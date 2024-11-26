@@ -4,6 +4,7 @@ class TraceToTree:
         self.events = [{**data, 'UID': i} for i, data in enumerate(events_data)]
         self.events_by_uid = {event['UID']: event for event in self.events}
         self._add_t_end()
+        self._set_linking_key()
         self._preprocess_and_index_events()
         self.cpu_root_nodes = []
 
@@ -11,6 +12,17 @@ class TraceToTree:
         for event in self.events:
             if 'ts' in event and 'dur' in event:
                 event['t_end'] = event['ts'] + event['dur']
+    
+    def _set_linking_key(self):
+        for event in self.events:
+            if event['cat'] == 'cuda_runtime':
+                if 'Launch' in event['name']:
+                    if 'correlation' in event['args']:
+                        self.linking_key = 'correlation'
+                        return
+                    else:
+                        self.linking_key = 'External id'
+                        return
 
     def build_cpu_op_tree(self) -> None:
         # 1. Sort the events by timestamps and initialize an empty stack
@@ -44,8 +56,8 @@ class TraceToTree:
             stack.append(event)
 
     def _preprocess_and_index_events(self) -> None:
-        # 1. Create a dictionary to map the correlation id to the start and end ac2g events
-        # 2. Create a dictionary to map the pid, tid, and correlation id to the actual event
+        # 1. Create a dictionary to map the linking id to the start and end ac2g events
+        # 2. Create a dictionary to map the pid, tid, and linking id to the actual event
         # This is done to quickly find the corresponding output flow event for a given input flow event
         self.ac2g_event_map = {'start': {}, 'end': {}}
         self.pid_tid_event_map = {}
@@ -59,31 +71,33 @@ class TraceToTree:
             else:
                 pid = event.get('pid')
                 tid = event.get('tid')
-                corr_id = event.get('args', {}).get('correlation')
-                if pid is not None and tid is not None and corr_id is not None:
-                    pid_tid_key = (pid, tid, corr_id)
+                link_id = event.get('args', {}).get(self.linking_key)
+                if pid is not None and tid is not None and link_id is not None:
+                    pid_tid_key = (pid, tid, link_id)
                     self.pid_tid_event_map[pid_tid_key] = event
 
     def _find_corresponding_output_event(self, input_event):
-        # 1. Get the correlation id from the input event
-        # 2. Find the corresponding start and end ac2g events for the correlation id
-        # 3. Find the output event using the pid, tid, and correlation id of the end ac2g event
-        corr_id = input_event.get('args', {}).get('correlation')
-        ac2g_start_event = self.ac2g_event_map['start'].get(corr_id)
-        ac2g_end_event = self.ac2g_event_map['end'].get(corr_id)
+        # 1. Get the linking id from the input event
+        # 2. Find the corresponding start and end ac2g events for the linking id
+        # 3. Find the output event using the pid, tid, and linking id of the end ac2g event
+        link_id = input_event.get('args', {}).get(self.linking_key)
+        ac2g_start_event = self.ac2g_event_map['start'].get(link_id)
+        ac2g_end_event = self.ac2g_event_map['end'].get(link_id)
 
         if not ac2g_start_event:
             return None
 
         if not ac2g_end_event:
-            print(f"Warning: start event found for correlation id {corr_id} but no corresponding end event found.")
+            print(f"Warning: start ac2g event found for {self.linking_key}={link_id} but no corresponding end ac2g event found.")
+            print(f"Input event name: {input_event['name']}")
+            print(('-'*64))
             return None
 
         pid = ac2g_end_event.get('pid')
         tid = ac2g_end_event.get('tid')
-        corr_id = ac2g_end_event.get('id')
+        link_id = ac2g_end_event.get('id')
 
-        output_event = self.pid_tid_event_map.get((pid, tid, corr_id))
+        output_event = self.pid_tid_event_map.get((pid, tid, link_id))
         return output_event
 
     def add_gpu_ops_to_tree(self):
@@ -135,7 +149,7 @@ class TraceToTree:
         # Recursively traverse the child nodes
         for i, child in enumerate(children):
             self.traverse_subtree_and_print(child, new_prefix, is_last=(i == child_count - 1))
-    
+
     def traverse_parents_and_print(self, node):
         depth = 0
         while True:
@@ -158,12 +172,12 @@ class TraceToTree:
                 break
             depth += 1
 
-    def get_gpu_time_for_op(self, UID):
+    def get_kernel_time_for_op(self, event_UID):
         total_dur = 0
-        event = self.events_by_uid[UID]
+        event = self.events_by_uid[event_UID]
         if event.get('cat') == 'kernel':
             total_dur += event['dur']
             return total_dur
         for child_UID in event.get('children', []):
-            total_dur += self.get_gpu_time_for_op(child_UID)
+            total_dur += self.get_kernel_time_for_op(child_UID)
         return total_dur
