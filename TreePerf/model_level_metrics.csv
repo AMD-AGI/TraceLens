@@ -1,0 +1,7 @@
+name,kernel_time (ms),percent_total
+Conv Backbone fwd,203.257,9.41
+Conv Backbone bwd,414.32,19.18
+Transformer fwd,297.84,13.79
+Transformer bwd,950.451,44.01
+Decoder fwd,10.326,0.48
+Decoder bwd,283.447,13.12
