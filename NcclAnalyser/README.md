@@ -69,11 +69,15 @@ def rank2file(rank):
     return os.path.join(profiles_root_dir, f'pytorch_profile_rank{rank}_step120.json')
 nccl_analyser.set_rank2file_fn(rank2file)
 
-# Build and save the detailed database
-output_db_path = os.path.join(profiles_root_dir, 'nccl_events_db.csv')
-nccl_analyser.build_and_save_db(output_db_path)
+# Build and save full df
+output_db_path = os.path.join(profiles_root_dir, 'nccl_events_df.csv')
+df_nccl = nccl_analyser.build_df_nccl()
+df_nccl = df_nccl.round(2)
+df_nccl.to_csv(output_db_path, index=False)
 
-# Build and save the summary database
-summary_db_path = os.path.join(profiles_root_dir, 'nccl_summary_db.csv')
-nccl_analyser.build_and_save_summary_db(summary_db_path)
+# Build and save the summary df
+summary_db_path = os.path.join(profiles_root_dir, 'nccl_summary_df.csv')
+df_nccl_summary = nccl_analyser.summarize_df_nccl(df_nccl)
+df_nccl_summary = df_nccl_summary.round(2)
+df_nccl_summary.to_csv(summary_db_path, index=False)
 ```
