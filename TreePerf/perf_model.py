@@ -4,16 +4,16 @@ def linear_flops(dict_shapes):
     M, N, K = dict_shapes['M'], dict_shapes['N'], dict_shapes['K']
     bias = dict_shapes['bias']
     flops_matmul = 2 * M * N * K
-    flops_bias = M * K if bias else 0
+    flops_bias = M * N if bias else 0
     return flops_matmul + flops_bias
 
 def linear_bytes(dict_shapes, bytes_per_element):
     M, N, K = dict_shapes['M'], dict_shapes['N'], dict_shapes['K']
     bias = dict_shapes['bias']
-    elems_input_read = M * N
-    elems_weight_read = N * K
-    elems_bias_read = K if bias else 0
-    elems_output_write = M * K
+    elems_input_read = M * K
+    elems_weight_read = K * N
+    elems_bias_read = N if bias else 0
+    elems_output_write = M * N
     total_elems_moved = elems_input_read + elems_weight_read + elems_bias_read + elems_output_write
     return total_elems_moved * bytes_per_element
 
@@ -22,18 +22,18 @@ def linear_bwd_flops(dict_shapes):
     bias = dict_shapes['bias']
     flops_input_grad = 2 * M * N * K
     flops_weight_grad = 2 * M * N * K
-    flops_bias_grad = M * K if bias else 0
+    flops_bias_grad = M * N if bias else 0
     return flops_input_grad + flops_weight_grad + flops_bias_grad
 
 def linear_bwd_bytes(dict_shapes, bytes_per_element):
     M, N, K = dict_shapes['M'], dict_shapes['N'], dict_shapes['K']
     bias = dict_shapes['bias']
-    elems_out_grad_read = M * K
-    elems_input_read = M * N
-    elems_input_grad_write = M * N
-    elems_weight_grad_write = N * K
-    elems_weight_read = N * K
-    elems_bias_grad_write = K if bias else 0 
+    elems_out_grad_read = M * N
+    elems_input_read = M * K
+    elems_input_grad_write = M * K
+    elems_weight_grad_write = K * N
+    elems_weight_read = K * N
+    elems_bias_grad_write = N if bias else 0 
     total_elems_moved = (
         elems_out_grad_read +
         elems_input_read +
