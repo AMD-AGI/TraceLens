@@ -20,9 +20,9 @@ def get_param_details_aten_mm(event):
         raise ValueError(f"Event name is not aten::linear, but {event['name']}")
 
     input_dims = event['args']['Input Dims']
-    M = input_dims[0][0]
+    N = input_dims[0][0]
     K = input_dims[0][1]
-    N = input_dims[1][1]
+    M = input_dims[1][1]
     return {"M": M, "N": N, "K": K, "bias": False}
 
 
