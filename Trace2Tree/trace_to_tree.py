@@ -15,7 +15,7 @@ class TraceToTree:
 
     def _set_linking_key(self):
         launch_event = next(
-            ( event for event in self.events if event.get('cat') == 'cuda_runtime' and 'launch' in event.get('name', '').lower() )
+            ( event for event in self.events if event.get('cat') in ['cuda_runtime', 'cuda_driver'] and 'launch' in event.get('name', '').lower() )
             , None)
         self.linking_key = 'correlation' if 'correlation' in launch_event['args'] else 'External id'
 
@@ -70,7 +70,7 @@ class TraceToTree:
         print(f"Building CPU op tree with add_python_func={add_python_func}")
         list_events = []
         for event in self.events:
-            is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime'}
+            is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime', 'cuda_driver'}
             is_python_event = event.get('cat') == 'python_function'
             if is_cpu_or_cuda_event or (add_python_func and is_python_event):
                 list_events.append(event)
@@ -101,7 +101,7 @@ class TraceToTree:
 
     def add_gpu_ops_to_tree(self):
         for event in self.events:
-            if event.get('cat') != 'cuda_runtime':
+            if event.get('cat') != 'cuda_runtime' and event.get('cat') != 'cuda_driver':
                 continue
             corresponding_gpu_event = self._find_corresponding_output_event(event)
             if not corresponding_gpu_event:

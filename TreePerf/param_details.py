@@ -14,6 +14,18 @@ def get_param_details_aten_linear(event):
         M *= dim
     return {"M": M, "N": weight_out_dim, "K": input_dim, "bias": bias}
 
+
+def get_param_details_aten_mm(event):
+    if event['name'] != 'aten::mm':
+        raise ValueError(f"Event name is not aten::linear, but {event['name']}")
+
+    input_dims = event['args']['Input Dims']
+    M = input_dims[0][0]
+    K = input_dims[0][1]
+    N = input_dims[1][1]
+    return {"M": M, "N": N, "K": K, "bias": False}
+
+
 def get_param_details_flash_attention(event):
     if event['name'] != 'FlashAttnFunc':
         raise ValueError(f"Event name is not FlashAttnFunc, but {event['name']}")
