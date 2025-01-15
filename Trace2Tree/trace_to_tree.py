@@ -71,6 +71,7 @@ class TraceToTree:
         list_events = []
         for event in self.events:
             is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime', 'cuda_driver'}
+            is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime', 'cuda_driver'}
             is_python_event = event.get('cat') == 'python_function'
             if is_cpu_or_cuda_event or (add_python_func and is_python_event):
                 list_events.append(event)
@@ -101,7 +102,7 @@ class TraceToTree:
 
     def add_gpu_ops_to_tree(self):
         for event in self.events:
-            if event.get('cat') != 'cuda_runtime' and event.get('cat') != 'cuda_driver':
+            if event.get('cat') not in {'cuda_runtime', 'cuda_driver'}:
                 continue
             corresponding_gpu_event = self._find_corresponding_output_event(event)
             if not corresponding_gpu_event:
@@ -137,7 +138,7 @@ class TraceToTree:
         max_len = 64
         if len(name) > max_len:
             name = name[:max_len] + '...'
-        print(f"{prefix}{connector}UID: {node['UID']}, Category: {node.get('cat')}, Name: {name}")
+        print(f"{prefix}{connector}UID: {node['UID']}, Category: {node.get('cat')}, Name: {name}, Duration: {node.get('dur')}")
 
         children = self.get_children_events(node)
         child_count = len(children)

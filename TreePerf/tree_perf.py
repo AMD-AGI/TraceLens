@@ -110,9 +110,11 @@ class TreePerfAnalyzer:
         if 'FLOPS/Byte' in df_perf_metrics.columns:
             dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TFLOPS/s'] = agg_metrics
+        dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov Kernel Time (µs)'] = ['sum']
         dict_agg['Kernel Time (µs)'] = ['sum']
+        dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
 
         # Identify parameter columns for grouping
         param_cols = [col for col in df_perf_metrics.columns if col.startswith('param: ')]
