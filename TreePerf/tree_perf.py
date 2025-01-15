@@ -38,7 +38,7 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2):
+    def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False):
         # Select the appropriate dictionary for FLOPS and memory functions
         flops_func = (op_to_bwd_flops_func_map if bwd else op_to_flops_func_map)[event['name']]
         param_details_func = op_to_param_details_func_map[event['name']]
@@ -65,9 +65,10 @@ class TreePerfAnalyzer:
             'GFLOPS': gflops,
             'Kernel Time (µs)': total_kernel_time,
             'TFLOPS/s': tflops_per_s,
-            'Non-Data-Mov Kernel Time (µs)': total_non_data_mov_time,
-            'Non-Data-Mov TFLOPS/s': non_data_mov_tflops_per_s,
         }
+        if non_data_mov:
+            dict_metrics['Non-Data-Mov Kernel Time (µs)'] = total_non_data_mov_time
+            dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
         if bytes_moved is not None:
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved
         
@@ -76,19 +77,19 @@ class TreePerfAnalyzer:
 
         return dict_metrics
 
-    def compute_fwd_perf_metrics(self, event):
-        return self.compute_perf_metrics(event, bwd=False)
-    def compute_bwd_perf_metrics(self, event):
-        return self.compute_perf_metrics(event, bwd=True)
+    def compute_fwd_perf_metrics(self, event, non_data_mov=False):
+        return self.compute_perf_metrics(event, bwd=False, non_data_mov=non_data_mov)
+    def compute_bwd_perf_metrics(self, event, non_data_mov=False):
+        return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
-    def build_df_perf_metrics(self, event_UIDs, bwd):
+    def build_df_perf_metrics(self, event_UIDs, bwd, non_data_mov=False):
         rows = []
         for event_uid in event_UIDs:
             event = self.tree.events_by_uid[event_uid]
             metrics_event = {'cat': event['cat'], 'name': event['name'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
-            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd)
+            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
             rows.append(metrics_event)
@@ -110,7 +111,8 @@ class TreePerfAnalyzer:
         if 'FLOPS/Byte' in df_perf_metrics.columns:
             dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TFLOPS/s'] = agg_metrics
-        dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
+        if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
+            dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov Kernel Time (µs)'] = ['sum']
         dict_agg['Kernel Time (µs)'] = ['sum']
