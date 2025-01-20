@@ -185,14 +185,9 @@ class TreePerfAnalyzer:
         return df
     
     @staticmethod
-    def get_df_kernel_launchers_summary(df_kernel_launchers, filter_names=None, group_by_shape=False):
+    def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
-        if filter_names:
-            df_temp = df_temp[df_temp['name'].isin(filter_names)]
-        cols_groupby = ['name']
-        if group_by_shape:
-            cols_groupby += ['Input Dims']
-        df_agg = df_temp.groupby(cols_groupby).agg({'total_direct_kernel_time': ['sum', 'count']})
+        df_agg = df_temp.groupby('name').agg({'total_direct_kernel_time': ['sum', 'count']})
         df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={'total_direct_kernel_time_count': 'Count'}, inplace=True)
@@ -200,6 +195,30 @@ class TreePerfAnalyzer:
         df_agg['total_direct_kernel_time_ms'] = df_agg['total_direct_kernel_time_sum'] / 1000
         total_duration_ms = df_agg['total_direct_kernel_time_ms'].sum()
         df_agg['Percentage (%)'] = (df_agg['total_direct_kernel_time_ms'] / total_duration_ms) * 100
+        df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
+        
+        return df_agg
+
+    #separate out name wise perf breakdown and shape wise perf breakdown for a given name
+    @staticmethod
+    def get_df_kernel_launchers_summary_by_shape(df_kernel_launchers, name):
+        df_temp = df_kernel_launchers.copy()
+        df_temp = df_temp[df_temp['name'] == name]
+        dict_agg = {'total_direct_kernel_time': ['sum', 'count', 'mean', 'std'],
+                    'direct_kernel_count': ['max', 'min']}
+        df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
+        df_agg.reset_index(inplace=True)
+        df_agg.rename(columns={'total_direct_kernel_time_sum': 'Total Kernel Time (µs)',
+                               'total_direct_kernel_time_count': 'Count',
+                               'total_direct_kernel_time_mean': 'Mean Kernel Time (µs)',
+                               'total_direct_kernel_time_std': 'Std Kernel Time (µs)',
+                               'direct_kernel_count_max': 'Max Direct Kernel Count',
+                               'direct_kernel_count_min': 'Min Direct Kernel Count'}, inplace=True)
+        df_agg.sort_values(by='Total Kernel Time (µs)', ascending=False, inplace=True)
+        df_agg['Total Kernel Time (ms)'] = df_agg['Total Kernel Time (µs)'] / 1000
+        total_duration_ms = df_agg['Total Kernel Time (ms)'].sum()
+        df_agg['Percentage (%)'] = (df_agg['Total Kernel Time (ms)'] / total_duration_ms) * 100
         df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
         
         return df_agg
