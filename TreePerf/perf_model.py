@@ -57,14 +57,16 @@ class GEMM:
 class aten_mm(GEMM):
     """
     aten::mm the matrix multiplication primitive in PyTorch
+    A.matmul(B)
     """
     def get_param_details(self):
         if self.event['name'] != 'aten::mm':
             raise ValueError(f"Event name is not aten::mm, but {self.event['name']}")
         input_dims = self.event['args']['Input Dims']
-        N = input_dims[0][0]
-        K = input_dims[0][1]
-        M = input_dims[1][1]
+        A_shape, B_shape = input_dims[0], input_dims[1]
+        M = A_shape[0]
+        N = B_shape[1]
+        K = A_shape[1]
         return {"M": M, "N": N, "K": K, "bias": False}
 
 class aten_addmm(GEMM):
@@ -75,9 +77,10 @@ class aten_addmm(GEMM):
         if self.event['name'] != 'aten::addmm':
             raise ValueError(f"Event name is not aten::addmm, but {self.event['name']}")
         input_dims = self.event['args']['Input Dims']
-        N = input_dims[1][0]
-        K = input_dims[1][1]
-        M = input_dims[2][1]
+        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+        M = A_shape[0]
+        N = B_shape[1]
+        K = A_shape[1]
         return {"M": M, "N": N, "K": K, "bias": True}
 
 class aten_linear(GEMM):    
@@ -90,13 +93,13 @@ class aten_linear(GEMM):
         input_shape = input_dims[0]
         weight_shape = input_dims[1]
         bias = bool(input_dims[2])
-        input_dim = input_shape[-1]
-        weight_out_dim = weight_shape[0]
+        K = input_shape[-1]
+        N = weight_shape[0]
         # Compute M as the product of all dimensions except the last one
         M = 1
         for dim in input_shape[:-1]:
             M *= dim
-        return {"M": M, "N": weight_out_dim, "K": input_dim, "bias": bias}
+        return {"M": M, "N": N, "K": K, "bias": bias}
 
 # 2. Convolution
 class CONV:
