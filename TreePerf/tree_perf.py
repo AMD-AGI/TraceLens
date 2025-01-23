@@ -54,8 +54,9 @@ class TreePerfAnalyzer:
         total_kernel_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids)
         total_non_data_mov_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
 
-        tflops_per_s = (gflops / 1e3) / (total_kernel_time / 1e6)
-        non_data_mov_tflops_per_s = (gflops / 1e3) / (total_non_data_mov_time / 1e6)
+        tflops_per_s = (gflops / 1e3) / (total_kernel_time / 1e6) if total_kernel_time > 0 else float('nan')
+
+        non_data_mov_tflops_per_s = (gflops / 1e3) / (total_non_data_mov_time / 1e6) if total_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes(bytes_per_element) if not bwd else perf_model.bytes_bwd(bytes_per_element)
 
         # Return metrics
@@ -68,7 +69,7 @@ class TreePerfAnalyzer:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = total_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
         if bytes_moved is not None:
-            dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved
+            dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float('nan')
         
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
