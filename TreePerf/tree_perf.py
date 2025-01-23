@@ -40,12 +40,10 @@ class TreePerfAnalyzer:
 
     def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False):
         # Select the appropriate dictionary for FLOPS and memory functions
-        flops_func = (op_to_bwd_flops_func_map if bwd else op_to_flops_func_map)[event['name']]
-        param_details_func = op_to_param_details_func_map[event['name']]
-        bytes_func = (op_to_bwd_bytes_func_map if bwd else op_to_bytes_func_map).get(event['name'])
+        perf_model_class = op_to_perf_model_class_map[event['name']]
+        perf_model = perf_model_class(event)
 
-        param_details = param_details_func(event)
-        gflops = flops_func(param_details) / 1e9  
+        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
         # Handle kernel aggregation
         if bwd:
             if not event.get('bwd_events'):
@@ -58,7 +56,7 @@ class TreePerfAnalyzer:
 
         tflops_per_s = (gflops / 1e3) / (total_kernel_time / 1e6)
         non_data_mov_tflops_per_s = (gflops / 1e3) / (total_non_data_mov_time / 1e6)
-        bytes_moved = bytes_func(param_details, bytes_per_element) if bytes_func else None
+        bytes_moved = perf_model.bytes(bytes_per_element) if not bwd else perf_model.bytes_bwd(bytes_per_element)
 
         # Return metrics
         dict_metrics = {
@@ -72,7 +70,7 @@ class TreePerfAnalyzer:
         if bytes_moved is not None:
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved
         
-        for key, value in param_details.items():
+        for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
         return dict_metrics
