@@ -87,13 +87,15 @@ class TreePerfAnalyzer:
             event = self.tree.events_by_uid[event_uid]
             metrics_event = {'cat': event['cat'], 'name': event['name'],
                         'pid': event['pid'], 'tid': event['tid'],
-                        'external_id': event['args']['External id']}
+                        'external_id': event['args']['External id'],
+                        'UID': event['UID']}
             dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
             rows.append(metrics_event)
 
         df_perf_metrics = pd.DataFrame(rows)
+        df_perf_metrics.set_index('UID', inplace=True)
         return df_perf_metrics
     
     def build_df_fwd_perf_metrics(self, event_UIDs):
