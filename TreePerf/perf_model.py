@@ -1,3 +1,19 @@
+# utils
+def list_to_tuple(obj):
+    if isinstance(obj, list):
+        return tuple(list_to_tuple(item) for item in obj)
+    return obj
+
+def extract_pytorch_common_args(event):
+    """
+    Extracts 'Input Dims', 'Input Strides', and 'Input Type' from a PyTorch event.
+    """
+    args = event.get('args', {})
+    return {
+        'Input Dims': list_to_tuple(args.get('Input Dims', [])),
+        'Input Strides': list_to_tuple(args.get('Input Strides', [])),
+        'Input type': list_to_tuple(args.get('Input type', []))
+    }
 # 1. GEMM 
 class GEMM:
     """
@@ -62,13 +78,15 @@ class aten_mm(GEMM):
     def get_param_details(self):
         if self.event['name'] != 'aten::mm':
             raise ValueError(f"Event name is not aten::mm, but {self.event['name']}")
-        input_dims = self.event['args']['Input Dims']
+        comm_args = extract_pytorch_common_args(self.event)
+        input_dims = comm_args['Input Dims']
         A_shape, B_shape = input_dims[0], input_dims[1]
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": False}
-
+        param_details = {"M": M, "N": N, "K": K, "bias": False}
+        param_details.update(comm_args)
+        return param_details
 class aten_addmm(GEMM):
     """
     aten::addmm is the A.matmul(B) + C operation in PyTorch
@@ -76,20 +94,23 @@ class aten_addmm(GEMM):
     def get_param_details(self):
         if self.event['name'] != 'aten::addmm':
             raise ValueError(f"Event name is not aten::addmm, but {self.event['name']}")
-        input_dims = self.event['args']['Input Dims']
+        comm_args = extract_pytorch_common_args(self.event)
+        input_dims = comm_args['Input Dims']
         C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": True}
+        param_details = {"M": M, "N": N, "K": K, "bias": True}
+        param_details.update(comm_args)
+        return param_details
 
 class aten_linear(GEMM):    
     
     def get_param_details(self):
         if self.event['name'] != 'aten::linear':
             raise ValueError(f"Event name is not aten::linear, but {self.event['name']}")
-
-        input_dims = self.event['args']['Input Dims']
+        comm_args = extract_pytorch_common_args(self.event)
+        input_dims = comm_args['Input Dims']
         input_shape = input_dims[0]
         weight_shape = input_dims[1]
         bias = bool(input_dims[2])
@@ -99,8 +120,9 @@ class aten_linear(GEMM):
         M = 1
         for dim in input_shape[:-1]:
             M *= dim
-        return {"M": M, "N": N, "K": K, "bias": bias}
-
+        param_details = {"M": M, "N": N, "K": K, "bias": bias}
+        param_details.update(comm_args)
+        return param_details
 # 2. Convolution
 class CONV:
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
@@ -162,8 +184,9 @@ class aten_conv(CONV):
                             'aten::miopen_convolution', 'aten::cudnn_convolution']
         if self.event['name'] not in valid_conv_names:
             raise ValueError(f"Event name is not a convolution, but {self.event['name']}")
-        self.input_shape = tuple(self.event['args']['Input Dims'][0])
-        self.filter_shape = tuple(self.event['args']['Input Dims'][1])
+        comm_args = extract_pytorch_common_args(self.event)
+        self.input_shape = comm_args['Input Dims'][0]
+        self.filter_shape = comm_args['Input Dims'][1]
         self.c_in, self.c_out = self.input_shape[1], self.filter_shape[0]
         self.B = self.input_shape[0]
         # stride, padding and dilation are strings, eg: "[1, 1]" 
@@ -190,10 +213,12 @@ class aten_conv(CONV):
         
         self.groups = int(self.event['args']['Concrete Inputs'][6])
         self.bias = bool(self.event['args']['Input Dims'][2]) #recheck this
-        return {"input_shape": self.input_shape, "filter_shape": self.filter_shape,
-                "stride": self.stride, "padding": self.padding, "dilation": self.dilation,
-                "groups": self.groups}
-
+        param_details = {"input_shape": self.input_shape, "filter_shape": self.filter_shape,
+                        "stride": self.stride, "padding": self.padding, "dilation": self.dilation,
+                        "groups": self.groups, "bias": self.bias}
+        param_details.update(comm_args)
+        return param_details
+    
 class aten_conv_bwd(aten_conv):
     def __init__(self, event):
         super().__init__(event)
@@ -265,11 +290,16 @@ class flash_attention(SDPA):
     def get_param_details(self):
         if self.event['name'] != 'FlashAttnFunc':
             raise ValueError(f"Event name is not FlashAttnFunc, but {self.event['name']}")
-        input_dims = self.event['args']['Input Dims']
+        comm_args = extract_pytorch_common_args(self.event)
+        input_dims = comm_args['Input Dims']
         B, N_Q, H, d_k = input_dims[0]
         _, N_K, _, _ = input_dims[1]
         _, _, _, _ = input_dims[2]
         dropout = float(self.event['args']['Concrete Inputs'][3])
         causal = eval(self.event['args']['Concrete Inputs'][5])
-        return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
+        # return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
+        #         "dropout": dropout, "causal": causal, "flash_impl": True}
+        param_details = {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
                 "dropout": dropout, "causal": causal, "flash_impl": True}
+        param_details.update(comm_args)
+        return param_details
