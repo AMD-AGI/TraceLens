@@ -1,6 +1,33 @@
 import pandas as pd
 from torch_op_mapping import *
 
+def get_gemm_transpose_from_kernel_name(kernel_name):
+    """
+    Extracts the transpose information from the kernel name of a GEMM operation.
+    """
+    transA, transB = None, None
+    # ROCm 
+    if "Cijk_" in kernel_name:
+        if "_Ailk_" in kernel_name:
+            transA = False
+        elif "_Alik_" in kernel_name:
+            transA = True
+
+        if "_Bljk_" in kernel_name:
+            transB = False
+        elif "_Bjlk_" in kernel_name:
+            transB = True
+    # CUDA
+    if "_tn_" in kernel_name:
+        transA, transB = True, False
+    elif "_nn_" in kernel_name:
+        transA, transB = False, False
+    elif "_nt_" in kernel_name:
+        transA, transB = False, True
+    elif "_tt_" in kernel_name:
+        transA, transB = True, True
+    return transA, transB
+
 class TreePerfAnalyzer:
     def __init__(self, trace_to_tree):
         self.tree = trace_to_tree
@@ -51,7 +78,7 @@ class TreePerfAnalyzer:
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
-        total_kernel_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids)
+        total_kernel_time, list_kernels = self.loop_and_aggregate_kernels(cpu_op_uids)
         total_non_data_mov_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
 
         tflops_per_s = (gflops / 1e3) / (total_kernel_time / 1e6) if total_kernel_time > 0 else float('nan')
@@ -73,6 +100,15 @@ class TreePerfAnalyzer:
         
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
+
+        if event['name'] == 'aten::mm' or event['name'] == 'aten::addmm':
+            for kernel_uid in list_kernels:
+                kernel_name = self.tree.events_by_uid[kernel_uid]['name']
+                # print(kernel_name)
+                if "Cijk_" in kernel_name:
+                    kernel_name_transpose = get_gemm_transpose_from_kernel_name(kernel_name)
+                    dict_metrics['Kernel Name'] = kernel_name
+                    dict_metrics['param: Transpose'] = kernel_name_transpose
 
         return dict_metrics
 
