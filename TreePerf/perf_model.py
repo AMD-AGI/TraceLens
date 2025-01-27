@@ -233,7 +233,7 @@ class SDPA:
             raise ValueError(f"Not implemented for dropout={dropout}")
         elems_q_read = B * N_Q * d_k * H
         elems_kv_read = 2 * B * N_K * d_k * H
-        elems_out_write = B * N_K * d_k * H
+        elems_out_write = B * N_Q * d_k * H
         total_elems_moved = elems_q_read + elems_kv_read + elems_out_write
         return total_elems_moved * bytes_per_element
     
