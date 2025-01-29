@@ -101,6 +101,21 @@ class aten_linear(GEMM):
             M *= dim
         return {"M": M, "N": N, "K": K, "bias": bias}
 
+# transformer engine gemm
+class te_gemm(GEMM):
+
+    def get_param_details(self):
+        if self.event['name'] != 'tex_ts::te_gemm_ts':
+            raise ValueError(f"Event name is not tex_ts::te_gemm_ts, but {self.event['name']}")
+        # idx 0 is B_T, idx 5 is A
+        input_dims = self.event['args']['Input Dims']
+        A_shape, B_T_shape = input_dims[5], input_dims[0]
+        M = A_shape[0]
+        N = B_T_shape[0]
+        K = A_shape[1]
+        # assume no bias for simplicity for now
+        return {"M": M, "N": N, "K": K, "bias": False} 
+
 # 2. Convolution
 class CONV:
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
