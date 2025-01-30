@@ -15,22 +15,28 @@ class TreePerfAnalyzer:
                 return 0, []
             if verbose:
                 print(f"Found kernel event, duration: {event['dur']}, name: {event['name']}")
-            return event['dur'], [event_UID]
-        total_dur = 0
+            return event['dur'], [event_UID], event['ts'], event['t_end']
+        total_dur, min_ts, max_ts = 0, 0, 0
         list_kernels = []
         for child_UID in event.get('children', []):
-            child_total_dur, child_list_kernels = self.agg_kernels_in_subtree(child_UID, filter_func, verbose)
+            child_total_dur, child_list_kernels, child_min, child_max = self.agg_kernels_in_subtree(child_UID, filter_func, verbose)
             total_dur += child_total_dur
+            min_ts = min(min_ts, child_min)
+            max_ts = max(max_ts, child_max)
             list_kernels.extend(child_list_kernels)
-        return total_dur, list_kernels
+        return total_dur, list_kernels, min_ts, max_ts
 
-    def loop_and_aggregate_kernels(self, event_UIDs, filter_func=None, verbose=False):
-        total_kernel_time = 0
-        list_kernels = []
+    def loop_and_aggregate_kernels(self, event_UIDs, filter_func=None, verbose=False, multistream=False):
+        total_kernel_time, min_ts, max_ts = 0, 0, 0
+        list_kernels = [] 
         for event_UID in event_UIDs:
-            this_total_kernel_time, this_list_kernels = self.agg_kernels_in_subtree(event_UID, filter_func, verbose=False)
+            this_total_kernel_time, this_list_kernels, min_ts_, max_ts_ = self.agg_kernels_in_subtree(event_UID, filter_func, verbose=False)
             total_kernel_time += this_total_kernel_time
             list_kernels.extend(this_list_kernels)
+            min_ts = min(min_ts, min_ts_)
+            max_ts = max(max_ts, max_ts_)
+        if multistream:
+            total_kernel_time = max_ts - min_ts
         return total_kernel_time, list_kernels
 
     @staticmethod
@@ -38,7 +44,7 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False):
+    def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False, multistream=False):
         # Select the appropriate dictionary for FLOPS and memory functions
         perf_model_class = op_to_perf_model_class_map[event['name']]
         perf_model = perf_model_class(event)
@@ -51,8 +57,8 @@ class TreePerfAnalyzer:
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
-        total_kernel_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids)
-        total_non_data_mov_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
+        total_kernel_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids, multistream=multistream)
+        total_non_data_mov_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter, multistream=multistream)
 
         tflops_per_s = (gflops / 1e3) / (total_kernel_time / 1e6) if total_kernel_time > 0 else float('nan')
 
