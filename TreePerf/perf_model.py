@@ -263,8 +263,8 @@ class SDPA:
 class flash_attention(SDPA):
     
     def get_param_details(self):
-        # if self.event['name'] != 'FlashAttnFunc' 
-        #     raise ValueError(f"Event name is not FlashAttnFunc, but {self.event['name']}")
+        if self.event['name'] != 'FlashAttnFunc':
+            raise ValueError(f"Event name is not FlashAttnFunc, but {self.event['name']}")
         input_dims = self.event['args']['Input Dims']
         B, N_Q, H, d_k = input_dims[0]
         _, N_K, _, _ = input_dims[1]
@@ -273,14 +273,3 @@ class flash_attention(SDPA):
         causal = eval(self.event['args']['Concrete Inputs'][5])
         return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
                 "dropout": dropout, "causal": causal, "flash_impl": True}
-
-class flash_attention_backward(flash_attention):
-    
-    def __init__(self, event):
-        super().__init__(event)
-    
-    def flops(self):
-        return self.flops_bwd()
-    
-    def bytes(self, bytes_per_element):
-        return self.bytes_bwd(bytes_per_element)
