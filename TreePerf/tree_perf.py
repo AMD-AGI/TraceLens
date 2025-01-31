@@ -106,7 +106,7 @@ class TreePerfAnalyzer:
             for kernel_uid in list_kernels:
                 kernel_name = self.tree.events_by_uid[kernel_uid]['name']
                 # print(kernel_name)
-                if "Cijk_" in kernel_name:
+                if re.search(r'C[A-Za-z]{3}_A[A-Za-z]{3}_B[A-Za-z]{3}', kernel_name):
                     kernel_name_transpose = get_gemm_transpose_from_kernel_name(kernel_name)
                     dict_metrics['Kernel Name'] = kernel_name
                     dict_metrics['param: Transpose'] = kernel_name_transpose
