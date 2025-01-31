@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 from torch_op_mapping import *
 
 def get_gemm_transpose_from_kernel_name(kernel_name):
@@ -7,7 +8,7 @@ def get_gemm_transpose_from_kernel_name(kernel_name):
     """
     transA, transB = None, None
     # ROCm 
-    if "Cijk_" in kernel_name:
+    if re.search(r'C[A-Za-z]{3}_A[A-Za-z]{3}_B[A-Za-z]{3}', kernel_name):
         if "_Ailk_" in kernel_name:
             transA = False
         elif "_Alik_" in kernel_name:
