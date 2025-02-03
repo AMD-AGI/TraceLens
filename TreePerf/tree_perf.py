@@ -172,9 +172,11 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {'name': event['name'],
-                        'Input Dims': list_to_tuple(event['args']['Input Dims']),
-                        'total_direct_kernel_time': event['total_direct_kernel_time'],
-                        'direct_kernel_count': event['direct_kernel_count']}
+                            'total_direct_kernel_time': event['total_direct_kernel_time'],
+                            'direct_kernel_count': event['direct_kernel_count']}
+            if 'Input Dims' in event['args']:
+                metrics_event['Input Dims'] = list_to_tuple(event['args']['Input Dims'])
+
             if id_cols:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
