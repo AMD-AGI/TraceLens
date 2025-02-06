@@ -70,6 +70,7 @@ class TreePerfAnalyzer:
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
         if bytes_moved is not None:
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float('nan')
+            dict_metrics['TB/s'] = (bytes_moved / 1e12) / (total_kernel_time / 1e6) if total_kernel_time > 0 else float('nan')
         
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -109,6 +110,8 @@ class TreePerfAnalyzer:
         dict_agg['GFLOPS'] = 'first'
         if 'FLOPS/Byte' in df_perf_metrics.columns:
             dict_agg['FLOPS/Byte'] = 'first'
+        if 'TB/s' in df_perf_metrics.columns:
+            dict_agg['TB/s'] = 'first'
         dict_agg['TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
