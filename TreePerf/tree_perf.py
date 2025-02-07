@@ -1,5 +1,6 @@
 import pandas as pd
 from torch_op_mapping import *
+from gpu_event_analyser import GPUEventAnalyser
 
 class TreePerfAnalyzer:
     def __init__(self, trace_to_tree):
@@ -51,26 +52,31 @@ class TreePerfAnalyzer:
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
-        total_kernel_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids)
-        total_non_data_mov_time, _ = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
+        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_uids)
+        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
+        busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
+        list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
+        busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
 
-        tflops_per_s = (gflops / 1e3) / (total_kernel_time / 1e6) if total_kernel_time > 0 else float('nan')
+        tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
-        non_data_mov_tflops_per_s = (gflops / 1e3) / (total_non_data_mov_time / 1e6) if total_non_data_mov_time > 0 else float('nan')
+        non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes(bytes_per_element) if not bwd else perf_model.bytes_bwd(bytes_per_element)
 
         # Return metrics
         dict_metrics = {
             'GFLOPS': gflops,
-            'Kernel Time (µs)': total_kernel_time,
+            'Kernel Time (µs)': busy_kernel_time,
+            'Kernel sum Time (µs)': sum([kernel['dur'] for kernel in list_kernels]),
             'TFLOPS/s': tflops_per_s,
         }
         if non_data_mov:
-            dict_metrics['Non-Data-Mov Kernel Time (µs)'] = total_non_data_mov_time
+            dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
         if bytes_moved is not None:
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float('nan')
-            dict_metrics['TB/s'] = (bytes_moved / 1e12) / (total_kernel_time / 1e6) if total_kernel_time > 0 else float('nan')
+            dict_metrics['TB/s'] = (bytes_moved / 1e12) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
         
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -148,19 +154,23 @@ class TreePerfAnalyzer:
             if event.get('cat') != 'cpu_op':
                 continue
             kernel_launcher = False
-            total_direct_kernel_time = 0
-            direct_kernel_count = 0
+            # total_direct_kernel_time = 0
+            # direct_kernel_count = 0
+            list_kernels = []
             for child_UID in event.get('children', []):
                 child = self.tree.events_by_uid[child_UID]
                 for grand_child_UID in child.get('children', []):
                     grand_child = self.tree.events_by_uid[grand_child_UID]
                     if grand_child.get('cat') == 'kernel':
                         kernel_launcher = True
-                        total_direct_kernel_time += grand_child['dur']
-                        direct_kernel_count += 1
+                        # total_direct_kernel_time += grand_child['dur']
+                        # direct_kernel_count += 1
+                        list_kernels.append(grand_child)
             if kernel_launcher:
-                event['total_direct_kernel_time'] = total_direct_kernel_time
-                event['direct_kernel_count'] = direct_kernel_count
+                # event['total_direct_kernel_time'] = total_direct_kernel_time
+                # event['direct_kernel_count'] = direct_kernel_count
+                event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+                event['direct_kernel_count'] = len(list_kernels)
                 kernel_launchers.append(event)
         return kernel_launchers
 
@@ -226,3 +236,9 @@ class TreePerfAnalyzer:
         df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
         
         return df_agg
+
+    def get_df_gpu_timeline(self):
+        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
+        gpu_event_analyser = GPUEventAnalyser(kernel_events)
+        df = gpu_event_analyser.get_breakdown_df()
+        return df
