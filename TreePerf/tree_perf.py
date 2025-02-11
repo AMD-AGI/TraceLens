@@ -102,7 +102,7 @@ class TreePerfAnalyzer:
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
-        if event['name'] == 'aten::mm' or event['name'] == 'aten::addmm':
+        if event['name'] == 'aten::mm' or event['name'] == 'aten::addmm' or event['name'] == 'aten::_scaled_mm':
             for kernel_uid in list_kernels:
                 kernel_name = self.tree.events_by_uid[kernel_uid]['name']
                 # print(kernel_name)

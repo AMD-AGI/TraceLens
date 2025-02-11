@@ -123,6 +123,20 @@ class aten_linear(GEMM):
         param_details = {"M": M, "N": N, "K": K, "bias": bias}
         param_details.update(comm_args)
         return param_details
+
+class aten_scaled_mm(GEMM):
+    # refer: https://pytorch.org/cppdocs/api/function_namespaceat_1a2902105d8aed3fa448a0da42f90e2cbf.html
+    def get_param_details(self):
+        comm_args = extract_pytorch_common_args(self.event)
+        input_dims = comm_args['Input Dims']
+        A_shape, B_shape = input_dims[0], input_dims[1]
+        M = A_shape[0]
+        N = B_shape[1]
+        K = A_shape[1]
+        param_details = {"M": M, "N": N, "K": K, "bias": False}
+        param_details.update(comm_args)
+        return param_details
+
 # 2. Convolution
 class CONV:
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
