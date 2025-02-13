@@ -2,7 +2,7 @@ from nccl_analyser import NcclAnalyser
 import os
 
 # Initialize NCCL Analyser
-root_dir = '/home/ajassani/feb12_2025/iteration_6'
+root_dir = '/path/to/your/trace/files/directory'
 world_size = 8
 list_profile_filepaths = [os.path.join(root_dir, f'rank{i}_trace.json') for i in range(world_size)]
 output_db_path = os.path.join(root_dir, 'nccl_events_df.csv')
