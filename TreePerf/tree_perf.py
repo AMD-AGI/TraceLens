@@ -93,6 +93,7 @@ class TreePerfAnalyzer:
         for event_uid in event_UIDs:
             event = self.tree.events_by_uid[event_uid]
             metrics_event = {'cat': event['cat'], 'name': event['name'],
+                             'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
             dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
@@ -117,7 +118,7 @@ class TreePerfAnalyzer:
         if 'FLOPS/Byte' in df_perf_metrics.columns:
             dict_agg['FLOPS/Byte'] = 'first'
         if 'TB/s' in df_perf_metrics.columns:
-            dict_agg['TB/s'] = 'first'
+            dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
@@ -139,6 +140,7 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         df_perf_metrics_summary.sort_values(by='Kernel Time (µs)_sum', ascending=False, inplace=True)
+        df_perf_metrics_summary.reset_index(drop=True, inplace=True)
 
         return df_perf_metrics_summary
 
@@ -210,6 +212,7 @@ class TreePerfAnalyzer:
         total_duration_ms = df_agg['total_direct_kernel_time_ms'].sum()
         df_agg['Percentage (%)'] = (df_agg['total_direct_kernel_time_ms'] / total_duration_ms) * 100
         df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
+        df_agg.reset_index(drop=True, inplace=True)
         
         return df_agg
 
@@ -234,7 +237,7 @@ class TreePerfAnalyzer:
         total_duration_ms = df_agg['Total Kernel Time (ms)'].sum()
         df_agg['Percentage (%)'] = (df_agg['Total Kernel Time (ms)'] / total_duration_ms) * 100
         df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
-        
+        df_agg.reset_index(drop=True, inplace=True)
         return df_agg
 
     def get_df_gpu_timeline(self):

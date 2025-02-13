@@ -13,75 +13,48 @@ Key Ideas
 
 ## Key Featues
 
-1. **Model-Level Summarised Analysis**: Provides a high-level view of performance metrics aggregated by model components for informed architectural design decisions.
+1. **GPU timeline breakdown**: Provides a high-level view of activity of the GPU which includes busy time, idle time, communication time, etc
 Example output:
 
-| Name               | Kernel time (ms) | Percent Total |
-|--------------------|------------------|---------------|
-| Conv backbone fwd  | 203.257          | 9.41%         |
-| Conv backbone bwd  | 414.32           | 19.18%        |
-| Transformer fwd    | 297.84           | 13.79%        |
-| Transformer bwd    | 950.451          | 44.01%        |
-| Decoder fwd        | 10.326           | 0.48%         |
-| Decoder bwd        | 283.447          | 13.12%        |
-| Total              | 2159.641         | 100.00%       |
+| type                          | time ms       | percent     |
+|-------------------------------|--------------|------------|
+| busy_time                     | 6521.458211  | 99.927717  |
+| computation_time              | 6318.257587  | 96.814092  |
+| exposed_communication_time    | 203.057890   | 3.111438   |
+| exposed_memcpy_time           | 0.142734     | 0.002187   |
+| idle_time                     | 4.717306     | 0.072283   |
+| total_time                    | 6526.175517  | 100.000000 |
 
-2. **Detailed Operation Metrics**: Computes fine-grained performance metrics such as FLOPS, kernel time, and efficiency, enabling deep dives into specific operations.
-Example output for aten::linear
 
-| Operation     | M      | N      | K      | Bias  | GFLOPS   | FLOPS/Byte | TFLOPS/s | Total Kernel Time (µs) |
-|---------------|--------|--------|--------|-------|----------|------------|----------|------------------|
-| aten::linear  | 40960  | 1536   | 1536   | True  | 193.34   | 754.10     | 261.34   | 73298            |
-| aten::linear  | 40960  | 6144   | 1536   | True  | 773.16   | 1193.10    | 364.54   | 50908            |
-| aten::linear  | 40960  | 1536   | 6144   | True  | 773.35   | 1193.38    | 438.27   | 42408            |
-| aten::linear  | 41400  | 1536   | 1536   | True  | 195.41   | 754.25     | 151.98   | 2572             |
-| aten::linear  | 48000  | 64     | 1536   | True  | 9.51     | 61.84      | 27.97    | 340              |
+2. **GPU compute time breakdown by CPU op**: Analyze the performance breakdown by examining the lowest-level CPU operations (from the call stack perspective) and the time they "induce" on the GPU. 
+Unlike traditional methods that directly look at CPU and GPU durations, this feature provides insight into how CPU operations translate into GPU kernel launches, offering a more stable and interpretable abstraction of performance.
+Example output showing top 5 ops sorted by the total GPU time each op induces:
 
-3. **Backward and Forward Pass Metrics** - 
-Leverages the hierarchical linking provided by Trace2Tree to compute metrics for both forward and backward passes, enabling support for training performance analysis.
+| name                                                       | Count | total_direct_kernel_time_ms | Percentage (%) | Cumulative Percentage (%) |
+|------------------------------------------------------------|-------|-----------------------------|----------------|---------------------------|
+| aten::mm                                                   | 126   | 5576.76                     | 88.73          | 88.73                     |
+| flash_attn::_flash_attn_backward                           | 8     | 213.62                      | 3.40           | 92.13                     |
+| flash_attn::_flash_attn_forward                            | 8     | 119.65                      | 1.90           | 94.04                     |
+| aten::copy_                                                | 4     | 69.96                       | 1.11           | 95.15                     |
+| triton_poi_fused_add_fill_mul_sigmoid_silu_sub_0           | 8     | 43.19                       | 0.69           | 95.84                     |
 
-4. **Extensible Operation Support**: Adding new operations is simple:
-    - Parse operation shapes from the JSON trace.
-    - Write the performance model (FLOPS, bytes).
-    - Map the operation in the torch_op_mapping.py file.
-- Current supported operations:
-    - aten::linear
-    - FlashAttnFunc (SDPA)
-    - aten::conv2d
-    - aten::conv3d
 
-## Quick start
-**Example 1: Parse a Trace and Compute Kernel Time**
-```python
-path = "/path/to/profile.json"
-with open(path, 'r') as f:
-    data = json.load(f)
+3. **Roofline metrics**
+ Example output for aten::mm showing top 5 param combos sorted by the total GPU time each param combo induces:
 
-events = data['traceEvents']
-tree = TraceToTree(events)
-tree.build_tree(add_python_func=True)
-perf_analyzer = TreePerfAnalyzer(tree)
+| name    | param: M | param: N | param: K | param: bias | FLOPS/Byte_first | TFLOPS/s_mean |
+|---------|----------|----------|----------|-------------|------------------|---------------|
+| aten::mm | 73728    | 28672    | 8192     | False       | 5864.73          | 698.19        |
+| aten::mm | 73728    | 8192     | 28672    | False       | 5864.73          | 719.59        |
+| aten::mm | 28672    | 8192     | 73728    | False       | 5864.73          | 740.51        |
+| aten::mm | 73728    | 128256   | 8192     | False       | 6972.01          | 628.10        |
+| aten::mm | 8192     | 28672    | 73728    | False       | 5864.73          | 599.95        |
 
-event = next(event for event in tree.events if event['name'] == 'model/model.py(173): backbone_forward')
-fwd_conv_backbone_kernel_time,_ = perf_analyzer.agg_kernels_in_subtree(event['UID'])
-```
-**Example 2: Compute Performance Metrics for a Specific Operation**
-```python
-linear_root_nodes = [node for node in tree.cpu_root_nodes if tree.events_by_uid[node]['name'] == 'aten::linear']
-uid = linear_root_nodes[0]
-event = tree.events_by_uid[uid]
-perf_analyzer.compute_fwd_perf_metrics(event)
-```
-output:
-```
-{'GFLOPS': 193.34,
- 'Kernel Time (µs)': 778,
- 'TFLOPS/s': 248.50,
- 'Non-Data-Mov Kernel Time (µs)': 480,
- 'Non-Data-Mov TFLOPS/s': 402.78,
- 'FLOPS/Byte': 754.10,
- 'param: M': 40960,
- 'param: N': 1536,
- 'param: K': 1536,
- 'param: bias': True}
-```
+- Adding new operations is simple (Contributions are welcome!):
+    - perf_model.py
+        - Parse operation shapes from the JSON trace 
+        - Write the performance model (FLOPS, bytes) or reuse an existing one
+    - torch_op_mapping.py: Map the operation to the perf model here
+
+For more details and walkthrough checkout the base_example.ipynb notebook
+**Replace the profile path in base_example.ipynb by your profile file and get insights instantly!**
