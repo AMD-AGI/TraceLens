@@ -58,3 +58,5 @@ Example output showing top 5 ops sorted by the total GPU time each op induces:
 
 For more details and walkthrough checkout the base_example.ipynb notebook
 **Replace the profile path in base_example.ipynb by your profile file and get insights instantly!**
+
+Once you are familiar with the workflows you can directly use or modify the **generate_perf_report.py** script to generate a report excel sheet quickly.
