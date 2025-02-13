@@ -41,7 +41,7 @@ The NCCL Analyser can generate two types of databases: **detailed** and **summar
 
 #### Example Summarized Database
 
-| Collective name      | In msg size (MB) | dtype    | comm latency (Âµs)_mean | count | Total latency (ms) | algo bw (GB/s)_mean | bus bw (GB/s)_mean |
+| Collective name      | In msg size (MB) | dtype    | comm latency (µs)_mean | count | Total latency (ms) | algo bw (GB/s)_mean | bus bw (GB/s)_mean |
 |----------------------|------------------|----------|------------------------|-------|---------------------|---------------------|---------------------|
 | _allgather_base      | 204.0039         | BFloat16 | 6041.878               | 318   | 1921.3172           | 33.0018             | 28.8766             |
 | _reduce_scatter_base | 3264.0625        | Float    | 11662.7668             | 160   | 1866.0427           | 273.4303            | 239.2515            |
