@@ -72,6 +72,12 @@ class aten_mm(GEMM):
         K = A_shape[1]
         return {"M": M, "N": N, "K": K, "bias": False}
 
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::mm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::mm is not defined.")
+
+
 class aten_addmm(GEMM):
     """
     aten::addmm is the A.matmul(B) + C operation in PyTorch
@@ -84,6 +90,11 @@ class aten_addmm(GEMM):
         N = B_shape[1]
         K = A_shape[1]
         return {"M": M, "N": N, "K": K, "bias": True}
+    
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
 class aten_linear(GEMM):    
     
