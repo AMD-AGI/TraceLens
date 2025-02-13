@@ -20,7 +20,7 @@ Here’s how to use TraceFusion to merge and process trace files for distributed
 ### Example 1: Merge All Events from Selected Ranks
 
 ```python
-from trace_fuse import TraceFuse
+from TraceFusion.trace_fuse import TraceFuse
 import os
 
 profiles_root_dir = '/path/to/profiles'
@@ -42,7 +42,7 @@ fuser.merge_and_save(ranks_to_merge, output_file)
 ### Example 2: Merge Only NCCL Kernels from All Ranks
 
 ```python
-from trace_fusion import TraceFuse
+from TraceFusion.trace_fuse import TraceFuse
 import os
 
 profiles_root_dir = '/path/to/profiles/'
