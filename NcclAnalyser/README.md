@@ -10,41 +10,46 @@ In distributed deep learning, analyzing the performance of collective communicat
 
 - **Summary Statistics**: Aggregates per-event data into summarized statistics grouped by **message size**, **dtype** and **collective operation**. These include summary metrics such as total latency, mean/min/max for communication duration, algorithm bandwidth, and bus bandwidth. 
 
-- **Customizable File Mapping**: Offers flexible rank-to-file mapping to match your directory structure and naming conventions, making integration seamless.
 
 - **PyTorch Support**: Currently built for PyTorch trace files, with the potential to extend support to other frameworks.
 
-- **Lightweight and Simple**: Minimal dependencies and a straightforward codebase ensure the tool is easy to use and extend.
-
 ---
 
-### Example Database
+### Example
 
-The NCCL Analyser can generate two types of databases: **detailed** and **summarized**.
+The NCCL Analyser can generate two types of dataframes: **detailed** and **summarized**.
 
-1. **Detailed Database**: Contains records of each NCCL kernel event, including metadata and computed metrics such as communication latency, algorithm bandwidth, and bus bandwidth for every event across all ranks.
+1. **Detailed Dataframe**: Contains records of each NCCL kernel event, including metadata and computed metrics such as communication latency, algorithm bandwidth, and bus bandwidth for every event across all ranks.
 
-#### Example Detailed Database
+#### Example Detailed Dataframe
 
-| external_id | Collective name | In msg nelems | Out msg nelems | Group size | dtype | Process Group Name | comm latency (µs) | In msg size (MB) | algo bw (GB/s) | bus bw (GB/s) |
-|-------------|-----------------|---------------|----------------|------------|-------|---------------------|-------------------|------------------|----------------|---------------|
-| 14996150    | allreduce       | 16785408      | 16785408       | 32         | Float | default_pg          | 2996.022          | 64.031           | 20.871         | 40.438        |
-| 14996653    | allreduce       | 16785408      | 16785408       | 32         | Float | default_pg          | 1425.172          | 64.031           | 43.876         | 85.010        |
-| 14997156    | allreduce       | 16785408      | 16785408       | 32         | Float | default_pg          | 1367.510          | 64.031           | 45.726         | 88.594        |
-| 14998162    | allreduce       | 16785408      | 16785408       | 32         | Float | default_pg          | 1420.680          | 64.031           | 44.014         | 85.277        |
-| 15040802    | allreduce       | 10416000      | 10416000       | 32         | Float | default_pg          | 893.604           | 39.734           | 43.423         | 84.132        |
+| external_id | Collective name      | dtype    | comm latency (µs) | In msg size (MB) | algo bw (GB/s) | bus bw (GB/s) |
+|-------------|----------------------|----------|-------------------|------------------|----------------|---------------|
+| 1954        | _allgather_base       | BFloat16 | 6031.856          | 204.0039         | 33.0284        | 28.8999       |
+| 20483       | _allgather_base       | BFloat16 | 5916.243          | 204.0039         | 33.6738        | 29.4646       |
+| 36421       | _reduce_scatter_base  | Float    | 11649.693         | 3264.0625        | 273.6176       | 239.4154      |
+| 49991       | _reduce_scatter_base  | Float    | 9934.89           | 3264.0625        | 320.8451       | 280.7395      |
+| 38421       | _reduce_scatter_base  | Float    | 11638.397         | 3264.0625        | 273.8832       | 239.6478      |
+| 11483       | _allgather_base       | BFloat16 | 5913.518          | 204.0039         | 33.6893        | 29.4782       |
+| 2536        | _allgather_base       | BFloat16 | 6131.004          | 204.0039         | 32.4943        | 28.4325       |
+| 43676       | _allgather_base       | BFloat16 | 6012.867          | 204.0039         | 33.1327        | 28.9911       |
+| 16283       | _allgather_base       | BFloat16 | 5881.311          | 204.0039         | 33.8738        | 29.6396       |
+| 13083       | _allgather_base       | BFloat16 | 6092.666          | 204.0039         | 32.6988        | 28.6114       |
 
-2. **Summarized Database**: Groups events by collective type, message size, and data type to compute aggregated metrics, including the mean values for communication latency, algorithm bandwidth, and bus bandwidth.
 
-#### Example Summarized Database
+2. **Summarized Dataframe**: Groups events by collective type, message size, and data type to compute aggregated metrics, including the mean values for communication latency, algorithm bandwidth, and bus bandwidth.
 
-| Collective name | In msg size (MB) | In_msg_nelems | Out_msg_nelems | Group size | dtype | count | Total latency (ms) | min_dur_mean | algo_bw_mean | bus_bw_mean |
-|-----------------|------------------|---------------|----------------|------------|-------|-------|--------------------|--------------|--------------|-------------|
-| allreduce       | 0.01            | 2530          | 2530           | 32         | Int   | 1     | 0.102              | 101.529      | 0.096        | 0.186       |
-| allreduce       | 0.289           | 75808         | 75808          | 32         | Float | 1     | 0.210              | 210.321      | 1.342        | 2.600       |
-| allreduce       | 25.142          | 6590752       | 6590752        | 32         | Float | 9     | 6.007              | 667.422      | 36.830       | 71.358      |
-| allreduce       | 32.016          | 8392704       | 8392704        | 32         | Float | 26    | 26.585             | 1022.505     | 30.765       | 59.607      |
-| broadcast       | 2.971           | 778752        | 778752         | 32         | Float | 1     | 0.026              | 25.943       | 111.836      | 111.836     |
+#### Example Summarized Dataframe
+
+| Collective name      | In msg size (MB) | dtype    | comm latency (µs)_mean | count | Total latency (ms) | algo bw (GB/s)_mean | bus bw (GB/s)_mean |
+|----------------------|------------------|----------|------------------------|-------|---------------------|---------------------|---------------------|
+| _allgather_base      | 204.0039         | BFloat16 | 6041.878               | 318   | 1921.3172           | 33.0018             | 28.8766             |
+| _reduce_scatter_base | 3264.0625        | Float    | 11662.7668             | 160   | 1866.0427           | 273.4303            | 239.2515            |
+| _reduce_scatter_base | 8016.0312        | Float    | 22988.503              | 2     | 45.977              | 340.5255            | 297.9598            |
+| _allgather_base      | 501.002          | BFloat16 | 11920.8385             | 2     | 23.8417             | 41.0427             | 35.9124             |
+| allreduce            | 0                | Float    | 18.5802                | 6     | 0.1115              | 0.0002              | 0.0004              |
+
+Note that the last row in msg size is just rounded down to 0. 
 
 
 --- 
@@ -53,31 +58,28 @@ The NCCL Analyser can generate two types of databases: **detailed** and **summar
 
 Follow these steps to use NCCL Analyser for analyzing NCCL kernel events:
 
-### Example: Build and Save Detailed and Summary Databases
+### Example: Build and Save Detailed and Summary Dataframes
 
 ```python
 from nccl_analyser import NcclAnalyser
 import os
 
 # Initialize NCCL Analyser
-profiles_root_dir = '/path/to/profiles/'
-world_size = 32
-nccl_analyser = NcclAnalyser(profiles_root_dir, world_size)
+root_dir = '/path/to/dir'
+world_size = 8
+# Modify the following to pass your list of filepaths for the profiles
+# We need all ranks for Nccl Analysis
+list_profile_filepaths = [os.path.join(root_dir, f'rank{i}_trace.json') for i in range(world_size)]
+output_db_path = os.path.join(root_dir, 'nccl_events_df.csv')
+summary_db_path = os.path.join(root_dir, 'nccl_summary_df.csv')
+nccl_analyser = NcclAnalyser(list_profile_filepaths, world_size)
 
-# Define custom rank-to-file mapping (optional)
-def rank2file(rank):
-    return os.path.join(profiles_root_dir, f'pytorch_profile_rank{rank}_step120.json')
-nccl_analyser.set_rank2file_fn(rank2file)
-
-# Build and save full df
-output_db_path = os.path.join(profiles_root_dir, 'nccl_events_df.csv')
+# Build and save the detailed dataframe
 df_nccl = nccl_analyser.build_df_nccl()
-df_nccl = df_nccl.round(2)
 df_nccl.to_csv(output_db_path, index=False)
 
-# Build and save the summary df
-summary_db_path = os.path.join(profiles_root_dir, 'nccl_summary_df.csv')
+# Build and save the summary dataframe
 df_nccl_summary = nccl_analyser.summarize_df_nccl(df_nccl)
-df_nccl_summary = df_nccl_summary.round(2)
 df_nccl_summary.to_csv(summary_db_path, index=False)
 ```
+**Modify the filepaths for your profiles and the output filepaths in example.py and get analysis instantly!**
