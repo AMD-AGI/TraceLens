@@ -1,4 +1,4 @@
-from nccl_analyser import NcclAnalyser
+from NcclAnalyser.nccl_analyser import NcclAnalyser
 import os
 
 # Initialize NCCL Analyser
