@@ -12,5 +12,13 @@ The library currently includes three tools:
 - **Trace2Tree**: Parses trace files into a hierarchical tree intermediate representation (IR) that maps CPU operations to GPU kernels. 
 - **TreePerf**: Uses the tree IR from Trace2Tree to compute detailed performance metrics such as TFLOPS/s, FLOPS, FLOPS/Byte, and GPU execution times. 
 
+## Installation
+
+
+1. (Optional) Create virtual environment: `python3 -m venv .venv`
+2. (Optional) Activate the virtual environment: `source .venv/bin/activate`
+3. Install the package `pip install .`
+
+
 ### Quick start
 Each tool in iLoveTrace is modular, with its own documentation and usage instructions. To get started with any tool navigate to the respective tool's directory and follow the detailed README in the tool's directory for usage instructions.
