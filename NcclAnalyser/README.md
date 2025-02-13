@@ -15,13 +15,13 @@ In distributed deep learning, analyzing the performance of collective communicat
 
 ---
 
-### Example Database
+### Example
 
-The NCCL Analyser can generate two types of databases: **detailed** and **summarized**.
+The NCCL Analyser can generate two types of dataframes: **detailed** and **summarized**.
 
 1. **Detailed Dataframe**: Contains records of each NCCL kernel event, including metadata and computed metrics such as communication latency, algorithm bandwidth, and bus bandwidth for every event across all ranks.
 
-#### Example Detailed Database
+#### Example Detailed Dataframe
 
 | external_id | Collective name      | dtype    | comm latency (µs) | In msg size (MB) | algo bw (GB/s) | bus bw (GB/s) |
 |-------------|----------------------|----------|-------------------|------------------|----------------|---------------|
@@ -37,9 +37,9 @@ The NCCL Analyser can generate two types of databases: **detailed** and **summar
 | 13083       | _allgather_base       | BFloat16 | 6092.666          | 204.0039         | 32.6988        | 28.6114       |
 
 
-2. **Summarized Database**: Groups events by collective type, message size, and data type to compute aggregated metrics, including the mean values for communication latency, algorithm bandwidth, and bus bandwidth.
+2. **Summarized Dataframe**: Groups events by collective type, message size, and data type to compute aggregated metrics, including the mean values for communication latency, algorithm bandwidth, and bus bandwidth.
 
-#### Example Summarized Database
+#### Example Summarized Dataframe
 
 | Collective name      | In msg size (MB) | dtype    | comm latency (µs)_mean | count | Total latency (ms) | algo bw (GB/s)_mean | bus bw (GB/s)_mean |
 |----------------------|------------------|----------|------------------------|-------|---------------------|---------------------|---------------------|
@@ -58,7 +58,7 @@ Note that the last row in msg size is just rounded down to 0.
 
 Follow these steps to use NCCL Analyser for analyzing NCCL kernel events:
 
-### Example: Build and Save Detailed and Summary Databases
+### Example: Build and Save Detailed and Summary Dataframes
 
 ```python
 from nccl_analyser import NcclAnalyser
@@ -74,11 +74,11 @@ output_db_path = os.path.join(root_dir, 'nccl_events_df.csv')
 summary_db_path = os.path.join(root_dir, 'nccl_summary_df.csv')
 nccl_analyser = NcclAnalyser(list_profile_filepaths, world_size)
 
-# Build and save the detailed database
+# Build and save the detailed dataframe
 df_nccl = nccl_analyser.build_df_nccl()
 df_nccl.to_csv(output_db_path, index=False)
 
-# Build and save the summary database
+# Build and save the summary dataframe
 df_nccl_summary = nccl_analyser.summarize_df_nccl(df_nccl)
 df_nccl_summary.to_csv(summary_db_path, index=False)
 ```
