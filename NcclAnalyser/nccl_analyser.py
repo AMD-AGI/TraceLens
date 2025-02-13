@@ -5,26 +5,43 @@ import pandas as pd
 class NcclAnalyser:
     # in the init we create a dict from rank to trace data
     # also we have the trace data in dict format key as event['args']['External id'] and value as event
-    def __init__(self, profiles_root_dir, world_size):
-        self.profiles_root_dir = profiles_root_dir
+    def __init__(self, list_profile_filepaths, world_size):
+        self.list_profile_filepaths = list_profile_filepaths
         self.world_size = world_size
+        assert len(self.list_profile_filepaths) == self.world_size
         self.filter_event_fn = self.nccl_filter_event_fn
-        self.fn_rank2file = self.default_fn_rank2file
         self.metadata_fields = ['Collective name', 'In msg nelems', 'Out msg nelems',
                             'Group size', 'dtype', 'Process Group Name',
                             'Process Group Description']
 
-        self.dtype2bytes = {'Float': 4, 'Int': 4, 'Long': 8}
+        self.dtype2bytes = {
+                    "Float": 4,
+                    "Int": 4,
+                    "Long": 8,
+                    "BFloat16": 2,
+                    "Bool": 1,
+                    "Byte": 1,
+                    "Double": 8,
+                    "Half": 2,
+                    "Short": 2,
+                }
 
-        # Initialize the scaling factor for bus bandwidth
+        # current support for allreduce, reducescatter, allgather
         self.collective2scaling_factor = {
             'allreduce': lambda n: 2 * (n - 1) / n,
             'reducescatter': lambda n: (n - 1) / n,
             'allgather': lambda n: (n - 1) / n,
-            'broadcast': lambda n: 1,
-            'reduce': lambda n: 1,
-            'alltoall': lambda n: (n - 1) / n,
+            # 'broadcast': lambda n: 1,
+            # 'reduce': lambda n: 1,
+            # 'alltoall': lambda n: (n - 1) / n,
         }
+
+        self.collective_cat2name = {
+            'allreduce': ['allreduce', 'allreduce_coalesced'],
+            'reducescatter': ['reducescatter', '_reduce_scatter_base', 'reduce_scatter_tensor_coalesced'],
+            'allgather': ['allgather', 'all_gather', '_allgather_base', 'all_gather_into_tensor_coalesced'],
+        }
+        self.collective_name2cat = {name: cat for cat, names in self.collective_cat2name.items() for name in names}
 
     def nccl_filter_event_fn(self, event):
             
@@ -34,25 +51,18 @@ class NcclAnalyser:
             return False
         if 'nccl' not in event['name']:
             return False
-        # current support for allreduce, reducescatter, allgather
-        if event['args']['Collective name'] not in ['allreduce', 'reducescatter', 'allgather']:
+        #TODO raise warning if collective name not in the list
+        #TODO think about how to handle collectives like broadcast,
+        # that dont obey the sync property
+        if event['args']['Collective name'] not in self.collective_name2cat:
             return False
-
         return True
-
-    def default_fn_rank2file(self, rank):
-        """Default function to map rank to file path."""
-        return os.path.join(self.profiles_root_dir, str(rank), 'pytorch_profile.json')
-
-    def set_rank2file_fn(self, fn_rank2file):
-        """Set a custom rank-to-file mapping function."""
-        self.fn_rank2file = fn_rank2file
     
     def load_trace_data(self):
         self.rank2trace_data = {}
         for rank in range(self.world_size):
             print(f'Processing rank {rank}')
-            file_path = self.fn_rank2file(rank)
+            file_path = self.list_profile_filepaths[rank]
             with open(file_path, 'r') as f:
                 data = json.load(f)
             dict_external_id2event = {}
@@ -65,8 +75,6 @@ class NcclAnalyser:
     def build_df_nccl(self):
 
         self.load_trace_data()
-        print('Building df_nccl')
-
         list_of_nccl_events = []
         for external_id in self.rank2trace_data[0].keys():
             # Find the minimum duration of the event across all ranks
@@ -85,8 +93,8 @@ class NcclAnalyser:
             # algorithm bandwidth = size / time in GB/s
             df_row['algo bw (GB/s)'] = (df_row['In msg size (MB)']/1024) / (comm_latency/1e6)
             # bus bandwidth = algo bw * correction factor
-            df_row['bus bw (GB/s)'] = df_row['algo bw (GB/s)'] * self.collective2scaling_factor[df_row['Collective name']](df_row['Group size'])
-            
+            # df_row['bus bw (GB/s)'] = df_row['algo bw (GB/s)'] * self.collective2scaling_factor[df_row['Collective name']](df_row['Group size'])
+            df_row['bus bw (GB/s)'] = df_row['algo bw (GB/s)'] * self.collective2scaling_factor[self.collective_name2cat[df_row['Collective name']]](df_row['Group size'])
             list_of_nccl_events.append(df_row)
         list_of_nccl_events.sort(key=lambda x: x['In msg size (MB)'], reverse=True)
 
