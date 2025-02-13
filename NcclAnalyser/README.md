@@ -61,7 +61,7 @@ Follow these steps to use NCCL Analyser for analyzing NCCL kernel events:
 ### Example: Build and Save Detailed and Summary Dataframes
 
 ```python
-from nccl_analyser import NcclAnalyser
+from NcclAnalyser.nccl_analyser import NcclAnalyser
 import os
 
 # Initialize NCCL Analyser
