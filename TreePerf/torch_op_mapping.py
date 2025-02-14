@@ -11,9 +11,3 @@ op_to_perf_model_class_map = {
     'aten::conv3d': perf_model.aten_conv,
 
 }
-
-op_category_to_op_name_map = {
-    'GEMM': ['aten::mm', 'aten::addmm'],
-    'FLASH_ATTN': ['FlashAttnFunc'],
-    'CONV': ['aten::conv2d', 'aten::conv3d'],
-}
