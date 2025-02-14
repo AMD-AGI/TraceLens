@@ -1,4 +1,5 @@
-import perf_model
+# import perf_model
+from TreePerf import perf_model
 
 op_to_perf_model_class_map = {
     'aten::linear': perf_model.aten_linear,
@@ -9,4 +10,10 @@ op_to_perf_model_class_map = {
     'aten::conv2d': perf_model.aten_conv,
     'aten::conv3d': perf_model.aten_conv,
 
+}
+
+op_category_to_op_name_map = {
+    'GEMM': ['aten::mm', 'aten::addmm'],
+    'FLASH_ATTN': ['FlashAttnFunc'],
+    'CONV': ['aten::conv2d', 'aten::conv3d'],
 }
