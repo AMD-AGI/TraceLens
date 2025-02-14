@@ -44,7 +44,7 @@ class TraceToTree:
             pid = event.get('pid')
             tid = event.get('tid')
             link_id = event.get('args', {}).get(self.linking_key)
-            if not all([pid, tid, link_id]):
+            if None not in [pid, tid, link_id]:
                 self.pid_tid_event_map[(pid, tid, link_id)] = event
             
             # Process sequence number events
