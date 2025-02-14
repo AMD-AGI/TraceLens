@@ -1,3 +1,4 @@
+from collections import defaultdict
 
 class TraceToTree:
     def __init__(self, events_data):
@@ -71,22 +72,26 @@ class TraceToTree:
         list_events = []
         for event in self.events:
             is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime', 'cuda_driver'}
-            is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime', 'cuda_driver'}
             is_python_event = event.get('cat') == 'python_function'
             if is_cpu_or_cuda_event or (add_python_func and is_python_event):
                 list_events.append(event)
 
         events_sorted = sorted(list_events, key=lambda e: e['ts'])
-        stack = []
-        num_cpu_ops_in_stack = 0
+        dict_pidtid2stack = defaultdict(list)
+        dict_pidtid2num_cpu_ops = defaultdict(int)
 
         for event in events_sorted:
             event['tree'] = True
 
+            pid = event.get('pid')
+            tid = event.get('tid')
+            stack_key = (pid, tid)
+            stack = dict_pidtid2stack[stack_key]
+
             while stack and event['ts'] >= stack[-1]['t_end']:
                 popped_event = stack.pop()
                 if popped_event.get('cat') == 'cpu_op':
-                    num_cpu_ops_in_stack -= 1
+                    dict_pidtid2num_cpu_ops[stack_key] -= 1
 
             if stack:
                 parent = stack[-1]
@@ -95,10 +100,10 @@ class TraceToTree:
 
             stack.append(event)
             if event.get('cat') == 'cpu_op':
-                if num_cpu_ops_in_stack == 0:
+                if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event['cpu_op_root'] = True
                     self.cpu_root_nodes.append(event['UID'])
-                num_cpu_ops_in_stack += 1
+                dict_pidtid2num_cpu_ops[stack_key] += 1
 
     def add_gpu_ops_to_tree(self):
         for event in self.events:
