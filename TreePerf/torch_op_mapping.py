@@ -1,4 +1,5 @@
-import perf_model
+# import perf_model
+from TreePerf import perf_model
 
 op_to_perf_model_class_map = {
     'aten::linear': perf_model.aten_linear,
