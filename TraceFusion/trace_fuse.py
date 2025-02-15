@@ -1,146 +1,108 @@
 import json
-import os
 import gzip
-import shutil
 from collections import defaultdict
 import math
 
 class TraceFuse:
-    def __init__(self, profiles_dir, world_size):
+    def __init__(self, profile_filepaths_list_or_dict):
         """
         Initialize the TraceFuse class.
         
-        :param profiles_dir: Root directory containing the profiles.
-        :param world_size: Total number of ranks in the distributed setup.
-        :param ranks_to_merge: Optional list of ranks to merge. Defaults to all ranks in the world_size.
+        :param profile_filepaths_or_dict: 
+            - If a list, assume it is already sorted by rank 
+              and each entry is a filepath for ranks [0..N-1]
+            - If a dict, keys are rank and values are filepaths.
         """
-        self.profiles_dir = profiles_dir
-        self.world_size = world_size
-        # self.fields_to_adjust_offset = ['External id', 'id']
-        self.fields_to_adjust_offset = ['id', 'correlation', 'pid']
-        self.filter_event_fn = self.default_filter_event_fn
-        self.fn_rank2file = self.default_fn_rank2file
+        # we will map the list of filepaths to a dict
+        if isinstance(profile_filepaths_list_or_dict, list):
+            self.rank2filepath = {i: filepath for i, filepath in enumerate(profile_filepaths_list_or_dict)}
+        elif isinstance(profile_filepaths_list_or_dict, dict):
+            self.rank2filepath = profile_filepaths_list_or_dict
+        
+        # get the first file to set the linking key and offset multiplier
+        with open(next(iter(self.rank2filepath.values())), 'r') as f:
+            data = json.load(f)
+        events = data['traceEvents']
+        self._set_linking_key(events)
 
-    def default_filter_event_fn(self, event):
-        """Default filter function to keep all events."""
-        return True
+        self.fields_to_adjust_offset = ['id', 'pid', self.linking_key]
+        self._set_offset_multiplier(events)
 
-    def default_fn_rank2file(self, rank):
-        """Default function to map rank to file path."""
-        return os.path.join(self.profiles_dir, str(rank), 'pytorch_profile.json')
+    def _set_linking_key(self, events):
+        # load the first file to get the linking key
+        launch_event = next(
+            ( event for event in events if event.get('cat') in ['cuda_runtime', 'cuda_driver'] and 'launch' in event.get('name', '').lower() )
+            , None)
+        self.linking_key = 'correlation' if 'correlation' in launch_event['args'] else 'External id'
 
-    def set_filter(self, filter_fn):
-        """Set a custom filter function."""
-        self.filter_event_fn = filter_fn
-
-    def set_rank2file_fn(self, fn_rank2file):
-        """Set a custom rank-to-file mapping function."""
-        self.fn_rank2file = fn_rank2file
-
-    # def adjust_pid(self, event, rank):
-    def adjust_pid(self, event, rank, offset_multiplier):
-        # pid = str(event['pid'])
-        # event['pid'] = f"rank{rank}_pid{pid}"
-        # event['args']['pid_raw'] = pid
-        try:
-            event['args']['pid_raw'] = event['pid']
-            event['pid'] += rank * offset_multiplier
-        except TypeError:
-            pass
-
-    def adjust_id(self, event, rank, offset_multiplier):
-        if event.get('cat', None) != 'ac2g':
-            return
-        try:
-            event['args']['id_raw'] = event['id']
-            event['id'] += rank * offset_multiplier
-        except KeyError:
-            pass
-    
-    def adjust_external_id(self, event, rank, offset_multiplier):
-        try:
-            event['args']['External id_raw'] = event['args']['External id']
-            event['args']['External id'] += rank * offset_multiplier
-        except KeyError:
-            pass
-    
-    def adjust_correlation(self, event, rank, offset_multiplier):
-        try:
-            event['args']['correlation_raw'] = event['args']['correlation']
-            event['args']['correlation'] += rank * offset_multiplier
-        except KeyError:
-            pass
-
-
-    def get_offset_multiplier(self, data):
+    def _set_offset_multiplier(self, events):
         """Calculate offset multipliers for each field."""
         max_values = defaultdict(int)
-        for event in data['traceEvents']:
-            if not self.filter_event_fn(event):
-                continue
-            if event.get('cat', None) == 'Trace':
-                continue
+        for event in events:
             for field in self.fields_to_adjust_offset:
-                # is_arg = field == 'External id'
-                is_arg = field == 'correlation' or field == 'External id'
-                try:
-                    value = int(event['args'][field] if is_arg else event[field])
+                if field == self.linking_key:
+                    value = event.get('args', {}).get(field)
+                else:
+                    value = event.get(field)
+                if isinstance(value, int):
                     max_values[field] = max(max_values[field], value)
-                except (KeyError, ValueError):
-                    pass
+        self.offset_multiplier = {field: 10 ** (math.ceil(math.log10(max_value)) + 1)
+                                    for field, max_value in max_values.items()}
 
-        return {field: 10 ** (math.ceil(math.log10(max_value)) + 1)
-                for field, max_value in max_values.items()}
+    @staticmethod
+    def default_filter_fn(event):
+        return event.get('cat', None) != 'Trace'
+    
+    def adjust_field(self, event, field, rank, offset_multiplier):
+        is_arg = field == self.linking_key
+        if is_arg and field in event['args']:
+            value = event['args'][field]
+            event['args'][f'{field}_raw'] = value
+            event['args'][field] += rank * offset_multiplier
+        elif not is_arg and field in event:
+            value = event[field]
+            event['args'][f'{field}_raw'] = value
+            if type(value) == int:
+                event[field] += rank * offset_multiplier
 
-    def process_single_file(self, filepath, rank):
-        """Process a single trace file."""
-        print(f"Processing file: {filepath}")
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-
-        dict_offset = self.get_offset_multiplier(data)
-        print(f"Offset multipliers: {dict_offset}")
-        processed_events = []
-
-        for event in data['traceEvents']:
-            if not self.filter_event_fn(event):
-                continue
-            if 'args' not in event:
-                event['args'] = {}
-            event['args']['rank'] = rank
-            self.adjust_pid(event, rank, dict_offset.get('pid'))
-            # self.adjust_id(event, rank, dict_offset.get('id'))
-            self.adjust_id(event, rank, 100*dict_offset.get('pid')) # for now use same offset multiplier as pid
-            # self.adjust_external_id(event, rank, dict_offset.get('External id'))
-            self.adjust_correlation(event, rank, dict_offset.get('correlation'))
-            processed_events.append(event)
-        
-        return processed_events
-
-    def merge(self, ranks_to_merge=None):
+    def merge(self, filter_fn=None, include_pyfunc=False):
         """Merge trace files."""
-        self.merged_data = []
+        merged_data = []
 
-        for rank in ranks_to_merge:
-            filepath = self.fn_rank2file(rank)
-            if not os.path.exists(filepath):
-                print(f"Warning: file {filepath} does not exist")
-                continue
-            self.merged_data.extend(self.process_single_file(filepath, rank))
+        if filter_fn is None:
+            filter_fn = lambda event: (
+                event.get('cat', None) != 'Trace'
+                and (include_pyfunc or event.get('cat') != 'python_function')
+            )
+
+        for rank, filepath in self.rank2filepath.items():
+            print(f"Processing file: {filepath}")
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+
+            processed_events = []
+            for event in data['traceEvents']:
+                if not filter_fn(event):
+                    continue
+                if 'args' not in event:
+                    event['args'] = {}
+                event['args']['rank'] = rank
+
+                for field, offset_multiplier in self.offset_multiplier.items():
+                    self.adjust_field(event, field, rank, offset_multiplier)
+                processed_events.append(event)
+            merged_data.extend(processed_events)
+
+        return merged_data
         
-    def merge_and_save(self, ranks_to_merge=None, output_file='merged_trace.json'):
+    def merge_and_save(self, output_file='merged_trace.json',
+                        filter_fn=None, include_pyfunc=False):
         """Merge trace files and save the output."""
-        self.merge(ranks_to_merge)
+        merged_data = self.merge(filter_fn, include_pyfunc)
 
-        json_data_out = {'traceEvents': self.merged_data}
-        with open(output_file, 'w') as jsonfileout:
-            print(f"Writing data to {output_file}...")
-            json.dump(json_data_out, jsonfileout, indent=4)
-        print(f"Data successfully written to {output_file}.")
-
-        with open(output_file, 'rb') as f_in:
-            with gzip.open(output_file + '.gz', 'wb') as f_out:
-                shutil.copyfileobj(f_in, f_out)
-        print(f"Data successfully written to {output_file}.gz.")
-
-
+        json_data_out = {'traceEvents': merged_data}
+        gz_output_file = output_file + '.gz'
+        with gzip.open(gz_output_file, 'wt', encoding='utf-8') as f:
+            print(f"Writing to file: {gz_output_file}")
+            json.dump(json_data_out, f, indent=4)
+        print(f"Data successfully written to {gz_output_file}")
