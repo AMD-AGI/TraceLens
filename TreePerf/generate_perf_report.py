@@ -10,14 +10,7 @@ def main():
     parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')
     args = parser.parse_args()
 
-    # Load JSON trace data
-    with open(args.profile_path, 'r') as f:
-        data = json.load(f)
-
-    events = data['traceEvents']
-    tree = TraceToTree(events)
-    tree.build_tree(add_python_func=False)
-    perf_analyzer = TreePerfAnalyzer(tree)
+    perf_analyzer = TreePerfAnalyzer(profile_filepath=args.profile_path)
 
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
@@ -37,7 +30,7 @@ def main():
 
     for op_cat, op_names in op_category_to_op_name_map.items():
         # Filter events belonging to the current category
-        op_events = [event for event in tree.events if event['name'] in op_names]
+        op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
         op_events_uids = [event['UID'] for event in op_events]
 
         if op_cat == 'GEMM':

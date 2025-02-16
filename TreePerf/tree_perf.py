@@ -1,14 +1,17 @@
+import json
 import pandas as pd
 from TreePerf.torch_op_mapping import op_to_perf_model_class_map
 from TreePerf.gpu_event_analyser import GPUEventAnalyser
+from Trace2Tree.trace_to_tree import TraceToTree
 
 class TreePerfAnalyzer:
-    def __init__(self, trace_to_tree):
-        self.tree = trace_to_tree
+    def __init__(self, profile_filepath, add_python_func=False):
+        with open(profile_filepath, 'r') as f:
+            data = json.load(f)
+        self.tree = TraceToTree(data['traceEvents'])
+        self.tree.build_tree(add_python_func=add_python_func)
 
-    def agg_kernels_in_subtree(self, event_UID, filter_func=None, verbose=False):
-        events_by_uid = self.tree.events_by_uid
-        event = events_by_uid[event_UID]
+    def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
             filter_func = lambda x: True
         if event.get('cat') == 'kernel':
@@ -16,20 +19,21 @@ class TreePerfAnalyzer:
                 return 0, []
             if verbose:
                 print(f"Found kernel event, duration: {event['dur']}, name: {event['name']}")
-            return event['dur'], [event_UID]
+            return event['dur'], [event['UID']]
         total_dur = 0
         list_kernels = []
         for child_UID in event.get('children', []):
-            child_total_dur, child_list_kernels = self.agg_kernels_in_subtree(child_UID, filter_func, verbose)
+            child = self.tree.get_UID2event(child_UID)
+            child_total_dur, child_list_kernels = self.agg_kernels_in_subtree(child, filter_func, verbose)
             total_dur += child_total_dur
             list_kernels.extend(child_list_kernels)
         return total_dur, list_kernels
 
-    def loop_and_aggregate_kernels(self, event_UIDs, filter_func=None, verbose=False):
+    def loop_and_aggregate_kernels(self, events, filter_func=None, verbose=False):
         total_kernel_time = 0
         list_kernels = []
-        for event_UID in event_UIDs:
-            this_total_kernel_time, this_list_kernels = self.agg_kernels_in_subtree(event_UID, filter_func, verbose=False)
+        for event in events:
+            this_total_kernel_time, this_list_kernels = self.agg_kernels_in_subtree(event, filter_func, verbose=False)
             total_kernel_time += this_total_kernel_time
             list_kernels.extend(this_list_kernels)
         return total_kernel_time, list_kernels
@@ -52,10 +56,11 @@ class TreePerfAnalyzer:
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
-        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_uids)
+        cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
+        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
+        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
         busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
 
@@ -88,10 +93,9 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
-    def build_df_perf_metrics(self, event_UIDs, bwd, non_data_mov=False):
+    def build_df_perf_metrics(self, events, bwd, non_data_mov=False):
         rows = []
-        for event_uid in event_UIDs:
-            event = self.tree.events_by_uid[event_uid]
+        for event in events:
             metrics_event = {'cat': event['cat'], 'name': event['name'],
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
@@ -104,10 +108,10 @@ class TreePerfAnalyzer:
         df_perf_metrics = pd.DataFrame(rows)
         return df_perf_metrics
     
-    def build_df_fwd_perf_metrics(self, event_UIDs):
-        return self.build_df_perf_metrics(event_UIDs, bwd=False)
-    def build_df_bwd_perf_metrics(self, event_UIDs):
-        return self.build_df_perf_metrics(event_UIDs, bwd=True)
+    def build_df_fwd_perf_metrics(self, events):
+        return self.build_df_perf_metrics(events, bwd=False)
+    def build_df_bwd_perf_metrics(self, events):
+        return self.build_df_perf_metrics(events, bwd=True)
     
 
     @staticmethod
