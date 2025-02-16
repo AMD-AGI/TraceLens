@@ -191,10 +191,12 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {'name': event['name'],
+                             'UID': event['UID'],
                             'total_direct_kernel_time': event['total_direct_kernel_time'],
                             'direct_kernel_count': event['direct_kernel_count']}
-            if 'Input Dims' in event['args']:
-                metrics_event['Input Dims'] = list_to_tuple(event['args']['Input Dims'])
+            for arg in ['Input Dims', 'Input type', 'Input Strides']:
+                if arg in event['args']:
+                    metrics_event[arg] = list_to_tuple(event['args'][arg])
 
             if id_cols:
                 metrics_event['pid'] = event['pid']
@@ -227,7 +229,9 @@ class TreePerfAnalyzer:
         df_temp = df_temp[df_temp['name'] == name]
         dict_agg = {'total_direct_kernel_time': ['sum', 'count', 'mean', 'std'],
                     'direct_kernel_count': ['max', 'min']}
-        df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        # df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        #check if the input dims and others are present in the df
+        df_agg = df_temp.groupby(['Input Dims', 'Input type', 'Input Strides']).agg(dict_agg)
         df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={'total_direct_kernel_time_sum': 'Total Kernel Time (µs)',
