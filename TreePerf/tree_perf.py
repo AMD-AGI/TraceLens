@@ -148,7 +148,7 @@ class TreePerfAnalyzer:
 
         return df_perf_metrics_summary
 
-    def get_kernel_launchers(self):
+    def get_kernel_launchers(self, include_nccl=False):
         # This method traverses the event tree to identify CPU operations that serve as 
         # "kernel launchers." These are operations that result in GPU kernel 
         # execution without further cpu op calls. 
@@ -167,14 +167,13 @@ class TreePerfAnalyzer:
                 child = self.tree.events_by_uid[child_UID]
                 for grand_child_UID in child.get('children', []):
                     grand_child = self.tree.events_by_uid[grand_child_UID]
-                    if grand_child.get('cat') == 'kernel':
+                    is_kernel = grand_child.get('cat') == 'kernel'
+                    is_nccl = 'nccl' in grand_child['name']
+                    should_include = is_kernel and (include_nccl or not is_nccl)
+                    if should_include:
                         kernel_launcher = True
-                        # total_direct_kernel_time += grand_child['dur']
-                        # direct_kernel_count += 1
                         list_kernels.append(grand_child)
             if kernel_launcher:
-                # event['total_direct_kernel_time'] = total_direct_kernel_time
-                # event['direct_kernel_count'] = direct_kernel_count
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
                 kernel_launchers.append(event)
@@ -191,10 +190,12 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {'name': event['name'],
+                             'UID': event['UID'],
                             'total_direct_kernel_time': event['total_direct_kernel_time'],
                             'direct_kernel_count': event['direct_kernel_count']}
-            if 'Input Dims' in event['args']:
-                metrics_event['Input Dims'] = list_to_tuple(event['args']['Input Dims'])
+            for arg in ['Input Dims', 'Input type', 'Input Strides']:
+                if arg in event['args']:
+                    metrics_event[arg] = list_to_tuple(event['args'][arg])
 
             if id_cols:
                 metrics_event['pid'] = event['pid']
@@ -227,7 +228,9 @@ class TreePerfAnalyzer:
         df_temp = df_temp[df_temp['name'] == name]
         dict_agg = {'total_direct_kernel_time': ['sum', 'count', 'mean', 'std'],
                     'direct_kernel_count': ['max', 'min']}
-        df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        # df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        #check if the input dims and others are present in the df
+        df_agg = df_temp.groupby(['Input Dims', 'Input type', 'Input Strides']).agg(dict_agg)
         df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={'total_direct_kernel_time_sum': 'Total Kernel Time (µs)',
