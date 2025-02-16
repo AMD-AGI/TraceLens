@@ -22,7 +22,7 @@ def main():
     op_category_to_op_name_map = {
         'GEMM': ['aten::mm', 'aten::addmm'],
         'FLASH_ATTN': ['FlashAttnFunc'],
-        'CONV': ['aten::conv2d', 'aten::conv3d'],
+        'CONV': ['aten::convolution'],
     }
 
     # Dictionary to hold the op-specific DataFrames
