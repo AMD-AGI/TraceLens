@@ -96,6 +96,22 @@ class aten_addmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
+class aten_scaled_mm(GEMM):
+    """
+    aten::scaled_mm is the scale_result(scale_a*A.matmul(scale_b*B) + bias)
+    """
+    @staticmethod
+    def get_param_details(event):
+        # ref: https://pytorch.org/cppdocs/api/function_namespaceat_1a2902105d8aed3fa448a0da42f90e2cbf.html
+        input_dims = event['args']['Input Dims']
+        A_shape, B_shape = input_dims[0], input_dims[1]
+        M = A_shape[0]
+        N = B_shape[1]
+        K = A_shape[1]
+        bias = len(input_dims) == 3
+        return {"M": M, "N": N, "K": K, "bias": bias}
+
+
 class aten_linear(GEMM):    
     
     @staticmethod

@@ -20,7 +20,7 @@ def main():
     # Define operation categories and their associated operation names.
     # TODO: This mapping should be moved to another file and expanded to include more operations.
     op_category_to_op_name_map = {
-        'GEMM': ['aten::mm', 'aten::addmm'],
+        'GEMM': ['aten::mm', 'aten::addmm', 'aten::_scaled_mm'],
         'FLASH_ATTN': ['FlashAttnFunc'],
         'CONV': ['aten::convolution'],
     }
