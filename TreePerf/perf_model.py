@@ -70,7 +70,11 @@ class aten_mm(GEMM):
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": False}
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+
+        return {"M": M, "N": N, "K": K, "bias": False,
+                "dtype_A_B": dtype_A_B}
 
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
@@ -89,7 +93,11 @@ class aten_addmm(GEMM):
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": True}
+
+        dtype_A_B = tuple(event['args']['Input type'][1:3])
+
+        return {"M": M, "N": N, "K": K, "bias": True,
+                "dtype_A_B": dtype_A_B}
     
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
@@ -109,7 +117,10 @@ class aten_scaled_mm(GEMM):
         N = B_shape[1]
         K = A_shape[1]
         bias = len(input_dims) == 3
-        return {"M": M, "N": N, "K": K, "bias": bias}
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "dtype_A_B": dtype_A_B}
 
 
 class aten_linear(GEMM):    
@@ -126,7 +137,11 @@ class aten_linear(GEMM):
         M = 1
         for dim in input_shape[:-1]:
             M *= dim
-        return {"M": M, "N": N, "K": K, "bias": bias}
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "dtype_A_B": dtype_A_B}
 
 # 2. Convolution
 class CONV:
