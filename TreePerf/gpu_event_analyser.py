@@ -3,18 +3,10 @@ import pandas as pd
 class GPUEventAnalyser:
     def __init__(self, events):
         """
-        Initialize with a list of event dictionaries. Each event is expected to have
-        'ts', 't_end', and 'name' keys.
+        Initialize with a list of event dictionaries.
         """
         self.events = events
-        if events:
-            self.overall_start = min(event['ts'] for event in events)
-            self.overall_end = max(event['t_end'] for event in events)
-            self.total_time = self.overall_end - self.overall_start
-        else:
-            self.overall_start = None
-            self.overall_end = None
-            self.total_time = 0
+    
 
     @staticmethod
     def merge_intervals(intervals):
@@ -55,83 +47,137 @@ class GPUEventAnalyser:
         if current_start < current_end:
             result.append((current_start, current_end))
         return result
+    
+    @staticmethod
+    def subtract_intervalsA_from_B(merged_intervalA, merged_intervalB):
+        """
+        Subtract a set of non-overlapping, sorted intervals from another set of non-overlapping, sorted intervals.
+        Returns a list of intervals (as (start, end) tuples) that represent the parts of 'merged_intervalB'
+        """
+        result = []
+        for b_interval in merged_intervalB:
+            # Subtract the entire set of merged_A from the current interval b_interval.
+            remaining_parts = GPUEventAnalyser.subtract_intervals(b_interval, merged_intervalA)
+            result.extend(remaining_parts)
+        
+        return result
+
+    
+    def get_gpu_event_lists(self):
+        """
+        Return a dictionary of lists of events, categorized by event types
+        Event types are all gpu events, computation, communication, and memcpy.
+        Be sure that the returned events have 'ts' and 't_end' fields.
+        The default implementation is for PyTorch json trace format.
+        Inherit the class and reimplement this method for your profile format.
+        """
+        
+        # note all events are not gpu events 
+        # the events list contains gpu events as well as host side events
+
+        gpu_events = []
+        comp_events = []
+        comm_events = []
+        memcpy_events = []
+
+        for event in self.events:
+            
+            #TODO: ideally we want to get gpu events based on process id
+            # That will be done shortly
+            category = event.get('cat')
+            if category in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
+
+                if 't_end' not in event:
+                    event['t_end'] = event['ts'] + event['dur']
+                gpu_events.append(event)
+
+                if category == 'gpu_memcpy':
+                    memcpy_events.append(event)
+                elif category in {'kernel', 'gpu_memset'}:
+                    if 'nccl' in event.get('name'):
+                        comm_events.append(event)
+                    else:
+                        comp_events.append(event)
+                else:
+                    raise ValueError(f"Unknown event category: {category}")
+
+        return {
+            'all_gpu': gpu_events, 
+            'computation': comp_events,
+            'communication': comm_events,
+            'memcpy': memcpy_events,
+        }
+    
+    @staticmethod
+    def verify_dict_gpu_event_lists(dict_gpu_event_lists):
+        # first check if the keys are correct
+        expected_keys = {'all_gpu', 'computation', 'communication', 'memcpy'}
+        if set(dict_gpu_event_lists.keys()) != expected_keys:
+            raise ValueError(f"Expected keys: {expected_keys}, got: {dict_gpu_event_lists.keys()}")
+        # next check if the events have 'ts' and 't_end' fields
+        for key, events in dict_gpu_event_lists.items():
+            for event in events:
+                if 'ts' not in event or 't_end' not in event:
+                    raise ValueError(f"Event {event} does not have 'ts' or 't_end' fields")
 
     def compute_metrics(self):
         """
-        Compute the following percentages relative to the overall timeline:
-          - computation_percent: time covered by computation events.
-          - exposed_communication_percent: time for communication events (names containing 'nccl')
-            after subtracting any overlapping computation time.
-          - exposed_memcpy_percent: time for memcpy events (names containing 'memcpy')
-            after subtracting any overlapping computation time.
-          - idle_percent: time not covered by any event.
+        Compute various metrics from the GPU event data.
+        Computation is defined as the time spent in computation kernels.
+        Communication is defined as the time spent in communication kernels.
+        Memcpy is defined as the time spent in memcpy kernels.
+        Exposed communication time is the time spent in communication kernels that is not overlapped by computation.
+        Exposed memcpy time is the time spent in memcpy kernels that is not overlapped by computation or communication.
         """
-        if not self.events or self.total_time <= 0:
-            return None
 
         # Categorize events.
-        comp_intervals = []
-        comm_intervals = []
-        memcpy_intervals = []
-        for event in self.events:
-            start = event['ts']
-            end = event['t_end']
-            name = event.get('name', '').lower()
-            if 'nccl' in name:
-                comm_intervals.append((start, end))
-            elif 'memcpy' in name:
-                memcpy_intervals.append((start, end))
-            else:
-                comp_intervals.append((start, end))
+        dict_gpu_event_lists = self.get_gpu_event_lists()
+        GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
+
+        dict_intervals = {}
+        for key, events in dict_gpu_event_lists.items():
+            dict_intervals[key] = [(event['ts'], event['t_end']) for event in events]
 
         # Merge intervals within each category.
-        comp_union = self.merge_intervals(comp_intervals)
-        comm_union = self.merge_intervals(comm_intervals)
-        memcpy_union = self.merge_intervals(memcpy_intervals)
-        all_intervals = self.merge_intervals(
-            [(event['ts'], event['t_end']) for event in self.events]
-        )
+        comp_union = self.merge_intervals(dict_intervals['computation'])
+        comm_union = self.merge_intervals(dict_intervals['communication'])
+        memcpy_union = self.merge_intervals(dict_intervals['memcpy'])
+        all_intervals = self.merge_intervals(dict_intervals['all_gpu'])
 
-        # Compute total computation time.
+        # end of the last event - start of the first event
+        total_time = all_intervals[-1][1] - all_intervals[0][0]
+
+        
         comp_time = sum(end - start for start, end in comp_union)
 
-        # For communication, subtract overlapping computation time.
-        exposed_comm_time = 0
-        for comm_interval in comm_union:
-            remaining_parts = self.subtract_intervals(comm_interval, comp_union)
-            exposed_comm_time += sum(end - start for start, end in remaining_parts)
+        total_comm_time = sum(end - start for start, end in comm_union)
+        exposed_comm_intervals = self.subtract_intervalsA_from_B(comp_union, comm_union)
+        exposed_comm_time = sum(end - start for start, end in exposed_comm_intervals)
 
-        # For memcpy, subtract overlapping computation time.
-        exposed_memcpy_time = 0
-        for memcpy_interval in memcpy_union:
-            remaining_parts = self.subtract_intervals(memcpy_interval, comp_union)
-            exposed_memcpy_time += sum(end - start for start, end in remaining_parts)
+        total_memcpy_time = sum(end - start for start, end in memcpy_union)
+        memcpy_minus_compute = self.subtract_intervalsA_from_B(comp_union, memcpy_union)
+        exposed_memcpy_intervals = self.subtract_intervalsA_from_B(comm_union, memcpy_minus_compute)
+        exposed_memcpy_time = sum(end - start for start, end in exposed_memcpy_intervals)
 
-        # Idle time is the gap between overall timeline and busy intervals.
         busy_time = sum(end - start for start, end in all_intervals)
-        idle_time = self.total_time - busy_time
+        idle_time = total_time - busy_time
 
-        #TODO add communication time
+        # assert that compute + exposed comm + exposed memcpy + idle = total time
+        assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + idle_time - total_time) < 1e-6
+
         return {
-            "busy_time": busy_time,
             "computation_time": comp_time,
-            "exposed_communication_time": exposed_comm_time,
+            "exposed_comm_time": exposed_comm_time,
             "exposed_memcpy_time": exposed_memcpy_time,
+            "busy_time": busy_time,
             "idle_time": idle_time,
-            "total_time": self.total_time,
+            "total_time": total_time,
+            "total_comm_time": total_comm_time,
+            "total_memcpy_time": total_memcpy_time,
         }
     
     def get_breakdown_df(self):
         dict_metrics = self.compute_metrics()
-        # df = pd.DataFrame(dict_metrics, index=[0])
-        # Compute percentages based on total time.
-        # df['computation_percent'] = df['computation_time'] / df['total_time'] * 100
-        # df['exposed_communication_percent'] = df['exposed_communication_time'] / df['total_time'] * 100
-        # df['exposed_memcpy_percent'] = df['exposed_memcpy_time'] / df['total_time'] * 100
-        # df['idle_percent'] = df['idle_time'] / df['total_time'] * 100
-        # df['total_percent'] = df['computation_percent'] + df['exposed_communication_percent'] + df['exposed_memcpy_percent'] + df['idle_percent']
-        # we need rows to be the computtation, communication, memcpy, idle, total
-        # cols to be time, percent
         df = pd.DataFrame(dict_metrics.items(), columns=['type', 'time'])
         # convert time to ms by div by 1e3
         df['time ms'] = df['time'] / 1e3
