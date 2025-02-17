@@ -1,6 +1,6 @@
 # GPUEventAnalyser
 
-GPUEventAnalyser is a reusable component designed to analyze GPU profiling traces and extract key performance metrics. While it is used within TreePerf, it can also be used independently to analyze GPU execution time, compute and communication breakdowns, and exposed latencies.
+GPUEventAnalyser is a reusable component designed to analyze GPU timeline and extract key performance metrics. While it is used within TreePerf, it can also be used independently.
 
 ---
 
