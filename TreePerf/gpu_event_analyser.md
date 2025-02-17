@@ -22,7 +22,7 @@ GPUEventAnalyser is a reusable component designed to analyze GPU timeline and ex
 
 ```python
 import json
-from gpu_event_analyser import GPUEventAnalyser
+from TreePerf.gpu_event_analyser import GPUEventAnalyser
 
 path = '/path/to/profile.json'
 
