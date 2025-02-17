@@ -1,5 +1,5 @@
 from math import prod
-
+from TreePerf.kernel_name_parser import gemm_name_parser
 # 1. GEMM 
 class GEMM:
     """
@@ -9,6 +9,12 @@ class GEMM:
     def __init__(self, event):
         self.event = event
         self.param_details = self.get_param_details(event)
+        for kernel_name in event['kernel_names']:
+            parsed_details = gemm_name_parser(kernel_name)
+            if parsed_details is not None:
+                break
+        if parsed_details is not None:
+            self.param_details['transpose'] = parsed_details['transpose']
         self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
     

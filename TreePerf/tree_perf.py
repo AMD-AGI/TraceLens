@@ -44,11 +44,7 @@ class TreePerfAnalyzer:
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
     def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False):
-        # Select the appropriate dictionary for FLOPS and memory functions
-        perf_model_class = op_to_perf_model_class_map[event['name']]
-        perf_model = perf_model_class(event)
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
         # Handle kernel aggregation
         if bwd:
             if not event.get('bwd_events'):
@@ -63,6 +59,14 @@ class TreePerfAnalyzer:
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
         busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
+
+        event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+
+        # Select the appropriate dictionary for FLOPS and memory functions
+        perf_model_class = op_to_perf_model_class_map[event['name']]
+        perf_model = perf_model_class(event)
+
+        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
 
         tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
@@ -93,7 +97,7 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
-    def build_df_perf_metrics(self, events, bwd, non_data_mov=False):
+    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False):
         rows = []
         for event in events:
             metrics_event = {'cat': event['cat'], 'name': event['name'],
@@ -103,6 +107,8 @@ class TreePerfAnalyzer:
             dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
+            if include_kernel_names:
+                metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
 
         df_perf_metrics = pd.DataFrame(rows)
