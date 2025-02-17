@@ -1,5 +1,5 @@
 from math import prod
-
+from TreePerf.kernel_name_parser import gemm_name_parser
 # 1. GEMM 
 class GEMM:
     """
@@ -9,6 +9,12 @@ class GEMM:
     def __init__(self, event):
         self.event = event
         self.param_details = self.get_param_details(event)
+        for kernel_name in event['kernel_names']:
+            parsed_details = gemm_name_parser(kernel_name)
+            if parsed_details is not None:
+                break
+        if parsed_details is not None:
+            self.param_details['transpose'] = parsed_details['transpose']
         self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
     
@@ -70,7 +76,11 @@ class aten_mm(GEMM):
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": False}
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+
+        return {"M": M, "N": N, "K": K, "bias": False,
+                "dtype_A_B": dtype_A_B}
 
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
@@ -89,7 +99,11 @@ class aten_addmm(GEMM):
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": True}
+
+        dtype_A_B = tuple(event['args']['Input type'][1:3])
+
+        return {"M": M, "N": N, "K": K, "bias": True,
+                "dtype_A_B": dtype_A_B}
     
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
@@ -109,7 +123,10 @@ class aten_scaled_mm(GEMM):
         N = B_shape[1]
         K = A_shape[1]
         bias = len(input_dims) == 3
-        return {"M": M, "N": N, "K": K, "bias": bias}
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "dtype_A_B": dtype_A_B}
 
 
 class aten_linear(GEMM):    
@@ -126,7 +143,11 @@ class aten_linear(GEMM):
         M = 1
         for dim in input_shape[:-1]:
             M *= dim
-        return {"M": M, "N": N, "K": K, "bias": bias}
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "dtype_A_B": dtype_A_B}
 
 # 2. Convolution
 class CONV:
