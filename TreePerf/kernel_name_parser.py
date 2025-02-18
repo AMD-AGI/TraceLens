@@ -48,7 +48,7 @@ def is_cuda_gemm(kernel_name):
     """
     # Right now, we only check if the kernel name starts with 'nvjet'.
     # This is a temporary solution and will be expanded in the future.
-    return kernel_name.starteswith('nvjet')
+    return kernel_name.startswith('nvjet')
 
 def parse_cuda_gemm(kernel_name):
     transpose_chars = kernel_name.split('_')[-1]
