@@ -9,6 +9,7 @@ class GEMM:
     def __init__(self, event):
         self.event = event
         self.param_details = self.get_param_details(event)
+        parsed_details = None
         for kernel_name in event['kernel_names']:
             parsed_details = gemm_name_parser(kernel_name)
             if parsed_details is not None:

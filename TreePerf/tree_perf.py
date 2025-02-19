@@ -3,7 +3,7 @@ import pandas as pd
 from TreePerf.torch_op_mapping import op_to_perf_model_class_map
 from TreePerf.gpu_event_analyser import GPUEventAnalyser
 from Trace2Tree.trace_to_tree import TraceToTree
-
+import warnings
 class TreePerfAnalyzer:
     def __init__(self, profile_filepath, add_python_func=False):
         with open(profile_filepath, 'r') as f:
@@ -55,11 +55,14 @@ class TreePerfAnalyzer:
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
-        busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+        busy_kernel_time = 0
+        if len(list_kernels) > 0:
+            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
-        busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
-
+        busy_non_data_mov_time = 0
+        if len(list_non_data_mov_kernels) > 0:
+            busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -99,6 +102,7 @@ class TreePerfAnalyzer:
     
     def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False):
         rows = []
+        list_warn_non_zero_flops_and_zero_time = []
         for event in events:
             metrics_event = {'cat': event['cat'], 'name': event['name'],
                              'UID': event['UID'],
@@ -111,9 +115,20 @@ class TreePerfAnalyzer:
                 metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
 
+            if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
+                list_warn_non_zero_flops_and_zero_time.append(event)
+
+        self._show_warnings(list_warn_non_zero_flops_and_zero_time)
         df_perf_metrics = pd.DataFrame(rows)
         return df_perf_metrics
     
+    @staticmethod
+    def _show_warnings(list_warn_non_zero_flops_and_zero_time):
+        # we need to say theze many events had this issue and one example is following
+        if len(list_warn_non_zero_flops_and_zero_time) > 0:
+            warnings.warn(f"Found {len(list_warn_non_zero_flops_and_zero_time)} events with non-zero GFLOPS and zero Kernel Time (µs).")
+            warnings.warn(f"Example event: {list_warn_non_zero_flops_and_zero_time[0]}")
+                                                                                                                                        
     def build_df_fwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=False)
     def build_df_bwd_perf_metrics(self, events):
