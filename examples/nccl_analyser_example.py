@@ -1,4 +1,4 @@
-from NcclAnalyser.nccl_analyser import NcclAnalyser
+from iLoveTrace import NcclAnalyser
 import os
 
 # Initialize NCCL Analyser

@@ -3,9 +3,10 @@ import json
 import warnings
 import pprint
 import pandas as pd
-from TreePerf.torch_op_mapping import op_to_perf_model_class_map
-from TreePerf.gpu_event_analyser import GPUEventAnalyser
-from Trace2Tree.trace_to_tree import TraceToTree
+from .torch_op_mapping import op_to_perf_model_class_map
+from .gpu_event_analyser import GPUEventAnalyser
+from ..Trace2Tree.trace_to_tree import TraceToTree
+
 class TreePerfAnalyzer:
     def __init__(self, profile_filepath, add_python_func=False):
         with open(profile_filepath, 'r') as f:
