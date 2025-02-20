@@ -272,6 +272,12 @@ class aten_conv(CONV):
         output_padding = aten_conv.str_to_tuple(output_padding_arg) if output_padding_arg != '' else (0,) * ndims
         groups = int(concrete_inputs[8])
 
+        # if its a length 1 tuple then we broadcast it to the number of spatial dimensions
+        stride, padding, dilation, output_padding = [
+            param * ndims if len(param) == 1 else param
+            for param in [stride, padding, dilation, output_padding]
+        ]
+
         return {"input_shape": input_shape, "filter_shape": filter_shape, "bias": bias,
                 "stride": stride, "padding": padding, "dilation": dilation,
                 "transposed_conv": transposed_conv, "output_padding": output_padding,
