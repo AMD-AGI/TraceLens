@@ -21,4 +21,4 @@ The library currently includes three tools:
 
 
 ### Quick start
-Each tool in iLoveTrace is modular, with its own documentation and usage instructions. To get started with any tool navigate to the respective tool's directory and follow the detailed README in the tool's directory for usage instructions.
+Each tool in iLoveTrace has documentation and examples. To get started with any tool navigate to the respective tool's docs markdown file and then to the example. 

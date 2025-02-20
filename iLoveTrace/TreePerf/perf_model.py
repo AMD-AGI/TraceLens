@@ -1,5 +1,5 @@
 from math import prod
-from TreePerf.kernel_name_parser import gemm_name_parser
+from .kernel_name_parser import gemm_name_parser
 # 1. GEMM 
 class GEMM:
     """
