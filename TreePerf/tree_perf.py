@@ -1,9 +1,10 @@
 import json
+import warnings
+import pprint
 import pandas as pd
 from TreePerf.torch_op_mapping import op_to_perf_model_class_map
 from TreePerf.gpu_event_analyser import GPUEventAnalyser
 from Trace2Tree.trace_to_tree import TraceToTree
-import warnings
 class TreePerfAnalyzer:
     def __init__(self, profile_filepath, add_python_func=False):
         with open(profile_filepath, 'r') as f:
@@ -127,7 +128,7 @@ class TreePerfAnalyzer:
         # we need to say theze many events had this issue and one example is following
         if len(list_warn_non_zero_flops_and_zero_time) > 0:
             warnings.warn(f"Found {len(list_warn_non_zero_flops_and_zero_time)} events with non-zero GFLOPS and zero Kernel Time (µs).")
-            warnings.warn(f"Example event: {list_warn_non_zero_flops_and_zero_time[0]}")
+            warnings.warn(f"Example event: {pprint.pformat(list_warn_non_zero_flops_and_zero_time[0])}")
                                                                                                                                         
     def build_df_fwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=False)
