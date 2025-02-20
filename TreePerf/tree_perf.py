@@ -138,6 +138,10 @@ class TreePerfAnalyzer:
 
     @staticmethod
     def summarize_df_perf_metrics(df_perf_metrics, agg_metrics=['mean', 'std']):
+        if df_perf_metrics.empty:
+            warnings.warn("Input DataFrame is empty. Returning an empty summary DataFrame.")
+            return pd.DataFrame()  # Return an empty DataFrame instead of raising an error
+
         dict_agg = {}
         # first element for GFLOPS and FLOPS/Byte
         dict_agg['GFLOPS'] = 'first'
