@@ -1,9 +1,11 @@
 import json
+# TODO: warning should show the stack as well
+import warnings
+import pprint
 import pandas as pd
 from TreePerf.torch_op_mapping import op_to_perf_model_class_map
 from TreePerf.gpu_event_analyser import GPUEventAnalyser
 from Trace2Tree.trace_to_tree import TraceToTree
-
 class TreePerfAnalyzer:
     def __init__(self, profile_filepath, add_python_func=False):
         with open(profile_filepath, 'r') as f:
@@ -55,11 +57,14 @@ class TreePerfAnalyzer:
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
-        busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+        busy_kernel_time = 0
+        if len(list_kernels) > 0:
+            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
-        busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
-
+        busy_non_data_mov_time = 0
+        if len(list_non_data_mov_kernels) > 0:
+            busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -98,22 +103,50 @@ class TreePerfAnalyzer:
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
     def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False):
+        if len(events) == 0:
+            warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
+            return pd.DataFrame()
         rows = []
+        list_warn_non_zero_flops_and_zero_time = []
+        list_no_bwd_events = []
         for event in events:
             metrics_event = {'cat': event['cat'], 'name': event['name'],
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
             dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
+
+            # handle warnings
+            if bwd and not event.get('bwd_events'):
+                list_no_bwd_events.append(event)
+                continue
+            if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
+                list_warn_non_zero_flops_and_zero_time.append(event)
+
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
             if include_kernel_names:
                 metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
 
+        self._show_warnings(list_warn_non_zero_flops_and_zero_time,
+                            list_no_bwd_events, len(events))
         df_perf_metrics = pd.DataFrame(rows)
         return df_perf_metrics
     
+    @staticmethod
+    def _show_warnings(list_warn_non_zero_flops_and_zero_time,
+                          list_no_bwd_events, total_events):
+        # we need to say a/b  events had this issue and one example is following
+        # where b is total events
+        if len(list_warn_non_zero_flops_and_zero_time) > 0:
+            warnings.warn(f"Found {len(list_warn_non_zero_flops_and_zero_time)}/{total_events} events with non-zero GFLOPS and zero Kernel Time (µs).")
+            warnings.warn(f"Example event: {pprint.pformat(list_warn_non_zero_flops_and_zero_time[0])}")
+        if len(list_no_bwd_events) > 0:
+            warnings.warn(f"Found {len(list_no_bwd_events)}/{total_events} events without backward events.")
+            warnings.warn(f"Example event: {pprint.pformat(list_no_bwd_events[0])}")
+
+                                                                                                                                        
     def build_df_fwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=False)
     def build_df_bwd_perf_metrics(self, events):
@@ -122,6 +155,10 @@ class TreePerfAnalyzer:
 
     @staticmethod
     def summarize_df_perf_metrics(df_perf_metrics, agg_metrics=['mean', 'std']):
+        if df_perf_metrics.empty:
+            warnings.warn("Input DataFrame is empty. Returning an empty summary DataFrame.")
+            return pd.DataFrame()  # Return an empty DataFrame instead of raising an error
+
         dict_agg = {}
         # first element for GFLOPS and FLOPS/Byte
         dict_agg['GFLOPS'] = 'first'
@@ -139,7 +176,7 @@ class TreePerfAnalyzer:
 
         # Identify parameter columns for grouping
         param_cols = [col for col in df_perf_metrics.columns if col.startswith('param: ')]
-
+        #TODO warn user if nans in the performance metrics
         # Perform the aggregation
         df_perf_metrics_summary = (
             df_perf_metrics
