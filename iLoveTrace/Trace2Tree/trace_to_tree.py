@@ -120,16 +120,20 @@ class TraceToTree:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
+    
+    def get_UID2event(self, UID):
+        return self.events_by_uid[UID]
 
     def get_parent_event(self, event):
         if event.get('parent') is None:
             return None
-        return self.events_by_uid[event['parent']]
+        return self.get_UID2event(event['parent'])
+
 
     def get_children_events(self, event):
         if 'children' not in event:
             return []
-        return [self.events_by_uid[child] for child in event['children']]
+        return [self.get_UID2event(child_UID) for child_UID in event['children']]
 
     def get_node_by_ext_id_pid_tid(self, ext_id, pid, tid):
         for event in self.events:

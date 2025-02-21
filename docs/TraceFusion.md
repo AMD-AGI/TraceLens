@@ -20,7 +20,7 @@ Here’s how to use TraceFusion to merge and process trace files for distributed
 ### Example 1: Basic Usage
 
 ```python
-from trace_fuse import TraceFuse
+from iLoveTrace import TraceFuse
 import os
 
 # Define file paths for each rank
@@ -42,7 +42,7 @@ fuser.merge_and_save(output_file)
 ### Example 2: Advanced Usage
 
 ```python
-from trace_fuse import TraceFuse
+from iLoveTrace import TraceFuse
 import os
 
 # Define file paths for rank 0 on each node

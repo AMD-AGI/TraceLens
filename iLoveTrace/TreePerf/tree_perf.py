@@ -1,35 +1,42 @@
+import json
+# TODO: warning should show the stack as well
+import warnings
+import pprint
 import pandas as pd
-from TreePerf.torch_op_mapping import op_to_perf_model_class_map
-from TreePerf.gpu_event_analyser import GPUEventAnalyser
+from .torch_op_mapping import op_to_perf_model_class_map
+from .gpu_event_analyser import GPUEventAnalyser
+from ..Trace2Tree.trace_to_tree import TraceToTree
 
 class TreePerfAnalyzer:
-    def __init__(self, trace_to_tree):
-        self.tree = trace_to_tree
+    def __init__(self, profile_filepath, add_python_func=False):
+        with open(profile_filepath, 'r') as f:
+            data = json.load(f)
+        self.tree = TraceToTree(data['traceEvents'])
+        self.tree.build_tree(add_python_func=add_python_func)
 
-    def agg_kernels_in_subtree(self, event_UID, filter_func=None, verbose=False):
-        events_by_uid = self.tree.events_by_uid
-        event = events_by_uid[event_UID]
+    def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
             filter_func = lambda x: True
-        if event.get('cat') == 'kernel':
+        if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
             if not filter_func(event):
                 return 0, []
             if verbose:
                 print(f"Found kernel event, duration: {event['dur']}, name: {event['name']}")
-            return event['dur'], [event_UID]
+            return event['dur'], [event['UID']]
         total_dur = 0
         list_kernels = []
         for child_UID in event.get('children', []):
-            child_total_dur, child_list_kernels = self.agg_kernels_in_subtree(child_UID, filter_func, verbose)
+            child = self.tree.get_UID2event(child_UID)
+            child_total_dur, child_list_kernels = self.agg_kernels_in_subtree(child, filter_func, verbose)
             total_dur += child_total_dur
             list_kernels.extend(child_list_kernels)
         return total_dur, list_kernels
 
-    def loop_and_aggregate_kernels(self, event_UIDs, filter_func=None, verbose=False):
+    def loop_and_aggregate_kernels(self, events, filter_func=None, verbose=False):
         total_kernel_time = 0
         list_kernels = []
-        for event_UID in event_UIDs:
-            this_total_kernel_time, this_list_kernels = self.agg_kernels_in_subtree(event_UID, filter_func, verbose=False)
+        for event in events:
+            this_total_kernel_time, this_list_kernels = self.agg_kernels_in_subtree(event, filter_func, verbose=False)
             total_kernel_time += this_total_kernel_time
             list_kernels.extend(this_list_kernels)
         return total_kernel_time, list_kernels
@@ -40,11 +47,7 @@ class TreePerfAnalyzer:
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
     def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False):
-        # Select the appropriate dictionary for FLOPS and memory functions
-        perf_model_class = op_to_perf_model_class_map[event['name']]
-        perf_model = perf_model_class(event)
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
         # Handle kernel aggregation
         if bwd:
             if not event.get('bwd_events'):
@@ -52,12 +55,24 @@ class TreePerfAnalyzer:
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
-        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_uids)
+        cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
+        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
-        busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_uids, filter_func=self.non_data_mov_filter)
+        busy_kernel_time = 0
+        if len(list_kernels) > 0:
+            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
-        busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
+        busy_non_data_mov_time = 0
+        if len(list_non_data_mov_kernels) > 0:
+            busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
+        event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+
+        # Select the appropriate dictionary for FLOPS and memory functions
+        perf_model_class = op_to_perf_model_class_map[event['name']]
+        perf_model = perf_model_class(event)
+
+        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
 
         tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
@@ -88,30 +103,63 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
-    def build_df_perf_metrics(self, event_UIDs, bwd, non_data_mov=False):
+    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False):
+        if len(events) == 0:
+            warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
+            return pd.DataFrame()
         rows = []
-        for event_uid in event_UIDs:
-            event = self.tree.events_by_uid[event_uid]
+        list_warn_non_zero_flops_and_zero_time = []
+        list_no_bwd_events = []
+        for event in events:
             metrics_event = {'cat': event['cat'], 'name': event['name'],
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
             dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
+
+            # handle warnings
+            if bwd and not event.get('bwd_events'):
+                list_no_bwd_events.append(event)
+                continue
+            if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
+                list_warn_non_zero_flops_and_zero_time.append(event)
+
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
+            if include_kernel_names:
+                metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
 
+        self._show_warnings(list_warn_non_zero_flops_and_zero_time,
+                            list_no_bwd_events, len(events))
         df_perf_metrics = pd.DataFrame(rows)
         return df_perf_metrics
     
-    def build_df_fwd_perf_metrics(self, event_UIDs):
-        return self.build_df_perf_metrics(event_UIDs, bwd=False)
-    def build_df_bwd_perf_metrics(self, event_UIDs):
-        return self.build_df_perf_metrics(event_UIDs, bwd=True)
+    @staticmethod
+    def _show_warnings(list_warn_non_zero_flops_and_zero_time,
+                          list_no_bwd_events, total_events):
+        # we need to say a/b  events had this issue and one example is following
+        # where b is total events
+        if len(list_warn_non_zero_flops_and_zero_time) > 0:
+            warnings.warn(f"Found {len(list_warn_non_zero_flops_and_zero_time)}/{total_events} events with non-zero GFLOPS and zero Kernel Time (µs).")
+            warnings.warn(f"Example event: {pprint.pformat(list_warn_non_zero_flops_and_zero_time[0])}")
+        if len(list_no_bwd_events) > 0:
+            warnings.warn(f"Found {len(list_no_bwd_events)}/{total_events} events without backward events.")
+            warnings.warn(f"Example event: {pprint.pformat(list_no_bwd_events[0])}")
+
+                                                                                                                                        
+    def build_df_fwd_perf_metrics(self, events):
+        return self.build_df_perf_metrics(events, bwd=False)
+    def build_df_bwd_perf_metrics(self, events):
+        return self.build_df_perf_metrics(events, bwd=True)
     
 
     @staticmethod
     def summarize_df_perf_metrics(df_perf_metrics, agg_metrics=['mean', 'std']):
+        if df_perf_metrics.empty:
+            warnings.warn("Input DataFrame is empty. Returning an empty summary DataFrame.")
+            return pd.DataFrame()  # Return an empty DataFrame instead of raising an error
+
         dict_agg = {}
         # first element for GFLOPS and FLOPS/Byte
         dict_agg['GFLOPS'] = 'first'
@@ -129,7 +177,7 @@ class TreePerfAnalyzer:
 
         # Identify parameter columns for grouping
         param_cols = [col for col in df_perf_metrics.columns if col.startswith('param: ')]
-
+        #TODO warn user if nans in the performance metrics
         # Perform the aggregation
         df_perf_metrics_summary = (
             df_perf_metrics
@@ -144,7 +192,7 @@ class TreePerfAnalyzer:
 
         return df_perf_metrics_summary
 
-    def get_kernel_launchers(self):
+    def get_kernel_launchers(self, include_nccl=False):
         # This method traverses the event tree to identify CPU operations that serve as 
         # "kernel launchers." These are operations that result in GPU kernel 
         # execution without further cpu op calls. 
@@ -163,14 +211,13 @@ class TreePerfAnalyzer:
                 child = self.tree.events_by_uid[child_UID]
                 for grand_child_UID in child.get('children', []):
                     grand_child = self.tree.events_by_uid[grand_child_UID]
-                    if grand_child.get('cat') == 'kernel':
+                    is_kernel = grand_child.get('cat') == 'kernel'
+                    is_nccl = 'nccl' in grand_child['name']
+                    should_include = is_kernel and (include_nccl or not is_nccl)
+                    if should_include:
                         kernel_launcher = True
-                        # total_direct_kernel_time += grand_child['dur']
-                        # direct_kernel_count += 1
                         list_kernels.append(grand_child)
             if kernel_launcher:
-                # event['total_direct_kernel_time'] = total_direct_kernel_time
-                # event['direct_kernel_count'] = direct_kernel_count
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
                 kernel_launchers.append(event)
@@ -187,10 +234,12 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {'name': event['name'],
+                             'UID': event['UID'],
                             'total_direct_kernel_time': event['total_direct_kernel_time'],
                             'direct_kernel_count': event['direct_kernel_count']}
-            if 'Input Dims' in event['args']:
-                metrics_event['Input Dims'] = list_to_tuple(event['args']['Input Dims'])
+            for arg in ['Input Dims', 'Input type', 'Input Strides']:
+                if arg in event['args']:
+                    metrics_event[arg] = list_to_tuple(event['args'][arg])
 
             if id_cols:
                 metrics_event['pid'] = event['pid']
@@ -223,7 +272,9 @@ class TreePerfAnalyzer:
         df_temp = df_temp[df_temp['name'] == name]
         dict_agg = {'total_direct_kernel_time': ['sum', 'count', 'mean', 'std'],
                     'direct_kernel_count': ['max', 'min']}
-        df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        # df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)
+        #check if the input dims and others are present in the df
+        df_agg = df_temp.groupby(['Input Dims', 'Input type', 'Input Strides']).agg(dict_agg)
         df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={'total_direct_kernel_time_sum': 'Total Kernel Time (µs)',

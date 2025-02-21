@@ -1,5 +1,5 @@
 from math import prod
-
+from .kernel_name_parser import gemm_name_parser
 # 1. GEMM 
 class GEMM:
     """
@@ -9,6 +9,13 @@ class GEMM:
     def __init__(self, event):
         self.event = event
         self.param_details = self.get_param_details(event)
+        parsed_details = None
+        for kernel_name in event['kernel_names']:
+            parsed_details = gemm_name_parser(kernel_name)
+            if parsed_details is not None:
+                break
+        if parsed_details is not None:
+            self.param_details['transpose'] = parsed_details['transpose']
         self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
     
@@ -70,7 +77,11 @@ class aten_mm(GEMM):
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": False}
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+
+        return {"M": M, "N": N, "K": K, "bias": False,
+                "dtype_A_B": dtype_A_B}
 
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
@@ -89,12 +100,35 @@ class aten_addmm(GEMM):
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
-        return {"M": M, "N": N, "K": K, "bias": True}
+
+        dtype_A_B = tuple(event['args']['Input type'][1:3])
+
+        return {"M": M, "N": N, "K": K, "bias": True,
+                "dtype_A_B": dtype_A_B}
     
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+
+class aten_scaled_mm(GEMM):
+    """
+    aten::scaled_mm is the scale_result(scale_a*A.matmul(scale_b*B) + bias)
+    """
+    @staticmethod
+    def get_param_details(event):
+        # ref: https://pytorch.org/cppdocs/api/function_namespaceat_1a2902105d8aed3fa448a0da42f90e2cbf.html
+        input_dims = event['args']['Input Dims']
+        A_shape, B_shape = input_dims[0], input_dims[1]
+        M = A_shape[0]
+        N = B_shape[1]
+        K = A_shape[1]
+        bias = len(input_dims) == 3
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "dtype_A_B": dtype_A_B}
+
 
 class aten_linear(GEMM):    
     
@@ -110,7 +144,11 @@ class aten_linear(GEMM):
         M = 1
         for dim in input_shape[:-1]:
             M *= dim
-        return {"M": M, "N": N, "K": K, "bias": bias}
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "dtype_A_B": dtype_A_B}
 
 # 2. Convolution
 class CONV:
@@ -201,37 +239,49 @@ class CONV:
 class aten_conv(CONV):
 
     @staticmethod
+    def str_to_tuple(s):
+        return tuple(int(x) for x in s[1:-1].split(','))
+    @staticmethod
     def get_param_details(event):
-        input_shape = tuple(event['args']['Input Dims'][0])
-        filter_shape = tuple(event['args']['Input Dims'][1])
-        bias = len(event['args']['Input Dims']) == 2 
-        # stride, padding and dilation are strings, eg: "[1, 1]" 
-        # we do [1:-1] to remove the brackets
-        # we need to handle cases where the stride, padding and dilation are not provided
+        # 0 input tensor
+        # 1 weight tensor
+        # 2 bias tensor (optional)
+        # 3 stride
+        # 4 padding
+        # 5 dilation
+        # 6 transposed (boolean)
+        # 7 output_padding
+        # 8 groups
+        input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
-        stride_str = concrete_inputs[3]
-        if stride_str != '':
-            stride = tuple(int(s) for s in stride_str[1:-1].split(','))
-        else:
-            stride = (1,) * (len(input_shape) - 2)
 
-        padding_str = concrete_inputs[4]
-        if padding_str != '':
-            padding = tuple(int(p) for p in padding_str[1:-1].split(','))
-        else:
-            padding = (0,) * (len(input_shape) - 2)
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2 #first two dimensions are batch and channel
+        filter_shape = tuple(input_dims[1])
+        bias = len(input_dims) == 3
 
-        dilation_str = concrete_inputs[5]
-        if dilation_str != '':
-            dilation = tuple(int(d) for d in dilation_str[1:-1].split(','))
-        else:
-            dilation = (1,) * (len(input_shape) - 2)
         
-        groups = int(event['args']['Concrete Inputs'][6])
-        # self.bias = bool(self.event['args']['Input Dims'][2]) #recheck this
-        return {"input_shape": input_shape, "filter_shape": filter_shape,
+        stride_arg = concrete_inputs[3]
+        stride = aten_conv.str_to_tuple(stride_arg) if stride_arg != '' else (1,) * ndims
+        padding_arg = concrete_inputs[4]
+        padding = aten_conv.str_to_tuple(padding_arg) if padding_arg != '' else (0,) * ndims
+        dilation_arg = concrete_inputs[5]
+        dilation = aten_conv.str_to_tuple(dilation_arg) if dilation_arg != '' else (1,) * ndims
+        transposed_conv = eval(concrete_inputs[6])
+        output_padding_arg = concrete_inputs[7]
+        output_padding = aten_conv.str_to_tuple(output_padding_arg) if output_padding_arg != '' else (0,) * ndims
+        groups = int(concrete_inputs[8])
+
+        # if its a length 1 tuple then we broadcast it to the number of spatial dimensions
+        stride, padding, dilation, output_padding = [
+            param * ndims if len(param) == 1 else param
+            for param in [stride, padding, dilation, output_padding]
+        ]
+
+        return {"input_shape": input_shape, "filter_shape": filter_shape, "bias": bias,
                 "stride": stride, "padding": padding, "dilation": dilation,
-                "groups": groups, "bias": bias, "transposed_conv": False}
+                "transposed_conv": transposed_conv, "output_padding": output_padding,
+                "groups": groups}
 
 class aten_conv_bwd(aten_conv):
     def __init__(self, event):
