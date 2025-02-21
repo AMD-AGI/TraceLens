@@ -17,7 +17,7 @@ class TreePerfAnalyzer:
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
             filter_func = lambda x: True
-        if event.get('cat') == 'kernel':
+        if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
             if not filter_func(event):
                 return 0, []
             if verbose:
