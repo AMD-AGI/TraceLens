@@ -1,6 +1,6 @@
 import pandas as pd
-from TreePerf.torch_op_mapping import op_to_perf_model_class_map
-from TreePerf.gpu_event_analyser import GPUEventAnalyser
+from .torch_op_mapping import op_to_perf_model_class_map
+from .gpu_event_analyser import GPUEventAnalyser
 
 class TreePerfAnalyzer:
     def __init__(self, trace_to_tree):
