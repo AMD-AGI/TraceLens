@@ -1,4 +1,6 @@
 import json
+import gzip
+
 # TODO: warning should show the stack as well
 import warnings
 import pprint
@@ -9,8 +11,15 @@ from ..Trace2Tree.trace_to_tree import TraceToTree
 
 class TreePerfAnalyzer:
     def __init__(self, profile_filepath, add_python_func=False):
-        with open(profile_filepath, 'r') as f:
-            data = json.load(f)
+
+        if profile_filepath.endswith('.json'):
+            with open(profile_filepath, 'r') as f:
+                data = json.load(f)
+        elif profile_filepath.endswith('.gz'):
+            with gzip.open(profile_filepath, 'rt') as f:
+                data = json.load(f)
+        else:
+            raise ValueError("Profile file should be either .json or .gz")
         self.tree = TraceToTree(data['traceEvents'])
         self.tree.build_tree(add_python_func=add_python_func)
 
