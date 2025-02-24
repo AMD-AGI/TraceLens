@@ -43,6 +43,33 @@ class NcclAnalyser:
         }
         self.collective_name2cat = {name: cat for cat, names in self.collective_cat2name.items() for name in names}
 
+    def assign_stream_index_id(self, nccl_events):
+        """
+        Iterates through a list of NCCL events, groups them by their stream,
+        sorts them by time, and assigns a tuple (stream, order_id) to each event
+        in the event['args'] dictionary under the key 'stream_index_id'.
+        
+        Args:
+            nccl_events (list): List of NCCL event dictionaries.
+        """
+        # Group events by stream
+        events_by_stream = {}
+        for event in nccl_events:
+            # Ensure that the necessary keys exist
+            stream = event['args'].get('stream')
+            if stream is None:
+                raise ValueError("Event missing 'stream' in args")
+            events_by_stream.setdefault(stream, []).append(event)
+        
+        # Process each group of events corresponding to a single stream
+        for stream, events in events_by_stream.items():
+            # Sort events by timestamp
+            events.sort(key=lambda e: e['ts'])
+            
+            # Assign an order id to each event in this stream
+            for order_id, event in enumerate(events):
+                event['args']['stream_index_id'] = (stream, order_id)
+
     def nccl_filter_event_fn(self, event):
             
         if 'cat' not in event or 'args' not in event:
@@ -65,27 +92,31 @@ class NcclAnalyser:
             file_path = self.list_profile_filepaths[rank]
             with open(file_path, 'r') as f:
                 data = json.load(f)
-            dict_external_id2event = {}
+            dict_collective_id2event = {}
+            nccl_events = []
             for event in data['traceEvents']:
-                if not self.filter_event_fn(event):
-                    continue
-                dict_external_id2event[event['args']['External id']] = event
-            self.rank2trace_data[rank] = dict_external_id2event
+                if self.nccl_filter_event_fn(event):
+                    nccl_events.append(event)
+            self.assign_stream_index_id(nccl_events)
+            for event in nccl_events:
+                collective_id = event['args']['stream_index_id']
+                dict_collective_id2event[collective_id] = event
+            self.rank2trace_data[rank] = dict_collective_id2event
 
     def build_df_nccl(self):
 
         self.load_trace_data()
         list_of_nccl_events = []
-        for external_id in self.rank2trace_data[0].keys():
+        for collective_id in self.rank2trace_data[0].keys():
             # Find the minimum duration of the event across all ranks
             # this is important for getting communication time
             comm_latency = float('inf')
             for rank in range(self.world_size):
-                comm_latency = min(comm_latency, self.rank2trace_data[rank][external_id]['dur'])
-            df_row = {'external_id': external_id, 'comm latency (µs)': comm_latency}
+                comm_latency = min(comm_latency, self.rank2trace_data[rank][collective_id]['dur'])
+            df_row = {'collective_id': collective_id, 'comm latency (µs)': comm_latency}
 
             # Get metadata fields from rank 0
-            rank0_event = self.rank2trace_data[0][external_id]
+            rank0_event = self.rank2trace_data[0][collective_id]
             for field in self.metadata_fields:
                 df_row[field] = rank0_event['args'][field]
 
@@ -99,7 +130,7 @@ class NcclAnalyser:
         list_of_nccl_events.sort(key=lambda x: x['In msg size (MB)'], reverse=True)
 
         df_nccl = pd.DataFrame(list_of_nccl_events)
-        df_nccl = df_nccl[['external_id'] + self.metadata_fields + ['comm latency (µs)', 'In msg size (MB)', 'algo bw (GB/s)', 'bus bw (GB/s)']]
+        df_nccl = df_nccl[['collective_id'] + self.metadata_fields + ['comm latency (µs)', 'In msg size (MB)', 'algo bw (GB/s)', 'bus bw (GB/s)']]
         return df_nccl
     
     @staticmethod
