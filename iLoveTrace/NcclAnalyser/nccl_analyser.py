@@ -98,7 +98,6 @@ class NcclAnalyser:
                 if self.nccl_filter_event_fn(event):
                     nccl_events.append(event)
             self.assign_stream_index_id(nccl_events)
-            self.rank2trace_data[rank] = dict_collective_id2event
             for event in nccl_events:
                 collective_id = event['args']['stream_index_id']
                 dict_collective_id2event[collective_id] = event
