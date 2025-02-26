@@ -305,3 +305,54 @@ class TreePerfAnalyzer:
         gpu_event_analyser = GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
+
+    def get_kernel_details(self, kernel_event):
+
+        def list_to_tuple(obj):
+            if isinstance(obj, list):
+                return tuple(list_to_tuple(item) for item in obj)
+            return obj
+
+        assert kernel_event.get('cat') == 'kernel'
+        try:
+            launcher_UID = kernel_event['parent']
+            launcher = self.tree.get_UID2event(launcher_UID)
+            assert launcher.get('cat') in {'cuda_runtime', 'cuda_driver'}
+            cpu_op_UID = launcher['parent']
+            cpu_op = self.tree.get_UID2event(cpu_op_UID)
+            assert cpu_op.get('cat') == 'cpu_op'
+        except KeyError:
+            return None
+        details = {
+            'UID': kernel_event['UID'],
+            'Kernel name': kernel_event['name'],
+            'Kernel duration (µs)': kernel_event['dur'],
+            'Kernel stream': kernel_event['args'].get('stream'),
+            'Parent cpu_op UID': cpu_op_UID,
+            'Parent cpu_op': cpu_op['name'],
+            'Input dims': list_to_tuple(cpu_op['args'].get('Input Dims')),
+            'Input types': list_to_tuple(cpu_op['args'].get('Input type')),
+            'Input strides': list_to_tuple(cpu_op['args'].get('Input Strides')),
+            'kernel_file': cpu_op['args'].get('kernel_file'),
+            'Grid': list_to_tuple(launcher['args'].get('grid')),
+            'Block': list_to_tuple(launcher['args'].get('block')),
+        }
+        return details
+
+    def get_df_kernels(self):
+        rows = []
+        num_unlinked_kernels = 0
+        num_total_kernels = 0
+        for event in self.tree.events:
+            if event.get('cat') != 'kernel':
+                continue
+            num_total_kernels += 1
+            details = self.get_kernel_details(event)
+            if details is not None:
+                rows.append(details)
+            else:
+                num_unlinked_kernels += 1
+        if num_unlinked_kernels > 0:
+            warnings.warn(f"Found {num_unlinked_kernels}/{num_total_kernels} kernels without host link. They are not included in the DataFrame.")
+        df = pd.DataFrame(rows)
+        return df
