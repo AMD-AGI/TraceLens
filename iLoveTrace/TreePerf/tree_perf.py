@@ -1,5 +1,6 @@
 import json
 import gzip
+from collections import defaultdict
 
 # TODO: warning should show the stack as well
 import warnings
@@ -21,6 +22,7 @@ class TreePerfAnalyzer:
         else:
             raise ValueError("Profile file should be either .json or .gz")
         self.tree = TraceToTree(data['traceEvents'])
+        self.add_python_func = add_python_func  
         self.tree.build_tree(add_python_func=add_python_func)
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
@@ -307,23 +309,42 @@ class TreePerfAnalyzer:
         return df
 
     def get_kernel_details(self, kernel_event):
+        """
+        Extract detailed information for a given kernel event.
 
+        This method traces a kernel event's parent relationships to retrieve
+        its launcher and CPU operation details, then returns a dictionary of
+        relevant information. If any of the necessary links are missing or invalid,
+        the function returns None.
+
+        Args:
+            kernel_event (dict): The kernel event dictionary.
+
+        Returns:
+            dict or None: A dictionary containing the kernel details, or None if linking fails.
+        """
         def list_to_tuple(obj):
-            if isinstance(obj, list):
-                return tuple(list_to_tuple(item) for item in obj)
-            return obj
+            # Recursively convert lists to tuples.
+            return tuple(list_to_tuple(item) for item in obj) if isinstance(obj, list) else obj
 
-        assert kernel_event.get('cat') == 'kernel'
+        # Verify that the event is a kernel event.
+        if kernel_event.get('cat') != 'kernel':
+            return None
+
+        # Attempt to trace the kernel's parent (launcher) and grandparent (CPU op) events.
         try:
-            launcher_UID = kernel_event['parent']
-            launcher = self.tree.get_UID2event(launcher_UID)
-            assert launcher.get('cat') in {'cuda_runtime', 'cuda_driver'}
+            launcher = self.tree.get_UID2event(kernel_event['parent'])
+            if launcher.get('cat') not in {'cuda_runtime', 'cuda_driver'}:
+                return None
             cpu_op_UID = launcher['parent']
             cpu_op = self.tree.get_UID2event(cpu_op_UID)
-            assert cpu_op.get('cat') == 'cpu_op'
+            if cpu_op.get('cat') != 'cpu_op':
+                return None
         except KeyError:
             return None
-        details = {
+
+        # Build and return the details dictionary.
+        return {
             'UID': kernel_event['UID'],
             'Kernel name': kernel_event['name'],
             'Kernel duration (µs)': kernel_event['dur'],
@@ -337,22 +358,76 @@ class TreePerfAnalyzer:
             'Grid': list_to_tuple(launcher['args'].get('grid')),
             'Block': list_to_tuple(launcher['args'].get('block')),
         }
-        return details
 
-    def get_df_kernels(self):
-        rows = []
-        num_unlinked_kernels = 0
-        num_total_kernels = 0
-        for event in self.tree.events:
-            if event.get('cat') != 'kernel':
-                continue
-            num_total_kernels += 1
-            details = self.get_kernel_details(event)
-            if details is not None:
-                rows.append(details)
-            else:
-                num_unlinked_kernels += 1
-        if num_unlinked_kernels > 0:
-            warnings.warn(f"Found {num_unlinked_kernels}/{num_total_kernels} kernels without host link. They are not included in the DataFrame.")
-        df = pd.DataFrame(rows)
-        return df
+
+def get_df_kernels(self):
+    """
+    Build a DataFrame with kernel details augmented with aggregated parent CPU op metrics.
+
+    This method processes all events to extract kernel events, retrieves their details via
+    `get_kernel_details`, and then groups kernels by their parent CPU op UID to compute:
+      - The direct kernel count per CPU op.
+      - The total busy time (µs) for the CPU op.
+      - The percentage of the CPU op's busy time consumed by each kernel.
+
+    For a CPU op launching only one kernel, the kernel's duration is used as the busy time and
+    its percentage is set to 100%. For CPU ops launching multiple kernels, the busy time is computed
+    using GPUEventAnalyser.
+
+    Kernels that cannot be properly linked are skipped and a warning is issued.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing detailed kernel information and aggregated metrics.
+    """
+
+    kernel_details_list = []
+    unlinked_count = 0
+    total_kernel_count = 0
+
+    # Extract details for all kernel events.
+    for event in self.tree.events:
+        if event.get('cat') != 'kernel':
+            continue
+        total_kernel_count += 1
+        details = self.get_kernel_details(event)
+        if details is not None:
+            kernel_details_list.append(details)
+        else:
+            unlinked_count += 1
+
+    # Group kernel events by their parent CPU op UID.
+    cpu_op_to_kernel_events = defaultdict(list)
+    for details in kernel_details_list:
+        parent_uid = details['Parent cpu_op UID']
+        cpu_op_to_kernel_events[parent_uid].append(self.tree.get_UID2event(details['UID']))
+
+    # Compute busy time for each CPU op.
+    cpu_op_to_busy_time = {}
+    for parent_uid, events in cpu_op_to_kernel_events.items():
+        if len(events) == 1:
+            # For a single kernel, use its own duration.
+            busy_time = events[0]['dur']
+        else:
+            busy_time = GPUEventAnalyser(events).compute_metrics()['busy_time']
+        cpu_op_to_busy_time[parent_uid] = busy_time
+
+    # Augment each kernel's details with aggregated metrics.
+    for details in kernel_details_list:
+        parent_uid = details['Parent cpu_op UID']
+        kernel_count = len(cpu_op_to_kernel_events[parent_uid])
+        busy_time = cpu_op_to_busy_time[parent_uid]
+        details['Parent cpu_op direct kernel count'] = kernel_count
+        details['Parent cpu_op busy time (µs)'] = busy_time
+        if kernel_count == 1:
+            details['Percent of Parent cpu_op busy time (%)'] = 100.0
+        else:
+            details['Percent of Parent cpu_op busy time (%)'] = (
+                (details['Kernel duration (µs)'] / busy_time * 100) if busy_time > 0 else float('nan')
+            )
+
+    if unlinked_count > 0:
+        warnings.warn(
+            f"Found {unlinked_count}/{total_kernel_count} kernels without host link. They are not included in the DataFrame."
+        )
+
+    return pd.DataFrame(kernel_details_list)
