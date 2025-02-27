@@ -433,4 +433,7 @@ class TreePerfAnalyzer:
                 f"Found {unlinked_count}/{total_kernel_count} kernels without host link. They are not included in the DataFrame."
             )
 
-        return pd.DataFrame(kernel_details_list)
+        df_kernel_view = pd.DataFrame(kernel_details_list)
+        df_kernel_view.reset_index(drop=True, inplace=True)
+        return df_kernel_view
+
