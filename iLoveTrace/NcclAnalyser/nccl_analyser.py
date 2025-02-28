@@ -177,11 +177,11 @@ class NcclAnalyser:
                 row[f'rank_{r}_ts'] = ts
                 row[f'rank_{r}_dur'] = dur
 
-            # communication latency is latest start to earliest end
+            # communication latency is min dur 
             latest_start = max(row[f'rank_{r}_ts'] for r in range(self.world_size))
             earliest_end = min(row[f'rank_{r}_ts'] + row[f'rank_{r}_dur'] for r in range(self.world_size))
             latest_end = max(row[f'rank_{r}_ts'] + row[f'rank_{r}_dur'] for r in range(self.world_size))
-            row['comm latency'] = earliest_end - latest_start
+            row['comm latency'] = min(row[f'rank_{r}_dur'] for r in range(self.world_size))
 
             # wait time for each rank is the time from a ranks start to the latest start
             for r in range(self.world_size):
