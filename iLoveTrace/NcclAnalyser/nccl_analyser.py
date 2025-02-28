@@ -115,8 +115,8 @@ class NcclAnalyser:
         """
         # Basic fields that must match across ranks
         metadata_fields = ['Collective name', 'Group size', 'dtype',
-                           'In msg nelems', 'Out msg nelems',
-                            'Process Group Name', 'Process Group Description']
+                            'In msg nelems', 'Out msg nelems',
+                            'Process Group Ranks', 'Process Group Name', 'Process Group Description']
         # Our reference set: all IDs from rank=0
         collective_ids = list(self.rank2trace_data[0].keys())
 
@@ -270,7 +270,7 @@ class NcclAnalyser:
         # we will add some basic metrics for now
 
         metadata_fields = ['Collective name', 'Group size', 'dtype', 
-                           'Process Group Name', 'Process Group Description']
+                           'Process Group Ranks', 'Process Group Name', 'Process Group Description']
         # Our reference set: all IDs from rank=0
         collective_ids = list(self.rank2trace_data[0].keys())
 
