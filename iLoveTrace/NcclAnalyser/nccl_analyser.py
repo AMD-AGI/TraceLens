@@ -180,6 +180,7 @@ class NcclAnalyser:
             # communication latency is latest start to earliest end
             latest_start = max(row[f'rank_{r}_ts'] for r in range(self.world_size))
             earliest_end = min(row[f'rank_{r}_ts'] + row[f'rank_{r}_dur'] for r in range(self.world_size))
+            latest_end = max(row[f'rank_{r}_ts'] + row[f'rank_{r}_dur'] for r in range(self.world_size))
             row['comm latency'] = earliest_end - latest_start
 
             # wait time for each rank is the time from a ranks start to the latest start
@@ -191,6 +192,9 @@ class NcclAnalyser:
             row['avg wait time'] = sum(row[f'rank_{r}_wait_time'] for r in range(self.world_size)) / self.world_size
             row['max wait time'] = max_wait
             row['max wait rank'] = max_wait_rank
+
+            # spread of end time 
+            row['spread of end time'] = latest_end - earliest_end
 
             # algo bw and bus bw are computed based on in_msg_size and comm latency
             row['algo bw (GB/s)'] = (row['In msg size (MB)']/1024) / (row['comm latency'] / 1e6)
@@ -221,9 +225,12 @@ class NcclAnalyser:
         # we agg the cols comm latency, algo bw, bus bw, max wait time
         # we also count the number of collectives in the group
         agg_logic = {
+            'Out msg nelems': 'first',
+            'In msg size (MB)': 'first',
             'comm latency': agg_metrics + ['size', lambda x: x.sum() / 1000],  # Size and sum (convert to ms)
             'max wait time': agg_metrics,
             'avg wait time': agg_metrics,
+            'spread of end time': agg_metrics,
             'algo bw (GB/s)': agg_metrics,
             'bus bw (GB/s)': agg_metrics,
         }
@@ -236,10 +243,23 @@ class NcclAnalyser:
         column_renames = {
             'comm latency_<lambda_0>': 'Total latency (ms)',
             'comm latency_size': 'count',
+            'Out msg nelems_first': 'Out msg nelems',
+            'In msg size (MB)_first': 'In msg size (MB)',
         }
         agg_result.rename(columns=column_renames, inplace=True)
         summary_df = agg_result.reset_index()
         summary_df = summary_df.sort_values(by='Total latency (ms)', ascending=False)
-
-        self.df_summary_nccl_implicit_sync = summary_df
+        # Dynamically build the column ordering
+        # Grouping columns remain the same
+        group_cols = ['Collective name', 'dtype', 'In msg nelems', 'Out msg nelems', 'In msg size (MB)']
+        # Define the metric groups (for which we computed agg metrics)
+        metric_groups = ['algo bw (GB/s)', 'bus bw (GB/s)','comm latency', 'max wait time', 'avg wait time', 'spread of end time',]
+        columns_order = group_cols.copy()
+        # For the other groups, add their corresponding aggregated columns
+        for group in metric_groups:
+            for agg in agg_metrics:
+                columns_order.append(f"{group}_{agg}")
+        # Finally, append the special renamed columns from the comm latency group
+        columns_order.extend(['count', 'Total latency (ms)'])
+        summary_df = summary_df[columns_order]
         return summary_df
