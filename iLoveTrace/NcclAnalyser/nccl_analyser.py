@@ -8,14 +8,6 @@ class NcclAnalyser:
         self.world_size = world_size
         assert len(self.list_profile_filepaths) == self.world_size
 
-        # Basic fields that must match across ranks
-        self.metadata_fields = [
-            'Collective name', 
-            'In msg nelems', 'Out msg nelems',
-            'Group size', 'dtype', 'Process Group Name',
-            'Process Group Description'
-        ]
-
         # Byte sizes per dtype
         self.dtype2bytes = {
             "Float":    4,
@@ -41,7 +33,7 @@ class NcclAnalyser:
             'allreduce':     ['allreduce', 'allreduce_coalesced'],
             'reducescatter': ['reducescatter', '_reduce_scatter_base', 'reduce_scatter_tensor_coalesced'],
             'allgather':     ['allgather', 'all_gather', '_allgather_base', 'all_gather_into_tensor_coalesced'],
-            'alltoallv':      ['alltoallv'],
+            'alltoallv':      ['all_to_allv'],
         }
         
         self.collective_name2type = {
@@ -121,7 +113,10 @@ class NcclAnalyser:
               'start time (µs)',
             ]
         """
-
+        # Basic fields that must match across ranks
+        metadata_fields = ['Collective name', 'Group size', 'dtype',
+                           'In msg nelems', 'Out msg nelems',
+                            'Process Group Name', 'Process Group Description']
         # Our reference set: all IDs from rank=0
         collective_ids = list(self.rank2trace_data[0].keys())
 
@@ -143,7 +138,7 @@ class NcclAnalyser:
                 continue
 
             # Check metadata consistency, rely on rank0 as canonical
-            for field in self.metadata_fields:
+            for field in metadata_fields:
                 val0 = rank0['args'][field]
                 for r in range(1, self.world_size):
                     val_r = rank_events[r]['args'][field]
@@ -158,7 +153,7 @@ class NcclAnalyser:
             row = {'collective_id': cid}
             row['stream'] = rank0['args']['stream']
             # metadata
-            for field in self.metadata_fields:
+            for field in metadata_fields:
                 row[field] = rank0['args'][field]
             # msg size in MB
             in_nelems = row['In msg nelems']
@@ -212,7 +207,7 @@ class NcclAnalyser:
         else:
             return self.df_implicit_sync_cat_detailed
 
-    def build_df_summary_nccl_implicit_sync(self, agg_metrics=['mean', 'std']):
+    def build_df_summary_nccl_implicit_sync_cat(self, agg_metrics=['mean', 'std']):
         """
         Builds a summary DF with one row per collective name, dtype, and msg size.
         Aggregates across all collectives and ranks.
@@ -263,3 +258,87 @@ class NcclAnalyser:
         columns_order.extend(['count', 'Total latency (ms)'])
         summary_df = summary_df[columns_order]
         return summary_df
+
+    def build_df_nccl_all2allv(self, detailed=False):
+        # this is diff from implicit sync cat
+        # first, each rank can send and receive different amount of data
+        # as a result they do not respect the implicit sync cat
+        # we cannot calculate comm latency as min dur
+        # thus we cannot calculate algo bw and bus bw
+        # as we discuss and understand the metrics, we can add them
+        # for now we expose raw data and leave the calculations to the user
+        # we will add some basic metrics for now
+
+        metadata_fields = ['Collective name', 'Group size', 'dtype', 
+                           'Process Group Name', 'Process Group Description']
+        # Our reference set: all IDs from rank=0
+        collective_ids = list(self.rank2trace_data[0].keys())
+
+
+        rows = []
+        for cid in collective_ids:
+            # Gather that ID from all ranks
+            rank_events = []
+            for r in range(self.world_size):
+                evt = self.rank2trace_data[r][cid]
+                if evt is None:
+                    raise ValueError(f"Missing collective ID {cid} in rank {r}")
+                rank_events.append(evt)
+
+            rank0 = rank_events[0]
+            # skip if not in implicit_sync_cat
+            c_name = rank0['args']['Collective name']
+            c_type = self.collective_name2type.get(c_name)
+            if c_type != 'alltoallv':
+                continue
+
+            # Check metadata consistency, rely on rank0 as canonical
+            # in msg nelems and out msg nelems need not be consistent for all ranks
+            for field in metadata_fields:
+                val0 = rank0['args'][field]
+                for r in range(1, self.world_size):
+                    val_r = rank_events[r]['args'][field]
+                    if val_r != val0:
+                        raise ValueError(
+                            f"Metadata mismatch for '{field}'.\n"
+                            f"Collective ID: {cid}\n"
+                            f"Rank0 => {val0},  Rank{r} => {val_r}"
+                        )
+
+            # Build row
+            row = {'collective_id': cid}
+            row['stream'] = rank0['args']['stream']
+            # metadata
+            for field in metadata_fields:
+                row[field] = rank0['args'][field]
+            
+            # Per-rank columns
+            for r, evt in enumerate(rank_events):
+                ts = evt['ts']
+                dur = evt['dur']
+                row[f'rank_{r}_ts'] = ts
+                row[f'rank_{r}_dur'] = dur
+                row[f'In msg nelems_{r}'] = evt['args']['In msg nelems']
+                row[f'Out msg nelems_{r}'] = evt['args']['Out msg nelems']
+                bytes_per_elem = self.dtype2bytes[evt['args']['dtype']]
+                row[f'In msg size (MB)_{r}'] = evt['args']['In msg nelems'] * bytes_per_elem / (1024*1024)
+                row[f'Out msg size (MB)_{r}'] = evt['args']['Out msg nelems'] * bytes_per_elem / (1024*1024)
+            
+            # latency metrics
+            earliest_start = min(row[f'rank_{r}_ts'] for r in range(self.world_size))
+            earliest_end = min(row[f'rank_{r}_ts'] + row[f'rank_{r}_dur'] for r in range(self.world_size))
+            latest_start = max(row[f'rank_{r}_ts'] for r in range(self.world_size))
+            latest_end = max(row[f'rank_{r}_ts'] + row[f'rank_{r}_dur'] for r in range(self.world_size))
+            row['skew in start time'] = latest_start - earliest_start
+            row['skew in end time'] = latest_end - earliest_end
+
+            # data size metrics
+            total_in_msg_size = sum(row[f'In msg size (MB)_{r}'] for r in range(self.world_size))
+            row['total data communicated (MB)'] = total_in_msg_size
+
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        df = df.reset_index(drop=True)
+        self.df_all2allv_detailed = df
+        return self.df_all2allv_detailed
