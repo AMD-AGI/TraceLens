@@ -11,7 +11,10 @@ from .gpu_event_analyser import GPUEventAnalyser
 from ..Trace2Tree.trace_to_tree import TraceToTree
 
 class TreePerfAnalyzer:
-    def __init__(self, profile_filepath, add_python_func=False):
+    @staticmethod
+    def from_file(profile_filepath, *args, **kwargs) -> "TreePerfAnalyzer":
+        # Creates a TreePerfAnalyzer from the trace in the provided filepath.
+        # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
 
         if profile_filepath.endswith('.json'):
             with open(profile_filepath, 'r') as f:
@@ -21,7 +24,12 @@ class TreePerfAnalyzer:
                 data = json.load(f)
         else:
             raise ValueError("Profile file should be either .json or .gz")
-        self.tree = TraceToTree(data['traceEvents'])
+        
+        tree = TraceToTree(data['traceEvents'])
+        return TreePerfAnalyzer(tree, *args, **kwargs)
+
+    def __init__(self, tree: TraceToTree, add_python_func=False):
+        self.tree = tree
         self.add_python_func = add_python_func  
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func'), False)
