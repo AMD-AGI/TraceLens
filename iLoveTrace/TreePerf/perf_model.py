@@ -79,8 +79,11 @@ class aten_mm(GEMM):
         K = A_shape[1]
 
         dtype_A_B = tuple(event['args']['Input type'][:2])
+        stride_A = tuple(event['args']['Input Strides'][0])
+        stride_B = tuple(event['args']['Input Strides'][1])
 
         return {"M": M, "N": N, "K": K, "bias": False,
+                "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
 
     def flops_bwd(self):
@@ -102,8 +105,11 @@ class aten_addmm(GEMM):
         K = A_shape[1]
 
         dtype_A_B = tuple(event['args']['Input type'][1:3])
+        stride_A = tuple(event['args']['Input Strides'][1])
+        stride_B = tuple(event['args']['Input Strides'][2])
 
         return {"M": M, "N": N, "K": K, "bias": True,
+                "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
     
     def flops_bwd(self):
@@ -126,7 +132,10 @@ class aten_scaled_mm(GEMM):
         bias = len(input_dims) == 3
 
         dtype_A_B = tuple(event['args']['Input type'][:2])
+        stride_A = tuple(event['args']['Input Strides'][0])
+        stride_B = tuple(event['args']['Input Strides'][1])
         return {"M": M, "N": N, "K": K, "bias": bias,
+                "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
 
 
@@ -145,9 +154,13 @@ class aten_linear(GEMM):
         for dim in input_shape[:-1]:
             M *= dim
         
+        # TODO: remove repeated code, this is not cool
         dtype_A_B = tuple(event['args']['Input type'][:2])
+        stride_A = tuple(event['args']['Input Strides'][0])
+        stride_B = tuple(event['args']['Input Strides'][1])
 
         return {"M": M, "N": N, "K": K, "bias": bias,
+                "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
 
 # 2. Convolution
@@ -278,8 +291,13 @@ class aten_conv(CONV):
             for param in [stride, padding, dilation, output_padding]
         ]
 
-        return {"input_shape": input_shape, "filter_shape": filter_shape, "bias": bias,
-                "stride": stride, "padding": padding, "dilation": dilation,
+        dtype_input_weight = tuple(event['args']['Input type'][:2])
+        input_stride = tuple(event['args']['Input Strides'][0])
+        weight_stride = tuple(event['args']['Input Strides'][1])
+
+        return {"input_shape": input_shape, "filter_shape": filter_shape, "dtype_input_weight": dtype_input_weight,
+                "input_stide": input_stride, "weight_stride": weight_stride,
+                "bias": bias, "stride": stride, "padding": padding, "dilation": dilation,
                 "transposed_conv": transposed_conv, "output_padding": output_padding,
                 "groups": groups}
 
