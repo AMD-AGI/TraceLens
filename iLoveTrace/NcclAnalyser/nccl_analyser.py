@@ -1,6 +1,7 @@
 import os
 import json
 import pandas as pd
+import warnings
 
 def list_to_tuple(obj):
     if isinstance(obj, list):
@@ -55,6 +56,8 @@ class NcclAnalyser:
 
     def load_trace_data(self):
         """Loads NCCL JSON trace data and extracts relevant events."""
+        print(f"Make sure the rank to file mapping is correct as incorrect mapping may lead to unexpected results.")
+        print('Also note that we need all ranks for the analysis. We will add a fallback soon for lesser features for single rank or partial data.')
         self.rank2trace_data.clear()
         for rank, filepath in enumerate(self.list_profile_filepaths):
             print(f"Loading rank {rank} from {filepath}")
@@ -70,7 +73,7 @@ class NcclAnalyser:
     # ------------------------------------------------------------------------
     # Step 1: Build a long table where each row is a collective event on a rank
     # ------------------------------------------------------------------------
-    def build_long_table(self):
+    def build_df_long(self):
         """Constructs a long table where each row is a collective event on a rank."""
         metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size', 
                            'dtype', 'In msg nelems', 'Out msg nelems', 'In split size', 'Out split size',
@@ -121,7 +124,7 @@ class NcclAnalyser:
         Ensures metadata consistency across ranks.
         """
         if not hasattr(self, 'df_per_rank_coll'):
-            self.build_long_table()
+            self.build_df_long()
 
         df = self.df_per_rank_coll
 
@@ -269,7 +272,7 @@ class NcclAnalyser:
         # we will add some basic metrics for now
 
         if not hasattr(self, 'df_per_rank_coll'):
-            self.build_long_table()
+            self.build_df_long()
 
         df = self.df_per_rank_coll
 
@@ -324,7 +327,11 @@ class NcclAnalyser:
             row['total nelems communicated'] = total_in_nelems
 
             rows.append(row)
-    
+
+        if len(rows) == 0:
+            warnings.warn("No all_to_allv collectives found in the trace data.")
+            return None
+
         df = pd.DataFrame(rows).reset_index(drop=True)
         per_rank_cols = [col for col in df.columns if col.startswith('rank_')]
         general_cols = [
