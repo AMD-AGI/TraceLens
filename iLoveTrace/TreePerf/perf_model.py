@@ -46,12 +46,6 @@ class GEMM:
 
     @staticmethod
     def bytes_func(M, N, K, bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
-        # elems_input_read = M * K
-        # elems_weight_read = K * N
-        # elems_bias_read = N if bias else 0
-        # elems_output_write = M * N
-        # total_elems_moved = elems_input_read + elems_weight_read + elems_bias_read + elems_output_write
-        # return total_elems_moved * bytes_per_element
         bytes_mat1 = M * K * bpe_mat1
         bytes_mat2 = K * N * bpe_mat2
         bytes_output = M * N * bpe_output
