@@ -113,7 +113,10 @@ class TreePerfAnalyzer:
         if bytes_moved is not None:
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float('nan')
             dict_metrics['TB/s'] = (bytes_moved / 1e12) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
-        
+        else:
+            dict_metrics['FLOPS/Byte'] = float('nan')
+            dict_metrics['TB/s'] = float('nan')
+
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 

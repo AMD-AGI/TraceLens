@@ -10,7 +10,7 @@ def name2bpe(name):
     elif 'float8' in lower_name:
         return 1
     else:
-        raise ValueError(f"Unsupported dtype {name}")
+        return None
 # 1. GEMM 
 class GEMM:
     """
@@ -46,6 +46,9 @@ class GEMM:
 
     @staticmethod
     def bytes_func(M, N, K, bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
+        #if any of the bpe is None, we will return None
+        if None in {bpe_mat1, bpe_mat2, bpe_bias, bpe_output}:
+            return None
         bytes_mat1 = M * K * bpe_mat1
         bytes_mat2 = K * N * bpe_mat2
         bytes_output = M * N * bpe_output
@@ -183,7 +186,7 @@ class aten_scaled_mm(GEMM):
         elif self.bpe in [2, 4]:
             out_bpe = self.bpe
         else:
-            raise ValueError(f"Unsupported dtype {dtype_A_B[0]}")
+            out_bpe = None
         return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
                              bpe_bias=self.bpe, # does not matter
                              bpe_output=out_bpe)
@@ -270,6 +273,8 @@ class CONV:
     # we assume same bytes per element for all tensors
     # TODO: make it more general later
     def bytes_func(x_shape, w_shape, out_shape, bias, bytes_per_element):
+        if bytes_per_element is None:
+            return None
         elems_input_read = prod(x_shape)
         elems_weight_read = prod(w_shape)
         elems_bias_read = out_shape[1] if bias else 0
@@ -294,6 +299,8 @@ class CONV:
     
     @staticmethod
     def bytes_bwd_func(x_shape, w_shape, out_shape, bias, bytes_per_element):
+        if bytes_per_element is None:
+            return None
         bytes_input_grad = CONV.bytes_func(out_shape, w_shape, x_shape, False, bytes_per_element)
         bytes_weight_grad = CONV.bytes_func(out_shape, x_shape, w_shape, False, bytes_per_element)
         # for bias we read the output gradient and write the bias gradient
