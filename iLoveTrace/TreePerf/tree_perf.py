@@ -67,7 +67,7 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(self, event, bwd=False, bytes_per_element=2, non_data_mov=False):
+    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False):
 
         # Handle kernel aggregation
         if bwd:
@@ -98,7 +98,7 @@ class TreePerfAnalyzer:
         tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
         non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
-        bytes_moved = perf_model.bytes(bytes_per_element) if not bwd else perf_model.bytes_bwd(bytes_per_element)
+        bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
         # Return metrics
         dict_metrics = {

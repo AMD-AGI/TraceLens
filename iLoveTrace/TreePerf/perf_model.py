@@ -1,5 +1,16 @@
 from math import prod
 from .kernel_name_parser import gemm_name_parser
+
+def name2bpe(name):
+    lower_name = name.lower()
+    if 'float32' in lower_name or lower_name == 'float':
+        return 4
+    elif 'float16' in lower_name or lower_name in {'c10::half', 'c10::bfloat16'}:
+        return 2
+    elif 'float8' in lower_name:
+        return 1
+    else:
+        raise ValueError(f"Unsupported dtype {name}")
 # 1. GEMM 
 class GEMM:
     """
@@ -34,16 +45,23 @@ class GEMM:
         return self.flops_func(self.M, self.N, self.K, self.bias)
 
     @staticmethod
-    def bytes_func(M, N, K, bias, bytes_per_element):
-        elems_input_read = M * K
-        elems_weight_read = K * N
-        elems_bias_read = N if bias else 0
-        elems_output_write = M * N
-        total_elems_moved = elems_input_read + elems_weight_read + elems_bias_read + elems_output_write
-        return total_elems_moved * bytes_per_element
-    
-    def bytes(self, bytes_per_element):
-        return self.bytes_func(self.M, self.N, self.K, self.bias, bytes_per_element)
+    def bytes_func(M, N, K, bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
+        # elems_input_read = M * K
+        # elems_weight_read = K * N
+        # elems_bias_read = N if bias else 0
+        # elems_output_write = M * N
+        # total_elems_moved = elems_input_read + elems_weight_read + elems_bias_read + elems_output_write
+        # return total_elems_moved * bytes_per_element
+        bytes_mat1 = M * K * bpe_mat1
+        bytes_mat2 = K * N * bpe_mat2
+        bytes_output = M * N * bpe_output
+        # to be totally accurate we should use the bias shape from profile info
+        # but we just assume bias shape as 1xN
+        #TODO: use profile info to get the bias shape
+        bytes_bias = (N if bias else 0) * bpe_bias
+        return bytes_mat1 + bytes_mat2 + bytes_output + bytes_bias
+    def bytes(self, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
+        return self.bytes_func(self.M, self.N, self.K, self.bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output)
     
     """
     bwd pass for Y = X.matmul(W^T) + B
@@ -85,7 +103,15 @@ class aten_mm(GEMM):
         return {"M": M, "N": N, "K": K, "bias": False,
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
-
+    
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+        self.bpe = name2bpe(dtype_A_B[0])
+        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe, 
+                             bpe_bias=self.bpe, # does not matter
+                             bpe_output=self.bpe) # out dtype is not always provided. #TODO: use out dtype if provided
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
     def bytes_bwd(self, bytes_per_element):
@@ -111,6 +137,18 @@ class aten_addmm(GEMM):
         return {"M": M, "N": N, "K": K, "bias": True,
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+        self.bpe = name2bpe(dtype_A_B[0])
+        # setting bias bpe to be the same as the input matrices is not totally correct
+        # TODO: correct later
+        # TODO: similar to aten_mm, we need to use the output dtype if provided
+        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe, 
+                             bpe_bias=self.bpe, 
+                             bpe_output=self.bpe)
     
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
@@ -138,7 +176,31 @@ class aten_scaled_mm(GEMM):
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
 
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+        self.bpe = name2bpe(dtype_A_B[0])
+        # assumption:
+        # for fp8 the output dtype is fp16
+        # for fp16, bf16, fp32 the output dtype is the same as the input dtype
+        if self.bpe == 1:
+            out_bpe = 2
+        elif self.bpe in [2, 4]:
+            out_bpe = self.bpe
+        else:
+            raise ValueError(f"Unsupported dtype {dtype_A_B[0]}")
+        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
+                             bpe_bias=self.bpe, # does not matter
+                             bpe_output=out_bpe)
 
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+
+
+# TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
 class aten_linear(GEMM):    
     
     @staticmethod
@@ -211,6 +273,8 @@ class CONV:
                                 self.bias, self.transposed_conv)
 
     @staticmethod
+    # we assume same bytes per element for all tensors
+    # TODO: make it more general later
     def bytes_func(x_shape, w_shape, out_shape, bias, bytes_per_element):
         elems_input_read = prod(x_shape)
         elems_weight_read = prod(w_shape)
@@ -292,6 +356,9 @@ class aten_conv(CONV):
         ]
 
         dtype_input_weight = tuple(event['args']['Input type'][:2])
+        # check no mixed precision
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(f"Data types of input and weight are different: {dtype_input_weight}")
         input_stride = tuple(event['args']['Input Strides'][0])
         weight_stride = tuple(event['args']['Input Strides'][1])
 
@@ -300,6 +367,21 @@ class aten_conv(CONV):
                 "bias": bias, "stride": stride, "padding": padding, "dilation": dilation,
                 "transposed_conv": transposed_conv, "output_padding": output_padding,
                 "groups": groups}
+    
+    def bytes(self):
+        dtype_input_weight = self.param_details['dtype_input_weight']
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(f"Data types of input and weight are different: {dtype_input_weight}")
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details['dtype_input_weight']
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(f"Data types of input and weight are different: {dtype_input_weight}")
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
 
 class aten_conv_bwd(aten_conv):
     def __init__(self, event):
@@ -340,12 +422,15 @@ class SDPA:
     def bytes_func(B, N_Q, H, d_k, N_K, dropout, causal, bytes_per_element):
         if dropout != 0.0:
             raise ValueError(f"Not implemented for dropout={dropout}")
+        if causal:
+            raise ValueError("Not implemented for causal=True")
         elems_q_read = B * N_Q * d_k * H
         elems_kv_read = 2 * B * N_K * d_k * H
         elems_out_write = B * N_Q * d_k * H
         total_elems_moved = elems_q_read + elems_kv_read + elems_out_write
         return total_elems_moved * bytes_per_element
-    def bytes(self, bytes_per_element):
+    #TODO make bytes_per_element based on profile info
+    def bytes(self, bytes_per_element=2):
         return self.bytes_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
                                 self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
     
@@ -370,7 +455,7 @@ class SDPA:
 
     # @staticmethod
     # def bytes_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl, bytes_per_element):
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=2):
         # not implemented for now
         return None
 
