@@ -23,3 +23,12 @@ The library currently includes three tools:
 
 ### Quick start
 Each tool in TraceLens has documentation and examples. To get started with any tool navigate to the respective tool's docs markdown file and then to the example. 
+
+### What's New in v0.2.x
+- **NCCL Analyzer Upgrade**: Improved robustness, supports collectives on subset of world size and handles asymmetric activity across ranks
+- **API Changes**:  
+  - `TreePerfAnalyser.from_file(file)` replaces `TreePerfAnalyser(file)`.  
+  - NCCL Analyzer API updated for clarity (see docs & notebooks).  
+
+Check out the example notebooks for details! 🚀  
+
