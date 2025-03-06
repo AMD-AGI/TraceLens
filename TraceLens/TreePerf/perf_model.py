@@ -224,6 +224,7 @@ class aten_linear(GEMM):
 
 # 2. Convolution
 class CONV:
+    # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
     def __init__(self, event):
         self.event = event
