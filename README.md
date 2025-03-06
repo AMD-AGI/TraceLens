@@ -7,10 +7,11 @@ TraceLens is a Python library focused on **automating analysis from trace files*
 
 The library currently includes three tools:
 
-- **TraceFusion** : Merges distributed trace files for a global view of events across ranks.
-- **NcclAnalyser**: Analyzes collective communication operations to extract key metrics like communication latency and bandwidth.
-- **Trace2Tree**: Parses trace files into a hierarchical tree intermediate representation (IR) that maps CPU operations to GPU kernels. 
-- **TreePerf**: Uses the tree IR from Trace2Tree to compute detailed performance metrics such as TFLOPS/s, FLOPS, FLOPS/Byte, and GPU execution times. 
+- **Trace2Tree and TreePerf**: 
+    - Trace2Tree Parses trace files into a hierarchical **call stack tree** intermediate representation (IR) that maps CPU operations to GPU kernels. 
+    - TreePerf uses the tree IR from Trace2Tree to compute detailed **performance metrics** such as TFLOPS/s, FLOPS, FLOPS/Byte, and GPU execution times. 
+- **NcclAnalyser**: Analyzes collective communication operations to extract key metrics like communication latency, bandwidth and sync metrics.
+- **TraceFusion** : Merges distributed trace files for a global view of events across ranks in PerfettoUI. 
 
 ## Installation
 
