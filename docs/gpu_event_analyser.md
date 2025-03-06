@@ -22,7 +22,7 @@ GPUEventAnalyser is a reusable component designed to analyze GPU timeline and ex
 
 ```python
 import json
-from iLoveTrace import GPUEventAnalyser
+from TraceLens import GPUEventAnalyser
 
 path = '/path/to/profile.json'
 

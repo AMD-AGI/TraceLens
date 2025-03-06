@@ -1,5 +1,5 @@
 import os
-from iLoveTrace import TraceFuse
+from TraceLens import TraceFuse
 profiles_root_dir = 'path/to/your/profiles'
 world_size = 8
 output_file = os.path.join(profiles_root_dir, 'merged_trace.json')
