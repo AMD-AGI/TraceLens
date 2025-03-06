@@ -34,7 +34,7 @@ The NcclAnalyser can generate both per collective data frame as well as a global
 ### Example: Quick Summary of Implicit Sync Collectives
 
 ```python
-from iLoveTrace import NcclAnalyser
+from TraceLens import NcclAnalyser
 import os
 
 # Define the root directory and create file paths for all ranks
