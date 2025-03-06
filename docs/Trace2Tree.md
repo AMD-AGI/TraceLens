@@ -24,7 +24,7 @@ Trace2Tree is a Python SDK designed to parse these trace files and build a hiera
 
 import json
 from pprint import pprint
-from iLoveTrace import TraceToTree
+from TraceLens import TraceToTree
 
 # Load trace data
 trace_file = '/path/to/trace.json'

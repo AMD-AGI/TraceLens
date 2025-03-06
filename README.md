@@ -1,7 +1,7 @@
-# iLoveTrace
-iLoveTrace is a Python library focused on **automating analysis from trace files** and enabling rich performance insights. Designed with **simplicity and extensibility** in mind, this library provides tools to simplify the process of profiling and debugging complex distributed training and inference systems.
+# TraceLens
+TraceLens is a Python library focused on **automating analysis from trace files** and enabling rich performance insights. Designed with **simplicity and extensibility** in mind, this library provides tools to simplify the process of profiling and debugging complex distributed training and inference systems.
 
-🚨 **Alpha Release**: iLoveTrace is currently in its Alpha stage. This means the core features are functional, but the software may still have bugs. Feedback is highly encouraged to improve the tool for broader use cases!
+🚨 **Alpha Release**: TraceLens is currently in its Alpha stage. This means the core features are functional, but the software may still have bugs. Feedback is highly encouraged to improve the tool for broader use cases!
 
 ### Overview
 
@@ -21,4 +21,4 @@ The library currently includes three tools:
 
 
 ### Quick start
-Each tool in iLoveTrace has documentation and examples. To get started with any tool navigate to the respective tool's docs markdown file and then to the example. 
+Each tool in TraceLens has documentation and examples. To get started with any tool navigate to the respective tool's docs markdown file and then to the example. 
