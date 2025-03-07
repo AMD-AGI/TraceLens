@@ -104,7 +104,6 @@ class TreePerfAnalyzer:
         dict_metrics = {
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
-            'Kernel sum Time (µs)': sum([kernel['dur'] for kernel in list_kernels]),
             'TFLOPS/s': tflops_per_s,
         }
         if non_data_mov:
