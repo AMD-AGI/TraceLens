@@ -205,7 +205,7 @@ class TreePerfAnalyzer:
         # Perform the aggregation
         df_perf_metrics_summary = (
             df_perf_metrics
-            .groupby(['name'] + param_cols)
+            .groupby(['name'] + param_cols, dropna=False)
             .agg(dict_agg)
         )
         df_perf_metrics_summary.columns = ['_'.join(col).strip() for col in df_perf_metrics_summary.columns.values]
