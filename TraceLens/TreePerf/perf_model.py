@@ -390,7 +390,7 @@ class aten_conv(CONV):
             raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
 
         return {"convNd": convNd, "input_shape": input_shape, "filter_shape": filter_shape, "dtype_input_weight": dtype_input_weight,
-                "input_stide": input_stride, "weight_stride": weight_stride,
+                "input_stride": input_stride, "weight_stride": weight_stride,
                 "bias": bias, "stride": stride, "padding": padding, "dilation": dilation,
                 "transposed_conv": transposed_conv, "output_padding": output_padding,
                 "groups": groups}
