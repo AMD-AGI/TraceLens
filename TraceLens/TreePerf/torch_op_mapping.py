@@ -7,6 +7,6 @@ op_to_perf_model_class_map = {
     'aten::addmm': perf_model.aten_addmm,
     'aten::_scaled_mm': perf_model.aten_scaled_mm,
     'FlashAttnFunc': perf_model.flash_attention,
-    'FlashAttnFuncBackward': perf_model.flash_attention_backward,
+    'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
     'aten::convolution': perf_model.aten_conv,
 }
