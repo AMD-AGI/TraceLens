@@ -129,8 +129,7 @@ class NcclAnalyser:
         df = self.df_per_rank_coll
 
         metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size', 
-                           'dtype', 'In msg nelems', 'Out msg nelems', 'In msg size (MB)', 'Out msg size (MB)',
-                            'stream']
+                           'dtype', 'In msg nelems', 'Out msg nelems', 'In msg size (MB)', 'Out msg size (MB)']
         collective_ids = df['collective_id'].unique()
         rows = []
 
@@ -194,7 +193,6 @@ class NcclAnalyser:
             "collective_id", "Process Group Name", "Process Group Ranks",
             "Collective name", "Group size", "dtype",
             "In msg nelems", "Out msg nelems", "In msg size (MB)", "Out msg size (MB)",
-            "stream",
             
             # High-Level Performance Metrics
             "comm_latency", "skew in start time", "earliest arrival rank",
