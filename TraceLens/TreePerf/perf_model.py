@@ -422,25 +422,31 @@ class aten_conv_bwd(aten_conv):
 class SDPA:
 
     def __init__(self, event):
+        # S = QK^T
+        # P = softmax(S)
+        # O = PV
         self.event = event
         self.param_details = self.get_param_details(event)
         # get useful stuff from the param_details
         self.B, self.N_Q, self.H, self.d_k, self.N_K = (self.param_details[key] for key in ['B', 'N_Q', 'H', 'd_k', 'N_K'])
-    
+
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
     
     @staticmethod
     def flops_func(B, N_Q, H, d_k, N_K, dropout, causal):
-        if causal:
-            raise ValueError("Not implemented for causal=True")
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+        # ref: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L29
         flops_qk = 2 * B * N_Q * H * d_k * N_K
-        # not including softmax for now
+        # not including softmax for now as flops are order of d_k smaller
         flops_pv = 2 * B * N_Q * H * N_K *d_k
-        return flops_qk + flops_pv
+        total_flops = flops_qk + flops_pv
+        if causal:
+            if N_Q == N_K:
+                total_flops /= 2
+            else:
+                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_K}")
+        return total_flops
     def flops(self):
         return self.flops_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
                                 self.param_details['dropout'], self.param_details['causal'])
@@ -449,8 +455,6 @@ class SDPA:
     def bytes_func(B, N_Q, H, d_k, N_K, dropout, causal, bytes_per_element):
         if dropout != 0.0:
             raise ValueError(f"Not implemented for dropout={dropout}")
-        if causal:
-            raise ValueError("Not implemented for causal=True")
         elems_q_read = B * N_Q * d_k * H
         elems_kv_read = 2 * B * N_K * d_k * H
         elems_out_write = B * N_Q * d_k * H
@@ -475,7 +479,14 @@ class SDPA:
         flops_q_grad = 2 * B * N_Q * H * d_k * N_K
         flops_k_grad = 2 * B * N_Q * H * d_k * N_K
 
-        return flops_v_grad + flops_s_grad + flops_q_grad + flops_k_grad + flops_recompute_qk
+        total_flops = flops_v_grad + flops_s_grad + flops_q_grad + flops_k_grad + flops_recompute_qk
+        if causal:
+            if N_Q == N_K:
+                total_flops /= 2
+            else:
+                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_K}")
+        return total_flops
+
     def flops_bwd(self):
         return self.flops_bwd_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
                                     self.param_details['dropout'], self.param_details['causal'], self.param_details['flash_impl'])
@@ -509,3 +520,36 @@ class flash_attention_backward(flash_attention):
     
     def bytes(self, bytes_per_element):
         return self.bytes_bwd(bytes_per_element)
+
+class aten__scaled_dot_product_cudnn_attention(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        # the order of arguments for aten::_scaled_dot_product_cudnn_attention is:
+
+        # query: Tensor
+        # key: Tensor
+        # value: Tensor
+        # attn_bias: Optional[Tensor]
+        # compute_log_sumexp: bool
+        # dropout_p: float
+        # is_causal: bool
+        # return_debug_mask: bool
+        # scale: Optional[float]
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        
+        B, H, N_Q, d_k = input_dims[0]
+        _, _, N_K, _ = input_dims[1]
+                        
+        dropout_p = 0.0
+        if concrete_inputs[5] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[5])
+            except (ValueError, TypeError):
+                pass
+        
+        is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
+                
+        return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": False}
