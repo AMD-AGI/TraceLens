@@ -374,7 +374,7 @@ class TreePerfAnalyzer:
         }
 
 
-    def get_df_kernels(self):
+    def get_df_mapped_kernels(self):
         """
         Build a DataFrame with kernel details augmented with aggregated parent CPU op metrics.
 
