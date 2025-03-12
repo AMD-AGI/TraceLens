@@ -136,7 +136,34 @@ class TraceToTree:
             # Now, we are dealing with non-GPU events
             if 'gpu_events' not in event:
                 event['non_gpu_path'] = True
+    
+    def link_nn_modules(self):
+        # Identify all nn module events (python functions whose name starts with 'nn.Module:')
+        nn_module_events = [
+            event for event in self.events 
+            if event.get('cat') == 'python_function' and event.get('name', '').startswith('nn.Module:')
+        ]
+        
+        # Label each event as an nn module event
+        for event in nn_module_events:
+            event['nn_module_event'] = True
+        
+        for event in nn_module_events:
+            # Walk up the call stack to find the nearest nn module parent
+            parent = self.get_parent_event(event)
+            nn_module_parent = None
+            while parent:
+                if parent.get('nn_module_event'):
+                    nn_module_parent = parent
+                    break
+                parent = self.get_parent_event(parent)
             
+            # If found, update the linkage for the nn module events
+            if nn_module_parent:
+                # Record the nn module parent in the child event
+                event['nn_module_parent'] = nn_module_parent['UID']
+                # Add this event as a direct nn module child of its parent
+                nn_module_parent.setdefault('nn_module_children', []).append(event['UID'])
 
     def build_tree(self, add_python_func=False) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
@@ -144,6 +171,8 @@ class TraceToTree:
         self.add_gpu_ops_to_tree()
         if self.prune_nongpu_paths:
             self.prune_non_gpu_paths()
+        if add_python_func:
+            self.link_nn_modules()
     
     def get_UID2event(self, UID):
         return self.events_by_uid[UID]
@@ -205,6 +234,26 @@ class TraceToTree:
         for i, child in enumerate(children):
             self._traverse_subtree_recursive(child, prune_non_gpu,
                                             new_prefix, is_last=(i == child_count - 1))
+    
+    def traverse_nn_modules_subtree_and_print(self, node: Dict[str, Any]) -> None:
+        """
+        Initiates traversal of a subtree of nn module events and prints them in a hierarchical call stack format."
+        """
+        self._traverse_nn_modules_subtree_recursive(node, _prefix="", is_last=True)
+    
+    def _traverse_nn_modules_subtree_recursive(self, node: Dict[str, Any], _prefix: str, is_last: bool) -> None:
+        connector = "└── " if is_last else "├── "
+        name = node.get('name', 'Unknown')
+        
+        print_str = f"{_prefix}{connector}UID: {node['UID']}, Name: {name}"
+        print(print_str)
+
+        nn_module_children = node.get('nn_module_children', [])
+        child_count = len(nn_module_children)
+        new_prefix = _prefix + ("    " if is_last else "│   ")
+        for i, child_UID in enumerate(nn_module_children):
+            child = self.get_UID2event(child_UID)
+            self._traverse_nn_modules_subtree_recursive(child, new_prefix, is_last=(i == child_count - 1))
 
     def get_seq_nums_for_node_subtree(self, node_UID):
         seq_nums = set()
