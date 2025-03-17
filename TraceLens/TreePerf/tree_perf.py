@@ -450,7 +450,7 @@ class TreePerfAnalyzer:
         df_kernel_view.reset_index(drop=True, inplace=True)
         return df_kernel_view
 
-    def compute_nn_module_latency_tree(self, root_nn_module: Dict[str, Any]):
+    def build_nn_module_latency_tree(self, root_nn_module: Dict[str, Any]):
         """
         Compute the GPU time metrics for a subtree of nn.Module events rooted at the provided event.
         We populate the nn.Module events with the following metrics:
@@ -461,7 +461,7 @@ class TreePerfAnalyzer:
         """
         if not self.add_python_func:
             raise ValueError("This method requires the trace to include Python function events.")
-        if not root_nn_module.get('nn_module_event'):
+        if not self.tree._is_nn_module_event(root_nn_module):
             raise ValueError("The provided root event is not an nn.Module event.")
         self._build_nn_modules_subtree_recursive(root_nn_module)
 
@@ -472,7 +472,8 @@ class TreePerfAnalyzer:
         node['GPU Time'] = gpu_time
         node['nn Parent GPU Time'] = parent_gpu_time
 
-        nn_module_children = node.get('nn_module_children', [])
+        # nn_module_children = node.get('nn_module_children', [])
+        nn_module_children = self.tree.get_nn_module_children(node)
         if not nn_module_children:
             return
         
