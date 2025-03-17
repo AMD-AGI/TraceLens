@@ -1,13 +1,15 @@
 from collections import defaultdict
+from typing import Dict, Any
 
 class TraceToTree:
-    def __init__(self, events_data):
+    def __init__(self, events_data, prune_nongpu_paths=True):
         self.events = [{**data, 'UID': i} for i, data in enumerate(events_data)]
         self.events_by_uid = {event['UID']: event for event in self.events}
         self._compute_event_end_times()
         self._set_linking_key()
         self._preprocess_and_index_events()
         self.cpu_root_nodes = []
+        self.prune_nongpu_paths = prune_nongpu_paths
 
     def _compute_event_end_times(self) -> None:
         for event in self.events:
@@ -69,6 +71,7 @@ class TraceToTree:
     #      - Increment the count of CPU operations in the stack.
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
+        self.add_python_func = add_python_func
         list_events = []
         for event in self.events:
             is_cpu_or_cuda_event = event.get('cat') in {'cpu_op', 'cuda_runtime', 'cuda_driver'}
@@ -92,6 +95,11 @@ class TraceToTree:
                 popped_event = stack.pop()
                 if popped_event.get('cat') == 'cpu_op':
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+            
+            if stack and event['t_end'] > stack[-1]['t_end']:
+                #TODO add following to logging when logging level is debug
+                # print(f"Invalid event ordering: {event['name']} ends after the stack top event.")
+                continue
 
             if stack:
                 parent = stack[-1]
@@ -116,10 +124,31 @@ class TraceToTree:
             corresponding_gpu_event['parent'] = event['UID']
             corresponding_gpu_event['tree'] = True
 
+            # set the parents['gpu_events'] to the corresponding gpu event
+            event['gpu_events'] = [corresponding_gpu_event['UID']] # runtime event will have only one corresponding gpu event
+            while self.get_parent_event(event):
+                parent = self.get_parent_event(event)
+                parent.setdefault('gpu_events', []).append(corresponding_gpu_event['UID'])
+                event = parent
+    
+    def label_non_gpu_paths(self):
+        # 1. Iterate through non GPU nodes and chck the gpu_events list
+        # 2. If the gpu_events list is empty, mark the node as non_gpu_path
+
+        for event in self.events:
+            # Skip GPU events
+            if event.get('cat') in {'kernel', 'gpu_memset', 'gpu_memcpy'}:
+                continue
+            # Now, we are dealing with non-GPU events
+            if 'gpu_events' not in event:
+                event['non_gpu_path'] = True
+    
     def build_tree(self, add_python_func=False) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
+        if self.prune_nongpu_paths:
+            self.label_non_gpu_paths()
     
     def get_UID2event(self, UID):
         return self.events_by_uid[UID]
@@ -141,44 +170,47 @@ class TraceToTree:
                 return event
         return None
 
-    def traverse_subtree_and_print(self, node, prefix="", is_last=True):
+
+    def traverse_subtree_and_print(self, node: Dict[str, Any], prune_non_gpu: bool = True) -> None:
+        """
+        Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
+        
+        Args:
+            node (Dict[str, Any]): The root node of the subtree.
+            prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
+        
+        Prints:
+            A structured representation of the subtree with details about each event.
+        """
+        self._traverse_subtree_recursive(node, prune_non_gpu, _prefix="", is_last=True)
+
+    def _traverse_subtree_recursive(self, node: Dict[str, Any], prune_non_gpu: bool,
+                                _prefix: str, is_last: bool) -> None:
         connector = "└── " if is_last else "├── "
         name = node.get('name', 'Unknown')
         max_len = 64
         if len(name) > max_len:
             name = name[:max_len] + '...'
-        print(f"{prefix}{connector}UID: {node['UID']}, Category: {node.get('cat')}, Name: {name}, Duration: {node.get('dur')}")
-
+        
+        cat = node.get('cat')
+        print_str = f"{_prefix}{connector}UID: {node['UID']}, Category: {cat}, Name: {name}"
+        
+        if cat in {'kernel', 'gpu_memset', 'gpu_memcpy'}:
+            print_str += f", Duration: {node.get('dur')}"
+        
+        print(print_str)
+        
         children = self.get_children_events(node)
+        if prune_non_gpu:
+            children = [child for child in children if 'non_gpu_path' not in child]
+        
         child_count = len(children)
-
-        new_prefix = prefix + ("    " if is_last else "│   ")
-
+        new_prefix = _prefix + ("    " if is_last else "│   ")
+        
         for i, child in enumerate(children):
-            self.traverse_subtree_and_print(child, new_prefix, is_last=(i == child_count - 1))
-
-    def traverse_parents_and_print(self, node):
-        depth = 0
-        while True:
-            if depth == 0:
-                print("Node:")
-            else:
-                print(f"{depth}-up:")
-
-            # Print category and name
-            print(f"  cat: {node['cat']}")
-            name = node.get('name', 'Unknown')
-            max_len = 64
-            if len(name) > max_len:
-                name = name[:max_len] + '...'
-            print(f"  name: {name}")
-
-            # Move to the parent node
-            node = self.get_parent_event(node)
-            if node is None:
-                break
-            depth += 1
-
+            self._traverse_subtree_recursive(child, prune_non_gpu,
+                                            new_prefix, is_last=(i == child_count - 1))
+    
     def get_seq_nums_for_node_subtree(self, node_UID):
         seq_nums = set()
         event = self.events_by_uid[node_UID]
@@ -226,3 +258,26 @@ class TraceToTree:
 
         output_event = self.pid_tid_event_map.get((pid, tid, link_id))
         return output_event
+
+    def get_nn_module_children(self, nn_module_event: Dict[str, Any]):
+        """
+        Get the UIDs of the nn.Module children of the provided nn.Module event.
+        """
+        if not self.add_python_func:
+            raise ValueError("This method requires the add_python_func flag to be set to True when building the tree.")
+        # if the nn.Module children are already cached, return them
+        if 'nn_module_children' in nn_module_event:
+            return nn_module_event['nn_module_children']
+        nn_module_children = []
+        for child_UID in nn_module_event.get('children', []):
+            child = self.get_UID2event(child_UID)
+            if self._is_nn_module_event(child):
+                nn_module_children.append(child_UID)
+            else:
+                nn_module_children.extend(self.get_nn_module_children(self.get_UID2event(child_UID)))
+        # cache the nn.Module children for later use
+        nn_module_event['nn_module_children'] = nn_module_children
+        return nn_module_children
+    
+    def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
+        return event.get('cat') == 'python_function' and event.get('name', '').startswith('nn.Module:')

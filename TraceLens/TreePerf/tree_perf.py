@@ -1,6 +1,7 @@
 import json
 import gzip
 from collections import defaultdict
+from typing import Dict, Any
 
 # TODO: warning should show the stack as well
 import warnings
@@ -449,3 +450,44 @@ class TreePerfAnalyzer:
         df_kernel_view.reset_index(drop=True, inplace=True)
         return df_kernel_view
 
+    def build_nn_module_latency_tree(self, root_nn_module: Dict[str, Any]):
+        """
+        Compute the GPU time metrics for a subtree of nn.Module events rooted at the provided event.
+        We populate the nn.Module events with the following metrics:
+        - 'GPU Time': the total GPU busy time of the subtree rooted at the nn.Module event.
+        - 'nn Parent GPU Time': the total GPU busy time of the parent nn.Module event.
+        - 'Non-nn.Module GPU Time': the GPU busy time not attributed to nn.Module children if any.
+
+        """
+        if not self.add_python_func:
+            raise ValueError("This method requires the trace to include Python function events.")
+        if not self.tree._is_nn_module_event(root_nn_module):
+            raise ValueError("The provided root event is not an nn.Module event.")
+        self._build_nn_modules_subtree_recursive(root_nn_module)
+
+    def _build_nn_modules_subtree_recursive(self, node: Dict[str, Any], parent_gpu_time=None):
+        gpu_events_subtree_UIDs = node.get('gpu_events', [])
+        gpu_events_subtree = [self.tree.get_UID2event(uid) for uid in gpu_events_subtree_UIDs]
+        gpu_time = GPUEventAnalyser(gpu_events_subtree).compute_metrics()['busy_time']
+        node['GPU Time'] = gpu_time
+        node['nn Parent GPU Time'] = parent_gpu_time
+
+        # nn_module_children = node.get('nn_module_children', [])
+        nn_module_children = self.tree.get_nn_module_children(node)
+        if not nn_module_children:
+            return
+        
+        for i, child_UID in enumerate(nn_module_children):
+            child = self.tree.get_UID2event(child_UID)
+            self._build_nn_modules_subtree_recursive(child, parent_gpu_time=gpu_time)
+
+        # Account for GPU time not attributed to nn.Module children.
+        union_gpu_events_childrenUIDs = set()
+        for child_UID in nn_module_children:
+            union_gpu_events_childrenUIDs.update(self.tree.get_UID2event(child_UID).get('gpu_events', []))
+        remaining_gpu_events_UIDs = set(gpu_events_subtree_UIDs) - union_gpu_events_childrenUIDs
+        if remaining_gpu_events_UIDs:
+            gpu_events_remaining = [self.tree.get_UID2event(uid) for uid in remaining_gpu_events_UIDs]
+            gpu_time_remaining = GPUEventAnalyser(gpu_events_remaining).compute_metrics()['busy_time']
+            node['Non-nn.Module GPU Time'] = gpu_time_remaining
+        return
