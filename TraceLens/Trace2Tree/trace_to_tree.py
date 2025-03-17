@@ -131,7 +131,7 @@ class TraceToTree:
                 parent.setdefault('gpu_events', []).append(corresponding_gpu_event['UID'])
                 event = parent
     
-    def prune_non_gpu_paths(self):
+    def perform_prune_non_gpu_paths(self):
         # 1. Iterate through non GPU nodes and chck the gpu_events list
         # 2. If the gpu_events list is empty, mark the node as non_gpu_path
 
@@ -148,7 +148,7 @@ class TraceToTree:
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
         if self.prune_nongpu_paths:
-            self.prune_non_gpu_paths()
+            self.perform_prune_non_gpu_paths()
     
     def get_UID2event(self, UID):
         return self.events_by_uid[UID]
