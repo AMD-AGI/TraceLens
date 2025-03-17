@@ -176,8 +176,9 @@ class NcclAnalyser:
             row['skew in end time'] = latest_end - earliest_end
 
             # Compute algorithmic and bus bandwidth
-            row['algo bw (GB/s)'] = (row['In msg size (MB)']/1024) / (row['comm_latency'] / 1e6)
             c_type = self.collective_name2type.get(row['Collective name'])
+            row['Full msg size (MB)'] = row['Out msg size (MB)'] if c_type == 'allgather' else row['In msg size (MB)']
+            row['algo bw (GB/s)'] = (row['Full msg size (MB)']/1024) / (row['comm_latency'] / 1e6)
             scaling_factor = self.collective2scaling_factor[c_type](row['Group size'])            
             row['bus bw (GB/s)'] = row['algo bw (GB/s)'] * scaling_factor
 
@@ -192,7 +193,7 @@ class NcclAnalyser:
             # Collective Identifier & Metadata
             "collective_id", "Process Group Name", "Process Group Ranks",
             "Collective name", "Group size", "dtype",
-            "In msg nelems", "Out msg nelems", "In msg size (MB)", "Out msg size (MB)",
+            "In msg nelems", "Out msg nelems", "In msg size (MB)", "Out msg size (MB)", "Full msg size (MB)",
             
             # High-Level Performance Metrics
             "comm_latency", "skew in start time", "earliest arrival rank",
@@ -210,7 +211,7 @@ class NcclAnalyser:
 
 
     def build_df_summary_nccl_implicit_sync_cat(self, agg_metrics=['mean', 'std'], 
-                                                metadata_fields=["Process Group Name", "Group size", "In msg size (MB)"]):
+                                                metadata_fields=["Process Group Name", "Group size", "Full msg size (MB)"]):
         """
         Builds a summary DF with one row per collective name, dtype, and msg size.
         Aggregates across all collectives and ranks.
