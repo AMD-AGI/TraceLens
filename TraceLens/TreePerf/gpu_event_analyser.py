@@ -6,7 +6,7 @@ class GPUEventAnalyser:
         Initialize with a list of event dictionaries.
         """
         self.events = events
-    
+
 
     @staticmethod
     def merge_intervals(intervals):
@@ -47,7 +47,7 @@ class GPUEventAnalyser:
         if current_start < current_end:
             result.append((current_start, current_end))
         return result
-    
+
     @staticmethod
     def subtract_intervalsA_from_B(merged_intervalA, merged_intervalB):
         """
@@ -59,10 +59,10 @@ class GPUEventAnalyser:
             # Subtract the entire set of merged_A from the current interval b_interval.
             remaining_parts = GPUEventAnalyser.subtract_intervals(b_interval, merged_intervalA)
             result.extend(remaining_parts)
-        
+
         return result
 
-    
+
     def get_gpu_event_lists(self):
         """
         Return a dictionary of lists of events, categorized by event types
@@ -71,8 +71,8 @@ class GPUEventAnalyser:
         The default implementation is for PyTorch json trace format.
         Inherit the class and reimplement this method for your profile format.
         """
-        
-        # note all events are not gpu events 
+
+        # note all events are not gpu events
         # the events list contains gpu events as well as host side events
 
         gpu_events = []
@@ -81,12 +81,11 @@ class GPUEventAnalyser:
         memcpy_events = []
 
         for event in self.events:
-            
+
             #TODO: ideally we want to get gpu events based on process id
             # That will be done shortly
             category = event.get('cat')
             if category in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
-
                 if 't_end' not in event:
                     event['t_end'] = event['ts'] + event['dur']
                 gpu_events.append(event)
@@ -100,14 +99,53 @@ class GPUEventAnalyser:
                         comp_events.append(event)
                 else:
                     raise ValueError(f"Unknown event category: {category}")
-
         return {
-            'all_gpu': gpu_events, 
+            'all_gpu': gpu_events,
             'computation': comp_events,
             'communication': comm_events,
             'memcpy': memcpy_events,
         }
-    
+
+    def get_gpu_event_lists_jax(self):
+        """
+        Return a dictionary of lists of events, categorized by event types
+        Event types are all gpu events, computation, communication, and memcpy.
+        Be sure that the returned events have 'ts' and 't_end' fields.
+        The default implementation is for PyTorch json trace format.
+        Inherit the class and reimplement this method for your profile format.
+        """
+
+        # note all events are not gpu events
+        # the events list contains gpu events as well as host side events
+
+        gpu_events = []
+        comp_events = []
+        comm_events = []
+        memcpy_events = []
+
+        for event in self.events:
+            args = event.get('args')
+            if args is not None:
+                device_id = args.get('device_id')
+                if device_id is not None:
+                    if 't_end' not in event:
+                        event['t_end'] = event['ts'] + event['dur']
+                    gpu_events.append(event)
+                    name = event.get('name')
+                    if name.startswith('hipMemcpy'):
+                        memcpy_events.append(event)
+                    elif name.startswith('nccl'):
+                        comm_events.append(event)
+                    else:
+                        comp_events.append(event)
+        return {
+            'all_gpu': gpu_events,
+            'computation': comp_events,
+            'communication': comm_events,
+            'memcpy': memcpy_events,
+        }
+
+
     @staticmethod
     def verify_dict_gpu_event_lists(dict_gpu_event_lists):
         # first check if the keys are correct
@@ -122,7 +160,7 @@ class GPUEventAnalyser:
         if len(dict_gpu_event_lists['all_gpu']) == 0:
             raise ValueError("No GPU events found in the trace")
 
-    def compute_metrics(self):
+    def compute_metrics(self, jax: bool = False):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -133,7 +171,7 @@ class GPUEventAnalyser:
         """
 
         # Categorize events.
-        dict_gpu_event_lists = self.get_gpu_event_lists()
+        dict_gpu_event_lists = self.get_gpu_event_lists() if not jax else self.get_gpu_event_lists_jax()
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         dict_intervals = {}
@@ -149,7 +187,7 @@ class GPUEventAnalyser:
         # end of the last event - start of the first event
         total_time = all_intervals[-1][1] - all_intervals[0][0]
 
-        
+
         comp_time = sum(end - start for start, end in comp_union)
 
         total_comm_time = sum(end - start for start, end in comm_union)
@@ -177,9 +215,9 @@ class GPUEventAnalyser:
             "total_comm_time": total_comm_time,
             "total_memcpy_time": total_memcpy_time,
         }
-    
-    def get_breakdown_df(self):
-        dict_metrics = self.compute_metrics()
+
+    def get_breakdown_df(self, jax: bool = False):
+        dict_metrics = self.compute_metrics(jax = jax)
         df = pd.DataFrame(dict_metrics.items(), columns=['type', 'time'])
         # convert time to ms by div by 1e3
         df['time ms'] = df['time'] / 1e3
