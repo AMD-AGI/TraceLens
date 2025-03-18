@@ -553,3 +553,92 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
                 
         return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}
+
+class UnaryElementwise:
+
+    def __init__(self, event):
+        self.event = event
+        self.param_details = self.get_param_details(event)
+        self.nelems = self.param_details['nelems']
+        self.dtype_in_out = self.param_details['dtype_in_out']
+        self.stride_input = self.param_details['stride_input']
+        self.stride_output = self.param_details['stride_output']
+
+        self.bpe_in = name2bpe(self.dtype_in_out[0])
+        self.bpe_out = name2bpe(self.dtype_in_out[1])
+    
+    @staticmethod
+    def flops_func(nelems):
+        return nelems
+    def flops(self):
+        return self.flops_func(self.nelems)
+    
+    @staticmethod
+    def bytes_func(nelems, bpe_in, bpe_out):
+        return nelems*bpe_in + nelems*bpe_out
+    def bytes(self):
+        return self.bytes_func(self.nelems, self.bpe_in, self.bpe_out)
+
+class aten_unary_elementwise(UnaryElementwise):
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event['args']['Input Dims']
+        nelems = prod(args_input_dims[0])
+        dtype_in = event['args']['Input type'][0]
+        stride_input = tuple(event['args']['Input Strides'][0])
+        if args_input_dims[1] and event['args']['Input type'][1]:
+            dtype_out = event['args']['Input type'][1]
+            stride_output = tuple(event['args']['Input Strides'][1])
+        else:
+            dtype_out = dtype_in
+            stride_output = None
+        return {"nelems": nelems, "dtype_in_out" : (dtype_in, dtype_out),
+                "stride_input": stride_input, "stride_output": stride_output}
+class BinaryElementwise:
+
+    def __init__(self, event):
+        self.event = event
+        self.param_details = self.get_param_details(event)
+        self.nelems = self.param_details['nelems']
+        self.dtype_in1_in2_out = self.param_details['dtype_in1_in2_out']
+        self.stride_input1 = self.param_details['stride_input1']
+        self.stride_input2 = self.param_details['stride_input2']
+        self.stride_output = self.param_details['stride_output']
+
+        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
+        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
+        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
+    
+    @staticmethod
+    def flops_func(nelems):
+        return nelems
+    def flops(self):
+        return self.flops_func(self.nelems)
+    
+    @staticmethod
+    def bytes_func(nelems, bpe_in1, bpe_in2, bpe_out):
+        return nelems*bpe_in1 + nelems*bpe_in2 + nelems*bpe_out
+    def bytes(self):
+        return self.bytes_func(self.nelems, self.bpe_in1, self.bpe_in2, self.bpe_out)
+
+class aten_binary_elementwise(BinaryElementwise):
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event['args']['Input Dims']
+        nelems = prod(args_input_dims[0])
+        dtype_in1 = event['args']['Input type'][0]
+        dtype_in2 = event['args']['Input type'][1]
+        stride_input1 = tuple(event['args']['Input Strides'][0])
+        stride_input2 = tuple(event['args']['Input Strides'][1])
+
+        if args_input_dims[2] and event['args']['Input type'][2]:
+            dtype_out = event['args']['Input type'][2]
+            stride_output = tuple(event['args']['Input Strides'][2])
+        else:
+            dtype_out = dtype_in1
+            stride_output = None
+        return {"nelems": nelems, "dtype_in1_in2_out" : (dtype_in1, dtype_in2, dtype_out),
+                "stride_input1": stride_input1, "stride_input2": stride_input2, "stride_output": stride_output}
+
