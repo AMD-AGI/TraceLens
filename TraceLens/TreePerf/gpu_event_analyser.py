@@ -210,8 +210,8 @@ class GPUEventAnalyser:
         dict_metrics = self.compute_metrics()
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
-# Python GPU event analyser inherits everything from the base calss
-class PythonGPUEventAnalyser(GPUEventAnalyser):
+# Pytorch GPU event analyser inherits everything from the base class
+class PytorchGPUEventAnalyser(GPUEventAnalyser):
     pass
 
 # Jax GPU event analyser supports multiple GPUs
