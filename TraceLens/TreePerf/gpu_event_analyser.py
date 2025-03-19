@@ -210,7 +210,7 @@ class GPUEventAnalyser:
         dict_metrics = self.compute_metrics()
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
-# Pytorch GPU event analyser inherits everything from the base calss
+# Pytorch GPU event analyser inherits everything from the base class
 class PytorchGPUEventAnalyser(GPUEventAnalyser):
     pass
 
