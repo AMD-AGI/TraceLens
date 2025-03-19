@@ -196,6 +196,9 @@ class TreePerfAnalyzer:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov Kernel Time (µs)'] = ['sum']
+        # this is a quick fix, we need to veriify it matches in the group
+        if 'kernel_names' in df_perf_metrics.columns:
+            dict_agg['kernel_names'] = 'first'
         dict_agg['Kernel Time (µs)'] = ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
 
