@@ -83,19 +83,27 @@ class NcclAnalyser:
             for cid, evt in self.rank2trace_data[rank].items():
                 row = {'ts': evt['ts'], 'dur': evt['dur'], 'rank': rank}
                 for field in metadata_fields:
-                    field_value = evt['args'][field]
+                    if field in evt['args']:
+                        field_value = evt['args'][field]
+                    else:
+                        field_value = None
                     if isinstance(field_value, list):  
                         field_value = list_to_tuple(field_value)
                     row[field] = field_value
-                bytes_per_elem = self.dtype2bytes[row['dtype']]
-                row['In msg size (MB)'] = row['In msg nelems'] * bytes_per_elem / 1024**2
-                row['Out msg size (MB)'] = row['Out msg nelems'] * bytes_per_elem / 1024**2
+                bytes_per_elem = self.dtype2bytes[row['dtype']] if row['dtype'] in self.dtype2bytes else None
+                if bytes_per_elem is not None and row['In msg nelems'] is not None:
+                    row['In msg size (MB)'] = row['In msg nelems'] * bytes_per_elem / 1024**2 
+                    row['Out msg size (MB)'] = row['Out msg nelems'] * bytes_per_elem / 1024**2
+                else:
+                    row['In msg size (MB)'] = None
+                    row['Out msg size (MB)'] = None
                 rows.append(row)
 
         df_long = pd.DataFrame(rows)
         df_long = df_long.reset_index(drop=True)
 
         # Assign an index within each process group and rank
+        df_long['Process Group Name'] = df_long['Process Group Name'].fillna('Unknown_Group')
         df_long['index_in_group'] = df_long.groupby(['Process Group Name', 'rank'])['ts'].rank(method='first').astype(int) - 1
 
         # Create a composite collective ID (process group + index)
