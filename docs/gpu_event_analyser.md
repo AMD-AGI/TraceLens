@@ -22,9 +22,10 @@ GPUEventAnalyser is a reusable component designed to analyze GPU timeline and ex
 
 ```python
 import json
+import sys
 from TraceLens import GPUEventAnalyser
 
-path = '/path/to/profile.json'
+path = sys.argv[1] # this expects the JSON file (unzipped)
 
 with open(path, 'r') as f:
     data = json.load(f)
@@ -50,11 +51,39 @@ Example output:
 
 ---
 
+## Jax support
+Jax describes events slightly differently, and includes all GPUs in a single trace, using the JaxGPUEventAnalyser class.
+When using GPUEventAnalyser for JAX traces (enabled by passing "jax=True" to the analysis functions),
+the compute_metrics() and get_breakdown_df() methods will return events from GPU 0.
+To access the traces for all devices, call get_gpu_event_lists_jax() to obtain a dictionary of
+{pid: event_lists} where pid is the process id (1-n for n GPUs, a number >100 for CPU the CPU event list).
+To create a Pandas dataframe for each GPU, call get_breakdown_df_multigpu(), which will return a dictionary of
+{gpu_index: DataFrame} for gpuindex in [0, num_gpus).
+The inherited function get_breakdown_df will return the results from GPU 0
+
+### Jax Usage Example
+```python
+import gzip
+import json
+import sys
+from TraceLens import JaxGPUEventAnalyser
+
+path = sys.argv[1] # this expects the zipped JSON file produced by the
+
+with gzip.open(path, 'r') as fin:
+    data = json.loads(fin.read().decode('utf-8'))
+
+events = data['traceEvents']
+my_gpu_event_analyser = JaxGPUEventAnalyser(events)
+for gpu, df in my_gpu_event_analyser.get_breakdown_df_multigpu().items():
+    print(f"GPU {gpu}")
+    print(df)
+```
+
 ## Customizing for Other Profiling Formats
 
 To adapt GPUEventAnalyser for other profiling formats, subclass it and reimplement the `get_gpu_event_lists()` method to correctly extract GPU events.
-
-**TODO: Add an example demonstrating subclassing for a different profiling format.**
+See the class JaxGPUEventAnalyser for an example.
 
 ---
 

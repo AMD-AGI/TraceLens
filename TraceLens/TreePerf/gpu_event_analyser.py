@@ -119,56 +119,6 @@ class GPUEventAnalyser:
             GPUEventAnalyser.memcpy_key: memcpy_events,
         }
 
-    def get_gpu_event_lists_jax(self, pid = None):
-        """
-        Return a dictionory of GPU to dictionaries of lists of events,
-        categorized by event types
-        Event types are all gpu events, computation, communication, and memcpy.
-        Be sure that the returned events have 'ts' and 't_end' fields.
-        The default implementation is for PyTorch json trace format.
-        Inherit the class and reimplement this method for your profile format.
-
-        If pid is passed in, returns just a dictionary of that pid's events
-        """
-
-        # note all events are not gpu events
-        # the events list contains gpu events as well as host side events
-
-        def create_dict():
-            return {  }
-
-        return_dict = {}
-        for event in self.events:
-            pid = event.get('pid')
-            # jax uses pid > 100 for CPU evens
-            # skip some dictionary setup events that do not have ts
-            if 'ts' in event:
-                if pid < 100:
-                    cur_dict = return_dict.get(pid)
-                    if cur_dict is None:
-                        cur_dict = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
-                        return_dict[pid] = cur_dict
-                    if 't_end' not in event:
-                        event['t_end'] = event['ts'] + event['dur']
-                    cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
-                    name = event.get('name')
-                    if name.startswith('Copy'):
-                        cur_dict[GPUEventAnalyser.memcpy_key].append(event)
-                    elif name.startswith('nccl'):
-                        cur_dict[GPUEventAnalyser.communication_key].append(event)
-                    else:
-                        cur_dict[GPUEventAnalyser.computation_key].append(event)
-                else:
-                    cur_dict = return_dict.get(pid)
-                    if cur_dict is None:
-                        cur_dict = {key: [] for key in GPUEventAnalyser.cpu_event_keys}
-                        return_dict[pid] = cur_dict
-                    cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
-        if pid is None:
-            return return_dict
-        else:
-            return return_dict.get(pid, create_dict())
-
 
     @staticmethod
     def verify_dict_gpu_event_lists(dict_gpu_event_lists):
@@ -230,7 +180,7 @@ class GPUEventAnalyser:
         }
 
 
-    def compute_metrics(self, jax: bool = False):
+    def compute_metrics(self):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -241,8 +191,7 @@ class GPUEventAnalyser:
         """
 
         # Categorize events.
-        # get GPU 0 (PID 1) for Jax
-        dict_gpu_event_lists = self.get_gpu_event_lists() if not jax else self.get_gpu_event_lists_jax(1)
+        dict_gpu_event_lists = self.get_gpu_event_lists()
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
@@ -257,19 +206,85 @@ class GPUEventAnalyser:
 
         return df
 
-    def get_breakdown_df(self, jax: bool = False):
-        dict_metrics = self.compute_metrics(jax = jax)
+    def get_breakdown_df(self):
+        dict_metrics = self.compute_metrics()
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
-    def get_breakdown_df_multigpu(self, jax: bool = True, max_gpus: int = 8):
-        if not jax:
-            raise ValueError("Multi GPU computation only works for JAX")
-        events = self.get_gpu_event_lists_jax()
+# Python GPU event analyser inherits everything from the base calss
+class PythonGPUEventAnalyser(GPUEventAnalyser):
+    pass
+
+# Jax GPU event analyser supports multiple GPUs
+class JaxGPUEventAnalyser(GPUEventAnalyser):
+    def get_gpu_event_lists(self, gpu_pid = None):
+        """
+        Return a dictionory of GPU to dictionaries of lists of events,
+        categorized by event types
+        Event types are all gpu events, computation, communication, and memcpy.
+        Be sure that the returned events have 'ts' and 't_end' fields.
+        The default implementation is for PyTorch json trace format.
+        Inherit the class and reimplement this method for your profile format.
+
+        If pid is passed in, returns just a dictionary of that pid's events
+        """
+
+        # note all events are not gpu events
+        # the events list contains gpu events as well as host side events
+        return_dict = {}
+        for event in self.events:
+            pid = event.get('pid')
+            # jax uses pid > 100 for CPU evens
+            # skip some dictionary setup events that do not have ts
+            if 'ts' in event:
+                if pid < 100:
+                    cur_dict = return_dict.get(pid)
+                    if cur_dict is None:
+                        cur_dict = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
+                        return_dict[pid] = cur_dict
+                    if 't_end' not in event:
+                        event['t_end'] = event['ts'] + event['dur']
+                    cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
+                    name = event.get('name')
+                    if name.startswith('Copy'):
+                        cur_dict[GPUEventAnalyser.memcpy_key].append(event)
+                    elif name.startswith('nccl'):
+                        cur_dict[GPUEventAnalyser.communication_key].append(event)
+                    else:
+                        cur_dict[GPUEventAnalyser.computation_key].append(event)
+                else:
+                    cur_dict = return_dict.get(pid)
+                    if cur_dict is None:
+                        cur_dict = {key: [] for key in GPUEventAnalyser.cpu_event_keys}
+                        return_dict[pid] = cur_dict
+                    cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
+        if gpu_pid is None:
+            return return_dict
+        else:
+            return return_dict.get(gpu_pid, {})
+
+    def compute_metrics(self):
+        """
+        Compute various metrics from the GPU event data.
+        Computation is defined as the time spent in computation kernels.
+        Communication is defined as the time spent in communication kernels.
+        Memcpy is defined as the time spent in memcpy kernels.
+        Exposed communication time is the time spent in communication kernels that is not overlapped by computation.
+        Exposed memcpy time is the time spent in memcpy kernels that is not overlapped by computation or communication.
+        """
+
+        # Categorize events.
+        # get GPU 0 (PID 1) for Jax
+        dict_gpu_event_lists = self.get_gpu_event_lists(1)
+        GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
+
+        return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
+
+    def get_breakdown_df_multigpu(self):
+        events = self.get_gpu_event_lists()
         gpu_frames = {}
         for gpu_id, cur_events in events.items():
-            if gpu_id <= max_gpus:
+            if gpu_id <= 100:
                 self.verify_dict_gpu_event_lists(cur_events)
                 cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
                 gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
         return gpu_frames
-
