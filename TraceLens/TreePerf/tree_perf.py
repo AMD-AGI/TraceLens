@@ -252,10 +252,11 @@ class TreePerfAnalyzer:
             if kernel_launcher:
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
+                event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
                 kernel_launchers.append(event)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False):
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -279,6 +280,8 @@ class TreePerfAnalyzer:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
                 metrics_event['external_id'] = event['args']['External id']
+            if include_kernel_names:
+                metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df

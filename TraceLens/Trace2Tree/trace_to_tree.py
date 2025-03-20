@@ -211,6 +211,28 @@ class TraceToTree:
             self._traverse_subtree_recursive(child, prune_non_gpu,
                                             new_prefix, is_last=(i == child_count - 1))
     
+    def traverse_parents_and_print(self, node):
+        depth = 0
+        while True:
+            if depth == 0:
+                print("Node:")
+            else:
+                print(f"{depth}-up:")
+
+            # Print category and name
+            print(f"  cat: {node['cat']}")
+            name = node.get('name', 'Unknown')
+            max_len = 64
+            if len(name) > max_len:
+                name = name[:max_len] + '...'
+            print(f"  name: {name}")
+
+            # Move to the parent node
+            node = self.get_parent_event(node)
+            if node is None:
+                break
+            depth += 1
+
     def get_seq_nums_for_node_subtree(self, node_UID):
         seq_nums = set()
         event = self.events_by_uid[node_UID]
