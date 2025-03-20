@@ -2,15 +2,22 @@ from math import prod
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
-    lower_name = name.lower()
-    if 'float32' in lower_name or lower_name == 'float':
-        return 4
-    elif 'float16' in lower_name or lower_name in {'c10::half', 'c10::bfloat16'}:
-        return 2
-    elif 'float8' in lower_name:
-        return 1
-    else:
-        return None
+    """
+    This function maps a data type name to the number of bytes per element.
+    Args:
+        name (str): The name of the data type.
+    Returns:
+        int: The number of bytes per element.
+    """
+    dict_bpe2dtype = {
+        8: ['double'],
+        4: ['float'],
+        2: ['c10::half', 'c10::bfloat16'],
+        1: ['c10::float8_e4m3fnuz'],
+    }
+    dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
+    return dict_dtype2bpe.get(name.lower(), None)
+
 # 1. GEMM 
 class GEMM:
     """
@@ -575,6 +582,8 @@ class UnaryElementwise:
     
     @staticmethod
     def bytes_func(nelems, bpe_in, bpe_out):
+        if None in {bpe_in, bpe_out}:
+            return None
         return nelems*bpe_in + nelems*bpe_out
     def bytes(self):
         return self.bytes_func(self.nelems, self.bpe_in, self.bpe_out)
@@ -587,7 +596,7 @@ class aten_unary_elementwise(UnaryElementwise):
         nelems = prod(args_input_dims[0])
         dtype_in = event['args']['Input type'][0]
         stride_input = tuple(event['args']['Input Strides'][0])
-        if args_input_dims[1] and event['args']['Input type'][1]:
+        if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event['args']['Input type'][1]
             stride_output = tuple(event['args']['Input Strides'][1])
         else:
@@ -618,6 +627,8 @@ class BinaryElementwise:
     
     @staticmethod
     def bytes_func(nelems, bpe_in1, bpe_in2, bpe_out):
+        if None in {bpe_in1, bpe_in2, bpe_out}:
+            return None
         return nelems*bpe_in1 + nelems*bpe_in2 + nelems*bpe_out
     def bytes(self):
         return self.bytes_func(self.nelems, self.bpe_in1, self.bpe_in2, self.bpe_out)
@@ -633,7 +644,7 @@ class aten_binary_elementwise(BinaryElementwise):
         stride_input1 = tuple(event['args']['Input Strides'][0])
         stride_input2 = tuple(event['args']['Input Strides'][1])
 
-        if args_input_dims[2] and event['args']['Input type'][2]:
+        if len(args_input_dims) > 2 and args_input_dims[2]:
             dtype_out = event['args']['Input type'][2]
             stride_output = tuple(event['args']['Input Strides'][2])
         else:
