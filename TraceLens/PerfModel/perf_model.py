@@ -10,13 +10,26 @@ def name2bpe(name):
         int: The number of bytes per element.
     """
     dict_bpe2dtype = {
-        8: ['double'],
-        4: ['float'],
+        8: ['double', 'long int'],
+        4: ['float', 'scalar'],
         2: ['c10::half', 'c10::bfloat16'],
         1: ['c10::float8_e4m3fnuz'],
     }
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
+
+def is_tensortype(dtype):
+    """
+    This function checks if a data type is a tensor type.
+    Args:
+        dtype (str): The name of the data type.
+    Returns:
+        bool: True if the data type is a tensor type, False if not. If the data type is not recognized, None is returned.
+    """
+    if dtype.lower() in ['float', 'double', 'c10::half', 'c10::bfloat16', 'c10::float8_e4m3fnuz']:
+        return True
+    elif dtype.lower() in ['long int', 'scalar']:
+        return False
 
 # 1. GEMM 
 class GEMM:
@@ -566,13 +579,17 @@ class UnaryElementwise:
     def __init__(self, event):
         self.event = event
         self.param_details = self.get_param_details(event)
-        self.nelems = self.param_details['nelems']
+        self.nelems = prod(self.param_details['op_shape'])
         self.dtype_in_out = self.param_details['dtype_in_out']
         self.stride_input = self.param_details['stride_input']
         self.stride_output = self.param_details['stride_output']
 
         self.bpe_in = name2bpe(self.dtype_in_out[0])
-        self.bpe_out = name2bpe(self.dtype_in_out[1])
+        if self.dtype_in_out[1] is not None:
+            self.bpe_out = name2bpe(self.dtype_in_out[1])
+        else:
+            # same as input
+            self.bpe_out = self.bpe_in
     
     @staticmethod
     def flops_func(nelems):
@@ -593,52 +610,78 @@ class aten_unary_elementwise(UnaryElementwise):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event['args']['Input Dims']
-        nelems = prod(args_input_dims[0])
+        op_shape = tuple(args_input_dims[0])
         dtype_in = event['args']['Input type'][0]
         stride_input = tuple(event['args']['Input Strides'][0])
         if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event['args']['Input type'][1]
             stride_output = tuple(event['args']['Input Strides'][1])
         else:
-            dtype_out = dtype_in
+            dtype_out = None
             stride_output = None
-        return {"nelems": nelems, "dtype_in_out" : (dtype_in, dtype_out),
+        return {"op_shape": op_shape, "dtype_in_out" : (dtype_in, dtype_out),
                 "stride_input": stride_input, "stride_output": stride_output}
 class BinaryElementwise:
 
     def __init__(self, event):
         self.event = event
         self.param_details = self.get_param_details(event)
-        self.nelems = self.param_details['nelems']
+        broadcast_shape = self.get_broadcast_shape(self.param_details['shape_in1'], self.param_details['shape_in2'])
+        self.nelems_in1 = prod(self.param_details['shape_in1'])
+        self.nelems_in2 = prod(self.param_details['shape_in2'])
+        self.nelems_out = prod(broadcast_shape)
         self.dtype_in1_in2_out = self.param_details['dtype_in1_in2_out']
         self.stride_input1 = self.param_details['stride_input1']
         self.stride_input2 = self.param_details['stride_input2']
         self.stride_output = self.param_details['stride_output']
 
-        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
-        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
-        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
-    
+        dtype_in1, dtype_in2, dtype_out = self.dtype_in1_in2_out
+        self.bpe_in1 = name2bpe(dtype_in1)
+        self.bpe_in2 = name2bpe(dtype_in2)
+        if dtype_out is not None:
+            self.bpe_out = name2bpe(dtype_out)
+        elif self.bpe_in1 and self.bpe_in2:
+            if is_tensortype(dtype_in1) and is_tensortype(dtype_in2):
+                # cast to higher precision if both are tensors
+                self.bpe_out = max(self.bpe_in1, self.bpe_in2)
+            else:
+                self.bpe_out = self.bpe_in1
+        else:
+            self.bpe_out = None
     @staticmethod
-    def flops_func(nelems):
-        return nelems
+    def flops_func(nelems_out):
+        return nelems_out
     def flops(self):
-        return self.flops_func(self.nelems)
+        return self.flops_func(self.nelems_out)
     
     @staticmethod
-    def bytes_func(nelems, bpe_in1, bpe_in2, bpe_out):
+    def bytes_func(nelems_in1, nelems_in2, nelems_out, bpe_in1, bpe_in2, bpe_out):
         if None in {bpe_in1, bpe_in2, bpe_out}:
             return None
-        return nelems*bpe_in1 + nelems*bpe_in2 + nelems*bpe_out
+        return nelems_in1*bpe_in1 + nelems_in2*bpe_in2 + nelems_out*bpe_out
     def bytes(self):
-        return self.bytes_func(self.nelems, self.bpe_in1, self.bpe_in2, self.bpe_out)
+        return self.bytes_func(self.nelems_in1, self.nelems_in2, self.nelems_out, self.bpe_in1, self.bpe_in2, self.bpe_out)
+
+    @staticmethod
+    def get_broadcast_shape(shape1, shape2):
+        # Align shapes to the right by pre-pending 1's
+        ndim = max(len(shape1), len(shape2))
+        shape1 = (1,) * (ndim - len(shape1)) + shape1
+        shape2 = (1,) * (ndim - len(shape2)) + shape2
+        result = []
+        for d1, d2 in zip(shape1, shape2):
+            if d1 != d2 and d1 != 1 and d2 != 1:
+                raise ValueError("Shapes not broadcastable: {} and {}".format(shape1, shape2))
+            result.append(max(d1, d2))
+        return tuple(result)
 
 class aten_binary_elementwise(BinaryElementwise):
 
     @staticmethod
     def get_param_details(event):
         args_input_dims = event['args']['Input Dims']
-        nelems = prod(args_input_dims[0])
+        shape_in1 = tuple(args_input_dims[0])
+        shape_in2 = tuple(args_input_dims[1])
         dtype_in1 = event['args']['Input type'][0]
         dtype_in2 = event['args']['Input type'][1]
         stride_input1 = tuple(event['args']['Input Strides'][0])
@@ -648,8 +691,9 @@ class aten_binary_elementwise(BinaryElementwise):
             dtype_out = event['args']['Input type'][2]
             stride_output = tuple(event['args']['Input Strides'][2])
         else:
-            dtype_out = dtype_in1
+            dtype_out = None
             stride_output = None
-        return {"nelems": nelems, "dtype_in1_in2_out" : (dtype_in1, dtype_in2, dtype_out),
+        return {"shape_in1": shape_in1, "shape_in2": shape_in2, 
+                "dtype_in1_in2_out" : (dtype_in1, dtype_in2, dtype_out),
                 "stride_input1": stride_input1, "stride_input2": stride_input2, "stride_output": stride_output}
 
