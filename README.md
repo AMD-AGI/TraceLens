@@ -30,5 +30,12 @@ Each tool in TraceLens has documentation and examples. To get started with any t
   - `TreePerfAnalyser.from_file(file)` replaces `TreePerfAnalyser(file)`.  
   - NCCL Analyzer API updated for clarity (see docs & notebooks).  
 
+### What's New in v0.3.x
+- **NN Module View**: Visualize the nn module hierarchy with the GPU time spent in each module. This is useful for performance aware architecture design.
+- **Perf Model**: New ops support including unary and binary elementwise ops.
+- **Jax Support for GPUEventAnalyser**: Get compute-communication-memcpy and overlap metrics for Jax profiles. Thanks to @gabeweisz for the contribution!
+
+Bug Fixes: Allgather incorrect msg size calculation fixed.
+
 Check out the example notebooks for details! 🚀  
 
