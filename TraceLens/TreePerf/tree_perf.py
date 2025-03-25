@@ -1,12 +1,13 @@
 import json
 import gzip
 from collections import defaultdict
+from typing import Dict, Any
 
 # TODO: warning should show the stack as well
 import warnings
 import pprint
 import pandas as pd
-from .torch_op_mapping import op_to_perf_model_class_map
+from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
 from .gpu_event_analyser import GPUEventAnalyser
 from ..Trace2Tree.trace_to_tree import TraceToTree
 
@@ -67,7 +68,7 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False):
+    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False, perf_model_class=None):
 
         # Handle kernel aggregation
         if bwd:
@@ -90,7 +91,8 @@ class TreePerfAnalyzer:
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
-        perf_model_class = op_to_perf_model_class_map[event['name']]
+        if perf_model_class is None:
+            perf_model_class = op_to_perf_model_class_map[event['name']]
         perf_model = perf_model_class(event)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
@@ -110,9 +112,11 @@ class TreePerfAnalyzer:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
         if bytes_moved is not None:
+            dict_metrics['Data Moved (MB)'] = bytes_moved / (1024 * 1024)
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float('nan')
             dict_metrics['TB/s'] = (bytes_moved / 1e12) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
         else:
+            dict_metrics['Data Moved (MB)'] = float('nan')
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
 
@@ -126,7 +130,7 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
-    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False):
+    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False, dict_name_to_perf_model=None):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
             return pd.DataFrame()
@@ -138,8 +142,11 @@ class TreePerfAnalyzer:
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
-            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
-
+            if dict_name_to_perf_model and event['name'] in dict_name_to_perf_model:
+                perf_model_class = dict_name_to_perf_model[event['name']]
+            else:
+                perf_model_class = None
+            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, perf_model_class=perf_model_class)
             # handle warnings
             if bwd and not event.get('bwd_events'):
                 list_no_bwd_events.append(event)
@@ -186,15 +193,17 @@ class TreePerfAnalyzer:
         dict_agg = {}
         # first element for GFLOPS and FLOPS/Byte
         dict_agg['GFLOPS'] = 'first'
-        if 'FLOPS/Byte' in df_perf_metrics.columns:
-            dict_agg['FLOPS/Byte'] = 'first'
-        if 'TB/s' in df_perf_metrics.columns:
-            dict_agg['TB/s'] = agg_metrics
+        dict_agg['Data Moved (MB)'] = 'first'
+        dict_agg['FLOPS/Byte'] = 'first'
+        dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov Kernel Time (µs)'] = ['sum']
+        # this is a quick fix, we need to veriify it matches in the group
+        if 'kernel_names' in df_perf_metrics.columns:
+            dict_agg['kernel_names'] = 'first'
         dict_agg['Kernel Time (µs)'] = ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
 
@@ -243,10 +252,11 @@ class TreePerfAnalyzer:
             if kernel_launcher:
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
+                event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
                 kernel_launchers.append(event)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False):
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -270,6 +280,8 @@ class TreePerfAnalyzer:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
                 metrics_event['external_id'] = event['args']['External id']
+            if include_kernel_names:
+                metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -449,3 +461,44 @@ class TreePerfAnalyzer:
         df_kernel_view.reset_index(drop=True, inplace=True)
         return df_kernel_view
 
+    def build_nn_module_latency_tree(self, root_nn_module: Dict[str, Any]):
+        """
+        Compute the GPU time metrics for a subtree of nn.Module events rooted at the provided event.
+        We populate the nn.Module events with the following metrics:
+        - 'GPU Time': the total GPU busy time of the subtree rooted at the nn.Module event.
+        - 'nn Parent GPU Time': the total GPU busy time of the parent nn.Module event.
+        - 'Non-nn.Module GPU Time': the GPU busy time not attributed to nn.Module children if any.
+
+        """
+        if not self.add_python_func:
+            raise ValueError("This method requires the trace to include Python function events.")
+        if not self.tree._is_nn_module_event(root_nn_module):
+            raise ValueError("The provided root event is not an nn.Module event.")
+        self._build_nn_modules_subtree_recursive(root_nn_module)
+
+    def _build_nn_modules_subtree_recursive(self, node: Dict[str, Any], parent_gpu_time=None):
+        gpu_events_subtree_UIDs = node.get('gpu_events', [])
+        gpu_events_subtree = [self.tree.get_UID2event(uid) for uid in gpu_events_subtree_UIDs]
+        gpu_time = GPUEventAnalyser(gpu_events_subtree).compute_metrics()['busy_time']
+        node['GPU Time'] = gpu_time
+        node['nn Parent GPU Time'] = parent_gpu_time
+
+        # nn_module_children = node.get('nn_module_children', [])
+        nn_module_children = self.tree.get_nn_module_children(node)
+        if not nn_module_children:
+            return
+        
+        for i, child_UID in enumerate(nn_module_children):
+            child = self.tree.get_UID2event(child_UID)
+            self._build_nn_modules_subtree_recursive(child, parent_gpu_time=gpu_time)
+
+        # Account for GPU time not attributed to nn.Module children.
+        union_gpu_events_childrenUIDs = set()
+        for child_UID in nn_module_children:
+            union_gpu_events_childrenUIDs.update(self.tree.get_UID2event(child_UID).get('gpu_events', []))
+        remaining_gpu_events_UIDs = set(gpu_events_subtree_UIDs) - union_gpu_events_childrenUIDs
+        if remaining_gpu_events_UIDs:
+            gpu_events_remaining = [self.tree.get_UID2event(uid) for uid in remaining_gpu_events_UIDs]
+            gpu_time_remaining = GPUEventAnalyser(gpu_events_remaining).compute_metrics()['busy_time']
+            node['Non-nn.Module GPU Time'] = gpu_time_remaining
+        return
