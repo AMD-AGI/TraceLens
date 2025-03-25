@@ -7,7 +7,7 @@ from typing import Dict, Any
 import warnings
 import pprint
 import pandas as pd
-from .torch_op_mapping import op_to_perf_model_class_map
+from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
 from .gpu_event_analyser import GPUEventAnalyser
 from ..Trace2Tree.trace_to_tree import TraceToTree
 
@@ -68,7 +68,7 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False):
+    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False, perf_model_class=None):
 
         # Handle kernel aggregation
         if bwd:
@@ -91,7 +91,8 @@ class TreePerfAnalyzer:
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
-        perf_model_class = op_to_perf_model_class_map[event['name']]
+        if perf_model_class is None:
+            perf_model_class = op_to_perf_model_class_map[event['name']]
         perf_model = perf_model_class(event)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
@@ -111,9 +112,11 @@ class TreePerfAnalyzer:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
         if bytes_moved is not None:
+            dict_metrics['Data Moved (MB)'] = bytes_moved / (1024 * 1024)
             dict_metrics['FLOPS/Byte'] = (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float('nan')
             dict_metrics['TB/s'] = (bytes_moved / 1e12) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
         else:
+            dict_metrics['Data Moved (MB)'] = float('nan')
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
 
@@ -127,7 +130,7 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
-    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False):
+    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False, dict_name_to_perf_model=None):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
             return pd.DataFrame()
@@ -139,8 +142,11 @@ class TreePerfAnalyzer:
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
-            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov)
-
+            if dict_name_to_perf_model and event['name'] in dict_name_to_perf_model:
+                perf_model_class = dict_name_to_perf_model[event['name']]
+            else:
+                perf_model_class = None
+            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, perf_model_class=perf_model_class)
             # handle warnings
             if bwd and not event.get('bwd_events'):
                 list_no_bwd_events.append(event)
@@ -187,10 +193,9 @@ class TreePerfAnalyzer:
         dict_agg = {}
         # first element for GFLOPS and FLOPS/Byte
         dict_agg['GFLOPS'] = 'first'
-        if 'FLOPS/Byte' in df_perf_metrics.columns:
-            dict_agg['FLOPS/Byte'] = 'first'
-        if 'TB/s' in df_perf_metrics.columns:
-            dict_agg['TB/s'] = agg_metrics
+        dict_agg['Data Moved (MB)'] = 'first'
+        dict_agg['FLOPS/Byte'] = 'first'
+        dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
