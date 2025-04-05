@@ -1,8 +1,8 @@
 import argparse
 import json
 import pandas as pd
-from Trace2Tree.trace_to_tree import TraceToTree
-from TreePerf.tree_perf import TreePerfAnalyzer
+from TraceLens import TraceToTree
+from TraceLens import TreePerfAnalyzer
 
 def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
