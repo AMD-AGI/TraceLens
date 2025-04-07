@@ -1,3 +1,25 @@
+# MIT License
+
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import json
 import gzip
 from collections import defaultdict
@@ -25,13 +47,13 @@ class TreePerfAnalyzer:
                 data = json.load(f)
         else:
             raise ValueError("Profile file should be either .json or .gz")
-        
+
         tree = TraceToTree(data['traceEvents'])
         return TreePerfAnalyzer(tree, *args, **kwargs)
 
     def __init__(self, tree: TraceToTree, add_python_func=False):
         self.tree = tree
-        self.add_python_func = add_python_func  
+        self.add_python_func = add_python_func
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
@@ -73,7 +95,7 @@ class TreePerfAnalyzer:
         # Handle kernel aggregation
         if bwd:
             if not event.get('bwd_events'):
-                self.tree.link_bwd_events(event['UID']) 
+                self.tree.link_bwd_events(event['UID'])
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
@@ -95,7 +117,7 @@ class TreePerfAnalyzer:
             perf_model_class = op_to_perf_model_class_map[event['name']]
         perf_model = perf_model_class(event)
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9  
+        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
 
         tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
@@ -129,7 +151,7 @@ class TreePerfAnalyzer:
         return self.compute_perf_metrics(event, bwd=False, non_data_mov=non_data_mov)
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
-    
+
     def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False, dict_name_to_perf_model=None):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
@@ -164,7 +186,7 @@ class TreePerfAnalyzer:
                             list_no_bwd_events, len(events))
         df_perf_metrics = pd.DataFrame(rows)
         return df_perf_metrics
-    
+
     @staticmethod
     def _show_warnings(list_warn_non_zero_flops_and_zero_time,
                           list_no_bwd_events, total_events):
@@ -177,12 +199,12 @@ class TreePerfAnalyzer:
             warnings.warn(f"Found {len(list_no_bwd_events)}/{total_events} events without backward events.")
             warnings.warn(f"Example event: {pprint.pformat(list_no_bwd_events[0])}")
 
-                                                                                                                                        
+
     def build_df_fwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=False)
     def build_df_bwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=True)
-    
+
 
     @staticmethod
     def summarize_df_perf_metrics(df_perf_metrics, agg_metrics=['mean', 'std']):
@@ -225,11 +247,11 @@ class TreePerfAnalyzer:
         return df_perf_metrics_summary
 
     def get_kernel_launchers(self, include_nccl=False):
-        # This method traverses the event tree to identify CPU operations that serve as 
-        # "kernel launchers." These are operations that result in GPU kernel 
-        # execution without further cpu op calls. 
+        # This method traverses the event tree to identify CPU operations that serve as
+        # "kernel launchers." These are operations that result in GPU kernel
+        # execution without further cpu op calls.
         # Note that kernels are called through runtime events.
-        # This is why, this method identifies such cases 
+        # This is why, this method identifies such cases
         # by checking if grandchildren of CPU operations are kernel events.
         kernel_launchers = []
         for event in self.tree.events:
@@ -262,7 +284,7 @@ class TreePerfAnalyzer:
             if isinstance(obj, list):
                 return tuple(list_to_tuple(item) for item in obj)
             return obj
-        
+
         kernel_launchers = self.get_kernel_launchers()
         rows = []
         for event in kernel_launchers:
@@ -285,7 +307,7 @@ class TreePerfAnalyzer:
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
-    
+
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
@@ -299,7 +321,7 @@ class TreePerfAnalyzer:
         df_agg['Percentage (%)'] = (df_agg['total_direct_kernel_time_ms'] / total_duration_ms) * 100
         df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-        
+
         return df_agg
 
     #separate out name wise perf breakdown and shape wise perf breakdown for a given name
@@ -487,7 +509,7 @@ class TreePerfAnalyzer:
         nn_module_children = self.tree.get_nn_module_children(node)
         if not nn_module_children:
             return
-        
+
         for i, child_UID in enumerate(nn_module_children):
             child = self.tree.get_UID2event(child_UID)
             self._build_nn_modules_subtree_recursive(child, parent_gpu_time=gpu_time)
