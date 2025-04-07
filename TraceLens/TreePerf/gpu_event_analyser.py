@@ -234,6 +234,22 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 
 # Jax GPU event analyser supports multiple GPUs
 class JaxGPUEventAnalyser(GPUEventAnalyser):
+    # keywords for splitting jax events
+    GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
+    FABwdKeys = ["FmhaBwd"] # CK assembly FA BWD kernel needs to be added
+    FAFwdKeys = ["FmhaFwd"]
+    ConvKeys = ["FillBuffer"]
+    TEKeys = ["transformer_engine"]
+    ClassCategories = {
+        "GEMM": GemmKeys,
+        "FA BWD": FABwdKeys,
+        "FA FWD": FAFwdKeys,
+        "ConvKeys": ConvKeys,
+        "TEKeys": TEKeys,
+    }
+    UncategorizedEventKey = "Uncategorized Events"
+
+
     def get_gpu_event_lists(self, gpu_pid = None, event_filter = None):
         """
         Return a dictionory of GPU to dictionaries of lists of events,
@@ -309,3 +325,99 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                 cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
                 gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
         return gpu_frames
+
+    @staticmethod
+    def breakdown_compute_events(event_list, group_by_gpu: bool = True, group_by_name = False):
+        import string
+        def add_event(cur_event_list, name, duration):
+            current = cur_event_list.get(name, [0, 0])
+            current[0] += 1
+            current[1] += duration
+            if current[0] == 1:
+                cur_event_list[name] = current
+
+        categorized_events = {}
+        uncategorized_events = {}
+        for compute_event in filter(lambda k: k.get('tid', 200) <= 100, event_list):
+            if group_by_gpu:
+                gpu = int(compute_event['pid'])
+                if gpu in categorized_events:
+                    cur_categorized_list = categorized_events[gpu]
+                    cur_uncategorized_list = uncategorized_events[gpu]
+                else:
+                    cur_categorized_list = {}
+                    categorized_events[gpu] = cur_categorized_list
+                    cur_uncategorized_list = {}
+                    uncategorized_events[gpu] = cur_uncategorized_list
+            else:
+                cur_categorized_list = categorized_events
+                cur_uncategorized_list = uncategorized_events
+
+            name=compute_event["name"]
+            duration=compute_event["dur"]
+            found = False
+            for category, filters in JaxGPUEventAnalyser.ClassCategories.items():
+                if any(f in name for f in filters):
+                    add_event(cur_categorized_list, category, duration)
+                    found = True
+                    break
+            if not found:
+                if group_by_name:
+                    name = name.rstrip(string.digits)
+                add_event(cur_categorized_list, JaxGPUEventAnalyser.UncategorizedEventKey, duration)
+                add_event(cur_uncategorized_list, name, duration)
+
+        return categorized_events, uncategorized_events
+
+    @staticmethod
+    def create_breakdown_df(events: dict, total_time):
+        df = pd.DataFrame.from_dict(events, orient='index', columns=['count', 'time'])
+        # convert time to ms by div by 1e3
+        df['time ms'] = df['time'] / 1e3
+        df['percent'] = df['time'] / total_time * 100
+        df = df.drop(columns=['time'])
+        df = df.sort_values("percent", ascending=False)
+        return df
+
+    def create_gpu_summary(self, group_kernels_by_name: bool = False):
+        event_filter = lambda x : x.get("tid", 200) < 100 # ignore of supplemental events
+        all_events = self.get_gpu_event_lists(event_filter = event_filter)
+
+        # create an average across GPUs
+        average_gpu_metrics = None
+        num_gpus = 0
+        for gpu_id, cur_events in all_events.items():
+            if gpu_id <= 100:
+                num_gpus += 1
+                self.verify_dict_gpu_event_lists(cur_events)
+                current_metrics = self.compute_metrics_dict(cur_events)
+                if average_gpu_metrics is None:
+                    average_gpu_metrics = current_metrics
+                else:
+                    for k, v in current_metrics.items():
+                        average_gpu_metrics[k] += v
+        for k in average_gpu_metrics.keys():
+            average_gpu_metrics[k] /= num_gpus
+
+        # find compute times
+        all_gpu_compute_events = [e for ge in all_events.values() for e in ge[GPUEventAnalyser.computation_key]]
+        categorized_times, uncategorized_times = self.breakdown_compute_events(all_gpu_compute_events,
+                                                                           group_by_gpu = False,
+                                                                           group_by_name = group_kernels_by_name)
+
+        categorized_df = self.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"])
+        uncategorized_df = self.create_breakdown_df(uncategorized_times, categorized_times[self.UncategorizedEventKey][1])
+        return self.get_breakdown_df_from_dict(average_gpu_metrics), categorized_df, uncategorized_df
+
+    @staticmethod
+    def summarize_gpu_events(filename):
+        from ..util import DataLoader
+        data = DataLoader.load_data(filename)
+        events = data['traceEvents']
+        my_gpu_event_analyser = JaxGPUEventAnalyser(events)
+        return my_gpu_event_analyser.create_gpu_summary()
+
+
+
+
+
