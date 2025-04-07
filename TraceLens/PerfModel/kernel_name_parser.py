@@ -1,13 +1,35 @@
+# MIT License
+
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import re
 
 def gemm_name_parser(kernel_name):
     """
     Parse the kernel name to identify GEMM op details.
     Args:
-        kernel_name (str): The name of the kernel.    
+        kernel_name (str): The name of the kernel.
     Returns:
         dict: A dictionary containing the GEMM operation details.
-    """        
+    """
     if is_rocm_gemm(kernel_name):
         return parse_rocm_gemm(kernel_name)
     # NVIDIA trace: check if any of the known NVIDIA markers exist in the kernel name
@@ -18,7 +40,7 @@ def gemm_name_parser(kernel_name):
 def is_rocm_gemm(kernel_name):
     """
     Check if a kernel name matches the more general ROCm GEMM naming pattern.
-    Allows an arbitrary prefix before 'Cijk_Alik_Bljk_...' where each of C/A/B 
+    Allows an arbitrary prefix before 'Cijk_Alik_Bljk_...' where each of C/A/B
     is followed by exactly three axis letters.
     Example matches:
       - 'Cijk_Alik_Bljk_...'
@@ -28,7 +50,7 @@ def is_rocm_gemm(kernel_name):
     return bool(re.match(pattern, kernel_name))
 
 def parse_rocm_gemm(kernel_name):
-    
+
     # 1. Parse the transpose flags from the kernel name
     trans_a, trans_b = None, None
     if "_Ailk_" in kernel_name:
@@ -39,12 +61,12 @@ def parse_rocm_gemm(kernel_name):
         trans_b = False
     elif "_Bjlk_" in kernel_name:
         trans_b = True
-    
+
     # Feel free to add more details as needed.
     # https://github.com/ROCm/Tensile/wiki/Kernel-Parameters#kernel-names
 
     return {'transpose': (trans_a, trans_b)}
-    
+
 def is_cuda_gemm(kernel_name):
     """
     Check if a kernel name matches the NVIDIA GEMM naming pattern:
