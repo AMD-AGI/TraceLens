@@ -8,8 +8,8 @@ class DataLoader:
                 writefile.write(data)
         if filename_path.endswith('pb'):
             from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
-            data = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
-            data, _ = data.decode("utf-8") # we get bytes back from the call above
+            data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            data = data.decode("utf-8") # we get bytes back from the call above
             return json.loads(data)
         elif filename_path.endswith('json.gz'):
             import gzip
@@ -23,5 +23,5 @@ class DataLoader:
             print("Unknown file", filename_path)
             return None
         if (save_preprocessed):
-                save_preprocessed(data)
+            save_preprocessed(data)
         return json.loads(data)
