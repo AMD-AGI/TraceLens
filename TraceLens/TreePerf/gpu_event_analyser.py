@@ -240,7 +240,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                         event['t_end'] = event['ts'] + event['dur']
                     cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
                     name = event.get('name')
-                    if name.startswith('Copy') or name.startswith('Memcpy'):
+                    if (any(name.tolower().startswith(x) for x in ['copy', 'memcpy', 'memset'])):
                         cur_dict[GPUEventAnalyser.memcpy_key].append(event)
                     elif name.startswith('nccl'):
                         cur_dict[GPUEventAnalyser.communication_key].append(event)
