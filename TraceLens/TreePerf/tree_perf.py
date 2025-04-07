@@ -1,15 +1,37 @@
 import json
 import gzip
 from collections import defaultdict
+from dataclasses import dataclass
+import time
 from typing import Dict, Any
 
 # TODO: warning should show the stack as well
 import warnings
 import pprint
 import pandas as pd
+import torch
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
 from .gpu_event_analyser import GPUEventAnalyser
 from ..Trace2Tree.trace_to_tree import TraceToTree
+
+
+@dataclass
+class EventArgs:
+    dimentions: list[int]
+    types: list[torch.dtype]
+    strides: list[int]
+
+    @classmethod
+    def from_dict(cls: "EventArgs", data: dict) -> "EventArgs":
+        TYPES_MAP = {
+            "c10::BFloat16": torch.bfloat16,
+        }
+        return cls(
+            dimentions=data.get('Input Dims', []),
+            types=[TYPES_MAP[t] for t in data.get('Input type', [])],
+            strides=data.get('Input Strides', [])
+        )
+
 
 class TreePerfAnalyzer:
     @staticmethod
@@ -255,6 +277,30 @@ class TreePerfAnalyzer:
                 event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
                 kernel_launchers.append(event)
         return kernel_launchers
+
+    @staticmethod
+    def replay_kernel(event_args_example: EventArgs, op: callable = torch.mm, warmup: int = 100, repeats: int = 1000) -> float:
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    
+        a = torch.randn(event_args_example.dimentions[0], dtype=event_args_example.types[0])
+        b = torch.randn(event_args_example.dimentions[1], device=device, dtype=event_args_example.types[0])
+        
+        a = torch.as_strided(a, size=event_args_example.dimentions[0], stride=event_args_example.strides[0])
+        b = torch.as_strided(b, size=event_args_example.dimentions[1], stride=event_args_example.strides[1])
+        
+        for _ in range(warmup):
+            c = op(a, b)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
+        start = time.time()
+        for _ in range(repeats):
+            c = op(a, b)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        end = time.time()
+        
+        return (end - start) / repeats
 
     def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):
 
