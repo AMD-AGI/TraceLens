@@ -234,6 +234,7 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 
 # Jax GPU event analyser supports multiple GPUs
 class JaxGPUEventAnalyser(GPUEventAnalyser):
+<<<<<<< HEAD
     # keywords for splitting jax events
     GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
     FABwdKeys = ["FmhaBwd"]
@@ -252,6 +253,8 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
     UncategorizedEventKey = "Uncategorized Events"
 
 
+=======
+>>>>>>> e5112d8 (add optional filter; add memset)
     def get_gpu_event_lists(self, gpu_pid = None, event_filter = None):
         """
         Return a dictionory of GPU to dictionaries of lists of events,
