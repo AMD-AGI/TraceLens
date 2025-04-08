@@ -1,3 +1,25 @@
+# MIT License
+
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import json
 import gzip
 from collections import defaultdict
@@ -7,9 +29,9 @@ class TraceFuse:
     def __init__(self, profile_filepaths_list_or_dict):
         """
         Initialize the TraceFuse class.
-        
-        :param profile_filepaths_or_dict: 
-            - If a list, assume it is already sorted by rank 
+
+        :param profile_filepaths_or_dict:
+            - If a list, assume it is already sorted by rank
               and each entry is a filepath for ranks [0..N-1]
             - If a dict, keys are rank and values are filepaths.
         """
@@ -18,7 +40,7 @@ class TraceFuse:
             self.rank2filepath = {i: filepath for i, filepath in enumerate(profile_filepaths_list_or_dict)}
         elif isinstance(profile_filepaths_list_or_dict, dict):
             self.rank2filepath = profile_filepaths_list_or_dict
-        
+
         # get the first file to set the linking key and offset multiplier
         with open(next(iter(self.rank2filepath.values())), 'r') as f:
             data = json.load(f)
@@ -52,7 +74,7 @@ class TraceFuse:
     @staticmethod
     def default_filter_fn(event):
         return event.get('cat', None) != 'Trace'
-    
+
     def adjust_field(self, event, field, rank, offset_multiplier):
         is_arg = field == self.linking_key
         if is_arg and field in event['args']:
@@ -94,7 +116,7 @@ class TraceFuse:
             merged_data.extend(processed_events)
 
         return merged_data
-        
+
     def merge_and_save(self, output_file='merged_trace.json',
                         filter_fn=None, include_pyfunc=False):
         """Merge trace files and save the output."""
