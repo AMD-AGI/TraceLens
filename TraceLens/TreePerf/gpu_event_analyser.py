@@ -22,6 +22,8 @@
 
 import pandas as pd
 import itertools
+import math
+import string
 import tqdm
 
 class GPUEventAnalyser:
@@ -234,7 +236,6 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 
 # Jax GPU event analyser supports multiple GPUs
 class JaxGPUEventAnalyser(GPUEventAnalyser):
-<<<<<<< HEAD
     # keywords for splitting jax events
     GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
     FABwdKeys = ["FmhaBwd"]
@@ -252,9 +253,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
     }
     UncategorizedEventKey = "Uncategorized Events"
 
-
-=======
->>>>>>> e5112d8 (add optional filter; add memset)
     def get_gpu_event_lists(self, gpu_pid = None, event_filter = None):
         """
         Return a dictionory of GPU to dictionaries of lists of events,
@@ -325,16 +323,13 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         gpu_frames = {}
         print("Processing events by GPU")
         for gpu_id, cur_events in tqdm.tqdm(events.items()):
-            if gpu_id <= 100:
-                self.verify_dict_gpu_event_lists(cur_events)
-                cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
-                gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
+            self.verify_dict_gpu_event_lists(cur_events)
+            cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
+            gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
         return gpu_frames
-<<<<<<< HEAD
 
     @staticmethod
     def breakdown_compute_events(event_list, group_by_gpu: bool = True, group_by_name = False):
-        import string
         def add_event(cur_event_list, name, duration):
             current = cur_event_list.get(name, [0, 0])
             current[0] += 1
@@ -385,23 +380,29 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         df = df.sort_values("percent", ascending=False)
         return df
 
+    @staticmethod
+    def default_gpu_event_filter(event: dict):
+        return event.get("tid", 200) < 100 # ignore of supplemental events
+
+    @staticmethod
+    def get_just_gpu_events(events):
+        return filter(lambda _, v: len(v.get(GPUEventAnalyser.computation_key, {})) > 0, events.items())
+
+
     def create_gpu_summary(self, group_kernels_by_name: bool = False):
-        event_filter = lambda x : x.get("tid", 200) < 100 # ignore of supplemental events
-        all_events = self.get_gpu_event_lists(event_filter = event_filter)
+        all_events = self.get_gpu_event_lists(event_filter = GPUEventAnalyser.default_gpu_event_filter)
 
         # create an average across GPUs
         average_gpu_metrics = None
-        num_gpus = 0
-        for gpu_id, cur_events in all_events.items():
-            if gpu_id <= 100:
-                num_gpus += 1
-                self.verify_dict_gpu_event_lists(cur_events)
-                current_metrics = self.compute_metrics_dict(cur_events)
-                if average_gpu_metrics is None:
-                    average_gpu_metrics = current_metrics
-                else:
-                    for k, v in current_metrics.items():
-                        average_gpu_metrics[k] += v
+        num_gpus = len(self.get_just_gpu_events(all_events))
+        for cur_events in all_events.items():
+            self.verify_dict_gpu_event_lists(cur_events)
+            current_metrics = self.compute_metrics_dict(cur_events)
+            if average_gpu_metrics is None:
+                average_gpu_metrics = current_metrics
+            else:
+                for k, v in current_metrics.items():
+                    average_gpu_metrics[k] += v
         for k in average_gpu_metrics.keys():
             average_gpu_metrics[k] /= num_gpus
 
@@ -423,9 +424,72 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
         return my_gpu_event_analyser.create_gpu_summary()
 
+    communication_events_map={"all-gather-start":"all-gather", "all-reduce-start":"all-reduce", "reduce-scatter":"reduce-scatter", "collective-permute-start": "collective-permute"}
+
+    @staticmethod
+    def process_communication_events_from_event_dump(xla_file_name: str) -> dict:
+        import re
+        communication_events={key:[] for key in JaxGPUEventAnalyser.communication_events_map.keys()}
+
+        event_key=str.join('|', JaxGPUEventAnalyser.communication_events_map.keys())
+        pattern = re.compile(f"^.*value:.*({event_key})\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
+        for line in open(xla_file_name, "r"):
+            m=pattern.search(line)
+            if m:
+                communication_events[m.group(1)].append([m.group(2), m.group(3), m.group(4)])
+
+        return communication_events
+
+    def process_communication_events_from_profile(self, messages: dict) -> dict:
+        def get_unique_sizes(mdict, message):
+            uniq={}
+            for i in mdict.keys():
+                if message in i:
+                    size=mdict[i][1]
+                    uniq[size] = uniq.get(size, 0) + 1
+            return uniq
+
+        all_events = self.get_gpu_event_lists(event_filter = GPUEventAnalyser.default_gpu_event_filter)
+        just_gpu_events = {self.get_just_gpu_events(all_events)}
+        all_comm_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.communication_key]]
+        num_gpus = len(just_gpu_events)
+
+        rccl_stats={}
+
+        for i in all_comm_events:
+            tid=i["tid"]
+            dur=i["dur"]
+            op = i["args"]["hlo_op"]
+            if op.startswith('reduce-scatter'):
+                op = '.'.join(op.split('.')[:2]) # need to remove sub-communications from reduce-scatter only
+            current = rccl_stats.get(op, [math.inf] * num_gpus)
+            current[tid-1] = dur
+            rccl_stats[op] = current
+
+
+        #each dict is indexed by the hlo_op, and the value is a list [duration, total message size, number of tuple arguments,algbw]
+        output = {}
+        for msg_type, msg_values in messages.items():
+            coll_dict={}
+            output[JaxGPUEventAnalyser.communication_events_map[msg_type]] = coll_dict
+            for msg in msg_values:
+                collname=f"{msg_type}.{msg[0]}" if msg[0] is not None else msg_type
+                collsize=int(msg[1])
+                collval = rccl_stats.get(collname, None)
+                if (collval is not None):
+                    current = coll_dict.get(collname, [min(collval),0,0,0])
+                    current[1] += collsize
+                    current[2] += 1
+                    coll_dict[collname] = current
+                else:
+                    print(collname," not found")
+            scale = num_gpus if "reduce-scatter" in msg_type else 1
+            for collname, current in coll_dict.items():
+                current[3]=current[1]*scale*0.001/current[0]
+
+        return output
 
 
 
 
-=======
->>>>>>> b2e1a41 (fix extra line)
+
