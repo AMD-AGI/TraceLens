@@ -310,5 +310,3 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                 cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
                 gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
         return gpu_frames
-
-    def breakdown_compute_times
