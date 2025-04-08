@@ -51,9 +51,10 @@ class TreePerfAnalyzer:
         tree = TraceToTree(data['traceEvents'])
         return TreePerfAnalyzer(tree, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False):
+    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None):
         self.tree = tree
         self.add_python_func = add_python_func
+        self.arch = arch
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
@@ -90,7 +91,9 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False, perf_model_class=None):
+    def compute_perf_metrics(self, event, bwd=False,
+                             non_data_mov=False, perf_model_class=None,
+                             detail_level=0):
 
         # Handle kernel aggregation
         if bwd:
@@ -115,7 +118,7 @@ class TreePerfAnalyzer:
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = op_to_perf_model_class_map[event['name']]
-        perf_model = perf_model_class(event)
+        perf_model = perf_model_class(event, arch=self.arch, detail_level=detail_level)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
 
@@ -152,7 +155,9 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
 
-    def build_df_perf_metrics(self, events, bwd, non_data_mov=False, include_kernel_names=False, dict_name_to_perf_model=None):
+    def build_df_perf_metrics(self, events, bwd=False,
+                              non_data_mov=False, include_kernel_names=False, dict_name_to_perf_model=None,
+                              detail_level=0):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
             return pd.DataFrame()
@@ -168,7 +173,9 @@ class TreePerfAnalyzer:
                 perf_model_class = dict_name_to_perf_model[event['name']]
             else:
                 perf_model_class = None
-            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, perf_model_class=perf_model_class)
+            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd,
+                                                          non_data_mov=non_data_mov, perf_model_class=perf_model_class,
+                                                          detail_level=detail_level)
             # handle warnings
             if bwd and not event.get('bwd_events'):
                 list_no_bwd_events.append(event)

@@ -62,10 +62,28 @@ def parse_rocm_gemm(kernel_name):
     elif "_Bjlk_" in kernel_name:
         trans_b = True
 
+    # 2. Parse the macro tile size from the kernel name
+    # Example: ''Cijk_Ailk_Bjlk_BBS_BH_Bias_HAS_SAV_UserArgs_MT64x16x64_MI16x16x1_SN_LDSB0_AFC...'
+    # The macro tile size is usually represented by 'MT' followed by the tile dimensions.
+    # In this example, the macro tile size is 'MT64x16x64'.
+    # 64 is M tile, 16 is N tile, 64 is K loop unroll called DepthU
+    macro_tile_match = re.search(r'MT(\d+)x(\d+)x(\d+)', kernel_name)
+    if macro_tile_match:
+        mt_m = int(macro_tile_match.group(1))
+        mt_n = int(macro_tile_match.group(2))
+        depth_u = int(macro_tile_match.group(3))
+    else:
+        mt_m, mt_n, depth_u = None, None, None  # Fallback in case pattern is not found
+
     # Feel free to add more details as needed.
     # https://github.com/ROCm/Tensile/wiki/Kernel-Parameters#kernel-names
 
-    return {'transpose': (trans_a, trans_b)}
+    return {
+        'transpose': (trans_a, trans_b),
+        'mt_m': mt_m,
+        'mt_n': mt_n,
+        'depth_u': depth_u,
+    }
 
 def is_cuda_gemm(kernel_name):
     """
