@@ -1,3 +1,25 @@
+# MIT License
+
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 from math import prod
 import math
 from .kernel_name_parser import gemm_name_parser
@@ -32,10 +54,10 @@ def is_tensortype(dtype):
     elif dtype.lower() in ['long int', 'scalar']:
         return False
 
-# 1. GEMM 
+# 1. GEMM
 class GEMM:
     """
-    This is the base class for all GEMM operations. 
+    This is the base class for all GEMM operations.
     If you want to add a new GEMM operation, you should inherit from this class.
     """
     def __init__(self, event, arch=None, detail_level=0):
@@ -74,7 +96,7 @@ class GEMM:
         flops_matmul = 2 * M * N * K
         flops_bias = M * N if bias else 0
         return flops_matmul + flops_bias
-    
+
     def flops(self):
         return self.flops_func(self.M, self.N, self.K, self.bias)
 
@@ -93,14 +115,14 @@ class GEMM:
         return bytes_mat1 + bytes_mat2 + bytes_output + bytes_bias
     def bytes(self, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
         return self.bytes_func(self.M, self.N, self.K, self.bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output)
-    
+
     """
     bwd pass for Y = X.matmul(W^T) + B
     X_grad = Y_grad.matmul(W)
     W_grad = Y_grad^T.matmul(X)
     B_grad = Y_grad.sum(dim=0)
     """
-    
+
     def flops_bwd(self):
         flops_input_grad = self.flops_func(M=self.M, N=self.K, K=self.N, bias=False)
         flops_weight_grad = self.flops_func(M=self.N, N=self.K, K=self.M, bias=False)
@@ -181,13 +203,13 @@ class aten_mm(GEMM):
         return {"M": M, "N": N, "K": K, "bias": False,
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
-    
+
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
             raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
         self.bpe = name2bpe(dtype_A_B[0])
-        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe, 
+        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
                              bpe_bias=self.bpe, # does not matter
                              bpe_output=self.bpe) # out dtype is not always provided. #TODO: use out dtype if provided
     def flops_bwd(self):
@@ -227,10 +249,10 @@ class aten_addmm(GEMM):
         # setting bias bpe to be the same as the input matrices is not totally correct
         # TODO: correct later
         # TODO: similar to aten_mm, we need to use the output dtype if provided
-        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe, 
-                             bpe_bias=self.bpe, 
+        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
+                             bpe_bias=self.bpe,
                              bpe_output=self.bpe)
-    
+
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
     def bytes_bwd(self, bytes_per_element):
@@ -286,8 +308,8 @@ class aten_scaled_mm(GEMM):
 
 
 # TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
-class aten_linear(GEMM):    
-    
+class aten_linear(GEMM):
+
     @staticmethod
     def get_param_details(event):
         input_dims = event['args']['Input Dims']
@@ -300,7 +322,7 @@ class aten_linear(GEMM):
         M = 1
         for dim in input_shape[:-1]:
             M *= dim
-        
+
         # TODO: remove repeated code, this is not cool
         dtype_A_B = tuple(event['args']['Input type'][:2])
         try:
@@ -325,16 +347,16 @@ class CONV:
         self.bias = self.param_details['bias']
         self.transposed_conv = self.param_details['transposed_conv']
         self.out_shape = CONV.get_output_shape(self.x_shape, self.w_shape, self.stride, self.padding, self.dilation, self.transposed_conv)
-    
+
     @staticmethod
     def get_output_shape(input_shape, filter_shape, stride, padding, dilation, transposed_conv):
         x_spatial_shape, w_spatial_shape = input_shape[2:], filter_shape[2:]
         conv_ndims = len(x_spatial_shape)
         spatial_out_fn = CONV.get_conv_out_dim if not transposed_conv else CONV.get_transposed_conv_out_dim
-        out_spatial_shape = tuple(spatial_out_fn(x_spatial_shape[i], w_spatial_shape[i], 
+        out_spatial_shape = tuple(spatial_out_fn(x_spatial_shape[i], w_spatial_shape[i],
                                                 stride[i], padding[i], dilation[i]) for i in range(conv_ndims))
         return (input_shape[0], filter_shape[0]) + tuple(out_spatial_shape)
-    
+
     @staticmethod
     def t(shape):
         return (shape[1], shape[0]) + shape[2:]
@@ -388,7 +410,7 @@ class CONV:
         return flops_input_grad + flops_weight_grad + flops_bias_grad
     def flops_bwd(self):
         return self.flops_bwd_func(self.out_shape, self.x_shape, self.w_shape, self.bias, self.transposed_conv)
-    
+
     @staticmethod
     def bytes_bwd_func(x_shape, w_shape, out_shape, bias, bytes_per_element):
         if bytes_per_element is None:
@@ -400,12 +422,12 @@ class CONV:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
     def bytes_bwd(self, bytes_per_element):
         return self.bytes_bwd_func(self.x_shape, self.w_shape, self.out_shape, self.bias, bytes_per_element)
-    
+
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
-    
+
 class aten_conv(CONV):
 
     @staticmethod
@@ -430,7 +452,7 @@ class aten_conv(CONV):
         filter_shape = tuple(input_dims[1])
         bias = len(input_dims) == 3
 
-        
+
         stride_arg = concrete_inputs[3]
         stride = aten_conv.str_to_tuple(stride_arg) if stride_arg != '' else (1,) * ndims
         padding_arg = concrete_inputs[4]
@@ -457,7 +479,7 @@ class aten_conv(CONV):
             weight_stride = tuple(event['args']['Input Strides'][1])
         except KeyError:
             input_stride = weight_stride = None
-        
+
         if len(input_shape) == 3:
             convNd = 'conv1d'
         elif len(input_shape) == 4:
@@ -472,7 +494,7 @@ class aten_conv(CONV):
                 "bias": bias, "stride": stride, "padding": padding, "dilation": dilation,
                 "transposed_conv": transposed_conv, "output_padding": output_padding,
                 "groups": groups}
-    
+
     def bytes(self):
         dtype_input_weight = self.param_details['dtype_input_weight']
         if dtype_input_weight[0] != dtype_input_weight[1]:
@@ -491,10 +513,10 @@ class aten_conv(CONV):
 class aten_conv_bwd(aten_conv):
     def __init__(self, event):
         super().__init__(event)
-    
+
     def flops(self):
         return self.flops_bwd()
-    
+
     def bytes(self, bytes_per_element):
         return self.bytes_bwd(bytes_per_element)
 class SDPA:
@@ -511,7 +533,7 @@ class SDPA:
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
-    
+
     @staticmethod
     def flops_func(B, N_Q, H, d_k, N_K, dropout, causal):
         # ref: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L29
@@ -528,7 +550,7 @@ class SDPA:
     def flops(self):
         return self.flops_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
                                 self.param_details['dropout'], self.param_details['causal'])
-    
+
     @staticmethod
     def bytes_func(B, N_Q, H, d_k, N_K, dropout, causal, bytes_per_element):
         if dropout != 0.0:
@@ -542,7 +564,7 @@ class SDPA:
     def bytes(self, bytes_per_element=2):
         return self.bytes_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
                                 self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
-    
+
     @staticmethod
     def flops_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl):
         if causal:
@@ -576,7 +598,7 @@ class SDPA:
         return None
 
 class flash_attention(SDPA):
-    
+
     @staticmethod
     def get_param_details(event):
         input_dims = event['args']['Input Dims']
@@ -589,13 +611,13 @@ class flash_attention(SDPA):
                 "dropout": dropout, "causal": causal, "flash_impl": True}
 
 class flash_attention_backward(flash_attention):
-    
+
     def __init__(self, event):
         super().__init__(event)
-    
+
     def flops(self):
         return self.flops_bwd()
-    
+
     def bytes(self, bytes_per_element):
         return self.bytes_bwd(bytes_per_element)
 
@@ -616,19 +638,19 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
         # scale: Optional[float]
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
-        
+
         B, H, N_Q, d_k = input_dims[0]
         _, _, N_K, _ = input_dims[1]
-                        
+
         dropout_p = 0.0
         if concrete_inputs[5] not in ('', 'None'):
             try:
                 dropout_p = float(concrete_inputs[5])
             except (ValueError, TypeError):
                 pass
-        
+
         is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
-                
+
         return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}
 
@@ -648,13 +670,13 @@ class UnaryElementwise:
         else:
             # same as input
             self.bpe_out = self.bpe_in
-    
+
     @staticmethod
     def flops_func(nelems):
         return nelems
     def flops(self):
         return self.flops_func(self.nelems)
-    
+
     @staticmethod
     def bytes_func(nelems, bpe_in, bpe_out):
         if None in {bpe_in, bpe_out}:
@@ -711,7 +733,7 @@ class BinaryElementwise:
         return nelems_out
     def flops(self):
         return self.flops_func(self.nelems_out)
-    
+
     @staticmethod
     def bytes_func(nelems_in1, nelems_in2, nelems_out, bpe_in1, bpe_in2, bpe_out):
         if None in {bpe_in1, bpe_in2, bpe_out}:
@@ -751,7 +773,7 @@ class aten_binary_elementwise(BinaryElementwise):
         else:
             dtype_out = None
             stride_output = None
-        return {"shape_in1": shape_in1, "shape_in2": shape_in2, 
+        return {"shape_in1": shape_in1, "shape_in2": shape_in2,
                 "dtype_in1_in2_out" : (dtype_in1, dtype_in2, dtype_out),
                 "stride_input1": stride_input1, "stride_input2": stride_input2, "stride_output": stride_output}
 

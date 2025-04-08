@@ -1,3 +1,25 @@
+# MIT License
+
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import os
 import json
 import pandas as pd
@@ -35,7 +57,7 @@ class NcclAnalyser:
             'alltoall':      ['all_to_all'],
             'alltoallv':     ['all_to_allv'],
         }
-        
+
         self.collective_name2type = {
             name: cat for cat, names in self.collective_type2name.items()
             for name in names
@@ -69,13 +91,13 @@ class NcclAnalyser:
             # Build a dictionary with event data
             rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
             self.rank2trace_data[rank] = rank_dict
-    
+
     # ------------------------------------------------------------------------
     # Step 1: Build a long table where each row is a collective event on a rank
     # ------------------------------------------------------------------------
     def build_df_long(self):
         """Constructs a long table where each row is a collective event on a rank."""
-        metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size', 
+        metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size',
                            'dtype', 'In msg nelems', 'Out msg nelems', 'In split size', 'Out split size',
                             'stream']
         rows = []
@@ -87,12 +109,12 @@ class NcclAnalyser:
                         field_value = evt['args'][field]
                     else:
                         field_value = None
-                    if isinstance(field_value, list):  
+                    if isinstance(field_value, list):
                         field_value = list_to_tuple(field_value)
                     row[field] = field_value
                 bytes_per_elem = self.dtype2bytes[row['dtype']] if row['dtype'] in self.dtype2bytes else None
                 if bytes_per_elem is not None and row['In msg nelems'] is not None:
-                    row['In msg size (MB)'] = row['In msg nelems'] * bytes_per_elem / 1024**2 
+                    row['In msg size (MB)'] = row['In msg nelems'] * bytes_per_elem / 1024**2
                     row['Out msg size (MB)'] = row['Out msg nelems'] * bytes_per_elem / 1024**2
                 else:
                     row['In msg size (MB)'] = None
@@ -123,7 +145,7 @@ class NcclAnalyser:
         return df_long
 
     # ------------------------------------------------------------------------
-    # Step 2: Build a wide table for implicit sync class 
+    # Step 2: Build a wide table for implicit sync class
     # where each row is a collective operation
     # ------------------------------------------------------------------------
     def build_df_nccl_implicit_sync_cat(self, detailed=False):
@@ -136,7 +158,7 @@ class NcclAnalyser:
 
         df = self.df_per_rank_coll
 
-        metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size', 
+        metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size',
                            'dtype', 'In msg nelems', 'Out msg nelems', 'In msg size (MB)', 'Out msg size (MB)']
         collective_ids = df['collective_id'].unique()
         rows = []
@@ -187,7 +209,7 @@ class NcclAnalyser:
             c_type = self.collective_name2type.get(row['Collective name'])
             row['Full msg size (MB)'] = row['Out msg size (MB)'] if c_type == 'allgather' else row['In msg size (MB)']
             row['algo bw (GB/s)'] = (row['Full msg size (MB)']/1024) / (row['comm_latency'] / 1e6)
-            scaling_factor = self.collective2scaling_factor[c_type](row['Group size'])            
+            scaling_factor = self.collective2scaling_factor[c_type](row['Group size'])
             row['bus bw (GB/s)'] = row['algo bw (GB/s)'] * scaling_factor
 
             rows.append(row)
@@ -202,7 +224,7 @@ class NcclAnalyser:
             "collective_id", "Process Group Name", "Process Group Ranks",
             "Collective name", "Group size", "dtype",
             "In msg nelems", "Out msg nelems", "In msg size (MB)", "Out msg size (MB)", "Full msg size (MB)",
-            
+
             # High-Level Performance Metrics
             "comm_latency", "skew in start time", "earliest arrival rank",
             "avg_wait_time", "skew in end time", "algo bw (GB/s)", "bus bw (GB/s)"
@@ -218,7 +240,7 @@ class NcclAnalyser:
         return self.df_implicit_sync_cat if not detailed else self.df_implicit_sync_cat_detailed
 
 
-    def build_df_summary_nccl_implicit_sync_cat(self, agg_metrics=['mean', 'std'], 
+    def build_df_summary_nccl_implicit_sync_cat(self, agg_metrics=['mean', 'std'],
                                                 metadata_fields=["Process Group Name", "Group size", "Full msg size (MB)"]):
         """
         Builds a summary DF with one row per collective name, dtype, and msg size.
@@ -226,7 +248,7 @@ class NcclAnalyser:
         """
         if not hasattr(self, 'df_implicit_sync_cat'):
             self.df_implicit_sync_cat = self.build_df_nccl_implicit_sync_cat()
-        
+
         # Aggregation logic
 
         df = self.df_implicit_sync_cat
@@ -243,7 +265,7 @@ class NcclAnalyser:
 
         groupby_cols = ['Collective name', 'dtype', 'In msg nelems']
         agg_result = df.groupby(groupby_cols).agg(agg_logic)
-        
+
         # Post-processing: rename columns and sort
 
         agg_result.columns = [
@@ -283,7 +305,7 @@ class NcclAnalyser:
 
         df = self.df_per_rank_coll
 
-        metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size', 
+        metadata_fields = ['Process Group Name', 'Process Group Ranks', 'Collective name', 'Group size',
                            'dtype', 'stream']
         collective_ids = df['collective_id'].unique()
 
@@ -295,7 +317,7 @@ class NcclAnalyser:
             collective_name = rank_events.iloc[0]['Collective name']
             if collective_name != 'all_to_allv':
                 continue
-            
+
             # **Metadata Consistency Check**
             ref_metadata = {field: rank_events.iloc[0][field] for field in metadata_fields}
             for field in metadata_fields:
@@ -312,7 +334,7 @@ class NcclAnalyser:
             for r in rank_events.index:
                 for col in per_rank_cols:
                     row[f'rank_{r}_{col}'] = rank_events.loc[r, col]
-            
+
             # agg latency metrics
             earliest_start = min(row[f'rank_{r}_ts'] for r in rank_events.index)
             latest_start = max(row[f'rank_{r}_ts'] for r in rank_events.index)
@@ -321,7 +343,7 @@ class NcclAnalyser:
             row['skew in start time'] = latest_start - earliest_start
             row['skew in end time'] = latest_end - earliest_end
 
-            # 1) For the entire cohort, record the earliest starter's start time (S) and the earliest finisher's finish time (F)  
+            # 1) For the entire cohort, record the earliest starter's start time (S) and the earliest finisher's finish time (F)
             # 2)  For every rank report its start skew w.r.t S and its end skew w.r.t F
             for r in rank_events.index:
                 row[f'rank_{r}_skew in start time'] = row[f'rank_{r}_ts'] - earliest_start

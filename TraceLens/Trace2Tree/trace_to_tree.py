@@ -1,3 +1,25 @@
+# MIT License
+
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 from collections import defaultdict
 from typing import Dict, Any
 
@@ -49,7 +71,7 @@ class TraceToTree:
             link_id = event.get('args', {}).get(self.linking_key)
             if None not in [pid, tid, link_id]:
                 self.pid_tid_event_map[(pid, tid, link_id)] = event
-            
+
             # Process sequence number events
             seq_num = event.get('args', {}).get('Sequence number')
             if seq_num is not None:
@@ -95,7 +117,7 @@ class TraceToTree:
                 popped_event = stack.pop()
                 if popped_event.get('cat') == 'cpu_op':
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
-            
+
             if stack and event['t_end'] > stack[-1]['t_end']:
                 #TODO add following to logging when logging level is debug
                 # print(f"Invalid event ordering: {event['name']} ends after the stack top event.")
@@ -130,7 +152,7 @@ class TraceToTree:
                 parent = self.get_parent_event(event)
                 parent.setdefault('gpu_events', []).append(corresponding_gpu_event['UID'])
                 event = parent
-    
+
     def label_non_gpu_paths(self):
         # 1. Iterate through non GPU nodes and chck the gpu_events list
         # 2. If the gpu_events list is empty, mark the node as non_gpu_path
@@ -142,14 +164,14 @@ class TraceToTree:
             # Now, we are dealing with non-GPU events
             if 'gpu_events' not in event:
                 event['non_gpu_path'] = True
-    
+
     def build_tree(self, add_python_func=False) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
-    
+
     def get_UID2event(self, UID):
         return self.events_by_uid[UID]
 
@@ -174,11 +196,11 @@ class TraceToTree:
     def traverse_subtree_and_print(self, node: Dict[str, Any], prune_non_gpu: bool = True) -> None:
         """
         Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
-        
+
         Args:
             node (Dict[str, Any]): The root node of the subtree.
             prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
-        
+
         Prints:
             A structured representation of the subtree with details about each event.
         """
@@ -191,26 +213,26 @@ class TraceToTree:
         max_len = 64
         if len(name) > max_len:
             name = name[:max_len] + '...'
-        
+
         cat = node.get('cat')
         print_str = f"{_prefix}{connector}UID: {node['UID']}, Category: {cat}, Name: {name}"
-        
+
         if cat in {'kernel', 'gpu_memset', 'gpu_memcpy'}:
             print_str += f", Duration: {node.get('dur')}"
-        
+
         print(print_str)
-        
+
         children = self.get_children_events(node)
         if prune_non_gpu:
             children = [child for child in children if 'non_gpu_path' not in child]
-        
+
         child_count = len(children)
         new_prefix = _prefix + ("    " if is_last else "│   ")
-        
+
         for i, child in enumerate(children):
             self._traverse_subtree_recursive(child, prune_non_gpu,
                                             new_prefix, is_last=(i == child_count - 1))
-    
+
     def traverse_parents_and_print(self, node):
         depth = 0
         while True:
@@ -256,7 +278,7 @@ class TraceToTree:
                 bwd_event['fwd_event'] = event_UID
                 break
         fwd_event['bwd_events'] = bwd_event_UIDs
-    
+
     def _find_corresponding_output_event(self, input_event):
         # 1. Get the linking id from the input event
         # 2. Find the corresponding start and end ac2g events for the linking id
@@ -300,6 +322,6 @@ class TraceToTree:
         # cache the nn.Module children for later use
         nn_module_event['nn_module_children'] = nn_module_children
         return nn_module_children
-    
+
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
         return event.get('cat') == 'python_function' and event.get('name', '').startswith('nn.Module:')
