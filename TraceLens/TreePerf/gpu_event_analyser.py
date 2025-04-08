@@ -441,14 +441,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         return communication_events
 
     def process_communication_events_from_profile(self, messages: dict) -> dict:
-        def get_unique_sizes(mdict, message):
-            uniq={}
-            for i in mdict.keys():
-                if message in i:
-                    size=mdict[i][1]
-                    uniq[size] = uniq.get(size, 0) + 1
-            return uniq
-
         all_events = self.get_gpu_event_lists(event_filter = GPUEventAnalyser.default_gpu_event_filter)
         just_gpu_events = {self.get_just_gpu_events(all_events)}
         all_comm_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.communication_key]]
@@ -488,6 +480,82 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                 current[3]=current[1]*scale*0.001/current[0]
 
         return output
+
+    @staticmethod
+    def summarize_communication_data(comm_event_data):
+        summary_data = {}
+        for collective, collective_stats in comm_event_data.items():
+            current_data = [[collective, xfer_name, data[0], data[1] / 1024, data[3]]
+                            for xfer_name, data in collective_stats.items()]
+            df = pd.DataFrame(data=current_data,
+                            columns = [
+                                "base_collective",
+                                "collective_name",
+                                "latency_us",
+                                "buffer_size_kb",
+                                "effective_bw" ])
+
+            bandwidth_stats = (
+                df.groupby(["base_collective", "buffer_size_kb"])["effective_bw"]
+                .agg(["mean", "std"])
+                .reset_index()
+            )
+
+            # Group by collective type and buffer size for call counts
+            call_counts = (
+                df.groupby(["base_collective", "buffer_size_kb"])
+                .size()
+                .reset_index(name="count")
+            )
+
+            bw_data = bandwidth_stats.sort_values("buffer_size_kb")
+            count_data = call_counts[
+                call_counts["base_collective"] == collective
+            ].sort_values("buffer_size_kb")
+
+            time_by_size = (
+                df.groupby("buffer_size_kb")["latency_us"].sum().reset_index()
+            )
+            total_time_us = time_by_size["latency_us"].sum()
+            time_by_size["percentage"] = (time_by_size["latency_us"] / total_time_us) * 100 if total_time_us > 0 else 0
+
+
+            # Calculate time spent in each bandwidth range
+            bw_thresholds = [0, 50, 100, 200, 300, 350]
+            total_time = (df["latency_us"].sum()) / 1e6  # Convert to seconds
+            time_in_ranges = []
+            labels = []
+
+            for i in range(len(bw_thresholds) - 1):
+                mask = (df["effective_bw"] >= bw_thresholds[i]) & (
+                    df["effective_bw"] < bw_thresholds[i + 1]
+                )
+                time_in_range = (df[mask]["latency_us"].sum()) / 1e6
+                percentage = (time_in_range / total_time) * 100 if total_time > 0 else 0
+                time_in_ranges.append(percentage)
+                labels.append(f"{bw_thresholds[i]}-{bw_thresholds[i+1]} GB/s")
+
+            # Add the highest range
+            mask = df["effective_bw"] >= bw_thresholds[-1]
+            time_in_range = (df[mask]["latency_us"].sum()) / 1e6
+            percentage = (time_in_range / total_time) * 100 if total_time > 0 else 0
+            time_in_ranges.append(percentage)
+
+            summary_data[collective]=(df, bandwidth_stats, bw_data, count_data, time_by_size)
+
+
+    @staticmethod
+    def summarize_gpu_communication_events(profile_filename, xla_filename):
+        from ..util import DataLoader
+        data = DataLoader.load_data(profile_filename)
+        events = data['traceEvents']
+        my_gpu_event_analyser = JaxGPUEventAnalyser(events)
+        comm_xla_events = my_gpu_event_analyser.process_communication_events_from_event_dump(xla_filename)
+        return my_gpu_event_analyser.process_communication_events_from_profile(comm_xla_events)
+
+
+
+
 
 
 
