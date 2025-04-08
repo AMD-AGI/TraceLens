@@ -236,14 +236,16 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 class JaxGPUEventAnalyser(GPUEventAnalyser):
     # keywords for splitting jax events
     GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
-    FABwdKeys = ["FmhaBwd"] # CK assembly FA BWD kernel needs to be added
+    FABwdKeys = ["FmhaBwd"]
     FAFwdKeys = ["FmhaFwd"]
+    FAV3Keys = ["kernel_func"] # find a more precise way to do this
     ConvKeys = ["FillBuffer"]
     TEKeys = ["transformer_engine"]
     ClassCategories = {
         "GEMM": GemmKeys,
         "FA BWD": FABwdKeys,
         "FA FWD": FAFwdKeys,
+        "FA V3": FAV3Keys,
         "ConvKeys": ConvKeys,
         "TEKeys": TEKeys,
     }
