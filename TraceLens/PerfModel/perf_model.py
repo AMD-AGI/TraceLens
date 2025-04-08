@@ -1,4 +1,5 @@
 from math import prod
+import math
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
@@ -37,19 +38,32 @@ class GEMM:
     This is the base class for all GEMM operations. 
     If you want to add a new GEMM operation, you should inherit from this class.
     """
-    def __init__(self, event):
+    def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         self.param_details = self.get_param_details(event)
-        parsed_details = None
+        self.parsed_kernel_info = None
         for kernel_name in event['kernel_names']:
-            parsed_details = gemm_name_parser(kernel_name)
-            if parsed_details is not None:
+            # TODO: think you really wanna pass around dicts instead of objects?
+            self.parsed_kernel_info = gemm_name_parser(kernel_name)
+            if self.parsed_kernel_info is not None:
                 break
-        if parsed_details is not None:
-            self.param_details['transpose'] = parsed_details['transpose']
+        if self.parsed_kernel_info is not None:
+            self.param_details['transpose'] = self.parsed_kernel_info['transpose']
+
         self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
-    
+
+        if detail_level > 0:
+            if arch is None:
+                raise ValueError("arch must be provided if detail_level > 0")
+            if self.parsed_kernel_info is None:
+                raise ValueError("parsed_kernel_info must be provided if detail_level > 0")
+            self.param_details['mt_m'] = self.parsed_kernel_info['mt_m']
+            self.param_details['mt_n'] = self.parsed_kernel_info['mt_n']
+            self.param_details['depth_u'] = self.parsed_kernel_info['depth_u']
+            dim_eff_info = self.dim_efficiency(arch)
+            self.param_details.update(dim_eff_info)
+
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
@@ -99,6 +113,50 @@ class GEMM:
         bytes_bias_grad = self.M * self.N if self.bias else 0
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
+    @staticmethod
+    def dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u):
+        """
+        args:
+        num_cus: number of compute units (CUs) aka Streaming Multiprocessors (SMs)
+        M: M dimension of the matrix multiplication passed to the BLAS library
+        N: N dimension of the matrix multiplication passed to the BLAS library
+        K: K dimension of the matrix multiplication passed to the BLAS library
+        mt_m: macro tile size in M dimension
+        mt_n: macro tile size in N dimension
+        depth_u: depth tile size
+        """
+        # Tile quantization
+        M_pad = math.ceil(M / mt_m) * mt_m
+        N_pad = math.ceil(N / mt_n) * mt_n
+        tile_eff = (M * N) / (M_pad * N_pad)
+        
+        # Wave quantization
+        num_blocks = M_pad * N_pad // (mt_m * mt_n)
+        num_rounds = math.ceil(num_blocks / num_cus)
+        wq_eff = num_blocks / (num_rounds * num_cus)
+        
+        # Net dimensional efficiency = tile efficiency * wave efficiency
+        dim_eff = tile_eff * wq_eff
+        return {
+            'num_tiles': num_blocks,
+            'tile_eff': tile_eff,
+            'wq_eff': wq_eff,
+            'dim_eff': dim_eff,
+        }
+    
+    def dim_efficiency(self, arch_dict):
+        """
+        args:
+        arch_dict: dictionary with the architecture information
+        """
+        num_cus = arch_dict['num_cus']
+        # blas library swaps M and N from torch
+        M, N = self.N, self.M
+        K = self.K
+        mt_m = self.parsed_kernel_info['mt_m']
+        mt_n = self.parsed_kernel_info['mt_n']
+        depth_u = self.parsed_kernel_info['depth_u']
+        return self.dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u)
 
 class aten_mm(GEMM):
     """
