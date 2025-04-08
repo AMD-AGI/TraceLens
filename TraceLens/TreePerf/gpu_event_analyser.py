@@ -386,11 +386,11 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
     @staticmethod
     def get_just_gpu_events(events):
-        return filter(lambda _, v: len(v.get(GPUEventAnalyser.computation_key, {})) > 0, events.items())
+        return dict(filter(lambda v: len(v[1].get(GPUEventAnalyser.computation_key, {})) > 0, events.items()))
 
 
     def create_gpu_summary(self, group_kernels_by_name: bool = False):
-        all_events = self.get_gpu_event_lists(event_filter = GPUEventAnalyser.default_gpu_event_filter)
+        all_events = self.get_gpu_event_lists(event_filter = JaxGPUEventAnalyser.default_gpu_event_filter)
 
         # create an average across GPUs
         average_gpu_metrics = None
@@ -441,21 +441,21 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         return communication_events
 
     def process_communication_events_from_profile(self, messages: dict) -> dict:
-        all_events = self.get_gpu_event_lists(event_filter = GPUEventAnalyser.default_gpu_event_filter)
-        just_gpu_events = {self.get_just_gpu_events(all_events)}
+        all_events = self.get_gpu_event_lists(event_filter = JaxGPUEventAnalyser.default_gpu_event_filter)
+        just_gpu_events = self.get_just_gpu_events(all_events)
         all_comm_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.communication_key]]
         num_gpus = len(just_gpu_events)
 
         rccl_stats={}
 
         for i in all_comm_events:
-            tid=i["tid"]
+            pid=i["pid"]
             dur=i["dur"]
             op = i["args"]["hlo_op"]
             if op.startswith('reduce-scatter'):
                 op = '.'.join(op.split('.')[:2]) # need to remove sub-communications from reduce-scatter only
             current = rccl_stats.get(op, [math.inf] * num_gpus)
-            current[tid-1] = dur
+            current[pid-1] = dur
             rccl_stats[op] = current
 
 
@@ -521,7 +521,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
 
             # Calculate time spent in each bandwidth range
-            bw_thresholds = [0, 50, 100, 200, 300, 350]
+            bw_thresholds = [0, 50, 100, 200, 300, 350, 400]
             total_time = (df["latency_us"].sum()) / 1e6  # Convert to seconds
             time_in_ranges = []
             labels = []
@@ -540,18 +540,22 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             time_in_range = (df[mask]["latency_us"].sum()) / 1e6
             percentage = (time_in_range / total_time) * 100 if total_time > 0 else 0
             time_in_ranges.append(percentage)
+            range_data=pd.DataFrame(zip(labels, time_in_ranges), columns=("Bandwidth range", "Percentage of time"))
 
-            summary_data[collective]=(df, bandwidth_stats, bw_data, count_data, time_by_size)
+            summary_data[collective]=(df, bw_data, count_data, time_by_size, range_data)
+        return summary_data
 
 
     @staticmethod
     def summarize_gpu_communication_events(profile_filename, xla_filename):
+        # summarizes communication events from a single step
         from ..util import DataLoader
         data = DataLoader.load_data(profile_filename)
         events = data['traceEvents']
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
         comm_xla_events = my_gpu_event_analyser.process_communication_events_from_event_dump(xla_filename)
-        return my_gpu_event_analyser.process_communication_events_from_profile(comm_xla_events)
+        processed = my_gpu_event_analyser.process_communication_events_from_profile(comm_xla_events)
+        return my_gpu_event_analyser.summarize_communication_data(processed)
 
 
 
