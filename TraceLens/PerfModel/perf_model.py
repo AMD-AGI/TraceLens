@@ -285,31 +285,26 @@ class CONV:
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = self.param_details['input_shape'], self.param_details['filter_shape']
-        self.stride, self.padding, self.dilation, self.groups = (self.param_details[key] for key in ['stride', 'padding', 'dilation', 'groups'])
+        self.stride, self.padding, self.dilation, self.groups = ( self.param_details[key] for key in ['stride', 'padding', 'dilation', 'groups'])
         self.bias = self.param_details['bias']
         self.transposed_conv = self.param_details['transposed_conv']
-        self.output_padding = self.param_details['output_padding'] if self.transposed_conv else None
-        self.out_shape = CONV.get_output_shape(self.x_shape, self.w_shape, self.stride, self.padding, self.dilation, self.transposed_conv, self.output_padding)
+        self.out_shape = CONV.get_output_shape(self.x_shape, self.w_shape, self.stride, self.padding, self.dilation, self.transposed_conv)
 
     @staticmethod
-    def get_output_shape(input_shape, filter_shape, stride, padding, dilation, transposed_conv, output_padding):
+    def get_output_shape(input_shape, filter_shape, stride, padding, dilation, transposed_conv):
         x_spatial_shape, w_spatial_shape = input_shape[2:], filter_shape[2:]
         conv_ndims = len(x_spatial_shape)
         spatial_out_fn = CONV.get_conv_out_dim if not transposed_conv else CONV.get_transposed_conv_out_dim
-        out_filters = filter_shape[0] if not transposed_conv else filter_shape[1]
-
-        if not transposed_conv:
-            output_padding = (None,) * conv_ndims
         out_spatial_shape = tuple(spatial_out_fn(x_spatial_shape[i], w_spatial_shape[i],
-                                                 stride[i], padding[i], dilation[i], output_padding[i]) for i in range(conv_ndims))
-        return (input_shape[0], out_filters) + tuple(out_spatial_shape)
+                                                stride[i], padding[i], dilation[i]) for i in range(conv_ndims))
+        return (input_shape[0], filter_shape[0]) + tuple(out_spatial_shape)
 
     @staticmethod
     def t(shape):
         return (shape[1], shape[0]) + shape[2:]
 
     @staticmethod
-    def get_conv_out_dim(input_dim, kernel_size, stride, padding, dilation, output_padding=None):
+    def get_conv_out_dim(input_dim, kernel_size, stride, padding, dilation):
         return int(((input_dim + 2 * padding - dilation * (kernel_size - 1) - 1) / stride) + 1)
 
     @staticmethod
