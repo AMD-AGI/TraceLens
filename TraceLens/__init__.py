@@ -1,5 +1,6 @@
 from .TreePerf.tree_perf import TreePerfAnalyzer
 from .TreePerf.gpu_event_analyser import GPUEventAnalyser, PytorchGPUEventAnalyser, JaxGPUEventAnalyser
+from .TreePerf.jax_analyses import JaxAnalyses
 from .TraceFusion.trace_fuse import TraceFuse
 from .Trace2Tree.trace_to_tree import TraceToTree
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
@@ -11,6 +12,7 @@ __all__ = [
     "GPUEventAnalyser",
     "PytorchGPUEventAnalyser",
     "JaxGPUEventAnalyser",
+    "JaxAnalyses",
     "TraceFuse",
     "TraceToTree",
     "NcclAnalyser",
