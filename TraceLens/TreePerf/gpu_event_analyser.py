@@ -427,7 +427,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
     communication_events_map={"all-gather-start":"all-gather", "all-reduce-start":"all-reduce", "reduce-scatter":"reduce-scatter", "collective-permute-start": "collective-permute"}
 
     @staticmethod
-    def process_communication_events_from_event_dump(xla_file_name: str) -> dict:
+    def process_events_from_xla_dump(xla_file_name: str) -> dict:
         import re
         communication_events={key:[] for key in JaxGPUEventAnalyser.communication_events_map.keys()}
 
@@ -555,7 +555,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         data = DataLoader.load_data(profile_filename)
         events = data['traceEvents']
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
-        comm_xla_events = my_gpu_event_analyser.process_communication_events_from_event_dump(xla_filename)
+        comm_xla_events = my_gpu_event_analyser.process_events_from_xla_dump(xla_filename)
         processed = my_gpu_event_analyser.process_communication_events_from_profile(comm_xla_events)
         return my_gpu_event_analyser.summarize_communication_data(processed)
 
