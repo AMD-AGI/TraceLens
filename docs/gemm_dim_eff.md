@@ -41,13 +41,14 @@ Tiled computations divide matrices into smaller sub-blocks (tiles: `mt_m x mt_n`
 
 **Padded Dimensions:**
 
-\[ M_{\text{pad}} = \left\lceil \frac{M}{mt_m} \right\rceil \times mt_m, \quad N_{\text{pad}} = \left\lceil \frac{N}{mt_n} \right\rceil \times mt_n \]
+    M_pad = ceil(M / mt_m) × mt_m
+    N_pad = ceil(N / mt_n) × mt_n
 
 This padding introduces extra computations on regions that don’t contribute to the final result.
 
 **Tile Efficiency:**
 
-\[ \text{Tile Efficiency} = \frac{M \cdot N}{M_{\text{pad}} \cdot N_{\text{pad}}} \]
+    tile_eff = (M × N) / (M_pad × N_pad)
 
 Values < 1 indicate wasted computation due to padding.
 
@@ -59,15 +60,15 @@ GPUs execute tiles across many Compute Units (CUs) also known as Streaming multi
 
 **Total Tiles:**
 
-\[ B = \frac{M_{\text{pad}} \cdot N_{\text{pad}}}{mt_m \cdot mt_n} \]
+    B = (M_pad × N_pad) / (mt_m × mt_n)
 
 **Number of Waves:**
 
-\[ \text{num\_waves} = \left\lceil \frac{B}{\text{num\_cus}} \right\rceil \]
+    num_waves = ceil(B / num_cus)
 
 **Wave Efficiency:**
 
-\[ \text{wq\_eff} = \frac{B}{\text{num\_waves} \times \text{num\_cus}} \]
+    wq_eff = B / (num_waves × num_cus)
 
 ---
 
@@ -75,8 +76,7 @@ GPUs execute tiles across many Compute Units (CUs) also known as Streaming multi
 
 This is the combined impact:
 
-\[ \text{dim\_eff} = \text{tile\_eff} \times \text{wq\_eff} \]
-
+    dim_eff = tile_eff × wq_eff
 ---
 
 ## Why These Metrics Matter: Diagnosing Bottlenecks
