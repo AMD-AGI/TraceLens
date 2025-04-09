@@ -61,7 +61,7 @@ def parse_rocm_gemm(kernel_name):
         trans_b = False
     elif "_Bjlk_" in kernel_name:
         trans_b = True
-
+    
     # 2. Parse the macro tile size from the kernel name
     # Example: ''Cijk_Ailk_Bjlk_BBS_BH_Bias_HAS_SAV_UserArgs_MT64x16x64_MI16x16x1_SN_LDSB0_AFC...'
     # The macro tile size is usually represented by 'MT' followed by the tile dimensions.
@@ -84,7 +84,7 @@ def parse_rocm_gemm(kernel_name):
         'mt_n': mt_n,
         'depth_u': depth_u,
     }
-
+    
 def is_cuda_gemm(kernel_name):
     """
     Check if a kernel name matches the NVIDIA GEMM naming pattern:
