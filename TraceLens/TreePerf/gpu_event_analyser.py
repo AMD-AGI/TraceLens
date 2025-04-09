@@ -440,6 +440,8 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
         return communication_events
 
+    # this function only takes the minimum of each instance of the communication across all steps
+    # ideally it would be nice to aggregate for each step instead, if we can find the step from the messsage
     def process_communication_events_from_profile(self, messages: dict) -> dict:
         all_events = self.get_gpu_event_lists(event_filter = JaxGPUEventAnalyser.default_gpu_event_filter)
         just_gpu_events = self.get_just_gpu_events(all_events)
@@ -455,7 +457,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             if op.startswith('reduce-scatter'):
                 op = '.'.join(op.split('.')[:2]) # need to remove sub-communications from reduce-scatter only
             current = rccl_stats.get(op, [math.inf] * num_gpus)
-            current[pid-1] = dur
+            current[pid-1] = min(dur, current[pid-1])
             rccl_stats[op] = current
 
 
@@ -521,7 +523,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
 
             # Calculate time spent in each bandwidth range
-            bw_thresholds = [0, 50, 100, 200, 300, 350, 400]
+            bw_thresholds = [0, 50, 100, 200, 300, 400]
             total_time = (df["latency_us"].sum()) / 1e6  # Convert to seconds
             time_in_ranges = []
             labels = []
