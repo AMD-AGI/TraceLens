@@ -339,7 +339,7 @@ class aten_linear(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
-    def __init__(self, event):
+    def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = self.param_details['input_shape'], self.param_details['filter_shape']
@@ -526,7 +526,7 @@ class aten_conv_bwd(aten_conv):
         return self.bytes_bwd(bytes_per_element)
 class SDPA:
 
-    def __init__(self, event):
+    def __init__(self, event, arch=None, detail_level=0):
         # S = QK^T
         # P = softmax(S)
         # O = PV
@@ -661,7 +661,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
 
 class UnaryElementwise:
 
-    def __init__(self, event):
+    def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.nelems = prod(self.param_details['op_shape'])
@@ -708,7 +708,7 @@ class aten_unary_elementwise(UnaryElementwise):
                 "stride_input": stride_input, "stride_output": stride_output}
 class BinaryElementwise:
 
-    def __init__(self, event):
+    def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         self.param_details = self.get_param_details(event)
         broadcast_shape = self.get_broadcast_shape(self.param_details['shape_in1'], self.param_details['shape_in2'])
