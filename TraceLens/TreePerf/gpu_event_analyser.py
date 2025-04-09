@@ -48,40 +48,35 @@ class GPUEventAnalyser:
                 merged.append((start, end))
         return merged
 
-    @staticmethod
-    def subtract_intervals(interval, intervals_to_subtract):
-        """
-        Subtract a list of intervals (assumed non-overlapping and sorted) from a given interval.
-        Returns a list of intervals (as (start, end) tuples) that represent the parts of 'interval'
-        not covered by any of the intervals_to_subtract.
-        """
-        result = []
-        current_start, current_end = interval
-        for sub_start, sub_end in intervals_to_subtract:
-            # Skip if there is no overlap.
-            if sub_end <= current_start or sub_start >= current_end:
-                continue
-            # Add gap before the subtracting interval if any.
-            if sub_start > current_start:
-                result.append((current_start, sub_start))
-            current_start = max(current_start, sub_end)
-            if current_start >= current_end:
-                break
-        if current_start < current_end:
-            result.append((current_start, current_end))
-        return result
 
     @staticmethod
-    def subtract_intervalsA_from_B(merged_intervalA, merged_intervalB):
-        """
-        Subtract a set of non-overlapping, sorted intervals from another set of non-overlapping, sorted intervals.
-        Returns a list of intervals (as (start, end) tuples) that represent the parts of 'merged_intervalB'
+    def subtract_intervalsA_from_B(intervals_to_subtract, intervals):
+        """Subtract set of intervals from another set of intervals.
+
+        Intervals in sets are expected to be non-overlapping and sorted.
+
+        Returns a list of intervals as (start, end) tuples.
         """
         result = []
-        for b_interval in merged_intervalB:
-            # Subtract the entire set of merged_A from the current interval b_interval.
-            remaining_parts = GPUEventAnalyser.subtract_intervals(b_interval, merged_intervalA)
-            result.extend(remaining_parts)
+        a_idx = 0
+        a_len = len(intervals_to_subtract)
+
+        for b_start, b_end in intervals:
+            current = b_start
+            while a_idx < a_len and intervals_to_subtract[a_idx][1] <= b_start:
+                a_idx += 1
+
+            temp_idx = a_idx
+            while temp_idx < a_len and intervals_to_subtract[temp_idx][0] < b_end:
+                a_start, a_end = intervals_to_subtract[temp_idx]
+                if a_start > current:
+                    result.append((current, min(b_end, a_start)))
+                current = max(current, a_end)
+                if current >= b_end:
+                    break
+                temp_idx += 1
+            if current < b_end:
+                result.append((current, b_end))
 
         return result
 
