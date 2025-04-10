@@ -17,8 +17,8 @@ class JaxAnalyses:
         "FA BWD": FABwdKeys,
         "FA FWD": FAFwdKeys,
         "FA V3": FAV3Keys,
-        "ConvKeys": ConvKeys,
-        "TEKeys": TEKeys,
+        "Conv": ConvKeys,
+        "TE": TEKeys,
     }
     UncategorizedEventKey = "Uncategorized Events"
 
