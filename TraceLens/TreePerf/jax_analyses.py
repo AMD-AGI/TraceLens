@@ -18,8 +18,8 @@ class JaxAnalyses:
         "FA BWD": FABwdKeys,
         "FA FWD": FAFwdKeys,
         "FA V3": FAV3Keys,
-        "ConvKeys": ConvKeys,
-        "TEKeys": TEKeys,
+        "Conv": ConvKeys,
+        "TE": TEKeys,
     }
     UncategorizedEventKey = "Uncategorized Events"
 
@@ -131,10 +131,18 @@ class JaxAnalyses:
 
         event_key=str.join('|', JaxAnalyses.communication_events_map.keys())
         pattern = re.compile(f"^.*value:.*({event_key})\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
+<<<<<<< HEAD
         for line in open(xla_file_name, "r"):
             m=pattern.search(line)
             if m:
                 communication_events[m.group(1)].append([m.group(2), m.group(3), m.group(4)])
+=======
+        with open(xla_file_name, "r") as f:
+            for line in f:
+                m=pattern.search(line)
+                if m:
+                    communication_events[m.group(1)].append([m.group(2), m.group(3), m.group(4)])
+>>>>>>> eec26ca1f9ad1272db6b8969550032e40272f539
         return communication_events
 
     # filename here is the regular XLA file, not the "after-buffer-assignment" file
