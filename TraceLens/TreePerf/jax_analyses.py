@@ -1,7 +1,10 @@
-import pandas as pd
+import glob
 import math
-import string
+import os
+import pandas as pd
 import re
+import string
+
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
@@ -141,11 +144,13 @@ class JaxAnalyses:
     # filename here is the regular XLA file, not the "after-buffer-assignment" file
     @staticmethod
     def process_gemm_events_from_xla_dump(xla_file_name: str) -> dict:
-        op_processor = XlaOperatorProcessor()
-        with open(xla_file_name, "r") as f:
-            for line in f:
-                op_processor.process_line(line) # communication events might also return buffers that need to be processed
-        return op_processor.process_gemm_ops()
+        return JaxProfileProcessor.process_gemm_ops(JaxProfileProcessor.process_xla_file(xla_file_name))
+
+    @staticmethod
+    def process_gemm_events_from_pb(pb_file_name: str, module_name: str = "jit_train_step") -> dict:
+        return JaxProfileProcessor.process_gemm_ops(
+            JaxProfileProcessor.process_protobuf_file(pb_file_name, module_name))
+
 
     # this function only takes the minimum of each instance of the communication across all steps
     # ideally it would be nice to aggregate for each step instead, if we can find the step from the messsage
@@ -268,21 +273,64 @@ class JaxAnalyses:
         return JaxAnalyses.summarize_communication_data(processed)
 
     @staticmethod
-    def summarize_gpu_gemm_events(xla_filename):
+    def summarize_gpu_gemm_events_from_xla(xla_filename):
         gemms = JaxAnalyses.process_gemm_events_from_xla_dump(xla_filename)
-        return pd.DataFrame.from_dict(gemms, orient='index',  columns = XlaOperatorProcessor.gemm_columns)
+        return pd.DataFrame.from_dict(gemms, orient='index',  columns = JaxProfileProcessor.gemm_columns)
 
-class XlaOperatorProcessor:
-    def __init__(self):
-        self.hlo_ops = {}
+    @staticmethod
+    def summarize_gpu_gemm_events_from_pb(pb_filename, module_name: str = "jit_train_step"):
+        gemms = JaxAnalyses.process_gemm_events_from_pb(pb_filename, module_name)
+        return pd.DataFrame.from_dict(gemms, orient='index',  columns = JaxProfileProcessor.gemm_columns)
 
+class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Gemm type"]
 
-    def process_line(self, line: str):
+    @staticmethod
+    def process_xla_file(xla_file_name):
+        hlo_ops={}
+        with open(xla_file_name, "r") as f:
+            for line in f:
+                JaxProfileProcessor.process_line(hlo_ops, line)
+        return hlo_ops
+
+    @staticmethod
+    def process_protobuf_file(protobuf_file_name, module_name):
+        # look to see if the protobuf file has already been extracted
+        dir_name = os.path.dirname(protobuf_file_name) + "/"
+        hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
+        if len(hlo_filename) != 1:
+            tool_names= convert.xspace_to_tool_names([protobuf_file_name])
+            assert "graph_viewer^" in tool_names, "Graph viewer not in tool_names"
+        hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
+        assert len(hlo_filename) == 1
+        # need to make sure that the pb exists and get the numerical suffix into the module name
+        # and remove '.hlo_proto.pb'
+        module_name = os.path.splitext(os.path.splitext(os.path.basename(hlo_filename[0]))[0])[0]
+
+        hlo_ops={}
+        from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+        graph_viewer_options= {
+            'node_name': "",
+            'module_name': module_name,
+            'graph_width': 2,
+            'show_metadata': True,
+            'merge_fusion': True,
+            'type': "long_txt"
+        }
+        params = {'graph_viewer_options': graph_viewer_options }
+        data, _ = convert.xspace_to_tool_data(
+                [dir_name], "graph_viewer^", params)
+        data = data.decode("utf-8").split('\n')
+        for line in data:
+            JaxProfileProcessor.process_line(hlo_ops, line)
+        return hlo_ops
+
+    @staticmethod
+    def process_line(hlo_ops: dict, line: str):
         line_processed=line.strip()
         if ("metadata" in line_processed and not(re.search("\)$",line_processed)) and not(re.search("^ROOT",line_processed))) or "get-tuple-element" in line_processed or "bf16" in line_processed or "f8" in line_processed:
-            k,v=self.get_dict(line_processed)
-            self.hlo_ops[k]=v
+            k,v=JaxProfileProcessor.get_dict(line_processed)
+            hlo_ops[k]=v
             return True
         return False
 
@@ -297,27 +345,33 @@ class XlaOperatorProcessor:
         dict_line={}
         line=re.sub("\),",")",line)
         line=re.sub(", ",",",line)
+        line=re.sub(" %","%",line)
         backend_config=re.search("backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*",line)
         metadata=re.search("metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*",line)
         custom_call_target=re.search("custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*",line)
         line=line.split(" ")
         key=line[0]
         dict_line["output"]=line[2]
-        dict_line["operands"]=XlaOperatorProcessor.get_operands(line[3])
+        dict_line["operands"]=JaxProfileProcessor.get_operands(line[3])
         dict_line["type"]="rest"
         if metadata is not None:
             dict_line["metadata"]=metadata[0]
             if backend_config is not None:
                 dict_line["backend_config"]=backend_config[0]
             if custom_call_target is not None:
+                gemm_keys = ["matmul", "cublas"]
                 dict_line["custom_call_target"]=custom_call_target[0]
-                if "$f8" in custom_call_target[0]:
-                    dict_line["type"]="fp8gemm"
-                elif "cublas" in custom_call_target[0]:
-                    dict_line["type"]="gemm"
+                if any(k in dict_line["custom_call_target"] for k in gemm_keys):
+                    if "f8" in str(custom_call_target[0]):
+                        dict_line["type"]="fp8gemm"
+                    elif "f32" in str(custom_call_target[0]):
+                        dict_line["type"]="f32gemm"
+                    else:
+                        dict_line["type"]="bf16gemm"
         return (key,dict_line)
 
-    def process_gemm_ops(self):
+    @staticmethod
+    def process_gemm_ops(hlo_ops: dict):
         def get_sizes(str_size):
             match=(re.search(".*\[(.*)\]",str_size))
             if match is not None:
@@ -331,8 +385,8 @@ class XlaOperatorProcessor:
                 raise ValueError(str_size)
         dtypes=["bf16", "f16", "f32"]
         gemm_dict={}
-        for opname,op in self.hlo_ops.items():
-            if op["type"]=="gemm" or op["type"]=="fp8gemm":
+        for opname,op in hlo_ops.items():
+            if "gemm" in op["type"].lower():
                 if "backend_config" not in op:
                     raise ValueError("Gemm backend config information mnissing!", op)
                 backend_config=op["backend_config"]
@@ -356,7 +410,7 @@ class XlaOperatorProcessor:
 
                 operand_list=[]
                 for opid in op["operands"]:
-                    output = self.hlo_ops[opid]["output"]
+                    output = hlo_ops[opid]["output"]
                     if any(output.startswith(d) for d in dtypes + ["f8"]) and not output.endswith("[]"):
                         operand_list.append(opid)
                 if int(beta)==1 and len(operand_list)<3:
@@ -365,8 +419,8 @@ class XlaOperatorProcessor:
                     raise ValueError("Invalid operand list",op,operand_list)
                 c_order=re.search("\{[012,]*",sizes_string[0])[0].split("{")[1]
                 c=get_sizes(sizes_string[0])
-                a=get_sizes(self.hlo_ops[operand_list[0]]["output"])
-                b=get_sizes(self.hlo_ops[operand_list[1]]["output"])
+                a=get_sizes(hlo_ops[operand_list[0]]["output"])
+                b=get_sizes(hlo_ops[operand_list[1]]["output"])
                 batch=1
                 if a[int(lhs_dim)]!=b[int(rhs_dim)]:
                     raise ValueError("contracting dimension not matching",backend_config)
