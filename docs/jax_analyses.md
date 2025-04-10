@@ -1,4 +1,5 @@
 Analyze Jax computations including GEMM analysis
+Run this with the xplane.pb or json.gz and  jit_train_step.gfx942_gpu_after_optimizations.txt
 ```
 from TraceLens.TraceLens import JaxAnalyses
 import sys
@@ -18,6 +19,7 @@ if len(sys.argv)>2:
 ```
 
 Anylyze Jax communications
+Run this with the xplane.pb or json.gz and  jit_train_step.gfx942_gpu_after_optimizations-buffer-assignment.txt
 ```
 from TraceLens.TraceLens import JaxAnalyses
 import sys
