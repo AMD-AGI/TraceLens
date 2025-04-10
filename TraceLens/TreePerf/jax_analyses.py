@@ -1,6 +1,7 @@
 import pandas as pd
 import math
 import string
+import re
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
@@ -123,9 +124,9 @@ class JaxAnalyses:
 
     communication_events_map={"all-gather-start":"all-gather", "all-reduce-start":"all-reduce", "reduce-scatter":"reduce-scatter", "collective-permute-start": "collective-permute"}
 
+    # filename here is the "after-buffer-assignment" xla file
     @staticmethod
-    def process_events_from_xla_dump(xla_file_name: str) -> dict:
-        import re
+    def process_communication_events_from_xla_dump(xla_file_name: str) -> dict:
         communication_events={key:[] for key in JaxAnalyses.communication_events_map.keys()}
 
         event_key=str.join('|', JaxAnalyses.communication_events_map.keys())
@@ -134,8 +135,15 @@ class JaxAnalyses:
             m=pattern.search(line)
             if m:
                 communication_events[m.group(1)].append([m.group(2), m.group(3), m.group(4)])
-
         return communication_events
+
+    # filename here is the regular XLA file, not the "after-buffer-assignment" file
+    @staticmethod
+    def process_gemm_events_from_xla_dump(xla_file_name: str) -> dict:
+        op_processor = XlaOperatorProcessor()
+        for line in open(xla_file_name, "r"):
+            op_processor.process_line(line) # communication events might also return buffers that need to be processed
+        return op_processor.process_gemm_ops()
 
     # this function only takes the minimum of each instance of the communication across all steps
     # ideally it would be nice to aggregate for each step instead, if we can find the step from the messsage
@@ -253,6 +261,126 @@ class JaxAnalyses:
         data = DataLoader.load_data(profile_filename)
         events = data['traceEvents']
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
-        comm_xla_events = JaxAnalyses.process_events_from_xla_dump(xla_filename)
+        comm_xla_events = JaxAnalyses.process_communication_events_from_xla_dump(xla_filename)
         processed = JaxAnalyses.process_communication_events_from_profile(my_gpu_event_analyser, comm_xla_events)
         return JaxAnalyses.summarize_communication_data(processed)
+
+    @staticmethod
+    def summarize_gpu_gemm_events(xla_filename):
+        gemms = JaxAnalyses.process_gemm_events_from_xla_dump(xla_filename)
+        return pd.DataFrame.from_dict(gemms, orient='index',  columns = XlaOperatorProcessor.gemm_columns)
+
+class XlaOperatorProcessor:
+    def __init__(self):
+        self.hlo_ops = {}
+
+    gemm_columns = ["Batch", "M", "N", "K", "Beta", "Gemm type"]
+
+    def process_line(self, line: str):
+        line_processed=line.strip()
+        if ("metadata" in line_processed and not(re.search("\)$",line_processed)) and not(re.search("^ROOT",line_processed))) or "get-tuple-element" in line_processed or "bf16" in line_processed or "f8" in line_processed:
+            k,v=self.get_dict(line_processed)
+            self.hlo_ops[k]=v
+            return True
+        return False
+
+    @staticmethod
+    def get_operands(operands):
+        operands=re.sub(r'^.*?\(', '', operands)
+        operands=re.sub(r'\).*?$', '', operands)
+        return operands.split(",")
+
+    @staticmethod
+    def get_dict(line):
+        dict_line={}
+        line=re.sub("\),",")",line)
+        line=re.sub(", ",",",line)
+        backend_config=re.search("backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*",line)
+        metadata=re.search("metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*",line)
+        custom_call_target=re.search("custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*",line)
+        line=line.split(" ")
+        key=line[0]
+        dict_line["output"]=line[2]
+        dict_line["operands"]=XlaOperatorProcessor.get_operands(line[3])
+        dict_line["type"]="rest"
+        if metadata is not None:
+            dict_line["metadata"]=metadata[0]
+            if backend_config is not None:
+                dict_line["backend_config"]=backend_config[0]
+            if custom_call_target is not None:
+                dict_line["custom_call_target"]=custom_call_target[0]
+                if "$f8" in custom_call_target[0]:
+                    dict_line["type"]="fp8gemm"
+                elif "cublas" in custom_call_target[0]:
+                    dict_line["type"]="gemm"
+        return (key,dict_line)
+
+    def process_gemm_ops(self):
+        def get_sizes(str_size):
+            match=(re.search(".*\[(.*)\]",str_size))
+            if match is not None:
+                m=match.group(1)
+                s=m.split(",")
+                if len(s)>3:
+                    raise ValueError("tensor size is more than 3?",str_size)
+                return s
+
+            else:
+                raise ValueError(str_size)
+        dtypes=["bf16", "f16", "f32"]
+        gemm_dict={}
+        for opname,op in self.hlo_ops.items():
+            if op["type"]=="gemm" or op["type"]=="fp8gemm":
+                if "backend_config" not in op:
+                    raise ValueError("Gemm backend config information mnissing!", op)
+                backend_config=op["backend_config"]
+                beta=re.search("\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
+                lhs_dim=re.search("\"lhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
+                rhs_dim=re.search("\"rhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
+                outputs = op["output"]
+                if outputs.startswith("("):
+                    if not outputs.endswith(")"):
+                        raise ValueError("Mistmatched parens in outputs in ",outputs)
+                    output_list = outputs[1:-2].split("},")
+                    # this code assumes that the first output is the one we care about
+                    # we should be able to make this an RE
+                    sizes_string=[[i, d] for i in output_list for d in dtypes if i.startswith(d)]
+                    if len(sizes_string) != 1:
+                        raise ValueError("Did not find wide output ",op)
+                    sizes_string = sizes_string[0]
+                    sizes_string[0] = sizes_string[0] + "}" # restore the } that was removed
+                else:
+                    sizes_string = outputs
+
+                operand_list=[]
+                for opid in op["operands"]:
+                    output = self.hlo_ops[opid]["output"]
+                    if any(output.startswith(d) for d in dtypes + ["f8"]) and not output.endswith("[]"):
+                        operand_list.append(opid)
+                if int(beta)==1 and len(operand_list)<3:
+                    print("Bias is set, however on;y two operands found!",op)
+                if len(operand_list)>3 or len(operand_list) == 0:
+                    raise ValueError("Invalid operand list",op,operand_list)
+                c_order=re.search("\{[012,]*",sizes_string[0])[0].split("{")[1]
+                c=get_sizes(sizes_string[0])
+                a=get_sizes(self.hlo_ops[operand_list[0]]["output"])
+                b=get_sizes(self.hlo_ops[operand_list[1]]["output"])
+                batch=1
+                if a[int(lhs_dim)]!=b[int(rhs_dim)]:
+                    raise ValueError("contracting dimension not matching",backend_config)
+                k=a[int(lhs_dim)]
+                a.remove(k)
+                b.remove(k)
+                if len(c)>2:
+                    batch=c[0]
+                    a.remove(batch)
+                    b.remove(batch)
+                if "0,1" in c_order:
+                    n=b[0] if len(b) > 0 else 1
+                    m=a[0] if len(a) > 0 else 1
+                else:
+                    n=a[0] if len(a) > 0 else 1
+                    m=b[0] if len(b) > 0 else 1
+                gemm_dict[opname]=[int(batch),int(m),int(n),int(k),int(beta),op["type"]]
+
+        return gemm_dict
