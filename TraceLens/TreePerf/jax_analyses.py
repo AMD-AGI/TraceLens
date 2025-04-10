@@ -130,11 +130,11 @@ class JaxAnalyses:
 
         event_key=str.join('|', JaxAnalyses.communication_events_map.keys())
         pattern = re.compile(f"^.*value:.*({event_key})\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
-        for line in open(xla_file_name, "r"):
-            m=pattern.search(line)
-            if m:
-                communication_events[m.group(1)].append([m.group(2), m.group(3), m.group(4)])
-
+        with open(xla_file_name, "r") as f:
+            for line in f:
+                m=pattern.search(line)
+                if m:
+                    communication_events[m.group(1)].append([m.group(2), m.group(3), m.group(4)])
         return communication_events
 
     # this function only takes the minimum of each instance of the communication across all steps
