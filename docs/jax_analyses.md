@@ -1,3 +1,6 @@
+Jax analysis, particularly reading the protobuf files, has been tested with tensorboard 2.19.0 and tensorboard-plugin-profile 2.19.0 and protobuf 5.29.2.
+Other versions may not work
+
 Analyze Jax computations including GEMM analysis
 Run this with the xplane.pb or json.gz and jit_train_step.gfx942_gpu_after_optimizations.txt
 ```
