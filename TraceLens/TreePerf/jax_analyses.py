@@ -338,6 +338,9 @@ class JaxProfileProcessor:
     def get_operands(operands):
         operands=re.sub(r'^.*?\(', '', operands)
         operands=re.sub(r'\).*?$', '', operands)
+        operands_m=re.findall("[bfs][0-9\[\]\{,a-z]*}",operands)
+        if operands_m:
+            return operands_m
         return operands.split(",")
 
     @staticmethod
@@ -410,17 +413,21 @@ class JaxProfileProcessor:
 
                 operand_list=[]
                 for opid in op["operands"]:
-                    output = hlo_ops[opid]["output"]
-                    if any(output.startswith(d) for d in dtypes + ["f8"]) and not output.endswith("[]"):
+                    if ("[" in opid and "]" in opid):
+                        # pb format, shapes in operand list
                         operand_list.append(opid)
+                    else:
+                        output = hlo_ops[opid]["output"]
+                        if any(output.startswith(d) for d in dtypes + ["f8"]) and not output.endswith("[]"):
+                            operand_list.append(hlo_ops[opid]["output"])
                 if int(beta)==1 and len(operand_list)<3:
                     print("Bias is set, however on;y two operands found!",op)
                 if len(operand_list)>3 or len(operand_list) == 0:
                     raise ValueError("Invalid operand list",op,operand_list)
                 c_order=re.search("\{[012,]*",sizes_string[0])[0].split("{")[1]
                 c=get_sizes(sizes_string[0])
-                a=get_sizes(hlo_ops[operand_list[0]]["output"])
-                b=get_sizes(hlo_ops[operand_list[1]]["output"])
+                a=get_sizes(operand_list[0])
+                b=get_sizes(operand_list[1])
                 batch=1
                 if a[int(lhs_dim)]!=b[int(rhs_dim)]:
                     raise ValueError("contracting dimension not matching",backend_config)
