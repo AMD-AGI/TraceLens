@@ -295,6 +295,7 @@ class JaxProfileProcessor:
 
     @staticmethod
     def process_protobuf_file(protobuf_file_name, module_name):
+        from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
         # look to see if the protobuf file has already been extracted
         dir_name = os.path.dirname(protobuf_file_name) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
@@ -308,7 +309,6 @@ class JaxProfileProcessor:
         module_name = os.path.splitext(os.path.splitext(os.path.basename(hlo_filename[0]))[0])[0]
 
         hlo_ops={}
-        from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
         graph_viewer_options= {
             'node_name': "",
             'module_name': module_name,
