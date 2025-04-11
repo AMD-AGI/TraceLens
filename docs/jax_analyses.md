@@ -1,5 +1,5 @@
 Analyze Jax computations including GEMM analysis
-Run this with the xplane.pb or json.gz and  jit_train_step.gfx942_gpu_after_optimizations.txt
+Run this with the xplane.pb or json.gz and jit_train_step.gfx942_gpu_after_optimizations.txt
 ```
 from TraceLens.TraceLens import JaxAnalyses
 import sys
@@ -16,6 +16,21 @@ print(additional_events)
 if len(sys.argv)>2:
     print("GEMMs")
     print(JaxAnalyses.summarize_gpu_gemm_events(sys.argv[2]))
+```
+
+Standalone Jax GEMM analysis from protobuf (from profiler) or xla dump (jit_train_step.gfx942_gpu_after_optimizations.txt):
+```
+from TraceLens.TraceLens import JaxAnalyses
+import sys
+import pandas as pd
+pd.set_option('display.max_rows', None)
+print("GEMMs")
+filename = sys.argv[1]
+if filename.endswith("pb"):
+    gemms = JaxAnalyses.summarize_gpu_gemm_events_from_pb(filename)
+else:
+    gemms = JaxAnalyses.summarize_gpu_gemm_events_from_xla(filename)
+print(gemms)
 ```
 
 Anylyze Jax communications
