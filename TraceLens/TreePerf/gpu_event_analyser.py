@@ -22,6 +22,7 @@
 
 import pandas as pd
 import itertools
+import tqdm
 
 class GPUEventAnalyser:
     def __init__(self, events):
@@ -233,7 +234,7 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 
 # Jax GPU event analyser supports multiple GPUs
 class JaxGPUEventAnalyser(GPUEventAnalyser):
-    def get_gpu_event_lists(self, gpu_pid = None):
+    def get_gpu_event_lists(self, gpu_pid = None, event_filter = None):
         """
         Return a dictionory of GPU to dictionaries of lists of events,
         categorized by event types
@@ -249,6 +250,8 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         # the events list contains gpu events as well as host side events
         return_dict = {}
         for event in self.events:
+            if event_filter is not None and not event_filter(event):
+                continue
             pid = event.get('pid')
             # jax uses pid > 100 for CPU evens
             # skip some dictionary setup events that do not have ts
@@ -262,7 +265,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                         event['t_end'] = event['ts'] + event['dur']
                     cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
                     name = event.get('name')
-                    if name.startswith('Copy') or name.startswith('Memcpy'):
+                    if (any(name.lower().startswith(x) for x in ['copy', 'memcpy', 'memset'])):
                         cur_dict[GPUEventAnalyser.memcpy_key].append(event)
                     elif name.startswith('nccl'):
                         cur_dict[GPUEventAnalyser.communication_key].append(event)
@@ -296,12 +299,13 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
         return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
 
-    def get_breakdown_df_multigpu(self):
-        events = self.get_gpu_event_lists()
+    def get_breakdown_df_multigpu(self, event_filter = None):
+        events = self.get_gpu_event_lists(event_filter = event_filter)
         gpu_frames = {}
-        for gpu_id, cur_events in events.items():
-            if gpu_id <= 100:
-                self.verify_dict_gpu_event_lists(cur_events)
-                cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
-                gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
+        print("Processing events by GPU")
+        for gpu_id, cur_events in tqdm.tqdm(events.items()):
+            self.verify_dict_gpu_event_lists(cur_events)
+            cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
+            gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
         return gpu_frames
+
