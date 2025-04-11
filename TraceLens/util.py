@@ -17,8 +17,7 @@ class DataLoader:
             with open(filename_path, 'r') as fin:
                 data = fin.read()
         else:
-            print("Unknown file", filename_path)
-            return None
+            raise ValueError("Unknown file type",filename_path)
         if (save_preprocessed):
             with open(filename_path.replace("pb", "processed.json"), 'w') as writefile:
                 writefile.write(data)
