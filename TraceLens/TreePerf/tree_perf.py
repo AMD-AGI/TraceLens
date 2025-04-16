@@ -358,7 +358,7 @@ class TreePerfAnalyzer:
         return df_agg
 
     def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
+        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
         gpu_event_analyser = GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
