@@ -18,6 +18,7 @@ __all__ = [
     "TraceToTree",
     "NcclAnalyser",
     "PerfModel",
+    "EventReplay",
     "EventReplayer",
     "DataLoader"
 ]

@@ -20,31 +20,21 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# Right now everything is very manually done, but maybe it can be improved
+# checkout this as it might be useful: https://github.com/pytorch/pytorch/blob/main/torch/fx/operator_schemas.py
+
+from pprint import pprint
 from typing import Dict, Any, List, Optional, Tuple
 import re
+import warnings
+import time
 try:
     import torch
 except ImportError:
     raise ImportError("PyTorch is required for EventReplayer")
 
-list_profile_tensor_types = ['float', 'c10::Half', 'c10::BFloat16']
-dict_profile2torchdtype = {
-    'float': torch.float32,
-    'c10::Half': torch.float16,
-    'c10::BFloat16': torch.bfloat16,
-}
-
-from dataclasses import dataclass
-@dataclass
-class DummyTensor:
-    """
-    A class to represent a dummy tensor.
-    """
-    shape: List[int]
-    dtype: str
-    strides: List[int]
-
-
+from .utils import (TensorCfg, build_tensor, benchmark_func,
+                    list_profile_tensor_types, dict_profile2torchdtype)
 class EventReplayer:
     def __init__(self, event: Dict[str, Any], device: str = 'cuda', lazy: bool = False, verbose: bool = False):
         """
@@ -67,9 +57,9 @@ class EventReplayer:
         """
         if self.verbose: print(f"Preparing {self.event['name']} event for replay")
         self.matched_schema = EventReplayer._search_schema(self.event, self.verbose)
-        self.event_replay_IR = EventReplayer._get_event_replay_IR(self.event, self.matched_schema)
+        self.event_replay_IR = EventReplayer._get_event_replay_IR(self.event, self.matched_schema, self.verbose)
         if not self.lazy:
-            print("setting up args and kwargs")
+            if self.verbose: print("setting up args and kwargs")
             self.args, self.kwargs = EventReplayer._get_args_kwargs(self.event_replay_IR, device=self.device)
     
     def replay(self):
@@ -81,7 +71,7 @@ class EventReplayer:
         
         # Call the function with the arguments
         if self.lazy:
-            args, kwargs = EventReplayer._get_args_kwargs(self.event_replay_IR)
+            args, kwargs = EventReplayer._get_args_kwargs(self.event_replay_IR, device=self.device)
         else:
             args, kwargs = self.args, self.kwargs
         
@@ -97,14 +87,21 @@ class EventReplayer:
         if verbose:
             print(f"Found {len(op_schemas)} schemas for {event['name']}:")
             for schema in op_schemas:
-                print(f"\t{schema}")
+                pprint(str(schema))
+            print('-' * 80)
+        
         for schema in op_schemas:
             if verbose:
-                print(f"Checking schema: {schema}")
+                print(f"Checking schema:")
+                pprint(str(schema))
             if EventReplayer._is_schema_match(event, schema, verbose):
                 if verbose:
-                    print(f"Schema matched: {schema}")
+                    print(f"Schema matched successfully")
+                    print("-" * 80)
                 return schema
+            if verbose:
+                print('-' * 80)
+            
         raise ValueError(f"Cannot find matching schema for {event['name']}. Please check the event data and schema.")
     
     @staticmethod
@@ -128,10 +125,10 @@ class EventReplayer:
         for idx in range(len(event['args']['Input type'])):
             profiled_type = event['args']['Input type'][idx]
             schema_type = full_args_schema[idx]['arg_type']
-            # if verbose:
-            print(f"Checking arg {idx}:")
-            print(f"\tSchema type: {schema_type}")
-            print(f"\tProfiled type: {profiled_type}")
+            if verbose:
+                print(f"Checking arg {idx}:")
+                print(f"\tSchema type: {schema_type}")
+                print(f"\tProfiled type: {profiled_type}")
             # Rules for matching types
             # 1. for tensor types, schema type should be 'Tensor' and profiled type can be any of the tensor types 'float', 'c10::Half', 'c10::BFloat16' ...
             # 2. for bool types, schema type should be 'bool' and profiled type is 'Scalar'. So we need to further check the concrete Inputs if it only contains 'true' or 'false'
@@ -141,6 +138,11 @@ class EventReplayer:
             # 6. for bool[] types, schema type should be 'bool[]' and profiled type is 'ScalarList'. So we need to further check the concrete Inputs if it is a list of 'true' or 'false'
             # 7. for tensor[] types, we cannot replay the event as the tensor shapes are not provided in the event. So we need to skip this case. Maybe suggest PyTorch to add this in the future.
             is_match = True
+            # if the schema type ends with '?' then the profiled type can be blank as well
+            if schema_type.endswith('?'):
+                schema_type = schema_type[:-1]
+                if profiled_type == '':
+                    continue
             if schema_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
                 if profiled_type not in list_profile_tensor_types:
                     is_match = False
@@ -152,7 +154,7 @@ class EventReplayer:
                 if profiled_type != 'Scalar':
                     is_match = False
                 profiled_value = event['args']['Concrete Inputs'][idx]
-                if not profiled_value.isdigit():
+                if not profiled_value.lstrip('-').isdigit():
                     is_match = False
             elif schema_type in ['float', 'Scalar']:
                 if profiled_type != 'Scalar':
@@ -163,11 +165,12 @@ class EventReplayer:
                 except ValueError:
                     is_match = False
             elif schema_type.startswith('int[') or schema_type.startswith('SymInt['):
+                # custom dev debugging
                 if profiled_type != 'ScalarList':
                     is_match = False
                 profiled_value = event['args']['Concrete Inputs'][idx]
                 profiled_value_cleaned = [x.strip() for x in profiled_value.strip()[1:-1].split(',')]
-                if not all(x.isdigit() for x in profiled_value_cleaned):
+                if not all(x.lstrip('-').isdigit() for x in profiled_value_cleaned):
                     is_match = False
             elif schema_type.startswith('bool['):
                 if profiled_type != 'ScalarList':
@@ -179,7 +182,10 @@ class EventReplayer:
             elif schema_type.startswith('Tensor['):
                 raise ValueError(f"Tensor list type not supported: {schema_type} as the tensor shapes are not provided in the event")
             else:
-                raise ValueError(f"Unknown schema type: {schema_type}")
+                # raise ValueError(f"Unknown schema type: {schema_type}")
+                # warning: if the schema type is not in the list, we will skip this case
+                warnings.warn(f"Unknown schema type: {schema_type}. Skipping this case.")
+                is_match = False
             if not is_match:
                 if verbose:
                     print(f"Schema type {schema_type} does not match profiled type {profiled_type}")
@@ -188,7 +194,7 @@ class EventReplayer:
         
     
     @staticmethod
-    def _get_event_replay_IR(event: Dict[str, Any], schema: torch._C.FunctionSchema):
+    def _get_event_replay_IR(event: Dict[str, Any], schema: torch._C.FunctionSchema, verbose: bool = False) -> Dict[str, Any]:
         """
         Get the event replay IR from the event and schema.
         
@@ -217,36 +223,49 @@ class EventReplayer:
         """
         op_name, pos_args_schema, kwargs_schema, return_type = EventReplayer.parse_schema_string(schema)
         full_args_schema = pos_args_schema + kwargs_schema
-        pos_args = []
-        kwargs = {}
+        list_pos_args = []
+        list_kwargs = []
         for idx in range(len(event['args']['Input type'])):
             arg_name = full_args_schema[idx]['arg_name']
             arg_type = full_args_schema[idx]['arg_type']
-            if arg_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
-                value = DummyTensor(shape=event['args']['Input Dims'][idx],
-                                                dtype=event['args']['Input type'][idx],
-                                                strides=event['args']['Input Strides'][idx])
+
+            if arg_type.endswith('?') and event['args']['Input type'][idx] == '':
+                value = None
             else:
-                arg_str = event['args']['Concrete Inputs'][idx]
-                if arg_type == 'bool':
-                    value = arg_str.lower() == 'true'
-                elif arg_type in ['int', 'SymInt']:
-                    value = int(arg_str)
-                elif arg_type in ['float', 'Scalar']:
-                    value = float(arg_str)
-                elif arg_type.startswith('int[') or arg_type.startswith('SymInt['):
-                    value = [int(x.strip()) for x in arg_str.strip()[1:-1].split(',')]
-                elif arg_type.startswith('bool['):
-                    value = [x.strip().lower() == 'true' for x in arg_str.strip()[1:-1].split(',')]
+                if arg_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
+                    value = TensorCfg(shape=event['args']['Input Dims'][idx],
+                                                    dtype=event['args']['Input type'][idx],
+                                                    strides=event['args']['Input Strides'][idx])
                 else:
-                    raise ValueError(f"Unsupported arg type: {arg_type}")
+                    arg_str = event['args']['Concrete Inputs'][idx]
+                    if arg_type in ['bool', 'bool?']:
+                        value = arg_str.lower() == 'true'
+                    elif arg_type in ['int', 'SymInt']:
+                        value = int(arg_str)
+                    elif arg_type in ['float', 'float?', 'Scalar']:
+                        value = float(arg_str)
+                    elif arg_type.startswith('int[') or arg_type.startswith('SymInt['):
+                        value = [int(x.strip()) for x in arg_str.strip()[1:-1].split(',')]
+                    elif arg_type.startswith('bool['):
+                        value = [x.strip().lower() == 'true' for x in arg_str.strip()[1:-1].split(',')]
+                    else:
+                        raise ValueError(f"Unsupported arg type: {arg_type}")
+            if verbose:
+                print(f"Processing arg {idx}: {arg_name} ({arg_type})")
+                print(f"Profiled args type: {event['args']['Input type'][idx]}")
+                print(f"Profiled args dims: {event['args']['Input Dims'][idx]}")
+                print(f"Profiled args strides: {event['args']['Input Strides'][idx]}")
+                print(f"Concrete Inputs: {event['args']['Concrete Inputs'][idx]}")
+                print(f"Parsed value: {value}")
+                print(f"Positional/Keyword: {'Positional' if idx < len(pos_args_schema) else 'Keyword'}")
+                print('-' * 80)
             if idx < len(pos_args_schema):
-                pos_args.append(value)
+                list_pos_args.append({'arg_name': arg_name, 'arg_type': arg_type, 'value': value})
             else:
-                kwargs[arg_name] = value
+                list_kwargs.append({'arg_name': arg_name, 'arg_type': arg_type, 'value': value})
         return {
-            'pos_args': pos_args,
-            'kwargs': kwargs
+            'list_pos_args': list_pos_args,
+            'list_kwargs': list_kwargs
         }
         
     
@@ -262,35 +281,21 @@ class EventReplayer:
             (List[torch.Tensor], Dict[str, Any]): The positional arguments and keyword arguments.
         """
         pos_args = []
-        for arg in event_replay_IR['pos_args']:
-            if isinstance(arg, DummyTensor):
-                pos_args.append(EventReplayer.build_tensor(arg))
+        for arg in event_replay_IR['list_pos_args']:
+            value = arg['value']
+            if isinstance(value, TensorCfg):
+                pos_args.append(build_tensor(value, device=device))
             else:
-                pos_args.append(arg)
+                pos_args.append(value)
         kwargs = {}
-        for key, value in event_replay_IR['kwargs'].items():
-            if isinstance(value, DummyTensor):
-                kwargs[key] = EventReplayer.build_tensor(value)
+        for arg in event_replay_IR['list_kwargs']:
+            value = arg['value']
+            if isinstance(value, TensorCfg):
+                kwargs[arg['arg_name']] = build_tensor(value, device=device)
             else:
-                kwargs[key] = value
+                kwargs[arg['arg_name']] = value
         return pos_args, kwargs
     
-    @staticmethod
-    def build_tensor(dummy_tensor: DummyTensor, device: str = 'cuda') -> torch.Tensor:
-        """
-        Build a tensor from the dummy tensor.
-        
-        Args:
-            dummy_tensor (DummyTensor): The dummy tensor.
-        
-        Returns:
-            torch.Tensor: The built tensor.
-        """
-        # random normally distributed tensor
-        dtype = dict_profile2torchdtype[dummy_tensor.dtype]
-        tensor = torch.randn(dummy_tensor.shape, dtype=dtype, device=device)
-        tensor = tensor.as_strided(size=dummy_tensor.shape, stride=dummy_tensor.strides)
-        return tensor
 
     @staticmethod
     def parse_schema_string(schema) -> Tuple[str, List[Tuple[str, str, Optional[str], bool]], str]:
@@ -323,3 +328,33 @@ class EventReplayer:
             kwargs.append({'arg_type': arg_type, 'arg_name': arg_name, 'default': default})
         
         return op_name.strip(), args, kwargs, return_type.strip()
+
+    def get_repro_info(self) -> Dict[str, Any]:
+        """
+        Extracts the minimal, serializable information needed to reproduce the event call.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing the operator name and the replay IR.
+                            Suitable for JSON serialization using the custom encoder.
+        """
+        # return {
+        #     'op_name': self.event['name'],
+        #     'replay_ir': self.event_replay_IR
+        #     # No device info here - device is decided by the runner
+        # }
+        dict_repro_info = {}
+        dict_repro_info['op_name'] = self.event['name']
+        list_pos_args, list_kwargs = self.event_replay_IR['list_pos_args'], self.event_replay_IR['list_kwargs']
+        # Convert TensorCfg to dict for JSON serialization
+        list_pos_args_copy, list_kwargs_copy = list_pos_args.copy(), list_kwargs.copy()
+        for idx, val in enumerate(list_pos_args_copy):
+            if isinstance(val['value'], TensorCfg):
+                list_pos_args_copy[idx]['value'] = val['value'].__dict__
+        for idx, val in enumerate(list_kwargs_copy):
+            if isinstance(val['value'], TensorCfg):
+                list_kwargs_copy[idx]['value'] = val['value'].__dict__
+        dict_repro_info['replay_ir'] = {
+            'list_pos_args': list_pos_args_copy,
+            'list_kwargs': list_kwargs_copy
+        }
+        return dict_repro_info
