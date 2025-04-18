@@ -127,11 +127,22 @@ class TreePerfAnalyzer:
         non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
+        if hasattr(perf_model, "dim_efficiency"):
+            dim_effs = perf_model.dim_efficiency(arch_dict=self.arch)
+            simulated_kernel_time = dim_effs['simulated_time']
+        else:
+            if bytes_moved and bytes_moved > 0:
+                simulated_kernel_time = bytes_moved / self.arch['mem_bw_gbps']
+            else:
+                simulated_kernel_time = 1 # For avoiding division by 0.
+
         # Return metrics
         dict_metrics = {
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
+            'Simulated Kernel Time (us)': simulated_kernel_time,
             'TFLOPS/s': tflops_per_s,
+            'Simulated TFLOPS/s': gflops / (1000 * simulated_kernel_time)
         }
         if non_data_mov:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
@@ -226,6 +237,7 @@ class TreePerfAnalyzer:
         dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
+        dict_agg['Simulated TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
@@ -234,6 +246,7 @@ class TreePerfAnalyzer:
         if 'kernel_names' in df_perf_metrics.columns:
             dict_agg['kernel_names'] = 'first'
         dict_agg['Kernel Time (µs)'] = agg_metrics + ['sum']
+        #dict_agg['Simulated Kernel Time (us)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
         dict_agg['UID'] = 'first'
 
@@ -250,6 +263,7 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         df_perf_metrics_summary.sort_values(by='Kernel Time (µs)_sum', ascending=False, inplace=True)
+        #df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
 
         return df_perf_metrics_summary

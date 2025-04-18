@@ -10,7 +10,8 @@ def main():
     parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')
     args = parser.parse_args()
 
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_path)
+    arch = {'num_cus': 304, 'name': 'mi300x', 'gemm_units_per_cu': 4, 'freq_mhz': 1000, 'mem_bw_gbps': 4959}
+    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_path, arch=arch)
 
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()

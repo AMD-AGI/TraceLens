@@ -22,6 +22,9 @@
 
 from math import prod
 import math
+import os
+import re
+
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
@@ -60,6 +63,7 @@ class GEMM:
     This is the base class for all GEMM operations.
     If you want to add a new GEMM operation, you should inherit from this class.
     """
+    cache_gemm_results = {}  # This is used to cache gemm results
     def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         self.param_details = self.get_param_details(event)
@@ -136,7 +140,41 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u):
+    def get_simulated_time(M, N, K, arch, param_details, tile_eff, wq_eff):
+        # Create a unique key for the cache based on dimensions and architecture
+        cache_key = (M, N, K, arch['name'], arch['freq_mhz'])
+
+        # Calculate ideal time
+        ideal_ops_per_cycle_simd = { 4 : 256, 2 : 2048, 1 : 4096 }
+        ideal_time = 2 * M * N * K / (arch['num_cus'] * arch['gemm_units_per_cu'] *\
+                                      ideal_ops_per_cycle_simd[name2bpe(param_details['dtype_A_B'][0])]) \
+                                      / arch['freq_mhz']
+
+        # Check if the result is already in the cache
+        gemm_cache = GEMM.cache_gemm_results
+        if cache_key in GEMM.cache_gemm_results:
+            simulated_time = GEMM.cache_gemm_results[cache_key]
+        else:
+            if os.path.isdir('gemmologist'):
+                python_path = '.venv3.10\\Scripts\\python.exe'
+                cmd = 'cd gemmologist && %s bin/gemmologist.py -m %d -n %d -k %d -d 1 -a %s --freq_mhz %d --topn 1' % \
+                      (python_path, M, N, K, arch['name'], arch['freq_mhz'])
+                log = re.findall("Time=\\d+\\.\\d+", os.popen(cmd).read())
+
+                if len(log) > 0:
+                    simulated_time = float(re.sub("Time=", "", str(log[0])))
+                    # Store the result in the cache
+                    GEMM.cache_gemm_results[cache_key] = simulated_time
+                else:
+                    raise AssertionError("Not able to simulate in gemmologist")
+            else:
+                simulated_time = ideal_time * tile_eff * wq_eff
+
+        dim_eff = ideal_time / simulated_time
+        return simulated_time, dim_eff
+
+    @staticmethod
+    def dim_efficiency_func(arch, param_details, M, N, K, mt_m, mt_n, depth_u):
         """
         args:
         num_cus: number of compute units (CUs) aka Streaming Multiprocessors (SMs)
@@ -151,19 +189,20 @@ class GEMM:
         M_pad = math.ceil(M / mt_m) * mt_m
         N_pad = math.ceil(N / mt_n) * mt_n
         tile_eff = (M * N) / (M_pad * N_pad)
-        
+
         # Wave quantization
         num_blocks = M_pad * N_pad // (mt_m * mt_n)
-        num_rounds = math.ceil(num_blocks / num_cus)
-        wq_eff = num_blocks / (num_rounds * num_cus)
-        
-        # Net dimensional efficiency = tile efficiency * wave efficiency
-        dim_eff = tile_eff * wq_eff
+        num_rounds = math.ceil(num_blocks / arch['num_cus'])
+        wq_eff = num_blocks / (num_rounds * arch['num_cus'])
+
+        simulated_time, dim_eff = GEMM.get_simulated_time(M, N, K, arch, param_details, tile_eff, wq_eff)
+
         return {
             'num_tiles': num_blocks,
             'tile_eff': tile_eff,
             'wq_eff': wq_eff,
             'dim_eff': dim_eff,
+            'simulated_time': simulated_time
         }
     
     def dim_efficiency(self, arch_dict):
@@ -171,14 +210,13 @@ class GEMM:
         args:
         arch_dict: dictionary with the architecture information
         """
-        num_cus = arch_dict['num_cus']
         # blas library swaps M and N from torch
         M, N = self.N, self.M
         K = self.K
         mt_m = self.parsed_kernel_info['mt_m']
         mt_n = self.parsed_kernel_info['mt_n']
         depth_u = self.parsed_kernel_info['depth_u']
-        return self.dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u)
+        return self.dim_efficiency_func(arch_dict, self.param_details, M, N, K, mt_m, mt_n, depth_u)
 
 class aten_mm(GEMM):
     """
