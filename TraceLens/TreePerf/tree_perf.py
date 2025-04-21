@@ -233,8 +233,9 @@ class TreePerfAnalyzer:
         # this is a quick fix, we need to veriify it matches in the group
         if 'kernel_names' in df_perf_metrics.columns:
             dict_agg['kernel_names'] = 'first'
-        dict_agg['Kernel Time (µs)'] = ['sum']
+        dict_agg['Kernel Time (µs)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
+        dict_agg['UID'] = 'first'
 
         # Identify parameter columns for grouping
         param_cols = [col for col in df_perf_metrics.columns if col.startswith('param: ')]

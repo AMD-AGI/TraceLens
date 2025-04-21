@@ -6,6 +6,7 @@ from .Trace2Tree.trace_to_tree import TraceToTree
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
 from .util import DataLoader
 from .PerfModel import *
+from .EventReplay.event_replay import EventReplayer
 
 __all__ = [
     "TreePerfAnalyzer",
@@ -17,5 +18,7 @@ __all__ = [
     "TraceToTree",
     "NcclAnalyser",
     "PerfModel",
+    "EventReplay",
+    "EventReplayer",
     "DataLoader"
 ]
