@@ -51,7 +51,7 @@ def summarize_tensor(tensor: torch.Tensor) -> str:
 def benchmark_func(func, device, warmup=50, avg_steps=100):
     """
     Benchmark a function with warmup and average steps.
-    Disclaimer: This method would be innacurate for very short ops.
+    Disclaimer: This method would be inaccurate for very short ops.
     Args:
         func (callable): The function to benchmark.
         warmup (int): Number of warmup iterations.
