@@ -228,8 +228,9 @@ class TreePerfAnalyzer:
         # this is a quick fix, we need to veriify it matches in the group
         if 'kernel_names' in df_perf_metrics.columns:
             dict_agg['kernel_names'] = 'first'
-        dict_agg['Kernel Time (µs)'] = ['sum']
+        dict_agg['Kernel Time (µs)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
+        dict_agg['UID'] = 'first'
 
         # Identify parameter columns for grouping
         param_cols = [col for col in df_perf_metrics.columns if col.startswith('param: ')]
@@ -353,7 +354,7 @@ class TreePerfAnalyzer:
         return df_agg
 
     def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
+        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
         gpu_event_analyser = GPUEventAnalyser.create(kernel_events, self.jax)
         df = gpu_event_analyser.get_breakdown_df()
         return df
