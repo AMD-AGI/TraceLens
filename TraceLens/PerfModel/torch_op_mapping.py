@@ -27,6 +27,7 @@ op_to_perf_model_class_map = {
     'aten::mm': perf_model.aten_mm,
     'aten::addmm': perf_model.aten_addmm,
     'aten::_scaled_mm': perf_model.aten_scaled_mm,
+    'aten::bmm': perf_model.aten_bmm,
     'FlashAttnFunc': perf_model.flash_attention,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
     'aten::convolution': perf_model.aten_conv,
