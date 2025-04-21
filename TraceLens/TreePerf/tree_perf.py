@@ -492,26 +492,16 @@ class TreePerfAnalyzer:
         if self.with_python_stack:
             raise ValueError("This method does not support traces with Python stack events at the moment.")
         kernel_details_list = []
-        unlinked_count = 0
-        total_kernel_count = 0
 
         # Extract details for all kernel events.
         for event in self.tree.events:
             if event.get('cat') != 'kernel':
                 continue
-            total_kernel_count += 1
             details = self.get_kernel_details(event, 
                                                 launcher_detail=launcher_detail,
                                                 cpu_op_detail=cpu_op_detail,
                                                 nn_module_detail=nn_module_detail)
             kernel_details_list.append(details)
-            if details.get('Launcher UID') is None:
-                unlinked_count += 1
-
-        if unlinked_count > 0:
-            warnings.warn(
-                f"Found {unlinked_count}/{total_kernel_count} kernels without host links. "
-            )
 
         df_kernel_view = pd.DataFrame(kernel_details_list)
         for col in df_kernel_view.columns:
