@@ -25,11 +25,6 @@ import itertools
 import tqdm
 
 class GPUEventAnalyser:
-    @staticmethod
-    def create(events, jax: bool = False):
-        return JaxGPUEventAnalyser(events) if jax else PytorchGPUEventAnalyser(events)
-
-
     def __init__(self, events):
         """
         Initialize with a list of event dictionaries.

@@ -30,7 +30,7 @@ import warnings
 import pprint
 import pandas as pd
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
-from .gpu_event_analyser import GPUEventAnalyser
+from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..Trace2Tree.trace_to_tree import TraceToTree
 from ..util import DataLoader
 
@@ -43,10 +43,11 @@ class TreePerfAnalyzer:
         data = DataLoader.load_data(profile_filepath)
 
         tree = TraceToTree(data['traceEvents'])
-        return TreePerfAnalyzer(tree, *args, **kwargs)
+        return TreePerfAnalyzer(tree, jax=jax, *args, **kwargs)
 
     def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False):
         self.jax = jax
+        self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
         self.add_python_func = add_python_func
         self.arch = arch
@@ -102,12 +103,12 @@ class TreePerfAnalyzer:
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
         if len(list_kernels) > 0:
-            busy_kernel_time = GPUEventAnalyser.create(list_kernels, self.jax).compute_metrics()['busy_time']
+            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = GPUEventAnalyser.create(list_non_data_mov_kernels, self.jax).compute_metrics()['busy_time']
+            busy_non_data_mov_time = self.GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -275,7 +276,7 @@ class TreePerfAnalyzer:
                         kernel_launcher = True
                         list_kernels.append(grand_child)
             if kernel_launcher:
-                event['total_direct_kernel_time'] = GPUEventAnalyser.create(list_kernels, self.jax).compute_metrics()['busy_time']
+                event['total_direct_kernel_time'] = self.GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
                 event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
                 kernel_launchers.append(event)
@@ -355,7 +356,7 @@ class TreePerfAnalyzer:
 
     def get_df_gpu_timeline(self):
         kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
-        gpu_event_analyser = GPUEventAnalyser.create(kernel_events, self.jax)
+        gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
 
@@ -460,7 +461,7 @@ class TreePerfAnalyzer:
                 # For a single kernel, use its own duration.
                 busy_time = events[0]['dur']
             else:
-                busy_time = GPUEventAnalyser.create(events, self.jax).compute_metrics()['busy_time']
+                busy_time = self.GPUEventAnalyser(events).compute_metrics()['busy_time']
             cpu_op_to_busy_time[parent_uid] = busy_time
 
         # Augment each kernel's details with aggregated metrics.
@@ -504,7 +505,7 @@ class TreePerfAnalyzer:
     def _build_nn_modules_subtree_recursive(self, node: Dict[str, Any], parent_gpu_time=None):
         gpu_events_subtree_UIDs = node.get('gpu_events', [])
         gpu_events_subtree = [self.tree.get_UID2event(uid) for uid in gpu_events_subtree_UIDs]
-        gpu_time = GPUEventAnalyser.create(gpu_events_subtree, self.jax).compute_metrics()['busy_time']
+        gpu_time = self.GPUEventAnalyser(gpu_events_subtree).compute_metrics()['busy_time']
         node['GPU Time'] = gpu_time
         node['nn Parent GPU Time'] = parent_gpu_time
 
@@ -524,6 +525,6 @@ class TreePerfAnalyzer:
         remaining_gpu_events_UIDs = set(gpu_events_subtree_UIDs) - union_gpu_events_childrenUIDs
         if remaining_gpu_events_UIDs:
             gpu_events_remaining = [self.tree.get_UID2event(uid) for uid in remaining_gpu_events_UIDs]
-            gpu_time_remaining = GPUEventAnalyser.create(gpu_events_remaining, self.jax).compute_metrics()['busy_time']
+            gpu_time_remaining = self.GPUEventAnalyser(gpu_events_remaining).compute_metrics()['busy_time']
             node['Non-nn.Module GPU Time'] = gpu_time_remaining
         return
