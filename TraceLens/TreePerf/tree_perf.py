@@ -300,7 +300,7 @@ class TreePerfAnalyzer:
                              'UID': event['UID'],
                             'total_direct_kernel_time': event['total_direct_kernel_time'],
                             'direct_kernel_count': event['direct_kernel_count']}
-            for arg in ['Input Dims', 'Input type', 'Input Strides']:
+            for arg in ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
                 if arg in event['args']:
                     metrics_event[arg] = list_to_tuple(event['args'][arg])
                 else:
