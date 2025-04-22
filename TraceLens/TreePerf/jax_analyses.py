@@ -118,9 +118,9 @@ class JaxAnalyses:
         return analyzer.get_breakdown_df_from_dict(average_gpu_metrics), categorized_df, uncategorized_df
 
     @staticmethod
-    def summarize_gpu_events(filename):
+    def summarize_gpu_events(filename, save_preprocessed = False):
         from ..util import DataLoader
-        data = DataLoader.load_data(filename)
+        data = DataLoader.load_data(filename_path=filename, save_preprocessed=save_preprocessed)
         events = data['traceEvents']
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
         return JaxAnalyses.create_gpu_summary(my_gpu_event_analyser)
