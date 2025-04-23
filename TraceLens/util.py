@@ -81,7 +81,7 @@ class TraceEventUtils:
     # None: {process_name, process_sort_index}
     # Thread_id: {thread_name, thread_sort_index} for each Thread_id
     @staticmethod
-    def get_metadata_fields(events: List[dict]) -> Dict[str, Dict[str, str]]:
+    def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
         def get_metadata_val(x: dict) -> str:
             arg_labels = {
                 TraceEventUtils.MetadataFields.ProcessName: TraceEventUtils.ArgNames.Name,
