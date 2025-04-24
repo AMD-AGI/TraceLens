@@ -321,7 +321,31 @@ class TraceToTree:
                 nn_module_children.extend(self.get_nn_module_children(self.get_UID2event(child_UID)))
         # cache the nn.Module children for later use
         nn_module_event['nn_module_children'] = nn_module_children
+        # set parent for each child
+        for child_UID in nn_module_children:
+            child = self.get_UID2event(child_UID)
+            child['nn_module_parent'] = nn_module_event['UID']
         return nn_module_children
-
+    
+    def get_nn_module_parent(self, nn_module_event: Dict[str, Any]):
+        """
+        Get the UID of the nn.Module parent of the provided nn.Module event.
+        """
+        if not self.add_python_func:
+            raise ValueError("This method requires the add_python_func flag to be set to True when building the tree.")
+        # if the nn.Module parent is already cached, return it
+        if 'nn_module_parent' in nn_module_event:
+            return nn_module_event['nn_module_parent']
+        # find the parent, traverse up the tree until we find a nn.Module event or parent is None
+        parent_UID = nn_module_event.get('parent')
+        while parent_UID is not None:
+            parent = self.get_UID2event(parent_UID)
+            if self._is_nn_module_event(parent):
+                nn_module_event['nn_module_parent'] = parent_UID
+                return parent_UID
+            parent_UID = parent.get('parent')
+        # if no parent is found, return None
+        return None
+    
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
         return event.get('cat') == 'python_function' and event.get('name', '').startswith('nn.Module:')
