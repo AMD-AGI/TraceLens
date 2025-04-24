@@ -9,8 +9,8 @@ import pandas as pd
 import streamlit as st
 import torch
 
-from utils.hipblaslt import HipBLASLtColumns, perform_offline_tuning
-from utils.reporting import FAReportColumns, GEMMReportColumns, TraceLensColumns, get_fa_config, get_fa_perf_df, get_gemm_perf_df, read_trace
+from TraceLens.UI.utils.hipblaslt import HipBLASLtColumns, perform_offline_tuning
+from TraceLens.UI.utils.reporting import FAReportColumns, GEMMReportColumns, TraceLensColumns, get_fa_config, get_fa_perf_df, get_gemm_perf_df, read_trace
 
 
 logging.basicConfig(level=logging.INFO)

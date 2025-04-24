@@ -5,8 +5,9 @@ from io import BytesIO
 
 import numpy as np
 import pandas as pd
-from TraceLens import TraceToTree, TreePerfAnalyzer
 
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 @dataclass
 class TraceLensColumns:
