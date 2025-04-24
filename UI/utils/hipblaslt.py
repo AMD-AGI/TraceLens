@@ -58,6 +58,8 @@ def _replay_kernel(event_args_example: EventArgs, op: callable = torch.mm) -> No
 
 def record_bench_commands(kernes_to_tune: pd.DataFrame, output_log_file: str) -> None:
     TYPES_MAP = {
+        "float": torch.float32,
+        "c10::Half": torch.float16,
         "c10::BFloat16": torch.bfloat16,
     }
 

@@ -69,23 +69,7 @@ def get_fa_config(analyzer: TreePerfAnalyzer, index: str) -> pd.DataFrame:
             break
 
     if not fa_kernel:
-        return pd.DataFrame(
-            {
-                ("Sequence length", "", ""): [],
-                ("Attention type", "", ""): [],
-                ("Causal masking", "", ""): [],
-                ("Heads", "Q", "#"): [],
-                ("Heads", "Q", "Dims"): [],
-                ("Heads", "Q", "Type"): [],
-                ("Heads", "K", "#"): [],
-                ("Heads", "K", "Dims"): [],
-                ("Heads", "K", "Type"): [],
-                ("Heads", "V", "#"): [],
-                ("Heads", "V", "Dims"): [],
-                ("Heads", "V", "Type"): [],
-            },
-            index=[index],
-        )
+        return None
 
     CASUAL_ARG_IDX = 9
     ARGS_KEY = "args"
