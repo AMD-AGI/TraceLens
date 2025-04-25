@@ -303,7 +303,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         events = self.get_gpu_event_lists(event_filter = event_filter)
         gpu_frames = {}
         print("Processing events by GPU")
-        for gpu_id, cur_events in tqdm.tqdm(events.items()):
+        for gpu_id, cur_events in tqdm.tqdm(filter(lambda x: x[0] < 100, events.items())):
             self.verify_dict_gpu_event_lists(cur_events)
             cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
             gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
