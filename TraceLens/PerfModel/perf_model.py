@@ -62,13 +62,15 @@ class GEMM:
     """
     def __init__(self, event, arch=None, detail_level=0):
         self.event = event
-        self.param_details = self.get_param_details(event)
+        # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
         for kernel_name in event['kernel_names']:
             # TODO: think you really wanna pass around dicts instead of objects?
             self.parsed_kernel_info = gemm_name_parser(kernel_name)
             if self.parsed_kernel_info is not None:
                 break
+        self.param_details = self.get_param_details(event)
+       
         if self.parsed_kernel_info is not None:
             self.param_details['transpose'] = self.parsed_kernel_info['transpose']
 
@@ -391,6 +393,68 @@ class aten_linear(GEMM):
         return {"M": M, "N": N, "K": K, "bias": bias,
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
+
+class tex_ts_te_gemm_ts(GEMM):
+    """
+    tex_ts::te_gemm_ts is a matmul op in TransformerEngine
+
+    https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/csrc/ts_fp8_op.cpp#L244
+    https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/csrc/extensions/gemm.cpp#L10
+
+    """
+
+    def __init__(self, event, arch=None, detail_level=0):
+        super().__init__(event, arch, detail_level)
+
+    def get_param_details(self, event):
+        input_dims = event['args']['Input Dims']
+        C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
+
+        trans_a = self.parsed_kernel_info['transpose'][0]
+        trans_b = self.parsed_kernel_info['transpose'][1]
+
+        # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/common/gemm/cublaslt_gemm.cu#L330C17-L330C23
+        if trans_a:
+            M = A_shape[0]
+            K = A_shape[1]
+        else:
+            M = A_shape[1]
+            K = A_shape[0]
+
+        if trans_b:
+            N = B_shape[1]
+        else:
+            N = B_shape[0]
+
+        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5])
+
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][5])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {"M": M, "N": N, "K": K, "bias": True,
+                "stride_A": stride_A, "stride_B": stride_B,
+                "dtype_A_B": dtype_A_B}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+        self.bpe = name2bpe(dtype_A_B[0])
+        # setting bias bpe to be the same as the input matrices is not totally correct
+        # TODO: correct later
+        # TODO: similar to aten_mm, we need to use the output dtype if provided
+        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
+                             bpe_bias=self.bpe,
+                             bpe_output=self.bpe)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+
 
 # 2. Convolution
 class CONV:
