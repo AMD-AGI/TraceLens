@@ -156,7 +156,8 @@ class TreePerfAnalyzer:
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
     
     def build_df_perf_metrics(self, events, bwd=False, 
-                              non_data_mov=False, include_kernel_names=False, dict_name_to_perf_model=None, 
+                              non_data_mov=False, include_kernel_names=False, include_args=False,
+                              dict_name_to_perf_model=None, 
                               detail_level=0):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
@@ -169,6 +170,13 @@ class TreePerfAnalyzer:
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
                         'external_id': event['args']['External id']}
+            if include_args:
+                args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
+                for arg in args_cols:
+                    if arg in event['args']:
+                        metrics_event[arg] = event['args'][arg]
+                    else:
+                        metrics_event[arg] = None
             if dict_name_to_perf_model and event['name'] in dict_name_to_perf_model:
                 perf_model_class = dict_name_to_perf_model[event['name']]
             else:
@@ -233,6 +241,10 @@ class TreePerfAnalyzer:
         # this is a quick fix, we need to veriify it matches in the group
         if 'kernel_names' in df_perf_metrics.columns:
             dict_agg['kernel_names'] = 'first'
+        args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
+        for arg in args_cols:
+            if arg in df_perf_metrics.columns:
+                dict_agg[arg] = 'first'
         dict_agg['Kernel Time (µs)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
         dict_agg['UID'] = 'first'
