@@ -56,7 +56,7 @@ class TraceEventUtils:
         ProcessLabels = 'process_labels'
         ProcessSort   = 'process_sort_index'
         ThreadName    = 'thread_name'
-        ThreadSort    = 'thread_sort_index',
+        ThreadSort    = 'thread_sort_index'
 
     class ArgNames(StrEnum):
         Name      = 'name'
