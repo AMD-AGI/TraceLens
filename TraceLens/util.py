@@ -40,6 +40,8 @@ class TraceEventUtils:
         TimeStamp = 'ts'
         Duration  = 'dur'
         Category  = 'cat'
+        TimeEnd   = 't_end'
+        UID       = 'UID'
 
     class TracePhases(StrEnum):
         DurationBegin = 'B'
@@ -98,6 +100,9 @@ class TraceEventUtils:
         fully_sorted = map(lambda kv: (kv[0], itertools.groupby(kv[1], lambda event: event.get(TraceEventUtils.TraceKeys.TID))), by_process)
         return dict(map(lambda kv: (kv[0], dict(map(lambda kv1: (kv1[0], dict(map(lambda event: (get_metadata_val(event)), kv1[1]))), kv[1]))), fully_sorted))
 
+    @staticmethod
+    def non_metadata_fields(events):
+        return itertools.dropwhile(lambda e: e[TraceEventUtils.TraceKeys.Phase] == TraceEventUtils.TracePhases.Metadata, events)
 
 
 

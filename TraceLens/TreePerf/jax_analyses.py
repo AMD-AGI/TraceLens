@@ -4,9 +4,11 @@ import os
 import pandas as pd
 import re
 import string
+from typing import Callable
 
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
+from ..util import TraceEventUtils
 
 class JaxAnalyses:
     # keywords for splitting jax events
@@ -52,8 +54,8 @@ class JaxAnalyses:
                 cur_categorized_list = categorized_events
                 cur_uncategorized_list = uncategorized_events
 
-            name=compute_event["name"]
-            duration=compute_event["dur"]
+            name=compute_event[TraceEventUtils.TraceKeys.Name]
+            duration=compute_event[TraceEventUtils.TraceKeys.Duration]
             found = False
             for category, filters in JaxAnalyses.ClassCategories.items():
                 if any(f in name for f in filters):
@@ -164,8 +166,8 @@ class JaxAnalyses:
         rccl_stats={}
 
         for i in all_comm_events:
-            pid=i["pid"]
-            dur=i["dur"]
+            pid=i[TraceEventUtils.TraceKeys.PID]
+            dur=i[TraceEventUtils.TraceKeys.Duration]
             op = i["args"]["hlo_op"]
             if op.startswith('reduce-scatter'):
                 op = '.'.join(op.split('.')[:2]) # need to remove sub-communications from reduce-scatter only
@@ -281,6 +283,34 @@ class JaxAnalyses:
     def summarize_gpu_gemm_events_from_pb(pb_filename, module_name: str = "jit_train_step"):
         gemms = JaxAnalyses.process_gemm_events_from_pb(pb_filename, module_name)
         return pd.DataFrame.from_dict(gemms, orient='index',  columns = JaxProfileProcessor.gemm_columns)
+
+    @staticmethod
+    def get_event_category(metadata: dict, event: dict):
+        if event.get(TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata):
+            return "metadata"
+        elif (TraceEventUtils.TraceKeys.PID in event and TraceEventUtils.TraceKeys.TID in event):
+            pid = event[TraceEventUtils.TraceKeys.PID]
+            tid = event[TraceEventUtils.TraceKeys.TID]
+            ThreadName = metadata[pid][tid][TraceEventUtils.MetadataFields.ThreadName]
+            if ThreadName == "Framework Name Scope":
+                return "cpu_op"
+            elif ThreadName == "XLA Ops":
+                return "python function"
+            elif ThreadName.startswith("Stream"):
+                name = event[TraceEventUtils.TraceKeys.Name]
+                if any(name.lower().startswith(x) for x in ['copy', 'memcpy']):
+                    return "memcpy"
+                if any(name.lower().startswith(x) for x in ['memset']):
+                    return "memset"
+                return "kernel"
+        return "Unknown"
+
+    # returns a curried function to categorizes events based on the
+    # metadata extracted from the events list
+    @staticmethod
+    def prepare_event_categorizer(events: list[dict]) -> Callable[[dict], str]:
+        metadata = TraceEventUtils.get_metadata(events)
+        return lambda event: JaxAnalyses.get_event_category(metadata, event)
 
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Gemm type"]

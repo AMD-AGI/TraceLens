@@ -42,7 +42,7 @@ class TreePerfAnalyzer:
 
         data = DataLoader.load_data(profile_filepath)
 
-        tree = TraceToTree(data['traceEvents'])
+        tree = TraceToTree(data['traceEvents'], jax = jax)
         return TreePerfAnalyzer(tree, jax=jax, *args, **kwargs)
 
     def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False):
