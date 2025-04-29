@@ -70,8 +70,8 @@ def _create_host_mm_ops_common(perf_analyzer: TreePerfAnalyzer, fwd_op_event: di
     bprop_gpu_event_ids = [uid for bwd_op in bwd_ops for uid in bwd_op.get('gpu_events', [])]
     bprop_gpu_events = [perf_analyzer.tree.get_UID2event(uid) for uid in bprop_gpu_event_ids]
     bprop_gemm_kernels = [e for e in bprop_gpu_events if is_gemm_kernel(e)]
-    def get_launcher_start(kenrel_evt):
-        launcher = perf_analyzer.tree.get_parent_event(kenrel_evt)
+    def get_launcher_start(kernel_evt):
+        launcher = perf_analyzer.tree.get_parent_event(kernel_evt)
         return launcher.get('ts')
     bprop_gemm_kernels = sorted(bprop_gemm_kernels, key=lambda e: get_launcher_start(e)) #which 
 
