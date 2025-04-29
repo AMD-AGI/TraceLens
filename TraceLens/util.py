@@ -53,8 +53,8 @@ class TraceEventUtils:
 
     class MetadataFields(StrEnum):
         ProcessName   = 'process_name'
-        ProcessLabels = 'process_lables'
-        ProcessSort   = 'process_sort_index',
+        ProcessLabels = 'process_labels'
+        ProcessSort   = 'process_sort_index'
         ThreadName    = 'thread_name'
         ThreadSort    = 'thread_sort_index',
 
