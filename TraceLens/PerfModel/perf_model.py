@@ -426,6 +426,13 @@ class tex_ts_te_gemm_ts(GEMM):
         else:
             N = B_shape[0]
 
+        bias_term = event['args']['Concrete Inputs'][14]
+
+        if bias_term == '':
+            bias = False
+        else:
+            bias = True
+
         dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5])
 
         try:
@@ -434,7 +441,7 @@ class tex_ts_te_gemm_ts(GEMM):
         except KeyError:
             stride_A = stride_B = None
 
-        return {"M": M, "N": N, "K": K, "bias": True,
+        return {"M": M, "N": N, "K": K, "bias": bias,
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
 
