@@ -22,6 +22,7 @@
 
 import json
 import gzip
+import os
 from collections import defaultdict
 from typing import Dict, Any
 
@@ -127,14 +128,24 @@ class TreePerfAnalyzer:
         non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        if hasattr(perf_model, "dim_efficiency"):
+        if os.path.isdir('gemmologist') and hasattr(perf_model, "dim_efficiency"):
             dim_effs = perf_model.dim_efficiency(arch_dict=self.arch)
             simulated_kernel_time = dim_effs['simulated_time']
         else:
-            if bytes_moved and bytes_moved > 0:
-                simulated_kernel_time = bytes_moved / self.arch['mem_bw_gbps']
+            if hasattr(perf_model, "dim_efficiency"):
+                dim_effs = perf_model.dim_efficiency(arch_dict=self.arch)
+                compute_time = dim_effs['simulated_time']
             else:
-                simulated_kernel_time = 1 # For avoiding division by 0.
+                # Calculate ideal time
+                ideal_ew_ops_per_cycle_simd = 256
+                compute_time = (gflops * 1e9) / ideal_ew_ops_per_cycle_simd / self.arch['freq_mhz']
+            
+            if bytes_moved and bytes_moved > 0:
+                memory_time  = bytes_moved / (self.arch['mem_bw_gbps'] * 1e3)
+            else:
+                memory_time = 0
+            
+            simulated_kernel_time = max(compute_time, memory_time)
 
         # Return metrics
         dict_metrics = {
