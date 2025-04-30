@@ -43,6 +43,10 @@ class TraceToTree:
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
 
+    @staticmethod
+    def default_categorizer(event: dict) -> str:
+        return event.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+
     def _compute_event_end_times(self) -> None:
         for event in self.events:
             if TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp in event and TraceLens.util.TraceEventUtils.TraceKeys.Duration in event:

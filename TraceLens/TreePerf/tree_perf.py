@@ -31,6 +31,7 @@ import pprint
 import pandas as pd
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
+from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.trace_to_tree import TraceToTree
 from ..util import DataLoader
 
@@ -41,8 +42,10 @@ class TreePerfAnalyzer:
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
 
         data = DataLoader.load_data(profile_filepath)
+        data = data['traceEvents']
 
-        tree = TraceToTree(data['traceEvents'], jax = jax)
+        categorizer = JaxAnalyses.prepare_event_categorizer(data) if jax else TraceToTree.default_categorizer
+        tree = TraceToTree(data, event_to_category=categorizer)
         return TreePerfAnalyzer(tree, jax=jax, *args, **kwargs)
 
     def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False):
