@@ -101,7 +101,7 @@ class TraceEventUtils:
         return dict(map(lambda kv: (kv[0], dict(map(lambda kv1: (kv1[0], dict(map(lambda event: (get_metadata_val(event)), kv1[1]))), kv[1]))), fully_sorted))
 
     @staticmethod
-    def non_metadata_fields(events):
+    def non_metadata_events(events):
         return itertools.dropwhile(lambda e: e[TraceEventUtils.TraceKeys.Phase] == TraceEventUtils.TracePhases.Metadata, events)
 
 
