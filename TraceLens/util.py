@@ -1,7 +1,10 @@
 import itertools
 import json
 
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from backports.strenum import StrEnum
 from typing import List, Dict, Callable, Tuple
 
 # generic data loader class for json, json.gz, or tensorboard pb files
