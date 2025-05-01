@@ -97,12 +97,48 @@ class TraceEventUtils:
         metadata_fields = itertools.takewhile(lambda x: x[TraceEventUtils.TraceKeys.Phase] == TraceEventUtils.TracePhases.Metadata, events)
         by_process = itertools.groupby(metadata_fields, lambda event: event[TraceEventUtils.TraceKeys.PID])
         # TID is not required for process-specific tags, so use null thread id for them
-        fully_sorted = map(lambda kv: (kv[0], itertools.groupby(kv[1], lambda event: event.get(TraceEventUtils.TraceKeys.TID))), by_process)
-        return dict(map(lambda kv: (kv[0], dict(map(lambda kv1: (kv1[0], dict(map(lambda event: (get_metadata_val(event)), kv1[1]))), kv[1]))), fully_sorted))
+        fully_processed = map(lambda kv: (kv[0], itertools.groupby(kv[1], lambda event: event.get(TraceEventUtils.TraceKeys.TID))), by_process)
+        return dict(map(lambda kv: (kv[0], dict(map(lambda kv1: (kv1[0], dict(map(lambda event: (get_metadata_val(event)), kv1[1]))), kv[1]))), fully_processed))
 
     @staticmethod
-    def non_metadata_events(events):
+    def non_metadata_events(events:dict) -> dict:
         return itertools.dropwhile(lambda e: e[TraceEventUtils.TraceKeys.Phase] == TraceEventUtils.TracePhases.Metadata, events)
+
+    @staticmethod
+    def default_categorizer(event: dict) -> str:
+        return event.get(TraceEventUtils.TraceKeys.Category)
+
+    @staticmethod
+    def split_events_by_pid_tid(events: List[dict]) -> Dict[str, Dict[str, List[Dict]]]:
+        event_dict={}
+        for event in TraceEventUtils.non_metadata_events(events):
+            pid=event.get(TraceEventUtils.TraceKeys.PID)
+            tid=event.get(TraceEventUtils.TraceKeys.PID)
+            if pid in event_dict:
+                pid_events = event_dict[pid]
+            else:
+                pid_events = event_dict[pid] = {}
+            if tid in pid_events:
+                pid_events[tid].append(event)
+            else:
+                pid_events[tid] = [event]
+        return event_dict
+
+    @staticmethod
+    def sort_events_by_timestamp_duration(events: List[dict]) -> None:
+        events.sort(key = lambda x: (x.get(TraceEventUtils.TraceKeys.TimeStamp), x.get(TraceEventUtils.TraceKeys.Duration)))
+
+    @staticmethod
+    def compute_event_end_times(events: List[dict]) -> None:
+        for event in events:
+            TraceEventUtils.compute_single_event_end_time(event)
+
+    @staticmethod
+    def compute_single_event_end_time(event: dict) -> None:
+        if TraceEventUtils.TraceKeys.TimeStamp in event and TraceEventUtils.TraceKeys.Duration in event and TraceEventUtils.TraceKeys.TimeEnd not in event:
+            event[TraceEventUtils.TraceKeys.TimeEnd] = event[TraceEventUtils.TraceKeys.TimeStamp] + event[TraceEventUtils.TraceKeys.Duration]
+
+
 
 
 

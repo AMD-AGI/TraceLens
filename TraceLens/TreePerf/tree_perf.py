@@ -23,7 +23,7 @@
 import json
 import gzip
 from collections import defaultdict
-from typing import Dict, Any
+from typing import Dict, Any, Callable
 
 # TODO: warning should show the stack as well
 import warnings
@@ -47,22 +47,23 @@ class TreePerfAnalyzer:
         categorizer =  TraceToTree.default_categorizer if not jax else JaxAnalyses.prepare_event_categorizer(data)
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
         tree = TraceToTree(data, event_to_category=categorizer)
-        return TreePerfAnalyzer(tree, jax=jax, *args, **kwargs)
+        return TreePerfAnalyzer(tree, jax=jax, event_to_category=categorizer, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False):
+    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
         self.add_python_func = add_python_func
         self.arch = arch
+        self.event_to_category = event_to_category
         # we check if profile contains python func events
-        self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func'), False)
+        self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
             filter_func = lambda x: True
-        if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
+        if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
             if not filter_func(event):
                 return 0, []
             if verbose:
@@ -166,10 +167,10 @@ class TreePerfAnalyzer:
         list_warn_non_zero_flops_and_zero_time = []
         list_no_bwd_events = []
         for event in events:
-            metrics_event = {'cat': event['cat'], 'name': event['name'],
+            metrics_event = {'cat': self.event_to_category(event), 'name': event['name'],
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
-                        'external_id': event['args']['External id']}
+                        'external_id': event['args'].get('External id')}
             if include_args:
                 args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
                 for arg in args_cols:
@@ -275,7 +276,7 @@ class TreePerfAnalyzer:
         # by checking if grandchildren of CPU operations are kernel events.
         kernel_launchers = []
         for event in self.tree.events:
-            if event.get('cat') != 'cpu_op':
+            if self.event_to_category(event) != 'cpu_op':
                 continue
             kernel_launcher = False
             # total_direct_kernel_time = 0
@@ -285,7 +286,7 @@ class TreePerfAnalyzer:
                 child = self.tree.events_by_uid[child_UID]
                 for grand_child_UID in child.get('children', []):
                     grand_child = self.tree.events_by_uid[grand_child_UID]
-                    is_kernel = grand_child.get('cat') == 'kernel'
+                    is_kernel = self.event_to_category(grand_child) == 'kernel'
                     is_nccl = 'nccl' in grand_child['name']
                     should_include = is_kernel and (include_nccl or not is_nccl)
                     if should_include:
@@ -321,7 +322,7 @@ class TreePerfAnalyzer:
             if id_cols:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
-                metrics_event['external_id'] = event['args']['External id']
+                metrics_event['external_id'] = event['args'].get('External id')
             if include_kernel_names:
                 metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
@@ -371,7 +372,7 @@ class TreePerfAnalyzer:
         return df_agg
 
     def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
+        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
         gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
@@ -401,7 +402,7 @@ class TreePerfAnalyzer:
             return tuple(list_to_tuple(item) for item in obj) if isinstance(obj, list) else obj
 
         # Verify that the event is a kernel event.
-        if kernel_event.get('cat') != 'kernel':
+        if self.event_to_category(kernel_event) != 'kernel':
             return None
 
         kernel_details = {
@@ -425,7 +426,7 @@ class TreePerfAnalyzer:
         cpu_op = None
         evt = launcher
         while evt:
-            if evt.get('cat') == 'cpu_op':
+            if self.event_to_category(evt) == 'cpu_op':
                 cpu_op = evt
                 break
             evt = self.tree.get_parent_event(evt)
@@ -460,7 +461,7 @@ class TreePerfAnalyzer:
             # Attempt to find the nn.Module parent event.
             evt = kernel_event
             while evt:
-                if evt.get('cat') == 'python_function' and evt['name'].startswith('nn.Module:'):
+                if self.event_to_category(evt) == 'python_function' and evt['name'].startswith('nn.Module:'):
                     nn_module_event = evt
                     break
                 evt = self.tree.get_parent_event(evt)
@@ -507,7 +508,7 @@ class TreePerfAnalyzer:
 
         # Extract details for all kernel events.
         for event in self.tree.events:
-            if event.get('cat') != 'kernel':
+            if self.event_to_category(event) != 'kernel':
                 continue
             details = self.get_kernel_details(event,
                                                 launcher_detail=launcher_detail,

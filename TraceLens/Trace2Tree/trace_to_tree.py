@@ -29,7 +29,7 @@ class TraceToTree:
                  prune_nongpu_paths=True,
                  compute_end_times=True,
                  linking_key: str = None,
-                 event_to_category: Callable[[dict], str] = lambda e: e.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)):
+                 event_to_category: Callable[[dict], str] = TraceLens.util.TraceEventUtils.default_categorizer):
         self.events = [{**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i} for i, data in enumerate(events_data)]
         self.events_by_uid = {event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event for event in self.events}
         self.event_to_category = event_to_category
@@ -48,9 +48,7 @@ class TraceToTree:
         return event.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
 
     def _compute_event_end_times(self) -> None:
-        for event in self.events:
-            if TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp in event and TraceLens.util.TraceEventUtils.TraceKeys.Duration in event:
-                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd] = event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp] + event[TraceLens.util.TraceEventUtils.TraceKeys.Duration]
+        TraceLens.util.TraceEventUtils.compute_event_end_times(self.events)
 
     def _set_linking_key(self):
         launch_event = next(
