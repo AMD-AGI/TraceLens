@@ -360,7 +360,7 @@ class JaxProfileProcessor:
         line_processed=line.strip()
         if (("metadata" in line_processed and not(re.search("\)$",line_processed)) and not(re.search("^ROOT",line_processed)))
             or any(t in line_processed for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"])):
-            k,v=JaxProfileProcessor.get_dict(line_processed)
+            k,v=JaxProfileProcessor.get_dict(hlo_ops, line_processed)
             hlo_ops[k]=v
             return True
         return False
@@ -375,7 +375,7 @@ class JaxProfileProcessor:
         return operands.split(",")
 
     @staticmethod
-    def get_dict(line):
+    def get_dict(hlo_ops: dict, line):
         dict_line={}
         line=re.sub("\),",")",line)
         line=re.sub(", ",",",line)
@@ -386,7 +386,7 @@ class JaxProfileProcessor:
         line=line.split(" ")
         key=line[0]
         dict_line["output"]=line[2]
-        dict_line["operands"]=JaxProfileProcessor.get_operands(line[3])
+        dict_line["operands"] = operands = JaxProfileProcessor.get_operands(line[3])
         dict_line["type"]="rest"
         if metadata is not None:
             dict_line["metadata"]=metadata[0]
@@ -398,11 +398,21 @@ class JaxProfileProcessor:
                 if any(k in dict_line["custom_call_target"] for k in gemm_keys):
                     if "f8" in str(custom_call_target[0]):
                         dict_line["type"]="fp8gemm"
-                    elif "f32" in str(custom_call_target[0]):
-                        dict_line["type"]="f32gemm"
                     else:
-                        dict_line["type"]="bf16gemm"
+                        # use the input type to determine the GEMM type
+                        gemm_type = JaxProfileProcessor.get_operand_type(hlo_ops, operands[0])
+                        if not all(JaxProfileProcessor.get_operand_type(hlo_ops, o) == gemm_type for o in operands[1:]):
+                            raise Exception("Input operand type mismatch", line)
+                        dict_line["type"]=gemm_type+"gemm"
         return (key,dict_line)
+    @staticmethod
+    def get_operand_type(hlo_ops: dict, operand : str) -> str:
+        dtypes = ["bf16", "f16", "f32", "f8"]
+        output = hlo_ops[operand]["output"]
+        for t in dtypes:
+            if output.startswith(t):
+                return t
+        return None
 
     @staticmethod
     def process_gemm_ops(hlo_ops: dict):
