@@ -408,6 +408,11 @@ class JaxProfileProcessor:
     @staticmethod
     def get_operand_type(hlo_ops: dict, operand : str) -> str:
         dtypes = ["bf16", "f16", "f32", "f8"]
+        # if the operand is a slice of something else, then the type might be at the beginning of the operand name
+        for t in dtypes:
+            if operand.startswith(t):
+                return t
+        # otherwise look it up
         output = hlo_ops[operand]["output"]
         for t in dtypes:
             if output.startswith(t):
