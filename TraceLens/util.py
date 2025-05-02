@@ -104,8 +104,8 @@ class TraceEventUtils:
         return dict(map(lambda kv: (kv[0], dict(map(lambda kv1: (kv1[0], dict(map(lambda event: (get_metadata_val(event)), kv1[1]))), kv[1]))), fully_processed))
 
     @staticmethod
-    def non_metadata_events(events:dict) -> dict:
-        return itertools.dropwhile(lambda e: e[TraceEventUtils.TraceKeys.Phase] == TraceEventUtils.TracePhases.Metadata, events)
+    def non_metadata_events(events:List[dict]) -> List[dict]:
+        return list(itertools.dropwhile(lambda e: e[TraceEventUtils.TraceKeys.Phase] == TraceEventUtils.TracePhases.Metadata, events))
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
@@ -116,7 +116,7 @@ class TraceEventUtils:
         event_dict={}
         for event in TraceEventUtils.non_metadata_events(events):
             pid=event.get(TraceEventUtils.TraceKeys.PID)
-            tid=event.get(TraceEventUtils.TraceKeys.PID)
+            tid=event.get(TraceEventUtils.TraceKeys.TID)
             if pid in event_dict:
                 pid_events = event_dict[pid]
             else:
@@ -130,6 +130,10 @@ class TraceEventUtils:
     @staticmethod
     def sort_events_by_timestamp_duration(events: List[dict]) -> None:
         events.sort(key = lambda x: (x.get(TraceEventUtils.TraceKeys.TimeStamp), x.get(TraceEventUtils.TraceKeys.Duration)))
+
+    @staticmethod
+    def find_thread_by_item_in_metadata(metadata: dict[int, dict], select_item: Callable[[int], bool]) -> int:
+        return next(filter(select_item, metadata.items()))[0]
 
     @staticmethod
     def compute_event_end_times(events: List[dict]) -> None:

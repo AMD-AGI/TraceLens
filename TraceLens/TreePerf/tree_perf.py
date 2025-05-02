@@ -173,11 +173,7 @@ class TreePerfAnalyzer:
                         'external_id': event['args'].get('External id')}
             if include_args:
                 args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
-                for arg in args_cols:
-                    if arg in event['args']:
-                        metrics_event[arg] = event['args'][arg]
-                    else:
-                        metrics_event[arg] = None
+                metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
             if dict_name_to_perf_model and event['name'] in dict_name_to_perf_model:
                 perf_model_class = dict_name_to_perf_model[event['name']]
             else:

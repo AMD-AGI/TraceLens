@@ -151,12 +151,12 @@ class GEMM:
         M_pad = math.ceil(M / mt_m) * mt_m
         N_pad = math.ceil(N / mt_n) * mt_n
         tile_eff = (M * N) / (M_pad * N_pad)
-        
+
         # Wave quantization
         num_blocks = M_pad * N_pad // (mt_m * mt_n)
         num_rounds = math.ceil(num_blocks / num_cus)
         wq_eff = num_blocks / (num_rounds * num_cus)
-        
+
         # Net dimensional efficiency = tile efficiency * wave efficiency
         dim_eff = tile_eff * wq_eff
         return {
@@ -165,7 +165,7 @@ class GEMM:
             'wq_eff': wq_eff,
             'dim_eff': dim_eff,
         }
-    
+
     def dim_efficiency(self, arch_dict):
         """
         args:
