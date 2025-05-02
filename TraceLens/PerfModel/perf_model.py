@@ -366,6 +366,59 @@ class aten_bmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::bmm is not defined.")
 
+class aten_baddbmm(GEMM):
+    """
+    aten::baddbmm — batch matrix multiplication with bias
+    (B, M, K) × (B, K, N) + (B, M, N) → (B, M, N)
+    Inherits FLOP/byte analytics from GEMM and scales them by the batch size.
+    """
+    @staticmethod
+    def get_param_details(event):
+        """Extract B, M, N, K and metadata from the profiler event."""
+        input_dims = event['args']['Input Dims']
+        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+
+        B_dim, M, K = A_shape  # (B, M, K)
+        _,      _, N = B_shape # (B, K, N)
+
+        dtype_A_B = tuple(event['args']['Input type'][1:3])
+        try:
+            stride_A = tuple(event['args']['Input Strides'][1])
+            stride_B = tuple(event['args']['Input Strides'][2])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {
+            "B": B_dim,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": True,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+    # ---------------------- FLOPs / Bytes ----------------------
+    def flops(self):
+        """Total FLOPs for the entire batch."""
+        return self.param_details["B"] * super().flops()
+    def bytes(self):
+        """Total DRAM traffic for the entire batch (read+write)."""
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+
+        bpe = name2bpe(dtype_A_B[0])
+        per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
+                                   bpe_bias=bpe,   # not used, but keeps call signature
+                                   bpe_output=bpe)
+        return None if per_batch is None else self.param_details['B'] * per_batch
+    # ---------------------- Backward placeholders ----------------------
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
+    
 # TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
 class aten_linear(GEMM):
 
