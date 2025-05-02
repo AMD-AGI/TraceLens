@@ -377,6 +377,6 @@ class TraceToTree:
         for stream, events in dict_stream2events.items():
             for i, event in enumerate(events):
                 dict_stream_index2event[(stream, i)] = event
-                event['args']['stream index'] = i
+                event['args']['stream_index'] = i
         # now we set this dict in the perf_analyzer
         self.dict_stream_index2event = dict_stream_index2event
