@@ -409,7 +409,7 @@ class TreePerfAnalyzer:
         # 2. Aggregate the DataFrame by the string representations of the grouping columns
         agg_dict = {}
         if 'total_direct_kernel_time' in df_filtered.columns:
-            agg_dict['total_direct_kernel_time'] = agg_metrics + ['sum']
+            agg_dict['total_direct_kernel_time'] = agg_metrics + (['sum'] if 'sum' not in agg_metrics else [])
         columns_to_keep_first = []
         if 'UID' in df_filtered.columns:
             agg_dict['UID'] = ['first', 'count']
