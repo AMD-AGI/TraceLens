@@ -1,14 +1,11 @@
 import glob
 import os.path as osp
-import psutil
+from collections import defaultdict
 
 import pandas as pd
-
-from collections import defaultdict
+import psutil
+from perf_report_configs import all_ops_launchers, grouped_breakdown_mapping
 from TraceLens import TreePerfAnalyzer
-
-from perf_report_configs import *
-
 
 # Static methods
 get_df_kernel_launchers_summary = TreePerfAnalyzer.get_df_kernel_launchers_summary
