@@ -50,25 +50,21 @@ profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_7_step
 NOTE: add -d flag for launching a dry run (check if correct files will be targeted).
       add -e flag for specifying extension. json and gz are currently supported, json is used by default
 """
+
 import argparse
 import gc
 import os
+import os.path as osp
 import subprocess
 import time
-
-import os.path as osp
-import pandas as pd
-
-from typing import Dict, List, Callable, Optional, Tuple, Union, Any
-
-from TraceLens import TreePerfAnalyzer, EventReplayer
-
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from perf_report_configs import gemm_ops, conv_ops
-from perf_report_utils import parse_traces, collect_df_perf_metrics_per_group
-
+import pandas as pd
+from perf_report_configs import conv_ops, gemm_ops
+from perf_report_utils import collect_df_perf_metrics_per_group, parse_traces
+from TraceLens import EventReplayer, TreePerfAnalyzer
 
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics
 
@@ -103,7 +99,7 @@ df_cols_conv = [
     "param: transposed_conv",
     "param: output_padding",
     "param: groups",
-    "kernel_names_first"
+    "kernel_names_first",
 ]
 
 df_cols_common = [
@@ -302,70 +298,6 @@ def run_microbenchmarking(group: str, logging_envvars: Dict[str, str]) -> float:
     return bench_time_mean
 
 
-def run_node_replay(group, df_ops_all_summary):
-    df_results = None
-    device = "cuda"
-    args_cols = ["Input Dims_first", "Input type_first", "Input Strides_first", "Concrete Inputs_first"]
-
-    for i in range(len(df_ops_all_summary)):
-        event = dict(args=dict())
-        row = dict(df_ops_all_summary.iloc[i])
-
-        for col in row.keys():
-            if col in args_cols:
-                event["args"][col.split("_")[0]] = row[col]
-            else:
-                event[col] = row[col]
-
-        replayer = EventReplayer(event, device="cuda")
-
-        # Get group-specific logging environment variables
-        logging_envvars = get_logging_envvars(group, i)
-
-        # Log hipblaslt-bench/MIOpenDriver commands (pass envvars, no warmup, 1 active step)
-        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as executor:
-            args = [(replayer.replay, device, logging_envvars, 0, 1)]
-            _ = list(executor.map(benchmark_func_wrapper, args))
-
-        # Run microbenchmarking with hipblaslt-bench/MIOpenDriver
-        bench_time_mean = run_microbenchmarking(group, logging_envvars)
-
-        # Node replay time (no envvars, 1000 warmup and 1000 active steps)
-        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as executor:
-            args = [(replayer.replay, device, None, 1000, 1000)]
-            result = list(executor.map(benchmark_func_wrapper, args))
-
-        replay_time_mean = result[0]
-
-        # Workload time from profile trace
-        profile_time_mean = row["Kernel Time (µs)_mean"]
-
-        # Record results
-        diff_profile = replay_time_mean - profile_time_mean
-        diff_bench = bench_time_mean - profile_time_mean
-
-        percent_diff_profile = (replay_time_mean - profile_time_mean) / profile_time_mean * 100
-        percent_diff_bench = (bench_time_mean - profile_time_mean) / profile_time_mean * 100
-
-        result_dict = {
-            f"{group} no.": i,
-            f"Avg. {group}-bench time (us)": bench_time_mean,
-            "Avg. replay time (us)": replay_time_mean,
-            "Avg. profile time (us)": profile_time_mean,
-            "Diff profile vs. replay (us)": diff_profile,
-            f"Diff profile vs. {group}-bench (us)": diff_bench,
-            "Diff profile vs. replay (pct)": percent_diff_profile,
-            f"Diff profile vs. {group}-bench (pct)": percent_diff_bench,
-        }
-
-        df_results = pd.concat([df_results, pd.DataFrame([result_dict])]) if df_results is not None else pd.DataFrame([result_dict])
-
-        del replayer
-        gc.collect()
-
-        time.sleep(1)
-
-
 def run_node_replay(group, df_ops_summary):
     if df_ops_summary is None:
         print(f"No events to replay from group {group}")
@@ -455,7 +387,7 @@ def run_standalone_node_replay(base_dirpath, ext="json", include_only=["rank_0"]
         prefix = "_".join(include_only)
         xlsx_path = osp.join(parent_dirpath, f"{prefix}_node_replay_report.xlsx")
 
-        print(f"==================== Creating node replay report ====================")
+        print("==================== Creating node replay report ====================")
         print(f"Parent directory: {parent_dirpath}")
         print(f"Excel file (dummy): {osp.basename(xlsx_path)}")
         print(f"Filters: {', '.join(include_only)}")

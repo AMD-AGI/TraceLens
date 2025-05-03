@@ -51,26 +51,37 @@ NOTE: add -r flag for running microbenchmarking comparison for the most importan
       add -a flag for saving all kernels from all ranks (produces a lot of data).
 """
 
-
 import argparse
 import gc
+import os.path as osp
 import re
 import time
-import os.path as osp
+
 import pandas as pd
-
-from collections import defaultdict
-from TraceLens import NcclAnalyser, TreePerfAnalyzer
-
-from perf_report_utils import *
 from node_replay import run_node_replay
-
+from perf_report_utils import (
+    build_grouped_breakdown,
+    build_kernel_launchers_summary,
+    collect_df_perf_metrics_per_group,
+    group2ops,
+    parse_traces,
+    ram_stats_gb,
+)
+from TraceLens import NcclAnalyser, TreePerfAnalyzer
 
 # Static methods
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics
 
 
-def analyze_traces(base_dirpath, rank_pattern="rank_", ext="json", include_only=["rank_0"], node_replay=False, dry_run=False, save_all_kernels=False):
+def analyze_traces(
+    base_dirpath,
+    rank_pattern="rank_",
+    ext="json",
+    include_only=["rank_0"],
+    node_replay=False,
+    dry_run=False,
+    save_all_kernels=False,
+):
     all_traces_grouped = parse_traces(base_dirpath, ext, include_only)
 
     if all_traces_grouped is None:
@@ -86,7 +97,7 @@ def analyze_traces(base_dirpath, rank_pattern="rank_", ext="json", include_only=
         prefix = "_".join(include_only)
         xlsx_path = osp.join(parent_dirpath, f"{prefix}_performance_report.xlsx")
 
-        print(f"==================== Creating performance report ====================")
+        print("==================== Creating performance report ====================")
         print(f"Parent directory: {parent_dirpath}")
         print(f"Excel file: {osp.basename(xlsx_path)}")
         print(f"Filters: {', '.join(include_only)}")
@@ -182,7 +193,7 @@ def analyze_traces(base_dirpath, rank_pattern="rank_", ext="json", include_only=
             df_kernel_launchers_all_summary = build_kernel_launchers_summary(df_kernel_launchers_all, world_size)
 
             df_kernel_launchers_all_summary.to_excel(writer, sheet_name="kernel_launchers", index=False)
-            df_gpu_timelines_all.to_excel(writer, sheet_name=f"gpu_timelines", index=False)
+            df_gpu_timelines_all.to_excel(writer, sheet_name="gpu_timelines", index=False)
 
         # Build and write high-level grouped breakdown
         df_grouped_breakdown = build_grouped_breakdown(df_kernel_launchers_all_summary, df_gpu_timelines_all)
