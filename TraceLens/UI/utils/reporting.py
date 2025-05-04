@@ -50,6 +50,29 @@ class GEMMReportColumns:
         return df
 
 
+@dataclass
+class ConvReportColumns:
+    TYPES = "types"
+    DIMS = "dims"
+    STRIDES = "strides"
+    DURATION = "avg duration (µs)"
+    TFLOPS = "avg performance (TFLOPS)"
+
+    DEFAULT_MAPPING = {
+        TraceLensColumns.TYPE: ("Input", TYPES),
+        TraceLensColumns.DIMS: ("Input", DIMS),
+        TraceLensColumns.STRIDES: ("Input", STRIDES),
+    }
+
+    @staticmethod
+    def map_columns(df: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
+        df.columns = pd.MultiIndex.from_tuples([
+            ConvReportColumns.DEFAULT_MAPPING[col] if col in ConvReportColumns.DEFAULT_MAPPING else (experiment_name, col)
+            for col in df.columns
+        ])
+        return df
+
+
 def read_trace(file: BytesIO) -> TreePerfAnalyzer:
     if file.name.endswith(".json.gz"):
         with gzip.GzipFile(fileobj=file) as f:
@@ -78,11 +101,11 @@ def get_fa_config(analyzer: TreePerfAnalyzer, index: str) -> pd.DataFrame:
     config_df = pd.DataFrame(
         {
             ("Sequence length", "", ""): [q[0]],
-            ("Attention type", "", ""): [(
+            ("Attention type", "", ""): (
                 "Multi-Head" if q[1] == k[1] else
                 "Multi-Query" if k[1] == 1 else
                 "Groupped-Query"
-            )],
+            ),
             ("Causal masking", "", ""): [fa_kernel[ARGS_KEY]["Concrete Inputs"][CASUAL_ARG_IDX]],
             ("Heads", "Q", "#"): [q[1]],
             ("Heads", "Q", "Dims"): [q[0]],
@@ -131,6 +154,37 @@ def get_gemm_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFram
             TraceLensColumns.PERCENTAGE,
             GEMMReportColumns.DURATION,
             GEMMReportColumns.TFLOPS
+        ]],
+        experiment_name,
+    )
+
+
+def get_conv_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
+    # Filter for convolution kernels (e.g., "aten::conv" or similar)
+    conv_kernels = summary[summary["name"].str.contains("aten::conv", case=False, na=False)]
+
+    if conv_kernels.empty:
+        return pd.DataFrame()
+
+    # Calculate duration and TFLOPS
+    conv_kernels[ConvReportColumns.DURATION] = conv_kernels[TraceLensColumns.SUMMARY_TOTAL_KERNEL_TIME] / conv_kernels[TraceLensColumns.SUMMARY_COUNT]
+
+    # Example TFLOPS calculation for convolution (modify based on actual kernel details)
+    def _calc_conv_tflops(row: pd.Series) -> float:
+        # Assuming dims are in the format: [input_channels, output_channels, kernel_h, kernel_w, input_h, input_w]
+        input_channels, output_channels, kernel_h, kernel_w, input_h, input_w = row[TraceLensColumns.DIMS][0]
+        return (2 * input_channels * output_channels * kernel_h * kernel_w * input_h * input_w) / row[ConvReportColumns.DURATION] / 1e6
+
+    conv_kernels[ConvReportColumns.TFLOPS] = conv_kernels.apply(_calc_conv_tflops, axis=1)
+
+    return ConvReportColumns.map_columns(
+        conv_kernels[[
+            TraceLensColumns.TYPE,
+            TraceLensColumns.DIMS,
+            TraceLensColumns.STRIDES,
+            TraceLensColumns.PERCENTAGE,
+            ConvReportColumns.DURATION,
+            ConvReportColumns.TFLOPS
         ]],
         experiment_name,
     )

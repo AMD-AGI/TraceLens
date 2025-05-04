@@ -10,7 +10,7 @@ import streamlit as st
 import torch
 
 from TraceLens.UI.utils.hipblaslt import HipBLASLtColumns, perform_offline_tuning
-from TraceLens.UI.utils.reporting import FAReportColumns, GEMMReportColumns, TraceLensColumns, get_fa_config, get_fa_perf_df, get_gemm_perf_df, read_trace
+from TraceLens.UI.utils.reporting import FAReportColumns, GEMMReportColumns, ConvReportColumns, TraceLensColumns, get_fa_config, get_fa_perf_df, get_gemm_perf_df, get_conv_perf_df, read_trace
 
 
 logging.basicConfig(level=logging.INFO)
@@ -109,11 +109,12 @@ def main() -> None:
         experiment, experiment_kernels, experiment_gemms_kernels_summary = analyse_trace(experiment_trace)
         experiment_kernels_summary = experiment.get_df_kernel_launchers_summary(experiment_kernels)
 
-        baseline_summary, experiment_summary, flash_attention_tab, gemms_tab = st.tabs([
+        baseline_summary, experiment_summary, flash_attention_tab, gemms_tab, convolutions_tab = st.tabs([
             f"{ExperimentNames.BASELINE} summary",
             f"{ExperimentNames.EXPERIMENT} summary",
             "Flash Attention",
-            "GEMMs (aten::mm) comparison"
+            "GEMMs (aten::mm) comparison",
+            "Convolutions comparison"
         ])
 
         with baseline_summary:
@@ -222,6 +223,37 @@ def main() -> None:
                 .astype(int, errors="ignore")
             )
             st.dataframe(gemm_perf_df, hide_index=True)
+
+        with convolutions_tab:
+            st.write("**Performance**")
+            # Retrieve convolution performance data
+            baseline_conv_perf_df = get_conv_perf_df(baseline_kernels_summary, ExperimentNames.BASELINE)
+            experiment_conv_perf_df = get_conv_perf_df(experiment_kernels_summary, ExperimentNames.EXPERIMENT)
+
+            if baseline_conv_perf_df.empty and experiment_conv_perf_df.empty:
+                st.warning("No convolution kernels found in the traces.")
+            else:
+                merge_cols = list(ConvReportColumns.DEFAULT_MAPPING.values())
+                conv_perf_df = pd.merge(
+                    baseline_conv_perf_df,
+                    experiment_conv_perf_df,
+                    on=merge_cols,
+                    how="outer"
+                )
+                # Calculate parity
+                PARITY_COL = "Parity (%)"
+                conv_perf_df[(PARITY_COL, "with experiment")] = (
+                    100 * conv_perf_df[(ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION)] /
+                    conv_perf_df[(ExperimentNames.BASELINE, ConvReportColumns.DURATION)]
+                )
+                # Sort and format
+                conv_perf_df = (
+                    conv_perf_df
+                    .sort_values(by=[(ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)], ascending=False)
+                    .round()
+                    .astype(int, errors="ignore")
+                )
+                st.dataframe(conv_perf_df, hide_index=True)
 
 
 if __name__ == "__main__":
