@@ -16,7 +16,8 @@ class TraceLensColumns:
     STRIDES = "Input Strides"
     PERCENTAGE = "Percentage (%)"
 
-    SUMMARY_TOTAL_KERNEL_TIME = "Total Kernel Time (µs)"
+    SUMMARY_TOTAL_GEMM_KERNEL_TIME = "Total Kernel Time (µs)"
+    SUMMARY_TOTAL_CONV_KERNEL_TIME = "total_direct_kernel_time_ms"
     SUMMARY_COUNT = "Count"
 
 
@@ -146,16 +147,18 @@ def _calc_tflops(row: pd.Series) -> float:
 def get_gemm_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
     if summary.empty:
         # Return an empty DataFrame with the expected structure
-        return pd.DataFrame(columns=[
-            TraceLensColumns.TYPE,
-            TraceLensColumns.DIMS,
-            TraceLensColumns.STRIDES,
-            TraceLensColumns.PERCENTAGE,
-            GEMMReportColumns.DURATION,
-            GEMMReportColumns.TFLOPS
-        ])
+        return GEMMReportColumns.map_columns(
+            pd.DataFrame(columns=[
+                TraceLensColumns.TYPE,
+                TraceLensColumns.DIMS,
+                TraceLensColumns.STRIDES,
+                TraceLensColumns.PERCENTAGE,
+                GEMMReportColumns.DURATION,
+                GEMMReportColumns.TFLOPS
+            ]),
+            experiment_name,)
 
-    summary[GEMMReportColumns.DURATION] = summary[TraceLensColumns.SUMMARY_TOTAL_KERNEL_TIME] / summary[TraceLensColumns.SUMMARY_COUNT]
+    summary[GEMMReportColumns.DURATION] = summary[TraceLensColumns.SUMMARY_TOTAL_GEMM_KERNEL_TIME] / summary[TraceLensColumns.SUMMARY_COUNT]
     summary[GEMMReportColumns.TFLOPS] = summary.apply(_calc_tflops, axis=1)
     return GEMMReportColumns.map_columns(
         summary[[
@@ -171,31 +174,24 @@ def get_gemm_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFram
 
 
 def get_conv_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
-    # Filter for convolution kernels (e.g., "aten::conv" or similar)
-    conv_kernels = summary[summary["name"].str.contains("aten::conv", case=False, na=False)]
+    # Filter for convolution kernels (e.g., "aten::convolution" or similar)
+    conv_kernels = summary[summary["name"].str.contains("aten::cudnn_convolution", case=False, na=False)
+                        | summary["name"].str.contains("aten::miopen_convolution", case=False, na=False)]
 
     if conv_kernels.empty:
-        return pd.DataFrame()
-
-    # Calculate duration and TFLOPS
-    conv_kernels[ConvReportColumns.DURATION] = conv_kernels[TraceLensColumns.SUMMARY_TOTAL_KERNEL_TIME] / conv_kernels[TraceLensColumns.SUMMARY_COUNT]
-
-    # Example TFLOPS calculation for convolution (modify based on actual kernel details)
-    def _calc_conv_tflops(row: pd.Series) -> float:
-        # Assuming dims are in the format: [input_channels, output_channels, kernel_h, kernel_w, input_h, input_w]
-        input_channels, output_channels, kernel_h, kernel_w, input_h, input_w = row[TraceLensColumns.DIMS][0]
-        return (2 * input_channels * output_channels * kernel_h * kernel_w * input_h * input_w) / row[ConvReportColumns.DURATION] / 1e6
-
-    conv_kernels[ConvReportColumns.TFLOPS] = conv_kernels.apply(_calc_conv_tflops, axis=1)
+        return ConvReportColumns.map_columns(
+            pd.DataFrame(columns=[
+                TraceLensColumns.PERCENTAGE,
+                GEMMReportColumns.DURATION,
+            ]),
+            experiment_name,)
+    # Calculate duration
+    conv_kernels[ConvReportColumns.DURATION] = conv_kernels[TraceLensColumns.SUMMARY_TOTAL_CONV_KERNEL_TIME] / conv_kernels[TraceLensColumns.SUMMARY_COUNT]
 
     return ConvReportColumns.map_columns(
         conv_kernels[[
-            TraceLensColumns.TYPE,
-            TraceLensColumns.DIMS,
-            TraceLensColumns.STRIDES,
             TraceLensColumns.PERCENTAGE,
-            ConvReportColumns.DURATION,
-            ConvReportColumns.TFLOPS
+            ConvReportColumns.DURATION
         ]],
         experiment_name,
     )

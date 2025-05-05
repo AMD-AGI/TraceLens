@@ -163,16 +163,6 @@ def main() -> None:
                     ]
                 ))
             else:
-                # Ensure both DataFrames have a MultiIndex for columns
-                if not isinstance(baseline_gemm_perf_df.columns, pd.MultiIndex):
-                    baseline_gemm_perf_df.columns = pd.MultiIndex.from_tuples(
-                        [(ExperimentNames.BASELINE, col) for col in baseline_gemm_perf_df.columns]
-                    )
-                if not isinstance(experiment_gemm_perf_df.columns, pd.MultiIndex):
-                    experiment_gemm_perf_df.columns = pd.MultiIndex.from_tuples(
-                        [(ExperimentNames.EXPERIMENT, col) for col in experiment_gemm_perf_df.columns]
-                    )
-
                 # Perform the merge
                 gemm_perf_df = pd.merge(
                     baseline_gemm_perf_df,
