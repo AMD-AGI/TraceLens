@@ -463,8 +463,12 @@ class tex_ts_te_gemm_ts(GEMM):
         input_dims = event['args']['Input Dims']
         C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
 
-        trans_a = self.parsed_kernel_info['transpose'][0]
-        trans_b = self.parsed_kernel_info['transpose'][1]
+        # index 4 and 9 are transa and transb respectively
+        # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/cpp_extensions/gemm.py#L248
+        concrete_inputs = event['args']['Concrete Inputs']
+        trans_a = concrete_inputs[4] == '1'
+        trans_b = concrete_inputs[9] == '1'
+
 
         # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/common/gemm/cublaslt_gemm.cu#L330C17-L330C23
         if trans_a:
