@@ -150,12 +150,23 @@ def main() -> None:
             experiment_gemm_perf_df = get_gemm_perf_df(experiment_gemms_kernels_summary, ExperimentNames.EXPERIMENT)
             tuned_gemm_perf_df = None
             merge_cols = list(GEMMReportColumns.DEFAULT_MAPPING.values())
-            gemm_perf_df = pd.merge(
-                baseline_gemm_perf_df,
-                experiment_gemm_perf_df,
-                on=merge_cols,
-                how="outer"
-            )
+
+            # Check if either DataFrame is empty
+            if baseline_gemm_perf_df.empty and experiment_gemm_perf_df.empty:
+                st.warning("No GEMM kernels found in the traces.")
+                gemm_perf_df = pd.DataFrame(columns=merge_cols + [
+                    (ExperimentNames.BASELINE, GEMMReportColumns.DURATION),
+                    (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS),
+                    (ExperimentNames.EXPERIMENT, GEMMReportColumns.DURATION),
+                    (ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS),
+                ])
+            else:
+                gemm_perf_df = pd.merge(
+                    baseline_gemm_perf_df,
+                    experiment_gemm_perf_df,
+                    on=merge_cols,
+                    how="outer"
+                )
 
             sub_col0, sub_col1 = st.columns(2)
             if prepare_for_tuning_chk:
@@ -174,11 +185,11 @@ def main() -> None:
 
                 with sub_col0:
                     download_file_button("Download hipBLASLt shapes log", hipBLASLt_log)
-            
+                
                 if tuning_results_file:
                     with sub_col1:
                         download_file_button("Download tuning results", tuning_results_file)
-            
+                
                     winner_solutions_df = (
                         winner_solutions_df[[HipBLASLtColumns.DURATION, HipBLASLtColumns.GFLOPS]]
                         .rename(columns={
@@ -205,11 +216,11 @@ def main() -> None:
 
             BASELINE_TFLOPS_COL = (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS)
             gemm_perf_df[(PARITY_COL, "with experiment")] = (
-                100 * gemm_perf_df[(ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS)] / gemm_perf_df[BASELINE_TFLOPS_COL]
+                100 * gemm_perf_df.get((ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS), 0) / gemm_perf_df.get(BASELINE_TFLOPS_COL, 1)
             )
             if tuned_gemm_perf_df is not None:
                 gemm_perf_df[(PARITY_COL, "with tuned")] = (
-                    100 * gemm_perf_df[(ExperimentNames.TUNED, GEMMReportColumns.TFLOPS)] / gemm_perf_df[BASELINE_TFLOPS_COL]
+                    100 * gemm_perf_df.get((ExperimentNames.TUNED, GEMMReportColumns.TFLOPS), 0) / gemm_perf_df.get(BASELINE_TFLOPS_COL, 1)
                 )
 
             gemm_perf_df = (
