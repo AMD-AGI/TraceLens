@@ -40,6 +40,7 @@ class TraceToTree:
         else:
             self._set_linking_key()
         self._preprocess_and_index_events()
+        self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
 
@@ -259,6 +260,8 @@ class TraceToTree:
             if len(name) > max_len:
                 name = name[:max_len] + '..'
             print(f"  name: {name}")
+            # Print UID
+            print(f"  UID: {node['UID']}")
 
             # Move to the parent node
             node = self.get_parent_event(node)
@@ -360,3 +363,31 @@ class TraceToTree:
 
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
         return self.event_to_category(event) == 'python_function' and event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, '').startswith('nn.Module:')
+
+
+    def _annotate_gpu_events_with_stream_index(self):
+        """
+        This function preprocesses the GPU events in the perf_analyzer object.
+        """
+        # 1. we create a dict stream -> events
+        dict_stream2events = {}
+        for event in self.events:
+            stream =  event.get('args', {}).get('stream', None)
+            if stream is not None:
+                if stream not in dict_stream2events:
+                    dict_stream2events[stream] = []
+                dict_stream2events[stream].append(event)
+        
+        # 2. we sort the events in each stream by their timestamp
+        for stream, events in dict_stream2events.items():
+            dict_stream2events[stream] = sorted(events, key=lambda x: x['ts'])
+
+        # 3. we create a dict stream, index -> event
+        #    and we set the stream index in the event
+        dict_stream_index2event = {}
+        for stream, events in dict_stream2events.items():
+            for i, event in enumerate(events):
+                dict_stream_index2event[(stream, i)] = event
+                event['args']['stream_index'] = i
+        # now we set this dict in the perf_analyzer
+        self.dict_stream_index2event = dict_stream_index2event
