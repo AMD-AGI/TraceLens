@@ -154,13 +154,26 @@ def main() -> None:
             # Check if either DataFrame is empty
             if baseline_gemm_perf_df.empty and experiment_gemm_perf_df.empty:
                 st.warning("No GEMM kernels found in the traces.")
-                gemm_perf_df = pd.DataFrame(columns=merge_cols + [
-                    (ExperimentNames.BASELINE, GEMMReportColumns.DURATION),
-                    (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS),
-                    (ExperimentNames.EXPERIMENT, GEMMReportColumns.DURATION),
-                    (ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS),
-                ])
+                gemm_perf_df = pd.DataFrame(columns=pd.MultiIndex.from_tuples(
+                    merge_cols + [
+                        (ExperimentNames.BASELINE, GEMMReportColumns.DURATION),
+                        (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS),
+                        (ExperimentNames.EXPERIMENT, GEMMReportColumns.DURATION),
+                        (ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS),
+                    ]
+                ))
             else:
+                # Ensure both DataFrames have a MultiIndex for columns
+                if not isinstance(baseline_gemm_perf_df.columns, pd.MultiIndex):
+                    baseline_gemm_perf_df.columns = pd.MultiIndex.from_tuples(
+                        [(ExperimentNames.BASELINE, col) for col in baseline_gemm_perf_df.columns]
+                    )
+                if not isinstance(experiment_gemm_perf_df.columns, pd.MultiIndex):
+                    experiment_gemm_perf_df.columns = pd.MultiIndex.from_tuples(
+                        [(ExperimentNames.EXPERIMENT, col) for col in experiment_gemm_perf_df.columns]
+                    )
+
+                # Perform the merge
                 gemm_perf_df = pd.merge(
                     baseline_gemm_perf_df,
                     experiment_gemm_perf_df,
