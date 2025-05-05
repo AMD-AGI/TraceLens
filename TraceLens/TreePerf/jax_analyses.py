@@ -411,7 +411,7 @@ class JaxAnalyses:
 
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata):
+        if event.get(TraceEventUtils.TraceKeys.Phase) == TraceEventUtils.TracePhases.Metadata:
             return "metadata"
         elif (TraceEventUtils.TraceKeys.PID in event and TraceEventUtils.TraceKeys.TID in event):
             pid = event[TraceEventUtils.TraceKeys.PID]

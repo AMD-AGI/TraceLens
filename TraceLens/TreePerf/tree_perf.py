@@ -37,7 +37,7 @@ from ..util import DataLoader, TraceEventUtils
 
 class TreePerfAnalyzer:
     @staticmethod
-    def from_file(profile_filepath, jax: bool = False, *args, **kwargs) -> "TreePerfAnalyzer":
+    def from_file(profile_filepath, *args, **kwargs) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
 
@@ -108,12 +108,12 @@ class TreePerfAnalyzer:
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
         if len(list_kernels) > 0:
-            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = self.GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
+            busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -289,7 +289,7 @@ class TreePerfAnalyzer:
                         kernel_launcher = True
                         list_kernels.append(grand_child)
             if kernel_launcher:
-                event['total_direct_kernel_time'] = self.GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+                event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
                 event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
                 kernel_launchers.append(event)
@@ -369,7 +369,7 @@ class TreePerfAnalyzer:
         return df_agg
 
     @staticmethod
-    def get_df_kernel_launchers_unique_args(df_kernel_launchers: pd.DataFrame, 
+    def get_df_kernel_launchers_unique_args(df_kernel_launchers: pd.DataFrame,
                                             event_name=None, agg_metrics=['mean'], include_pct=False) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -390,7 +390,7 @@ class TreePerfAnalyzer:
             df_filtered = df_kernel_launchers[df_kernel_launchers['name'] == event_name].copy()
         else:
             df_filtered = df_kernel_launchers.copy()
-            
+
         # 1. Create string representations of the grouping columns - so we can group by them
         str_col_names, actual_grouping_cols = [], []
         for col in grouping_cols_original:
@@ -402,7 +402,7 @@ class TreePerfAnalyzer:
             str_col_names.append(str_col_name)
         if not str_col_names:
             raise ValueError("No valid columns found to group by.")
-        
+
         # 2. Aggregate the DataFrame by the string representations of the grouping columns
         agg_dict = {}
         if 'total_direct_kernel_time' in df_filtered.columns:
@@ -420,7 +420,7 @@ class TreePerfAnalyzer:
         df_unique_args = df_filtered.groupby(str_col_names, dropna=False, sort=False).agg(agg_dict)
         df_unique_args.columns = ['_'.join(col).strip() for col in df_unique_args.columns.values]
         df_unique_args.reset_index(inplace=True)
-        
+
         # 3. Rename columns for clarity
         rename_map = {'UID_count': 'operation_count'}
         for col in columns_to_keep_first:
@@ -441,7 +441,7 @@ class TreePerfAnalyzer:
         # 5. Sort the DataFrame by the sum of total_direct_kernel_time
         if 'total_direct_kernel_time_sum' in df_unique_args.columns:
             df_unique_args = df_unique_args.sort_values(by="total_direct_kernel_time_sum", ascending=False).reset_index(drop=True)
-        
+
         # 6. Calculate percentage of total time and cumulative percentage if requested
         if include_pct and 'total_direct_kernel_time_sum' in df_unique_args.columns:
             total_duration_ms = df_unique_args['total_direct_kernel_time_sum'].sum()
@@ -619,7 +619,7 @@ class TreePerfAnalyzer:
     def _build_nn_modules_subtree_recursive(self, node: Dict[str, Any], parent_gpu_time=None):
         gpu_events_subtree_UIDs = node.get('gpu_events', [])
         gpu_events_subtree = [self.tree.get_UID2event(uid) for uid in gpu_events_subtree_UIDs]
-        gpu_time = self.GPUEventAnalyser(gpu_events_subtree).compute_metrics()['busy_time']
+        gpu_time = GPUEventAnalyser(gpu_events_subtree).compute_metrics()['busy_time']
         node['GPU Time'] = gpu_time
         node['nn Parent GPU Time'] = parent_gpu_time
 
@@ -639,6 +639,6 @@ class TreePerfAnalyzer:
         remaining_gpu_events_UIDs = set(gpu_events_subtree_UIDs) - union_gpu_events_childrenUIDs
         if remaining_gpu_events_UIDs:
             gpu_events_remaining = [self.tree.get_UID2event(uid) for uid in remaining_gpu_events_UIDs]
-            gpu_time_remaining = self.GPUEventAnalyser(gpu_events_remaining).compute_metrics()['busy_time']
+            gpu_time_remaining = GPUEventAnalyser(gpu_events_remaining).compute_metrics()['busy_time']
             node['Non-nn.Module GPU Time'] = gpu_time_remaining
         return

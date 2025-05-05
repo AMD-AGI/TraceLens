@@ -392,4 +392,3 @@ class TraceToTree:
                 event[TraceLens.util.TraceEventUtils.TraceKeys.Args][TraceLens.util.TraceEventUtils.ArgNames.StreamIndex] = i
         # now we set this dict in the perf_analyzer
         self.dict_stream_index2event = dict_stream_index2event
-
