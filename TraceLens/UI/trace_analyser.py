@@ -10,7 +10,16 @@ import streamlit as st
 import torch
 
 from TraceLens.UI.utils.hipblaslt import HipBLASLtColumns, perform_offline_tuning
-from TraceLens.UI.utils.reporting import FAReportColumns, GEMMReportColumns, ConvReportColumns, TraceLensColumns, get_fa_config, get_fa_perf_df, get_gemm_perf_df, read_trace
+from TraceLens.UI.utils.reporting import (
+    FAReportColumns,
+    GEMMReportColumns,
+    ConvReportColumns,
+    TraceLensColumns,
+    get_fa_config,
+    get_fa_perf_df,
+    get_gemm_perf_df,
+    read_trace,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -32,10 +41,24 @@ def hipBLASLt_tuning_possible() -> bool:
 def analyse_trace(experiment_trace: bytes):
     experiment = read_trace(experiment_trace)
     experiment_kernels = experiment.get_df_kernel_launchers()
-    experiment_gemms_kernels_summary = experiment.get_df_kernel_launchers_summary_by_shape(experiment_kernels, "aten::mm")
+    experiment_gemms_kernels_summary = (
+        experiment.get_df_kernel_launchers_summary_by_shape(
+            experiment_kernels, "aten::mm"
+        )
+    )
     experiment_convs_kernels_summary = experiment.build_df_perf_metrics(
-        [event for event in experiment.tree.events if event["name"] == "aten::convolution"])
-    return experiment, experiment_kernels, experiment_gemms_kernels_summary, experiment_convs_kernels_summary
+        [
+            event
+            for event in experiment.tree.events
+            if event["name"] == "aten::convolution"
+        ]
+    )
+    return (
+        experiment,
+        experiment_kernels,
+        experiment_gemms_kernels_summary,
+        experiment_convs_kernels_summary,
+    )
 
 
 @st.fragment
@@ -72,7 +95,11 @@ def main() -> None:
             type=["json", "gz"],
         )
     with col2:
-        prepare_for_tuning_chk = st.checkbox("Prepare hipBLASLt-bench file", value=False, disabled=not hipBLASLt_tuning_possible())
+        prepare_for_tuning_chk = st.checkbox(
+            "Prepare hipBLASLt-bench file",
+            value=False,
+            disabled=not hipBLASLt_tuning_possible(),
+        )
         options = [5, 10, 25, 50]
         if torch.cuda.is_available():
             options += [torch.cuda.device_count()]
@@ -85,7 +112,11 @@ def main() -> None:
         )
 
     with col3:
-        run_tuning_chk = st.checkbox("Run offline hipBLASLt tuning", value=False, disabled=not prepare_for_tuning_chk,)
+        run_tuning_chk = st.checkbox(
+            "Run offline hipBLASLt tuning",
+            value=False,
+            disabled=not prepare_for_tuning_chk,
+        )
         iterations = st.selectbox(
             "Number of iterations",
             options=[100, 200, "All using '--algo_method index'"],
@@ -101,31 +132,58 @@ def main() -> None:
     )
 
     if button:
-        st.toast(f'Starting {baseline_trace.name} parsing.')
-        baseline, baseline_kernels, baseline_gemms_kernels_summary, baseline_conv_kernels_summary = analyse_trace(baseline_trace)
-        baseline_kernels_summary = baseline.get_df_kernel_launchers_summary(baseline_kernels)
-        st.toast(f'Starting {experiment_trace.name} parsing.')
-        experiment, experiment_kernels, experiment_gemms_kernels_summary, experiment_conv_kernels_summary = analyse_trace(experiment_trace)
-        experiment_kernels_summary = experiment.get_df_kernel_launchers_summary(experiment_kernels)
+        st.toast(f"Starting {baseline_trace.name} parsing.")
+        (
+            baseline,
+            baseline_kernels,
+            baseline_gemms_kernels_summary,
+            baseline_conv_kernels_summary,
+        ) = analyse_trace(baseline_trace)
+        baseline_kernels_summary = baseline.get_df_kernel_launchers_summary(
+            baseline_kernels
+        )
+        st.toast(f"Starting {experiment_trace.name} parsing.")
+        (
+            experiment,
+            experiment_kernels,
+            experiment_gemms_kernels_summary,
+            experiment_conv_kernels_summary,
+        ) = analyse_trace(experiment_trace)
+        experiment_kernels_summary = experiment.get_df_kernel_launchers_summary(
+            experiment_kernels
+        )
 
-        baseline_summary, experiment_summary, flash_attention_tab, gemms_tab, convolutions_tab = st.tabs([
-            f"{ExperimentNames.BASELINE} summary",
-            f"{ExperimentNames.EXPERIMENT} summary",
-            "Flash Attention",
-            "GEMMs (aten::mm) comparison",
-            "Convolutions comparison"
-        ])
+        (
+            baseline_summary,
+            experiment_summary,
+            flash_attention_tab,
+            gemms_tab,
+            convolutions_tab,
+        ) = st.tabs(
+            [
+                f"{ExperimentNames.BASELINE} summary",
+                f"{ExperimentNames.EXPERIMENT} summary",
+                "Flash Attention",
+                "GEMMs (aten::mm) comparison",
+                "Convolutions comparison",
+            ]
+        )
 
         with baseline_summary:
             st.dataframe(baseline_kernels_summary.round().astype(int, errors="ignore"))
 
         with experiment_summary:
-            st.dataframe(experiment_kernels_summary.round().astype(int, errors="ignore"))
-        
+            st.dataframe(
+                experiment_kernels_summary.round().astype(int, errors="ignore")
+            )
+
         PARITY_COL = "Parity (%)"
         with flash_attention_tab:
             config_df = None
-            for df in [get_fa_config(baseline, ExperimentNames.BASELINE), get_fa_config(experiment, ExperimentNames.EXPERIMENT)]:
+            for df in [
+                get_fa_config(baseline, ExperimentNames.BASELINE),
+                get_fa_config(experiment, ExperimentNames.EXPERIMENT),
+            ]:
                 if df is not None:
                     config_df = pd.concat([config_df, df], axis=0)
 
@@ -136,101 +194,144 @@ def main() -> None:
                 st.dataframe(config_df)
 
                 st.write("**Performance**")
-                BASELINE_DUR_COL = f"{ExperimentNames.BASELINE} {FAReportColumns.DURATION}"
-                baseline_fa_perf_df = get_fa_perf_df(baseline_kernels_summary).rename(columns={FAReportColumns.DURATION: BASELINE_DUR_COL})
-                EXPERIMENT_DUR_COL = f"{ExperimentNames.EXPERIMENT} {FAReportColumns.DURATION}"
-                experiment_fa_perf_df = get_fa_perf_df(experiment_kernels_summary).rename(columns={FAReportColumns.DURATION: EXPERIMENT_DUR_COL})
-                fa_perf_df = pd.merge(baseline_fa_perf_df, experiment_fa_perf_df, on=[FAReportColumns.PASS, FAReportColumns.NAME], how="outer")
-                fa_perf_df[PARITY_COL] = 100 * fa_perf_df[BASELINE_DUR_COL] / fa_perf_df[EXPERIMENT_DUR_COL]
+                BASELINE_DUR_COL = (
+                    f"{ExperimentNames.BASELINE} {FAReportColumns.DURATION}"
+                )
+                baseline_fa_perf_df = get_fa_perf_df(baseline_kernels_summary).rename(
+                    columns={FAReportColumns.DURATION: BASELINE_DUR_COL}
+                )
+                EXPERIMENT_DUR_COL = (
+                    f"{ExperimentNames.EXPERIMENT} {FAReportColumns.DURATION}"
+                )
+                experiment_fa_perf_df = get_fa_perf_df(
+                    experiment_kernels_summary
+                ).rename(columns={FAReportColumns.DURATION: EXPERIMENT_DUR_COL})
+                fa_perf_df = pd.merge(
+                    baseline_fa_perf_df,
+                    experiment_fa_perf_df,
+                    on=[FAReportColumns.PASS, FAReportColumns.NAME],
+                    how="outer",
+                )
+                fa_perf_df[PARITY_COL] = (
+                    100 * fa_perf_df[BASELINE_DUR_COL] / fa_perf_df[EXPERIMENT_DUR_COL]
+                )
                 fa_perf_df = fa_perf_df.round().astype(int, errors="ignore")
                 st.dataframe(fa_perf_df, hide_index=True)
 
         with gemms_tab:
             st.write("**Performance**")
-            
-            baseline_gemm_perf_df = get_gemm_perf_df(baseline_gemms_kernels_summary, ExperimentNames.BASELINE)
-            experiment_gemm_perf_df = get_gemm_perf_df(experiment_gemms_kernels_summary, ExperimentNames.EXPERIMENT)
+
+            baseline_gemm_perf_df = get_gemm_perf_df(
+                baseline_gemms_kernels_summary, ExperimentNames.BASELINE
+            )
+            experiment_gemm_perf_df = get_gemm_perf_df(
+                experiment_gemms_kernels_summary, ExperimentNames.EXPERIMENT
+            )
             tuned_gemm_perf_df = None
             merge_cols = list(GEMMReportColumns.DEFAULT_MAPPING.values())
 
             # Check if either DataFrame is empty
             if baseline_gemm_perf_df.empty and experiment_gemm_perf_df.empty:
                 st.warning("No GEMM kernels found in the traces.")
-                gemm_perf_df = pd.DataFrame(columns=pd.MultiIndex.from_tuples(
-                    merge_cols + [
-                        (ExperimentNames.BASELINE, GEMMReportColumns.DURATION),
-                        (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS),
-                        (ExperimentNames.EXPERIMENT, GEMMReportColumns.DURATION),
-                        (ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS),
-                    ]
-                ))
+                gemm_perf_df = pd.DataFrame(
+                    columns=pd.MultiIndex.from_tuples(
+                        merge_cols
+                        + [
+                            (ExperimentNames.BASELINE, GEMMReportColumns.DURATION),
+                            (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS),
+                            (ExperimentNames.EXPERIMENT, GEMMReportColumns.DURATION),
+                            (ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS),
+                        ]
+                    )
+                )
             else:
                 # Perform the merge
                 gemm_perf_df = pd.merge(
                     baseline_gemm_perf_df,
                     experiment_gemm_perf_df,
                     on=merge_cols,
-                    how="outer"
+                    how="outer",
                 )
 
             sub_col0, sub_col1 = st.columns(2)
             if prepare_for_tuning_chk:
                 kernes_to_tune = (
-                    experiment_gemms_kernels_summary.sort_values(by=[TraceLensColumns.PERCENTAGE], ascending=False)[:int(n_kernels)]
+                    experiment_gemms_kernels_summary.sort_values(
+                        by=[TraceLensColumns.PERCENTAGE], ascending=False
+                    )[: int(n_kernels)]
                     if n_kernels != "All"
                     else experiment_gemms_kernels_summary
                 )
                 st.toast(f"Recording shapes for {kernes_to_tune.shape[0]} kernels")
                 st.toast("Starting offline tuning")
 
-                hipBLASLt_log, tuning_results_file, winner_solutions_df = perform_offline_tuning(
-                    kernes_to_tune,
-                    only_collect_log=not run_tuning_chk,
+                hipBLASLt_log, tuning_results_file, winner_solutions_df = (
+                    perform_offline_tuning(
+                        kernes_to_tune,
+                        only_collect_log=not run_tuning_chk,
+                    )
                 )
 
                 with sub_col0:
                     download_file_button("Download hipBLASLt shapes log", hipBLASLt_log)
-                
+
                 if tuning_results_file:
                     with sub_col1:
-                        download_file_button("Download tuning results", tuning_results_file)
-                
+                        download_file_button(
+                            "Download tuning results", tuning_results_file
+                        )
+
                     winner_solutions_df = (
-                        winner_solutions_df[[HipBLASLtColumns.DURATION, HipBLASLtColumns.GFLOPS]]
-                        .rename(columns={
-                            HipBLASLtColumns.DURATION: GEMMReportColumns.DURATION,
-                            HipBLASLtColumns.GFLOPS: GEMMReportColumns.TFLOPS,
-                        })
+                        winner_solutions_df[
+                            [HipBLASLtColumns.DURATION, HipBLASLtColumns.GFLOPS]
+                        ]
+                        .rename(
+                            columns={
+                                HipBLASLtColumns.DURATION: GEMMReportColumns.DURATION,
+                                HipBLASLtColumns.GFLOPS: GEMMReportColumns.TFLOPS,
+                            }
+                        )
                         .astype(float, errors="ignore")
                     )
-                    winner_solutions_df[GEMMReportColumns.TFLOPS] = winner_solutions_df[GEMMReportColumns.TFLOPS] / 1e3
+                    winner_solutions_df[GEMMReportColumns.TFLOPS] = (
+                        winner_solutions_df[GEMMReportColumns.TFLOPS] / 1e3
+                    )
                     winner_solutions_df = pd.merge(
                         kernes_to_tune[list(GEMMReportColumns.DEFAULT_MAPPING.keys())],
                         winner_solutions_df,
                         left_index=True,
                         right_index=True,
-                        how="outer"
+                        how="outer",
                     )
-                    tuned_gemm_perf_df = GEMMReportColumns.map_columns(winner_solutions_df, ExperimentNames.TUNED)
+                    tuned_gemm_perf_df = GEMMReportColumns.map_columns(
+                        winner_solutions_df, ExperimentNames.TUNED
+                    )
                     gemm_perf_df = pd.merge(
-                        gemm_perf_df,
-                        tuned_gemm_perf_df,
-                        on=merge_cols,
-                        how="outer"
+                        gemm_perf_df, tuned_gemm_perf_df, on=merge_cols, how="outer"
                     )
 
             BASELINE_TFLOPS_COL = (ExperimentNames.BASELINE, GEMMReportColumns.TFLOPS)
             gemm_perf_df[(PARITY_COL, "with experiment")] = (
-                100 * gemm_perf_df.get((ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS), 0) / gemm_perf_df.get(BASELINE_TFLOPS_COL, 1)
+                100
+                * gemm_perf_df.get(
+                    (ExperimentNames.EXPERIMENT, GEMMReportColumns.TFLOPS), 0
+                )
+                / gemm_perf_df.get(BASELINE_TFLOPS_COL, 1)
             )
             if tuned_gemm_perf_df is not None:
                 gemm_perf_df[(PARITY_COL, "with tuned")] = (
-                    100 * gemm_perf_df.get((ExperimentNames.TUNED, GEMMReportColumns.TFLOPS), 0) / gemm_perf_df.get(BASELINE_TFLOPS_COL, 1)
+                    100
+                    * gemm_perf_df.get(
+                        (ExperimentNames.TUNED, GEMMReportColumns.TFLOPS), 0
+                    )
+                    / gemm_perf_df.get(BASELINE_TFLOPS_COL, 1)
                 )
 
             gemm_perf_df = (
-                gemm_perf_df
-                .sort_values(by=[(ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)], ascending=False)
+                gemm_perf_df.sort_values(
+                    by=[(ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)],
+                    ascending=False,
+                )
                 .round()
                 .astype(int, errors="ignore")
             )
@@ -238,37 +339,94 @@ def main() -> None:
 
         with convolutions_tab:
             st.write("**Performance**")
-            if baseline_conv_kernels_summary.empty and experiment_conv_kernels_summary.empty:
+            if (
+                baseline_conv_kernels_summary.empty
+                and experiment_conv_kernels_summary.empty
+            ):
                 st.warning("No convolution kernels found in the traces.")
             else:
                 merge_cols = ConvReportColumns.ID_COLS
-                baseline_conv_kernels_summary.columns = [("",col) if col in merge_cols else (ExperimentNames.BASELINE,col) for col in baseline_conv_kernels_summary.columns]
-                experiment_conv_kernels_summary.columns = [("",col) if col in merge_cols else (ExperimentNames.EXPERIMENT,col) for col in experiment_conv_kernels_summary.columns]
+                baseline_conv_kernels_summary.columns = [
+                    ("", col) if col in merge_cols else (ExperimentNames.BASELINE, col)
+                    for col in baseline_conv_kernels_summary.columns
+                ]
+                experiment_conv_kernels_summary.columns = [
+                    (
+                        ("", col)
+                        if col in merge_cols
+                        else (ExperimentNames.EXPERIMENT, col)
+                    )
+                    for col in experiment_conv_kernels_summary.columns
+                ]
                 conv_perf_df = pd.merge(
                     baseline_conv_kernels_summary,
                     experiment_conv_kernels_summary,
-                    on=[("",col) for col in merge_cols],
-                    how="outer"
+                    on=[("", col) for col in merge_cols],
+                    how="outer",
                 )
                 # Calculate parity
                 PARITY_COL = "Parity (%)"
                 conv_perf_df[(PARITY_COL, "with experiment")] = (
-                    100 * conv_perf_df[(ExperimentNames.BASELINE,ConvReportColumns.DURATION)] /
-                    conv_perf_df[(ExperimentNames.EXPERIMENT,ConvReportColumns.DURATION)
+                    100
+                    * conv_perf_df[
+                        (ExperimentNames.BASELINE, ConvReportColumns.DURATION)
+                    ]
+                    / conv_perf_df[
+                        (ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION)
                     ]
                 )
                 # Sort and format
                 conv_perf_df = (
-                    conv_perf_df
-                    .sort_values(by=[(ExperimentNames.BASELINE, ConvReportColumns.DURATION)], ascending=False)
+                    conv_perf_df.sort_values(
+                        by=[(ExperimentNames.BASELINE, ConvReportColumns.DURATION)],
+                        ascending=False,
+                    )
                     .round()
                     .astype(int, errors="ignore")
                 )
                 conv_perf_df = conv_perf_df.set_index([("", col) for col in merge_cols])
 
-                conv_perf_cols = ([(ExperimentNames.BASELINE, ConvReportColumns.DURATION),(ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION),(PARITY_COL, "with experiment")])
-
-                st.dataframe(conv_perf_df[conv_perf_cols], hide_index=False)
+                conv_perf_cols = [
+                    (ExperimentNames.BASELINE, ConvReportColumns.DURATION),
+                    (ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION),
+                    (PARITY_COL, "with experiment"),
+                ]
+                conv_perf_df = conv_perf_df[conv_perf_cols]
+                conv_perf_df[
+                    (ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)
+                ] = (
+                    conv_perf_df[(ExperimentNames.BASELINE, ConvReportColumns.DURATION)]
+                    / conv_perf_df[
+                        (ExperimentNames.BASELINE, ConvReportColumns.DURATION)
+                    ]
+                    .sum()
+                    .round(2)
+                    * 100
+                )
+                conv_perf_df[
+                    (ExperimentNames.EXPERIMENT, TraceLensColumns.PERCENTAGE)
+                ] = (
+                    conv_perf_df[
+                        (ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION)
+                    ]
+                    / conv_perf_df[
+                        (ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION)
+                    ]
+                    .sum()
+                    .round(2)
+                    * 100
+                )
+                conv_perf_df[(ExperimentNames.EXPERIMENT, "Cumulative Percentage")] = (
+                    conv_perf_df[
+                        (ExperimentNames.EXPERIMENT, TraceLensColumns.PERCENTAGE)
+                    ].cumsum()
+                )
+                conv_perf_df[(ExperimentNames.BASELINE, "Cumulative Percentage")] = (
+                    conv_perf_df[
+                        (ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)
+                    ].cumsum()
+                )
+                st.dataframe(conv_perf_df, hide_index=False)
 
 
 if __name__ == "__main__":

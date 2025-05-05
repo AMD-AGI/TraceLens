@@ -22,7 +22,6 @@
 
 import json
 import gzip
-from collections import defaultdict
 from typing import Dict, Any
 
 # TODO: warning should show the stack as well

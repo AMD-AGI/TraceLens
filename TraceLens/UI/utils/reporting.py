@@ -9,6 +9,7 @@ import pandas as pd
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
+
 @dataclass
 class TraceLensColumns:
     TYPE = "Input type"
@@ -44,10 +45,16 @@ class GEMMReportColumns:
 
     @staticmethod
     def map_columns(df: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
-        df.columns = pd.MultiIndex.from_tuples([
-            GEMMReportColumns.DEFAULT_MAPPING[col] if col in GEMMReportColumns.DEFAULT_MAPPING else (experiment_name, col)
-            for col in df.columns
-        ])
+        df.columns = pd.MultiIndex.from_tuples(
+            [
+                (
+                    GEMMReportColumns.DEFAULT_MAPPING[col]
+                    if col in GEMMReportColumns.DEFAULT_MAPPING
+                    else (experiment_name, col)
+                )
+                for col in df.columns
+            ]
+        )
         return df
 
 
@@ -60,19 +67,31 @@ class ConvReportColumns:
     TFLOPS = "avg performance (TFLOPS)"
 
     ID_COLS = {
-        'param: convNd', 'param: input_shape', 'param: filter_shape',
-       'param: dtype_input_weight', 'param: input_stride',
-       'param: weight_stride', 'param: bias', 'param: stride',
-       'param: padding', 'param: dilation', 'param: transposed_conv',
+        "param: convNd",
+        "param: input_shape",
+        "param: filter_shape",
+        "param: dtype_input_weight",
+        "param: input_stride",
+        "param: weight_stride",
+        "param: bias",
+        "param: stride",
+        "param: padding",
+        "param: dilation",
+        "param: transposed_conv",
     }
 
-       
     @staticmethod
     def map_columns(df: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
-        df.columns = pd.MultiIndex.from_tuples([
-            ConvReportColumns.DEFAULT_MAPPING[col] if col in ConvReportColumns.DEFAULT_MAPPING else (experiment_name, col)
-            for col in df.columns
-        ])
+        df.columns = pd.MultiIndex.from_tuples(
+            [
+                (
+                    ConvReportColumns.DEFAULT_MAPPING[col]
+                    if col in ConvReportColumns.DEFAULT_MAPPING
+                    else (experiment_name, col)
+                )
+                for col in df.columns
+            ]
+        )
         return df
 
 
@@ -83,7 +102,7 @@ def read_trace(file: BytesIO) -> TreePerfAnalyzer:
     elif file.name.endswith(".json"):
         data = json.load(file)
 
-    tree = TraceToTree(data['traceEvents'])
+    tree = TraceToTree(data["traceEvents"])
     return TreePerfAnalyzer(tree)
 
 
@@ -105,11 +124,13 @@ def get_fa_config(analyzer: TreePerfAnalyzer, index: str) -> pd.DataFrame:
         {
             ("Sequence length", "", ""): [q[0]],
             ("Attention type", "", ""): (
-                "Multi-Head" if q[1] == k[1] else
-                "Multi-Query" if k[1] == 1 else
-                "Groupped-Query"
+                "Multi-Head"
+                if q[1] == k[1]
+                else "Multi-Query" if k[1] == 1 else "Groupped-Query"
             ),
-            ("Causal masking", "", ""): [fa_kernel[ARGS_KEY]["Concrete Inputs"][CASUAL_ARG_IDX]],
+            ("Causal masking", "", ""): [
+                fa_kernel[ARGS_KEY]["Concrete Inputs"][CASUAL_ARG_IDX]
+            ],
             ("Heads", "Q", "#"): [q[1]],
             ("Heads", "Q", "Dims"): [q[0]],
             ("Heads", "Q", "Type"): [fa_kernel[ARGS_KEY][TraceLensColumns.TYPE][0]],
@@ -129,13 +150,16 @@ def get_fa_perf_df(summary: pd.DataFrame) -> pd.DataFrame:
     # on MI300X forward operations doesn't have "forward" in the name,
     # so we have to search "backward" for identification
     lower_name_str = summary["name"].str.lower().str
-    summary[FAReportColumns.PASS] = np.where(lower_name_str.contains("backward"), "backward", "forward")
-    summary[FAReportColumns.DURATION] = summary["total_direct_kernel_time_sum"] / summary[TraceLensColumns.SUMMARY_COUNT]
-    return (
-        summary[lower_name_str.contains("flash")]
-        .rename(columns={"name": FAReportColumns.NAME})
-        [[FAReportColumns.PASS, FAReportColumns.NAME, FAReportColumns.DURATION]]
+    summary[FAReportColumns.PASS] = np.where(
+        lower_name_str.contains("backward"), "backward", "forward"
     )
+    summary[FAReportColumns.DURATION] = (
+        summary["total_direct_kernel_time_sum"]
+        / summary[TraceLensColumns.SUMMARY_COUNT]
+    )
+    return summary[lower_name_str.contains("flash")].rename(
+        columns={"name": FAReportColumns.NAME}
+    )[[FAReportColumns.PASS, FAReportColumns.NAME, FAReportColumns.DURATION]]
 
 
 def _calc_tflops(row: pd.Series) -> float:
@@ -150,28 +174,34 @@ def get_gemm_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFram
     if summary.empty:
         # Return an empty DataFrame with the expected structure
         return GEMMReportColumns.map_columns(
-            pd.DataFrame(columns=[
+            pd.DataFrame(
+                columns=[
+                    TraceLensColumns.TYPE,
+                    TraceLensColumns.DIMS,
+                    TraceLensColumns.STRIDES,
+                    TraceLensColumns.PERCENTAGE,
+                    GEMMReportColumns.DURATION,
+                    GEMMReportColumns.TFLOPS,
+                ]
+            ),
+            experiment_name,
+        )
+
+    summary[GEMMReportColumns.DURATION] = (
+        summary[TraceLensColumns.SUMMARY_TOTAL_GEMM_KERNEL_TIME]
+        / summary[TraceLensColumns.SUMMARY_COUNT]
+    )
+    summary[GEMMReportColumns.TFLOPS] = summary.apply(_calc_tflops, axis=1)
+    return GEMMReportColumns.map_columns(
+        summary[
+            [
                 TraceLensColumns.TYPE,
                 TraceLensColumns.DIMS,
                 TraceLensColumns.STRIDES,
                 TraceLensColumns.PERCENTAGE,
                 GEMMReportColumns.DURATION,
-                GEMMReportColumns.TFLOPS
-            ]),
-            experiment_name,)
-
-    summary[GEMMReportColumns.DURATION] = summary[TraceLensColumns.SUMMARY_TOTAL_GEMM_KERNEL_TIME] / summary[TraceLensColumns.SUMMARY_COUNT]
-    summary[GEMMReportColumns.TFLOPS] = summary.apply(_calc_tflops, axis=1)
-    return GEMMReportColumns.map_columns(
-        summary[[
-            TraceLensColumns.TYPE,
-            TraceLensColumns.DIMS,
-            TraceLensColumns.STRIDES,
-            TraceLensColumns.PERCENTAGE,
-            GEMMReportColumns.DURATION,
-            GEMMReportColumns.TFLOPS
-        ]],
+                GEMMReportColumns.TFLOPS,
+            ]
+        ],
         experiment_name,
     )
-
-
