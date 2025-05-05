@@ -62,9 +62,10 @@ class TraceEventUtils:
         ThreadSort    = 'thread_sort_index',
 
     class ArgNames(StrEnum):
-        Name      = 'name'
-        SortIndex = 'sort_index'
-        Labels    = 'labels'
+        Name        = 'name'
+        SortIndex   = 'sort_index'
+        StreamIndex = 'stream_index'
+        Labels      = 'labels'
 
     class GpuEventCategories(StrEnum):
         Kernel = 'kernel'
