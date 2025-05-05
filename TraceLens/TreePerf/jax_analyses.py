@@ -154,7 +154,7 @@ class JaxAnalyses:
         communication_events={key:[] for key in JaxAnalyses.communication_events_map.keys()}
 
         event_key=str.join('|', JaxAnalyses.communication_events_map.keys())
-        pattern = re.compile(r"^.*value:.*("+event_key+")\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
+        pattern = re.compile(rf"^.*value:.*({event_key})\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
         with open(xla_file_name, "r") as f:
             for line in f:
                 m=pattern.search(line)
@@ -411,7 +411,7 @@ class JaxAnalyses:
 
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(TraceEventUtils.TraceKeys.Phase) == TraceEventUtils.TracePhases.Metadata:
+        if event.get(TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata):
             return "metadata"
         elif (TraceEventUtils.TraceKeys.PID in event and TraceEventUtils.TraceKeys.TID in event):
             pid = event[TraceEventUtils.TraceKeys.PID]
