@@ -154,7 +154,7 @@ class JaxAnalyses:
         communication_events={key:[] for key in JaxAnalyses.communication_events_map.keys()}
 
         event_key=str.join('|', JaxAnalyses.communication_events_map.keys())
-        pattern = re.compile(f"^.*value:.*({event_key})\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
+        pattern = re.compile(r"^.*value:.*({event_key})\.?([\d]+)?.*size=(\d+).*: ([a-zA-Z\d].*)\[.*$")
         with open(xla_file_name, "r") as f:
             for line in f:
                 m=pattern.search(line)
@@ -337,12 +337,12 @@ class JaxAnalyses:
                 "stride_A": None,
                 "stride_B": None,
                 "dtype_A_B": (hlo_args["Type"], hlo_args["Type"]),
-                "B": hlo_args["Batch"],
+                "GEMM Batch": hlo_args["Batch"],
             }
 
         def flops(self):
             """Total FLOPs for the entire batch."""
-            return self.param_details["B"] * super().flops()
+            return self.param_details["GEMM Batch"] * super().flops()
 
         def bytes(self):
             size_map = {
@@ -455,8 +455,7 @@ class JaxProfileProcessor:
         dir_name = os.path.dirname(protobuf_file_name) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
-            tool_names= convert.xspace_to_tool_names([protobuf_file_name])
-            assert "graph_viewer^" in tool_names, "Graph viewer not in tool_names"
+            convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         assert len(hlo_filename) == 1
         # need to make sure that the pb exists and get the numerical suffix into the module name
@@ -483,7 +482,7 @@ class JaxProfileProcessor:
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
         line_processed=line.strip()
-        if (("metadata" in line_processed and not(re.search("\)$",line_processed)) and not(re.search("^ROOT",line_processed)))
+        if (("metadata" in line_processed and not(re.search(r"\)$",line_processed)) and not(re.search(r"^ROOT",line_processed)))
             or any(t in line_processed for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"])):
             k,v=JaxProfileProcessor.get_dict(hlo_ops, line_processed)
             hlo_ops[k]=v
@@ -494,7 +493,7 @@ class JaxProfileProcessor:
     def get_operands(operands):
         operands=re.sub(r'^.*?\(', '', operands)
         operands=re.sub(r'\).*?$', '', operands)
-        operands_m=re.findall("[bfs][0-9\[\]\{,a-z]*}",operands)
+        operands_m=re.findall(r"[bfs][0-9\[\]\{,a-z]*}",operands)
         if operands_m:
             return operands_m
         return operands.split(",")
@@ -502,12 +501,12 @@ class JaxProfileProcessor:
     @staticmethod
     def get_dict(hlo_ops: dict, line):
         dict_line={}
-        line=re.sub("\),",")",line)
-        line=re.sub(", ",",",line)
-        line=re.sub(" %","%",line)
-        backend_config=re.search("backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*",line)
-        metadata=re.search("metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*",line)
-        custom_call_target=re.search("custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*",line)
+        line=re.sub(r"\),",")",line)
+        line=re.sub(r", ",",",line)
+        line=re.sub(r" %","%",line)
+        backend_config=re.search(r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*",line)
+        metadata=re.search(r"metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*",line)
+        custom_call_target=re.search(r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*",line)
         line=line.split(" ")
         key=line[0]
         dict_line["output"]=line[2]
@@ -548,7 +547,7 @@ class JaxProfileProcessor:
     @staticmethod
     def process_gemm_ops(hlo_ops: dict):
         def get_sizes(str_size):
-            match=(re.search(".*\[(.*)\]",str_size))
+            match=(re.search(r".*\[(.*)\]",str_size))
             if match is not None:
                 m=match.group(1)
                 s=m.split(",")
@@ -565,9 +564,9 @@ class JaxProfileProcessor:
                 if "backend_config" not in op:
                     raise ValueError("Gemm backend config information mnissing!", op)
                 backend_config=op["backend_config"]
-                beta=re.search("\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
-                lhs_dim=re.search("\"lhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
-                rhs_dim=re.search("\"rhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
+                beta=re.search(r"\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
+                lhs_dim=re.search(r"\"lhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
+                rhs_dim=re.search(r"\"rhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
                 outputs = op["output"]
                 if outputs.startswith("("):
                     if not outputs.endswith(")"):
@@ -596,7 +595,7 @@ class JaxProfileProcessor:
                     print("Bias is set, however on;y two operands found!",op)
                 if len(operand_list)>3 or len(operand_list) == 0:
                     raise ValueError("Invalid operand list",op,operand_list)
-                c_order=re.search("\{[012,]*",sizes_string[0])[0].split("{")[1]
+                c_order=re.search(r"\{[012,]*",sizes_string[0])[0].split("{")[1]
                 c=get_sizes(sizes_string[0])
                 a=get_sizes(operand_list[0])
                 b=get_sizes(operand_list[1])

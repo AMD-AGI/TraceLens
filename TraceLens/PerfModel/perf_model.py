@@ -309,7 +309,7 @@ class aten_scaled_mm(GEMM):
 class aten_bmm(GEMM):
     """
     aten::bmm — batch matrix multiplication
-    (B, M, K) × (B, K, N) → (B, M, N)
+    (Gemm Batch, M, K) × (Gemm Batch, K, N) → (Gemm Batch, M, N)
     Inherits FLOP/byte analytics from GEMM and scales them by the batch size.
     """
 
@@ -319,8 +319,8 @@ class aten_bmm(GEMM):
         input_dims = event['args']['Input Dims']
         A_shape, B_shape = input_dims[0], input_dims[1]
 
-        B_dim, M, K = A_shape  # (B, M, K)
-        _,      _, N = B_shape # (B, K, N)
+        B_dim, M, K = A_shape  # (Gemm Batch, M, K)
+        _,      _, N = B_shape # (Gemm Batch, K, N)
 
         dtype_A_B = tuple(event['args']['Input type'][:2])
         try:
@@ -330,7 +330,7 @@ class aten_bmm(GEMM):
             stride_A = stride_B = None
 
         return {
-            "B": B_dim,
+            "Gemm Batch": B_dim,
             "M": M,
             "N": N,
             "K": K,
@@ -343,7 +343,7 @@ class aten_bmm(GEMM):
     # ---------------------- FLOPs / Bytes ----------------------
     def flops(self):
         """Total FLOPs for the entire batch."""
-        return self.param_details["B"] * super().flops()
+        return self.param_details["Gemm Batch"] * super().flops()
 
     def bytes(self):
         """Total DRAM traffic for the entire batch (read+write)."""
@@ -355,7 +355,7 @@ class aten_bmm(GEMM):
         per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
                                    bpe_bias=bpe,   # not used, but keeps call signature
                                    bpe_output=bpe)
-        return None if per_batch is None else self.param_details['B'] * per_batch
+        return None if per_batch is None else self.param_details['Gemm Batch'] * per_batch
 
     # ---------------------- Backward placeholders ----------------------
     def flops_bwd(self):
