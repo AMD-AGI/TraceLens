@@ -349,7 +349,7 @@ class TreePerfAnalyzer:
     def get_df_kernel_launchers_summary_by_shape(df_kernel_launchers, name):
         warnings.warn("get_df_kernel_launchers_summary_by_shape is deprecated. Use get_df_kernel_launchers_unique_args instead.")
         df_temp = df_kernel_launchers.copy()
-        df_temp = df_temp[df_temp['name'] == name]
+        df_temp = df_temp[df_temp['name'].str.contains(name)]
         dict_agg = {'total_direct_kernel_time': ['sum', 'count', 'mean', 'std'],
                     'direct_kernel_count': ['max', 'min']}
         # df_agg = df_temp.groupby(['Input Dims']).agg(dict_agg)

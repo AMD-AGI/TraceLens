@@ -17,7 +17,7 @@ class TraceLensColumns:
     PERCENTAGE = "Percentage (%)"
 
     SUMMARY_TOTAL_GEMM_KERNEL_TIME = "Total Kernel Time (µs)"
-    SUMMARY_TOTAL_CONV_KERNEL_TIME = "total_direct_kernel_time_ms"
+    SUMMARY_TOTAL_CONV_KERNEL_TIME = "Total Kernel Time (ms)"
     SUMMARY_COUNT = "Count"
 
 
@@ -56,15 +56,17 @@ class ConvReportColumns:
     TYPES = "types"
     DIMS = "dims"
     STRIDES = "strides"
-    DURATION = "avg duration (µs)"
+    DURATION = "Kernel Time (µs)"
     TFLOPS = "avg performance (TFLOPS)"
 
-    DEFAULT_MAPPING = {
-        TraceLensColumns.TYPE: ("Input", TYPES),
-        TraceLensColumns.DIMS: ("Input", DIMS),
-        TraceLensColumns.STRIDES: ("Input", STRIDES),
+    ID_COLS = {
+        'param: convNd', 'param: input_shape', 'param: filter_shape',
+       'param: dtype_input_weight', 'param: input_stride',
+       'param: weight_stride', 'param: bias', 'param: stride',
+       'param: padding', 'param: dilation', 'param: transposed_conv',
     }
 
+       
     @staticmethod
     def map_columns(df: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
         df.columns = pd.MultiIndex.from_tuples([
@@ -173,25 +175,3 @@ def get_gemm_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFram
     )
 
 
-def get_conv_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
-    # Filter for convolution kernels (e.g., "aten::convolution" or similar)
-    conv_kernels = summary[summary["name"].str.contains("aten::cudnn_convolution", case=False, na=False)
-                        | summary["name"].str.contains("aten::miopen_convolution", case=False, na=False)]
-
-    if conv_kernels.empty:
-        return ConvReportColumns.map_columns(
-            pd.DataFrame(columns=[
-                TraceLensColumns.PERCENTAGE,
-                GEMMReportColumns.DURATION,
-            ]),
-            experiment_name,)
-    # Calculate duration
-    conv_kernels[ConvReportColumns.DURATION] = conv_kernels[TraceLensColumns.SUMMARY_TOTAL_CONV_KERNEL_TIME] / conv_kernels[TraceLensColumns.SUMMARY_COUNT]
-
-    return ConvReportColumns.map_columns(
-        conv_kernels[[
-            TraceLensColumns.PERCENTAGE,
-            ConvReportColumns.DURATION
-        ]],
-        experiment_name,
-    )
