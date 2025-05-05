@@ -144,6 +144,17 @@ def _calc_tflops(row: pd.Series) -> float:
 
 
 def get_gemm_perf_df(summary: pd.DataFrame, experiment_name: str) -> pd.DataFrame:
+    if summary.empty:
+        # Return an empty DataFrame with the expected structure
+        return pd.DataFrame(columns=[
+            TraceLensColumns.TYPE,
+            TraceLensColumns.DIMS,
+            TraceLensColumns.STRIDES,
+            TraceLensColumns.PERCENTAGE,
+            GEMMReportColumns.DURATION,
+            GEMMReportColumns.TFLOPS
+        ])
+
     summary[GEMMReportColumns.DURATION] = summary[TraceLensColumns.SUMMARY_TOTAL_KERNEL_TIME] / summary[TraceLensColumns.SUMMARY_COUNT]
     summary[GEMMReportColumns.TFLOPS] = summary.apply(_calc_tflops, axis=1)
     return GEMMReportColumns.map_columns(

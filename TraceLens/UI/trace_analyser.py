@@ -69,7 +69,6 @@ def main() -> None:
             accept_multiple_files=False,
             type=["json", "gz"],
         )
-    
     with col2:
         prepare_for_tuning_chk = st.checkbox("Prepare hipBLASLt-bench file", value=False, disabled=not hipBLASLt_tuning_possible())
         options = [5, 10, 25, 50]
@@ -82,7 +81,7 @@ def main() -> None:
             index=0,
             disabled=not prepare_for_tuning_chk,
         )
-    
+
     with col3:
         run_tuning_chk = st.checkbox("Run offline hipBLASLt tuning", value=False, disabled=not prepare_for_tuning_chk,)
         iterations = st.selectbox(
@@ -91,7 +90,6 @@ def main() -> None:
             index=1,
             disabled=not run_tuning_chk or True,
         )
-                    
     button = st.button(
         "Analyse",
         type="primary",
@@ -104,7 +102,6 @@ def main() -> None:
         st.toast(f'Starting {baseline_trace.name} parsing.')
         baseline, baseline_kernels, baseline_gemms_kernels_summary = analyse_trace(baseline_trace)
         baseline_kernels_summary = baseline.get_df_kernel_launchers_summary(baseline_kernels)
-                
         st.toast(f'Starting {experiment_trace.name} parsing.')
         experiment, experiment_kernels, experiment_gemms_kernels_summary = analyse_trace(experiment_trace)
         experiment_kernels_summary = experiment.get_df_kernel_launchers_summary(experiment_kernels)
@@ -141,7 +138,6 @@ def main() -> None:
                 baseline_fa_perf_df = get_fa_perf_df(baseline_kernels_summary).rename(columns={FAReportColumns.DURATION: BASELINE_DUR_COL})
                 EXPERIMENT_DUR_COL = f"{ExperimentNames.EXPERIMENT} {FAReportColumns.DURATION}"
                 experiment_fa_perf_df = get_fa_perf_df(experiment_kernels_summary).rename(columns={FAReportColumns.DURATION: EXPERIMENT_DUR_COL})
-                
                 fa_perf_df = pd.merge(baseline_fa_perf_df, experiment_fa_perf_df, on=[FAReportColumns.PASS, FAReportColumns.NAME], how="outer")
                 fa_perf_df[PARITY_COL] = 100 * fa_perf_df[BASELINE_DUR_COL] / fa_perf_df[EXPERIMENT_DUR_COL]
                 fa_perf_df = fa_perf_df.round().astype(int, errors="ignore")
