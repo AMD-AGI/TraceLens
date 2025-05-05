@@ -337,12 +337,12 @@ class JaxAnalyses:
                 "stride_A": None,
                 "stride_B": None,
                 "dtype_A_B": (hlo_args["Type"], hlo_args["Type"]),
-                "GEMM Batch": hlo_args["Batch"],
+                "Op B": hlo_args["Batch"],
             }
 
         def flops(self):
             """Total FLOPs for the entire batch."""
-            return self.param_details["GEMM Batch"] * super().flops()
+            return self.param_details["Op B"] * super().flops()
 
         def bytes(self):
             size_map = {
@@ -356,7 +356,7 @@ class JaxAnalyses:
             per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
                                    bpe_bias=bpe,   # not used, but keeps call signature
                                    bpe_output=bpe)
-            return None if per_batch is None else self.param_details['B'] * per_batch
+            return None if per_batch is None else self.param_details['Op B'] * per_batch
         def flops_bwd(self):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
         def bytes_bwd(self, _):
