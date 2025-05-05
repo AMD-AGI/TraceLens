@@ -36,6 +36,20 @@ else:
 print(gemms)
 ```
 
+Detailed GEMM performance metrics
+```
+from TraceLens import JaxAnalyses
+import sys
+import pandas as pd
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+filename = sys.argv[1]
+# num_cus: MI300X - 304; MI210: 104
+gemms = JaxAnalyses.gemm_performance_from_pb(filename, arch = {"num_cus": 104})
+print(gemms)
+```
+
 Anylyze Jax communications
 Run this with the xplane.pb or json.gz and  jit_train_step.gfx942_gpu_after_optimizations-buffer-assignment.txt
 ```

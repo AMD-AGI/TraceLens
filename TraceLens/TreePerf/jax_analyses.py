@@ -303,7 +303,7 @@ class JaxAnalyses:
         return pd.DataFrame.from_dict(gemms, orient='index',  columns = JaxProfileProcessor.gemm_columns)
 
     @staticmethod
-    def gemm_performance_from_pb(pb_file_name, module_name: str = "jit_train_step"):
+    def gemm_performance_from_pb(pb_file_name, module_name: str = "jit_train_step", arch: dict = None):
         all_profile_events = DataLoader.load_data(filename_path=pb_file_name)["traceEvents"]
         metadata = TraceEventUtils.get_metadata(all_profile_events)
         events = TraceEventUtils.split_events_by_pid_tid(TraceEventUtils.non_metadata_events(all_profile_events))
@@ -322,7 +322,7 @@ class JaxAnalyses:
             lambda x: x[0] is not None and x[1][TraceEventUtils.MetadataFields.ThreadName].startswith(JaxAnalyses.JaxSpecialThreads.StreamPrefix))
         main_thread_events = events[1][main_thread_id]
         main_thread_gemms = filter(lambda x: TraceEventUtils.TraceKeys.Args in x and x[TraceEventUtils.TraceKeys.Args][JaxAnalyses.JaxKernelEventArgs.hlo_op] in gemm_ops, main_thread_events)
-        metrics = [JaxAnalyses.gemm_perf_metrics(event, gemm_ops[event[TraceEventUtils.TraceKeys.Args][JaxAnalyses.JaxKernelEventArgs.hlo_op]], False, None, 0) for event in main_thread_gemms]
+        metrics = [JaxAnalyses.gemm_perf_metrics(event, gemm_ops[event[TraceEventUtils.TraceKeys.Args][JaxAnalyses.JaxKernelEventArgs.hlo_op]], False, arch) for event in main_thread_gemms]
         return pd.DataFrame(metrics)
 
     class JaxGemm(perf_model.GEMM):
@@ -371,7 +371,7 @@ class JaxAnalyses:
         return None
 
     @staticmethod
-    def gemm_perf_metrics(event, op_params, bwd: bool = False, arch = None, detail_level = 0):
+    def gemm_perf_metrics(event, op_params, bwd: bool = False, arch = None):
         perf_model_class = JaxAnalyses.get_perf_model(event)
         # the class structure of the perf_model class doesn't make it easy to add additional parameters to the event,
         # so make a copy of the event with the hlo op info inside it
@@ -379,7 +379,7 @@ class JaxAnalyses:
         event_copy[JaxAnalyses.JaxKernelEventArgs.hlo_op] = op_params
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
-        perf_model = perf_model_class(event_copy, arch=arch, detail_level=detail_level)
+        perf_model = perf_model_class(event_copy, arch=arch, detail_level=1 if arch is not None else 0)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
         time = event[TraceEventUtils.TraceKeys.Duration]
