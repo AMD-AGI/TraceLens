@@ -486,7 +486,8 @@ class tex_ts_te_gemm_ts(GEMM):
         else:
             bias = True
 
-        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5])
+        # dtype A, B, bias
+        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5], event['args']['Input type'][10])
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
@@ -500,20 +501,23 @@ class tex_ts_te_gemm_ts(GEMM):
 
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
-        if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
-        self.bpe = name2bpe(dtype_A_B[0])
-        # setting bias bpe to be the same as the input matrices is not totally correct
-        # TODO: correct later
-        # TODO: similar to aten_mm, we need to use the output dtype if provided
-        return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
-                             bpe_bias=self.bpe,
-                             bpe_output=self.bpe)
+      
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
+        # TODO: correct later if better way found
+        self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
+
+        return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
+                             bpe_bias=self.bpe_bias,
+                             bpe_output=self.bpe_output)
 
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
 
 
 # 2. Convolution
