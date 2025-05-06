@@ -129,33 +129,11 @@ class TreePerfAnalyzer:
         non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        if os.path.isdir('gemmologist') and hasattr(perf_model, "dim_efficiency"):
-            dim_effs = perf_model.dim_efficiency(arch_dict=self.arch)
-            simulated_kernel_time = dim_effs['simulated_time']
-        else:
-            if hasattr(perf_model, "dim_efficiency"):
-                dim_effs = perf_model.dim_efficiency(arch_dict=self.arch)
-                compute_time = dim_effs['simulated_time']
-            else:
-                # Calculate ideal time
-                ideal_ew_ops_per_cycle_simd = 256
-                compute_time = (gflops * 1e9) / ideal_ew_ops_per_cycle_simd / self.arch['freq_mhz']
-            
-            if bytes_moved and bytes_moved > 0:
-                memory_time  = bytes_moved / (self.arch['mem_bw_gbps'] * 1e3)
-            else:
-                memory_time = 0
-            
-            simulated_kernel_time = max(compute_time, memory_time)
-
-        # Return metrics
         dict_metrics = {
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
-            'Simulated Kernel Time (us)': simulated_kernel_time,
             'TFLOPS/s': tflops_per_s,
-            'Simulated TFLOPS/s': gflops / (1000 * simulated_kernel_time)
-        }
+        }         
         if non_data_mov:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
@@ -167,6 +145,10 @@ class TreePerfAnalyzer:
             dict_metrics['Data Moved (MB)'] = float('nan')
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
+
+        if hasattr(perf_model, "gemmologist_time"):
+            dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
+            dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -253,7 +235,10 @@ class TreePerfAnalyzer:
         dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
-        dict_agg['Simulated TFLOPS/s'] = agg_metrics
+        if 'Gemmologist Time (µs)' in df_perf_metrics.columns:
+            # first since it should be same for the group
+            dict_agg['Gemmologist TFLOPS/s'] = 'first'
+            dict_agg['Gemmologist Time (µs)'] = 'first'
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
