@@ -309,7 +309,7 @@ class aten_scaled_mm(GEMM):
 class aten_bmm(GEMM):
     """
     aten::bmm — batch matrix multiplication
-    (Op B, M, K) × (Op B, K, N) → (Op B, M, N)
+    (B, M, K) × (B, K, N) → (B, M, N)
     Inherits FLOP/byte analytics from GEMM and scales them by the batch size.
     """
 
@@ -319,8 +319,8 @@ class aten_bmm(GEMM):
         input_dims = event['args']['Input Dims']
         A_shape, B_shape = input_dims[0], input_dims[1]
 
-        B_dim, M, K = A_shape  # (Op B, M, K)
-        _,      _, N = B_shape # (Op B, K, N)
+        B_dim, M, K = A_shape  # (B, M, K)
+        _,      _, N = B_shape # (B, K, N)
 
         dtype_A_B = tuple(event['args']['Input type'][:2])
         try:
@@ -330,7 +330,7 @@ class aten_bmm(GEMM):
             stride_A = stride_B = None
 
         return {
-            "Op B": B_dim,
+            "B": B_dim,
             "M": M,
             "N": N,
             "K": K,
@@ -343,7 +343,7 @@ class aten_bmm(GEMM):
     # ---------------------- FLOPs / Bytes ----------------------
     def flops(self):
         """Total FLOPs for the entire batch."""
-        return self.param_details["Op B"] * super().flops()
+        return self.param_details["B"] * super().flops()
 
     def bytes(self):
         """Total DRAM traffic for the entire batch (read+write)."""
@@ -355,7 +355,7 @@ class aten_bmm(GEMM):
         per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
                                    bpe_bias=bpe,   # not used, but keeps call signature
                                    bpe_output=bpe)
-        return None if per_batch is None else self.param_details['Op B'] * per_batch
+        return None if per_batch is None else self.param_details['B'] * per_batch
 
     # ---------------------- Backward placeholders ----------------------
     def flops_bwd(self):
@@ -722,7 +722,7 @@ class flash_attention(SDPA):
         _, _, _, _ = input_dims[2]
         dropout = float(event['args']['Concrete Inputs'][3])
         causal = eval(event['args']['Concrete Inputs'][5])
-        return {"Op B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
+        return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
                 "dropout": dropout, "causal": causal, "flash_impl": True}
 
 class flash_attention_backward(flash_attention):
@@ -766,7 +766,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
 
         is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
 
-        return {"Op B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
+        return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}
 
 class UnaryElementwise:
