@@ -4,7 +4,7 @@ from .TreePerf.jax_analyses import JaxAnalyses
 from .TraceFusion.trace_fuse import TraceFuse
 from .Trace2Tree.trace_to_tree import TraceToTree
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
-from .util import DataLoader
+from .util import DataLoader,TraceEventUtils
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 
@@ -20,5 +20,6 @@ __all__ = [
     "PerfModel",
     "EventReplay",
     "EventReplayer",
-    "DataLoader"
+    "DataLoader",
+    "TraceEventUtils",
 ]

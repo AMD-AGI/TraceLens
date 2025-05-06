@@ -206,7 +206,7 @@ class GEMM:
             'dim_eff': dim_eff,
             'simulated_time': simulated_time
         }
-    
+
     def dim_efficiency(self, arch_dict):
         """
         args:

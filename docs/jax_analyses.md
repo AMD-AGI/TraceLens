@@ -36,6 +36,20 @@ else:
 print(gemms)
 ```
 
+Detailed GEMM performance metrics
+```
+from TraceLens import JaxAnalyses
+import sys
+import pandas as pd
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+filename = sys.argv[1]
+# num_cus: MI300X - 304; MI210: 104
+gemms = JaxAnalyses.gemm_performance_from_pb(filename, arch = {"num_cus": 104})
+print(gemms)
+```
+
 Anylyze Jax communications
 Run this with the xplane.pb or json.gz and  jit_train_step.gfx942_gpu_after_optimizations-buffer-assignment.txt
 ```
@@ -55,4 +69,18 @@ for (df, bw_data, count_data, time_by_size, range_data) in filter(lambda x: len(
     print(time_by_size)
     print("time_in_ranges")
     print(range_data)
+```
+
+Trace to tree for Jax traces, based on the "Framework Name Scope" thread in the trace
+```
+import TraceLens
+import sys
+data=TraceLens.util.DataLoader.load_data(sys.argv[1])
+events=data['traceEvents']
+metadata = TraceLens.util.TraceEventUtils.get_metadata(events)
+categorizer = TraceLens.TreePerf.JaxAnalyses.prepare_event_categorizer(events)
+real_events = TraceLens.util.TraceEventUtils.non_metadata_events(events)
+tree = TraceLens.TraceToTree(real_events, linking_key='correlation', event_to_category=categorizer)
+tree.build_tree(True)
+tree.traverse_subtree_and_print(tree.get_UID2event(tree.cpu_root_nodes[1]), False)
 ```
