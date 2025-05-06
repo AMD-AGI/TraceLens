@@ -30,6 +30,7 @@ class TraceToTree:
         self._compute_event_end_times()
         self._set_linking_key()
         self._preprocess_and_index_events()
+        self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
 
@@ -248,6 +249,8 @@ class TraceToTree:
             if len(name) > max_len:
                 name = name[:max_len] + '...'
             print(f"  name: {name}")
+            # Print UID
+            print(f"  UID: {node['UID']}")
 
             # Move to the parent node
             node = self.get_parent_event(node)
@@ -321,7 +324,59 @@ class TraceToTree:
                 nn_module_children.extend(self.get_nn_module_children(self.get_UID2event(child_UID)))
         # cache the nn.Module children for later use
         nn_module_event['nn_module_children'] = nn_module_children
+        # set parent for each child
+        for child_UID in nn_module_children:
+            child = self.get_UID2event(child_UID)
+            child['nn_module_parent'] = nn_module_event['UID']
         return nn_module_children
-
+    
+    def get_nn_module_parent(self, nn_module_event: Dict[str, Any]):
+        """
+        Get the UID of the nn.Module parent of the provided nn.Module event.
+        """
+        if not self.add_python_func:
+            raise ValueError("This method requires the add_python_func flag to be set to True when building the tree.")
+        # if the nn.Module parent is already cached, return it
+        if 'nn_module_parent' in nn_module_event:
+            return nn_module_event['nn_module_parent']
+        # find the parent, traverse up the tree until we find a nn.Module event or parent is None
+        parent_UID = nn_module_event.get('parent')
+        while parent_UID is not None:
+            parent = self.get_UID2event(parent_UID)
+            if self._is_nn_module_event(parent):
+                nn_module_event['nn_module_parent'] = parent_UID
+                return parent_UID
+            parent_UID = parent.get('parent')
+        # if no parent is found, return None
+        return None
+    
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
         return event.get('cat') == 'python_function' and event.get('name', '').startswith('nn.Module:')
+
+
+    def _annotate_gpu_events_with_stream_index(self):
+        """
+        This function preprocesses the GPU events in the perf_analyzer object.
+        """
+        # 1. we create a dict stream -> events
+        dict_stream2events = {}
+        for event in self.events:
+            stream =  event.get('args', {}).get('stream', None)
+            if stream is not None:
+                if stream not in dict_stream2events:
+                    dict_stream2events[stream] = []
+                dict_stream2events[stream].append(event)
+        
+        # 2. we sort the events in each stream by their timestamp
+        for stream, events in dict_stream2events.items():
+            dict_stream2events[stream] = sorted(events, key=lambda x: x['ts'])
+
+        # 3. we create a dict stream, index -> event
+        #    and we set the stream index in the event
+        dict_stream_index2event = {}
+        for stream, events in dict_stream2events.items():
+            for i, event in enumerate(events):
+                dict_stream_index2event[(stream, i)] = event
+                event['args']['stream_index'] = i
+        # now we set this dict in the perf_analyzer
+        self.dict_stream_index2event = dict_stream_index2event

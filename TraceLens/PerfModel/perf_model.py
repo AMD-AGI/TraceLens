@@ -66,13 +66,15 @@ class GEMM:
     cache_gemm_results = {}  # This is used to cache gemm results
     def __init__(self, event, arch=None, detail_level=0):
         self.event = event
-        self.param_details = self.get_param_details(event)
+        # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
         for kernel_name in event['kernel_names']:
             # TODO: think you really wanna pass around dicts instead of objects?
             self.parsed_kernel_info = gemm_name_parser(kernel_name)
             if self.parsed_kernel_info is not None:
                 break
+        self.param_details = self.get_param_details(event)
+       
         if self.parsed_kernel_info is not None:
             self.param_details['transpose'] = self.parsed_kernel_info['transpose']
 
@@ -344,7 +346,117 @@ class aten_scaled_mm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
+class aten_bmm(GEMM):
+    """
+    aten::bmm — batch matrix multiplication
+    (B, M, K) × (B, K, N) → (B, M, N)
+    Inherits FLOP/byte analytics from GEMM and scales them by the batch size.
+    """
 
+    @staticmethod
+    def get_param_details(event):
+        """Extract B, M, N, K and metadata from the profiler event."""
+        input_dims = event['args']['Input Dims']
+        A_shape, B_shape = input_dims[0], input_dims[1]
+
+        B_dim, M, K = A_shape  # (B, M, K)
+        _,      _, N = B_shape # (B, K, N)
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][1])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {
+            "B": B_dim,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,            # aten::bmm has no implicit bias term
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    # ---------------------- FLOPs / Bytes ----------------------
+    def flops(self):
+        """Total FLOPs for the entire batch."""
+        return self.param_details["B"] * super().flops()
+
+    def bytes(self):
+        """Total DRAM traffic for the entire batch (read+write)."""
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+
+        bpe = name2bpe(dtype_A_B[0])
+        per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
+                                   bpe_bias=bpe,   # not used, but keeps call signature
+                                   bpe_output=bpe)
+        return None if per_batch is None else self.param_details['B'] * per_batch
+
+    # ---------------------- Backward placeholders ----------------------
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::bmm is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::bmm is not defined.")
+
+class aten_baddbmm(GEMM):
+    """
+    aten::baddbmm — batch matrix multiplication with bias
+    (B, M, K) × (B, K, N) + (B, M, N) → (B, M, N)
+    Inherits FLOP/byte analytics from GEMM and scales them by the batch size.
+    """
+    @staticmethod
+    def get_param_details(event):
+        """Extract B, M, N, K and metadata from the profiler event."""
+        input_dims = event['args']['Input Dims']
+        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+
+        B_dim, M, K = A_shape  # (B, M, K)
+        _,      _, N = B_shape # (B, K, N)
+
+        dtype_A_B = tuple(event['args']['Input type'][1:3])
+        try:
+            stride_A = tuple(event['args']['Input Strides'][1])
+            stride_B = tuple(event['args']['Input Strides'][2])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {
+            "B": B_dim,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": True,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+    # ---------------------- FLOPs / Bytes ----------------------
+    def flops(self):
+        """Total FLOPs for the entire batch."""
+        return self.param_details["B"] * super().flops()
+    def bytes(self):
+        """Total DRAM traffic for the entire batch (read+write)."""
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+
+        bpe = name2bpe(dtype_A_B[0])
+        per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
+                                   bpe_bias=bpe,   # not used, but keeps call signature
+                                   bpe_output=bpe)
+        return None if per_batch is None else self.param_details['B'] * per_batch
+    # ---------------------- Backward placeholders ----------------------
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
+    
 # TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
 class aten_linear(GEMM):
 
@@ -372,6 +484,83 @@ class aten_linear(GEMM):
         return {"M": M, "N": N, "K": K, "bias": bias,
                 "stride_A": stride_A, "stride_B": stride_B,
                 "dtype_A_B": dtype_A_B}
+
+class tex_ts_te_gemm_ts(GEMM):
+    """
+    tex_ts::te_gemm_ts is a matmul op in TransformerEngine
+
+    https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/csrc/ts_fp8_op.cpp#L244
+    https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/csrc/extensions/gemm.cpp#L10
+
+    """
+
+    def __init__(self, event, arch=None, detail_level=0):
+        super().__init__(event, arch, detail_level)
+
+    def get_param_details(self, event):
+        input_dims = event['args']['Input Dims']
+        C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
+
+        # index 4 and 9 are transa and transb respectively
+        # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/cpp_extensions/gemm.py#L248
+        concrete_inputs = event['args']['Concrete Inputs']
+        trans_a = concrete_inputs[4] == '1'
+        trans_b = concrete_inputs[9] == '1'
+
+
+        # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/common/gemm/cublaslt_gemm.cu#L330C17-L330C23
+        if trans_a:
+            M = A_shape[0]
+            K = A_shape[1]
+        else:
+            M = A_shape[1]
+            K = A_shape[0]
+
+        if trans_b:
+            N = B_shape[1]
+        else:
+            N = B_shape[0]
+
+        bias_term = event['args']['Concrete Inputs'][14]
+
+        if bias_term == '':
+            bias = False
+        else:
+            bias = True
+
+        # dtype A, B, bias
+        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5], event['args']['Input type'][10])
+
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][5])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "stride_A": stride_A, "stride_B": stride_B,
+                "dtype_A_B": dtype_A_B}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+      
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
+        # TODO: correct later if better way found
+        self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
+
+        return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
+                             bpe_bias=self.bpe_bias,
+                             bpe_output=self.bpe_output)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
+
 
 # 2. Convolution
 class CONV:
