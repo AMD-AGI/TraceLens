@@ -37,7 +37,7 @@ from ..util import DataLoader, TraceEventUtils
 
 class TreePerfAnalyzer:
     @staticmethod
-    def from_file(profile_filepath, *args, **kwargs) -> "TreePerfAnalyzer":
+    def from_file(profile_filepath, jax: bool = False, *args, **kwargs) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
 
