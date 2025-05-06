@@ -364,6 +364,17 @@ def main() -> None:
                     on=[("", col) for col in merge_cols],
                     how="outer",
                 )
+                
+                conv_perf_cols = [
+                    (ExperimentNames.BASELINE, ConvReportColumns.DURATION),
+                    (ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION),
+                ]
+
+                conv_perf_df = conv_perf_df[[("", col) for col in merge_cols]+conv_perf_cols]
+
+                conv_perf_df = conv_perf_df.groupby([("", col) for col in merge_cols]).sum()
+
+
                 # Calculate parity
                 PARITY_COL = "Parity (%)"
                 conv_perf_df[(PARITY_COL, "with experiment")] = (
@@ -384,14 +395,7 @@ def main() -> None:
                     .round()
                     .astype(int, errors="ignore")
                 )
-                conv_perf_df = conv_perf_df.set_index([("", col) for col in merge_cols])
 
-                conv_perf_cols = [
-                    (ExperimentNames.BASELINE, ConvReportColumns.DURATION),
-                    (ExperimentNames.EXPERIMENT, ConvReportColumns.DURATION),
-                    (PARITY_COL, "with experiment"),
-                ]
-                conv_perf_df = conv_perf_df[conv_perf_cols]
                 conv_perf_df[
                     (ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)
                 ] = (
@@ -426,7 +430,10 @@ def main() -> None:
                         (ExperimentNames.BASELINE, TraceLensColumns.PERCENTAGE)
                     ].cumsum()
                 )
-                st.dataframe(conv_perf_df, hide_index=False)
+                conv_perf_df = conv_perf_df.reindex(sorted(conv_perf_df.columns),axis=1)
+                conv_perf_df = conv_perf_df.reset_index()
+                conv_perf_df.columns = pd.MultiIndex.from_tuples(conv_perf_df.columns)
+                st.dataframe(conv_perf_df, hide_index=True)
 
 
 if __name__ == "__main__":
