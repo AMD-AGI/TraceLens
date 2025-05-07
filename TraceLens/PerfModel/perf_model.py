@@ -168,8 +168,17 @@ class GEMM:
             return GEMM.cache_gemm_results[cache_key]
         # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
-        cmd = f'cd {gemmologist_path} && ./bin/gemmologist.py -m {M} -n {N} -k {K} -d 1 -a {arch["name"]} --freq_mhz {arch["freq_mhz"]} --topn 1'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        cmd = [
+            "./bin/gemmologist.py",
+            "-m", str(M),
+            "-n", str(N),
+            "-k", str(K),
+            "-d", "1",
+            "-a", arch["name"],
+            "--freq_mhz", str(arch["freq_mhz"]),
+            "--topn", "1"
+        ]
+        result = subprocess.run(cmd, cwd=gemmologist_path, capture_output=True, text=True)
         stdout = result.stdout
         stderr = result.stderr
         log = re.findall(r"Time=\d+\.\d+", stdout)
