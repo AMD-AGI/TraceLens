@@ -22,6 +22,7 @@
 
 import json
 import gzip
+import os
 from collections import defaultdict
 from typing import Dict, Any, Callable
 
@@ -128,12 +129,11 @@ class TreePerfAnalyzer:
         non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        # Return metrics
         dict_metrics = {
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
             'TFLOPS/s': tflops_per_s,
-        }
+        }         
         if non_data_mov:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
@@ -145,6 +145,10 @@ class TreePerfAnalyzer:
             dict_metrics['Data Moved (MB)'] = float('nan')
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
+
+        if hasattr(perf_model, "gemmologist_time"):
+            dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
+            dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -231,6 +235,10 @@ class TreePerfAnalyzer:
         dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
+        if 'Gemmologist Time (µs)' in df_perf_metrics.columns:
+            # first since it should be same for the group
+            dict_agg['Gemmologist TFLOPS/s'] = 'first'
+            dict_agg['Gemmologist Time (µs)'] = 'first'
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
@@ -243,6 +251,7 @@ class TreePerfAnalyzer:
             if arg in df_perf_metrics.columns:
                 dict_agg[arg] = 'first'
         dict_agg['Kernel Time (µs)'] = agg_metrics + ['sum']
+        #dict_agg['Simulated Kernel Time (us)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
         dict_agg['UID'] = 'first'
 
@@ -259,6 +268,7 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         df_perf_metrics_summary.sort_values(by='Kernel Time (µs)_sum', ascending=False, inplace=True)
+        #df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
 
         return df_perf_metrics_summary

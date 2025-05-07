@@ -22,6 +22,9 @@
 
 from math import prod
 import math
+import os
+import re
+import subprocess
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
@@ -54,12 +57,31 @@ def is_tensortype(dtype):
     elif dtype.lower() in ['long int', 'scalar']:
         return False
 
+
+def torch_dtype_map(dtype):
+    """
+    This function maps a PyTorch data type to a gemmologist data type.
+    Args:
+        dtype (str): The name of the PyTorch data type.
+    Returns:
+        str: The name of the gemmologist data type.
+    """
+    dict_dtype2gemmologist = {
+        'float': 'fp32',
+        'double': 'fp64',
+        'c10::half': 'fp16',
+        'c10::bfloat16': 'bf16',
+        'c10::float8_e4m3fnuz': 'fp8'
+    }
+    return dict_dtype2gemmologist.get(dtype.lower(), None)
+
 # 1. GEMM
 class GEMM:
     """
     This is the base class for all GEMM operations.
     If you want to add a new GEMM operation, you should inherit from this class.
     """
+    cache_gemm_results = {}  # This is used to cache gemm results
     def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
@@ -77,16 +99,16 @@ class GEMM:
         self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
 
-        if detail_level > 0:
-            if arch is None:
-                raise ValueError("arch must be provided if detail_level > 0")
-            if self.parsed_kernel_info is None:
-                raise ValueError("parsed_kernel_info must be provided if detail_level > 0")
-            self.param_details['mt_m'] = self.parsed_kernel_info['mt_m']
-            self.param_details['mt_n'] = self.parsed_kernel_info['mt_n']
-            self.param_details['depth_u'] = self.parsed_kernel_info['depth_u']
-            dim_eff_info = self.dim_efficiency(arch)
-            self.param_details.update(dim_eff_info)
+        if arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                gemmologist_time = self.get_gemmologist_time(arch, self.M, self.N, self.K, dtype)
+                self.gemmologist_time = gemmologist_time
+            else:
+                # TODO: use naive roofline model
+                pass
 
     @staticmethod
     def get_param_details(event):
@@ -138,49 +160,35 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u):
-        """
-        args:
-        num_cus: number of compute units (CUs) aka Streaming Multiprocessors (SMs)
-        M: M dimension of the matrix multiplication passed to the BLAS library
-        N: N dimension of the matrix multiplication passed to the BLAS library
-        K: K dimension of the matrix multiplication passed to the BLAS library
-        mt_m: macro tile size in M dimension
-        mt_n: macro tile size in N dimension
-        depth_u: depth tile size
-        """
-        # Tile quantization
-        M_pad = math.ceil(M / mt_m) * mt_m
-        N_pad = math.ceil(N / mt_n) * mt_n
-        tile_eff = (M * N) / (M_pad * N_pad)
-
-        # Wave quantization
-        num_blocks = M_pad * N_pad // (mt_m * mt_n)
-        num_rounds = math.ceil(num_blocks / num_cus)
-        wq_eff = num_blocks / (num_rounds * num_cus)
-
-        # Net dimensional efficiency = tile efficiency * wave efficiency
-        dim_eff = tile_eff * wq_eff
-        return {
-            'num_tiles': num_blocks,
-            'tile_eff': tile_eff,
-            'wq_eff': wq_eff,
-            'dim_eff': dim_eff,
-        }
-
-    def dim_efficiency(self, arch_dict):
-        """
-        args:
-        arch_dict: dictionary with the architecture information
-        """
-        num_cus = arch_dict['num_cus']
-        # blas library swaps M and N from torch
-        M, N = self.N, self.M
-        K = self.K
-        mt_m = self.parsed_kernel_info['mt_m']
-        mt_n = self.parsed_kernel_info['mt_n']
-        depth_u = self.parsed_kernel_info['depth_u']
-        return self.dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u)
+    def get_gemmologist_time(arch, M, N, K, dtype):
+        # Create a unique key for the cache based on dimensions and architecture
+        cache_key = (arch['name'], arch['freq_mhz'], M, N, K, dtype)
+        # Check if the result is already in the cache
+        if cache_key in GEMM.cache_gemm_results:
+            return GEMM.cache_gemm_results[cache_key]
+        # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
+        gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
+        cmd = [
+            "./bin/gemmologist.py",
+            "-m", str(M),
+            "-n", str(N),
+            "-k", str(K),
+            "-d", "1",
+            "-a", arch["name"],
+            "--freq_mhz", str(arch["freq_mhz"]),
+            "--topn", "1"
+        ]
+        result = subprocess.run(cmd, cwd=gemmologist_path, capture_output=True, text=True)
+        stdout = result.stdout
+        stderr = result.stderr
+        log = re.findall(r"Time=\d+\.\d+", stdout)
+        if len(log) > 0:
+            gemmologist_time = float(re.sub("Time=", "", str(log[0])))
+            # Store the result in the cache
+            GEMM.cache_gemm_results[cache_key] = gemmologist_time
+            return gemmologist_time
+        else:
+            raise AssertionError("Not able to simulate in gemmologist", cmd, stdout, stderr)
 
 class aten_mm(GEMM):
     """
