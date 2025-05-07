@@ -166,7 +166,7 @@ class GEMM:
         # Check if the result is already in the cache
         if cache_key in GEMM.cache_gemm_results:
             return GEMM.cache_gemm_results[cache_key]
-        # assume that gemmoloigst path is given in the environment variable GEMMOLOGIST_PATH
+        # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
         cmd = f'cd {gemmologist_path} && ./bin/gemmologist.py -m {M} -n {N} -k {K} -d 1 -a {arch["name"]} --freq_mhz {arch["freq_mhz"]} --topn 1'
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
