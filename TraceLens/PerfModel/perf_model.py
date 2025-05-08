@@ -104,8 +104,7 @@ class GEMM:
                 if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
                     raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
                 dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                gemmologist_time = self.get_gemmologist_time(arch, self.M, self.N, self.K, dtype)
-                self.gemmologist_time = gemmologist_time
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, dtype)
             else:
                 # TODO: use naive roofline model
                 pass
@@ -161,11 +160,6 @@ class GEMM:
 
     @staticmethod
     def get_gemmologist_time(arch, M, N, K, dtype):
-        # Create a unique key for the cache based on dimensions and architecture
-        cache_key = (arch['name'], arch['freq_mhz'], M, N, K, dtype)
-        # Check if the result is already in the cache
-        if cache_key in GEMM.cache_gemm_results:
-            return GEMM.cache_gemm_results[cache_key]
         # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
         cmd = [
@@ -173,20 +167,28 @@ class GEMM:
             "-m", str(M),
             "-n", str(N),
             "-k", str(K),
+            "--dtype", dtype,
             "-d", "1",
             "-a", arch["name"],
             "--freq_mhz", str(arch["freq_mhz"]),
             "--topn", "1"
         ]
+
+        # Check if the result is already in the cache
+        cache_key = tuple(cmd)
+        if cache_key in GEMM.cache_gemm_results:
+            return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
+
+        # Run the command
         result = subprocess.run(cmd, cwd=gemmologist_path, capture_output=True, text=True)
         stdout = result.stdout
         stderr = result.stderr
         log = re.findall(r"Time=\d+\.\d+", stdout)
         if len(log) > 0:
             gemmologist_time = float(re.sub("Time=", "", str(log[0])))
-            # Store the result in the cache
+            # Cache the result
             GEMM.cache_gemm_results[cache_key] = gemmologist_time
-            return gemmologist_time
+            return gemmologist_time, " ".join(cmd)
         else:
             raise AssertionError("Not able to simulate in gemmologist", cmd, stdout, stderr)
 
