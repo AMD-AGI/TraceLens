@@ -469,6 +469,7 @@ class tex_ts_te_gemm_ts(GEMM):
 
     def get_param_details(self, event):
         input_dims = event['args']['Input Dims']
+    
         C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
 
         # index 4 and 9 are transa and transb respectively
@@ -498,9 +499,8 @@ class tex_ts_te_gemm_ts(GEMM):
         else:
             bias = True
 
-        # dtype A, B, bias
-        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5], event['args']['Input type'][10])
-
+        # dtype A, B, output, bias
+        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5], event['args']['Input type'][10], event['args']['Input type'][18])
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
             stride_B = tuple(event['args']['Input Strides'][5])
@@ -516,14 +516,8 @@ class tex_ts_te_gemm_ts(GEMM):
       
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
-        self.bpe_bias = name2bpe(dtype_A_B[2])
-        
-        if self.bpe_mat1 is None or self.bpe_mat2 is None or self.bpe_bias is None:
-            self.bpe_output = None
-        else:
-            # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
-            # TODO: correct later if better way found
-            self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[3])
 
         return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
                              bpe_bias=self.bpe_bias,
