@@ -56,6 +56,7 @@ class TreePerfAnalyzer:
         self.add_python_func = add_python_func  
         self.arch = arch
         # we check if profile contains python func events
+        #self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func' or event.get('cat') == 'python_function'), False)
         self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
 
@@ -91,6 +92,20 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ['at::native::direct_copy_kernel_cuda', 'transpose_']
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
+
+    def recurse_parent(self, event, parents_to_search):
+
+        if 'parent' not in event.keys():
+            return None
+        if event['name'] in parents_to_search:
+            return event
+        
+        parent_uid = event['parent']
+        parent_event = self.tree.get_UID2event(parent_uid)
+        parent_event = self.recurse_parent(parent_event, parents_to_search)
+
+        return parent_event
+
     def compute_perf_metrics(self, event, bwd=False, 
                              non_data_mov=False, perf_model_class=None,
                              detail_level=0):
@@ -115,6 +130,20 @@ class TreePerfAnalyzer:
             busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
+        parents_to_search = ['_Linear', '_LinearBackward', '_LayerNormLinear', '_LayerNormLinearBackward']
+        if event['name'] in parents_to_search:
+            print('Parents to search found:')
+            print(event)
+
+        # handle te 2.0 general gemm python function case
+        if 'general_gemm' in event['name']:
+            print(event)
+            parents_to_search = ['_Linear', '_LinearBackward', '_LayerNormLinear', '_LayerNormLinearBackward']
+            parent_event = self.recurse_parent(event, parents_to_search)
+            print('parent event found')
+            print(parent_event)
+            event = parent_event
+ 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = op_to_perf_model_class_map[event['name']]

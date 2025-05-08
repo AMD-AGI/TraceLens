@@ -33,6 +33,7 @@ class TraceToTree:
         self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
+        self._link_backward_flow_map()
 
     def _compute_event_end_times(self) -> None:
         for event in self.events:
@@ -380,3 +381,43 @@ class TraceToTree:
                 event['args']['stream_index'] = i
         # now we set this dict in the perf_analyzer
         self.dict_stream_index2event = dict_stream_index2event
+
+
+    def _link_backward_flow_map(self):
+
+
+        self.backward_flow_map_uid2uid = {}
+
+        for event in self.events:
+
+            if 'args' in event.keys():
+                if 'Sequence number' in event['args'].keys():
+
+                    seq_num = event['args']['Sequence number']
+                    uids = self.seq_num2event_uids_map[seq_num]
+
+                    for uid in uids:
+
+                        flow_event = self.get_UID2event(uid)
+
+                        flow_event_fwd_thread_id = flow_event['args']['Fwd thread id']
+
+                        event_fwd_thread_id = event['args']['Fwd thread id']
+
+                        if flow_event_fwd_thread_id==(event_fwd_thread_id+1) and ('parent' in flow_event.keys()):
+
+                            self.backward_flow_map_uid2uid[event['UID']] = flow_event['UID']
+                            break
+
+
+
+
+
+
+
+
+
+
+
+
+

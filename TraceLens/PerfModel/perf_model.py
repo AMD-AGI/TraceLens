@@ -506,10 +506,13 @@ class tex_ts_te_gemm_ts(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
       
+        print(dtype_A_B)
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_bias = name2bpe(dtype_A_B[2])
-
+        print(self.bpe_mat1)
+        print(self.bpe_mat2)
+        print(self.bpe_bias)
         # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
         # TODO: correct later if better way found
         self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
@@ -523,6 +526,229 @@ class tex_ts_te_gemm_ts(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
 
+class layer_norm_linear(GEMM):
+    """
+    _LayerNormLinear is a linear op in TransformerEngine 2.0
+
+    https://github.com/NVIDIA/TransformerEngine/blob/8d0187f116832003cc800daeee54ae82cafaa0e9/transformer_engine/pytorch/module/layernorm_linear.py#L78
+
+    """
+
+    def __init__(self, event, arch=None, detail_level=0):
+        super().__init__(event, arch, detail_level)
+
+    def get_param_details(self, event):
+
+        if len(event['args']['Input Dims'])>=4:
+            input_index = 0
+            weight_index = 3
+        else:
+            input_index = 0
+            weight_index = 2
+
+        if len(event['args']['Input Dims'])>0:
+            mat_a_dim1 = event['args']['Input Dims'][input_index][0]
+            mat_a_dim2 = event['args']['Input Dims'][input_index][1]
+            mat_a_dim3 = event['args']['Input Dims'][input_index][2]
+            # mat_a_dim2 is the batch size. This is combined with sequence length.
+            input_dim = (mat_a_dim1 * mat_a_dim2, mat_a_dim3)
+            # input type is always the first
+            input_type = event['Input type'][0]
+        else:
+            input_dim = None
+            input_type = None
+
+        if len(event['args']['Input Dims'][weight_index])>1:
+            mat_d_dim1 = event['args']['Input Dims'][weight_index][0]
+            mat_d_dim2 = event['args']['Input Dims'][weight_index][1]
+            weight_dim = (mat_d_dim1, mat_d_dim2)
+            # weight type is always the fourth
+            weight_type = event['Input type'][3]
+        else:
+            weight_dim = None
+            weight_type = None
+
+        trans_a, trans_b = self.parsed_kernel_info['transpose']
+
+        assert (
+            trans_a == 1 and trans_b == 0
+        ), "_LayerNormLinear forward transpose values are not correct"
+
+        mat_a_dim1, mat_a_dim2 = weight_dim
+        mat_b_dim1, mat_b_dim2 = input_dim
+        mat_a_type = weight_type
+        mat_b_type = input_type
+
+        M = mat_a_dim1 if trans_a else mat_a_dim2
+        K = mat_a_dim2 if trans_a else mat_a_dim1
+        N = mat_b_dim2 if trans_b else mat_b_dim1
+
+        bias_term = event['args']['Concrete Inputs'][9]
+
+        if bias_term == 'True':
+            bias = True
+        elif bias_term == 'False':
+            bias = False
+        else:
+            bias = False
+
+        # dtype A, B, bias
+        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][4])
+
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][2])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "stride_A": stride_A, "stride_B": stride_B,
+                "dtype_A_B": dtype_A_B}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+      
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
+        # TODO: correct later if better way found
+        self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
+
+        return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
+                             bpe_bias=self.bpe_bias,
+                             bpe_output=self.bpe_output)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+
+class layer_norm_linear_backward(GEMM):
+    """
+    _LayerNormLinearBackward is a linear op in TransformerEngine 2.0
+
+    https://github.com/NVIDIA/TransformerEngine/blob/8d0187f116832003cc800daeee54ae82cafaa0e9/transformer_engine/pytorch/module/layernorm_linear.py#L474
+
+    """
+
+    def __init__(self, event, arch=None, detail_level=0):
+        super().__init__(event, arch, detail_level)
+
+    def get_param_details(self, event):
+
+        mat_a_dim1 = event['args']['Input Dims'][0][0]
+        mat_a_dim2 = event['args']['Input Dims'][0][1]
+        mat_a_dim3 = event['args']['Input Dims'][0][2]
+        mat_a_type = event['args']['Input type'][0]
+
+        grad_output = (mat_a_dim1 * mat_a_dim2, mat_a_dim3)
+        grad_output_type = mat_a_type
+
+        if trans_a == 0 and trans_b == 0:
+            mat_a_dim1, mat_a_dim2 = input_dim_data["_LayerNormLinear"]["weight"]
+            mat_b_dim1, mat_b_dim2 = input_dim_data["_LayerNormLinearBackward"]["grad_output"]
+            mat_a_type = input_dim_data["_LayerNormLinear"]["weight_type"]
+            mat_b_type = input_dim_data["_LayerNormLinearBackward"]["grad_output_type"]
+
+        elif trans_a == 0 and trans_b == 1:
+            mat_a_dim1, mat_a_dim2 = input_dim_data["_LayerNormLinear"]["input"]
+            mat_b_dim1, mat_b_dim2 = input_dim_data["_LayerNormLinearBackward"][
+                "grad_output"
+            ]
+            mat_a_type = input_dim_data["_LayerNormLinear"]["input_type"]
+            mat_b_type = input_dim_data["_LayerNormLinearBackward"]["grad_output_type"]
+        else:
+            raise ValueError("Unknown GEMM operation")
+        
+
+
+        if len(event['args']['Input Dims'])>=4:
+            input_index = 0
+            weight_index = 3
+        else:
+            input_index = 0
+            weight_index = 2
+
+        if len(event['args']['Input Dims'])>0:
+            mat_a_dim1 = event['args']['Input Dims'][input_index][0]
+            mat_a_dim2 = event['args']['Input Dims'][input_index][1]
+            mat_a_dim3 = event['args']['Input Dims'][input_index][2]
+            # mat_a_dim2 is the batch size. This is combined with sequence length.
+            input_dim = (mat_a_dim1 * mat_a_dim2, mat_a_dim3)
+            # input type is always the first
+            input_type = event['Input type'][0]
+        else:
+            input_dim = None
+            input_type = None
+
+        if len(event['args']['Input Dims'][weight_index])>1:
+            mat_d_dim1 = event['args']['Input Dims'][weight_index][0]
+            mat_d_dim2 = event['args']['Input Dims'][weight_index][1]
+            weight_dim = (mat_d_dim1, mat_d_dim2)
+            # weight type is always the fourth
+            weight_type = event['Input type'][3]
+        else:
+            weight_dim = None
+            weight_type = None
+
+        trans_a, trans_b = self.parsed_kernel_info['transpose']
+
+        assert (
+            trans_a == 1 and trans_b == 0
+        ), "_LayerNormLinear forward transpose values are not correct"
+
+        mat_a_dim1, mat_a_dim2 = weight_dim
+        mat_b_dim1, mat_b_dim2 = input_dim
+        mat_a_type = weight_type
+        mat_b_type = input_type
+
+        M = mat_a_dim1 if trans_a else mat_a_dim2
+        K = mat_a_dim2 if trans_a else mat_a_dim1
+        N = mat_b_dim2 if trans_b else mat_b_dim1
+
+        bias_term = event['args']['Concrete Inputs'][9]
+
+        if bias_term == 'True':
+            bias = True
+        elif bias_term == 'False':
+            bias = False
+        else:
+            bias = False
+
+        # dtype A, B, bias
+        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][4])
+
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][2])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "stride_A": stride_A, "stride_B": stride_B,
+                "dtype_A_B": dtype_A_B}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+      
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
+        # TODO: correct later if better way found
+        self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
+
+        return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
+                             bpe_bias=self.bpe_bias,
+                             bpe_output=self.bpe_output)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.") 
 
 # 2. Convolution
 class CONV:
