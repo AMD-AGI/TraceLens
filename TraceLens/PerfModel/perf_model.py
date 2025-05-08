@@ -162,7 +162,18 @@ class GEMM:
 
     @staticmethod
     def get_gemmologist_time(arch, M, N, K, dtype):
-        assert M is not None and N is not None and K is not None and dtype is not None and "name" in arch, "Invalid inputs"
+        missing_inputs = []
+        if M is None:
+            missing_inputs.append("M")
+        if N is None:
+            missing_inputs.append("N")
+        if K is None:
+            missing_inputs.append("K")
+        if dtype is None:
+            missing_inputs.append("dtype")
+        if "name" not in arch:
+            missing_inputs.append("arch['name']")
+        assert not missing_inputs, f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
         # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
         cmd = [
