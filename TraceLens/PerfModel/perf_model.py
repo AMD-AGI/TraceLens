@@ -515,6 +515,8 @@ class tex_ts_te_gemm_ts(GEMM):
         print(self.bpe_bias)
         # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
         # TODO: correct later if better way found
+
+        if self.bpe_mat1 is None or self.bpe_mat2 is None or self.bpe_bias is None 
         self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
 
         return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
