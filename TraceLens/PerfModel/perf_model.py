@@ -39,7 +39,7 @@ def name2bpe(name):
         8: ['double', 'long int'],
         4: ['float', 'scalar'],
         2: ['c10::half', 'c10::bfloat16'],
-        1: ['c10::float8_e4m3fnuz'],
+        1: ['c10::float8_e4m3fnuz', 'unsigned char'],
     }
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
@@ -517,7 +517,7 @@ class tex_ts_te_gemm_ts(GEMM):
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_bias = name2bpe(dtype_A_B[2])
-
+        
         if self.bpe_mat1 is None or self.bpe_mat2 is None or self.bpe_bias is None:
             self.bpe_output = None
         else:
