@@ -329,6 +329,12 @@ class JaxAnalyses:
         @staticmethod
         def get_param_details(event):
             hlo_args = event[JaxAnalyses.JaxKernelEventArgs.hlo_op]
+            dict_dtype2gemmologist = {
+                'f32': 'fp32',
+                'f16': 'fp16',
+                'bf16': 'bf16',
+                'f8': 'fp8',
+            }
             return {
                 "M": hlo_args["M"],
                 "N": hlo_args["N"],
@@ -338,6 +344,7 @@ class JaxAnalyses:
                 "stride_B": None,
                 "dtype_A_B": (hlo_args["Type"], hlo_args["Type"]),
                 "Op B": hlo_args["Batch"],
+                "gemmologist_dtype": dict_dtype2gemmologist.get(hlo_args["Type"])
             }
 
         def flops(self):
@@ -402,6 +409,11 @@ class JaxAnalyses:
             dict_metrics['Data Moved (MB)'] = float('nan')
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
+
+        if hasattr(perf_model, "gemmologist_time"):
+            dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
+            dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
+            # dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value

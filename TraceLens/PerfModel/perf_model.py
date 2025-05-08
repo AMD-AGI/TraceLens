@@ -92,7 +92,7 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
-       
+
         if self.parsed_kernel_info is not None:
             self.param_details['transpose'] = self.parsed_kernel_info['transpose']
 
@@ -103,7 +103,9 @@ class GEMM:
             if os.environ.get('GEMMOLOGIST_PATH') is not None:
                 if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
                     raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
-                dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
                 self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, dtype)
             else:
                 # TODO: use naive roofline model
@@ -160,6 +162,7 @@ class GEMM:
 
     @staticmethod
     def get_gemmologist_time(arch, M, N, K, dtype):
+        assert M is not None and N is not None and K is not None and dtype is not None and "name" in arch, "Invalid inputs"
         # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
         cmd = [
@@ -170,9 +173,11 @@ class GEMM:
             "--dtype", dtype,
             "-d", "1",
             "-a", arch["name"],
-            "--freq_mhz", str(arch["freq_mhz"]),
             "--topn", "1"
         ]
+        if "freq_mhz" in arch:
+            cmd.append("--freq_mhz")
+            cmd.append(str(arch["freq_mhz"]))
 
         # Check if the result is already in the cache
         cache_key = tuple(cmd)
@@ -428,7 +433,7 @@ class aten_baddbmm(GEMM):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
-    
+
 # TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
 class aten_linear(GEMM):
 
@@ -515,7 +520,6 @@ class tex_ts_te_gemm_ts(GEMM):
 
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
-      
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_bias = name2bpe(dtype_A_B[2])
