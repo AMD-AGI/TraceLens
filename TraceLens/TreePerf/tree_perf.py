@@ -149,6 +149,7 @@ class TreePerfAnalyzer:
         if hasattr(perf_model, "gemmologist_time"):
             dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
             dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
+            dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -239,6 +240,7 @@ class TreePerfAnalyzer:
             # first since it should be same for the group
             dict_agg['Gemmologist TFLOPS/s'] = 'first'
             dict_agg['Gemmologist Time (µs)'] = 'first'
+            dict_agg['Gemmologist cmd'] = 'first'
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
