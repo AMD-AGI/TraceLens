@@ -22,40 +22,43 @@
 
 import json
 import gzip
+import os
 from collections import defaultdict
-from typing import Dict, Any
+from typing import Dict, Any, Callable
 
 # TODO: warning should show the stack as well
 import warnings
 import pprint
 import pandas as pd
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
-from .gpu_event_analyser import GPUEventAnalyser
+from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
+from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.trace_to_tree import TraceToTree
+from ..util import DataLoader, TraceEventUtils
 
 class TreePerfAnalyzer:
     @staticmethod
-    def from_file(profile_filepath, *args, **kwargs) -> "TreePerfAnalyzer":
+    def from_file(profile_filepath, jax: bool = False, *args, **kwargs) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
 
-        if profile_filepath.endswith('.json'):
-            with open(profile_filepath, 'r') as f:
-                data = json.load(f)
-        elif profile_filepath.endswith('.gz'):
-            with gzip.open(profile_filepath, 'rt') as f:
-                data = json.load(f)
-        else:
-            raise ValueError("Profile file should be either .json or .gz")
+        data = DataLoader.load_data(profile_filepath)
+        data = data['traceEvents']
 
-        tree = TraceToTree(data['traceEvents'])
-        return TreePerfAnalyzer(tree, *args, **kwargs)
+        categorizer =  TraceToTree.default_categorizer if not jax else JaxAnalyses.prepare_event_categorizer(data)
+        data = data if not jax else TraceEventUtils.non_metadata_events(data)
+        tree = TraceToTree(data, event_to_category=categorizer)
+        return TreePerfAnalyzer(tree, jax=jax, event_to_category=categorizer, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None):
+    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
+        self.jax = jax
+        self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
-        self.add_python_func = add_python_func  
+        self.add_python_func = add_python_func
         self.arch = arch
+        self.event_to_category = event_to_category
         # we check if profile contains python func events
+        self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
         #self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func' or event.get('cat') == 'python_function'), False)
         self.with_python_stack = next((True for event in self.tree.events if event.get('cat') == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
@@ -63,7 +66,7 @@ class TreePerfAnalyzer:
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
             filter_func = lambda x: True
-        if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
+        if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'}:
             if not filter_func(event):
                 return 0, []
             if verbose:
@@ -156,12 +159,11 @@ class TreePerfAnalyzer:
         non_data_mov_tflops_per_s = (gflops / 1e3) / (busy_non_data_mov_time / 1e6) if busy_non_data_mov_time > 0 else float('nan')
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        # Return metrics
         dict_metrics = {
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
             'TFLOPS/s': tflops_per_s,
-        }
+        }         
         if non_data_mov:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
             dict_metrics['Non-Data-Mov TFLOPS/s'] = non_data_mov_tflops_per_s
@@ -174,6 +176,11 @@ class TreePerfAnalyzer:
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
 
+        if hasattr(perf_model, "gemmologist_time"):
+            dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
+            dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
+            dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
+
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
@@ -183,10 +190,10 @@ class TreePerfAnalyzer:
         return self.compute_perf_metrics(event, bwd=False, non_data_mov=non_data_mov)
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
-    
-    def build_df_perf_metrics(self, events, bwd=False, 
+
+    def build_df_perf_metrics(self, events, bwd=False,
                               non_data_mov=False, include_kernel_names=False, include_args=False,
-                              dict_name_to_perf_model=None, 
+                              dict_name_to_perf_model=None,
                               detail_level=0):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
@@ -195,22 +202,18 @@ class TreePerfAnalyzer:
         list_warn_non_zero_flops_and_zero_time = []
         list_no_bwd_events = []
         for event in events:
-            metrics_event = {'cat': event['cat'], 'name': event['name'],
+            metrics_event = {'cat': self.event_to_category(event), 'name': event['name'],
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
-                        'external_id': event['args']['External id']}
+                        'external_id': event['args'].get('External id')}
             if include_args:
                 args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
-                for arg in args_cols:
-                    if arg in event['args']:
-                        metrics_event[arg] = event['args'][arg]
-                    else:
-                        metrics_event[arg] = None
+                metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
             if dict_name_to_perf_model and event['name'] in dict_name_to_perf_model:
                 perf_model_class = dict_name_to_perf_model[event['name']]
             else:
                 perf_model_class = None
-            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, 
+            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd,
                                                           non_data_mov=non_data_mov, perf_model_class=perf_model_class,
                                                           detail_level=detail_level)
             # handle warnings
@@ -263,6 +266,11 @@ class TreePerfAnalyzer:
         dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
+        if 'Gemmologist Time (µs)' in df_perf_metrics.columns:
+            # first since it should be same for the group
+            dict_agg['Gemmologist TFLOPS/s'] = 'first'
+            dict_agg['Gemmologist Time (µs)'] = 'first'
+            dict_agg['Gemmologist cmd'] = 'first'
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
@@ -275,6 +283,7 @@ class TreePerfAnalyzer:
             if arg in df_perf_metrics.columns:
                 dict_agg[arg] = 'first'
         dict_agg['Kernel Time (µs)'] = agg_metrics + ['sum']
+        #dict_agg['Simulated Kernel Time (us)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
         dict_agg['UID'] = 'first'
 
@@ -291,6 +300,7 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         df_perf_metrics_summary.sort_values(by='Kernel Time (µs)_sum', ascending=False, inplace=True)
+        #df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
 
         return df_perf_metrics_summary
@@ -304,7 +314,7 @@ class TreePerfAnalyzer:
         # by checking if grandchildren of CPU operations are kernel events.
         kernel_launchers = []
         for event in self.tree.events:
-            if event.get('cat') != 'cpu_op':
+            if self.event_to_category(event) != 'cpu_op':
                 continue
             kernel_launcher = False
             # total_direct_kernel_time = 0
@@ -314,7 +324,7 @@ class TreePerfAnalyzer:
                 child = self.tree.events_by_uid[child_UID]
                 for grand_child_UID in child.get('children', []):
                     grand_child = self.tree.events_by_uid[grand_child_UID]
-                    is_kernel = grand_child.get('cat') == 'kernel'
+                    is_kernel = self.event_to_category(grand_child) == 'kernel'
                     is_nccl = 'nccl' in grand_child['name']
                     should_include = is_kernel and (include_nccl or not is_nccl)
                     if should_include:
@@ -350,7 +360,7 @@ class TreePerfAnalyzer:
             if id_cols:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
-                metrics_event['external_id'] = event['args']['External id']
+                metrics_event['external_id'] = event['args'].get('External id')
             if include_kernel_names:
                 metrics_event['kernel_names'] = event['kernel_names']
             rows.append(metrics_event)
@@ -401,7 +411,7 @@ class TreePerfAnalyzer:
         return df_agg
 
     @staticmethod
-    def get_df_kernel_launchers_unique_args(df_kernel_launchers: pd.DataFrame, 
+    def get_df_kernel_launchers_unique_args(df_kernel_launchers: pd.DataFrame,
                                             event_name=None, agg_metrics=['mean'], include_pct=False) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -422,7 +432,7 @@ class TreePerfAnalyzer:
             df_filtered = df_kernel_launchers[df_kernel_launchers['name'] == event_name].copy()
         else:
             df_filtered = df_kernel_launchers.copy()
-            
+
         # 1. Create string representations of the grouping columns - so we can group by them
         str_col_names, actual_grouping_cols = [], []
         for col in grouping_cols_original:
@@ -434,7 +444,7 @@ class TreePerfAnalyzer:
             str_col_names.append(str_col_name)
         if not str_col_names:
             raise ValueError("No valid columns found to group by.")
-        
+
         # 2. Aggregate the DataFrame by the string representations of the grouping columns
         agg_dict = {}
         if 'total_direct_kernel_time' in df_filtered.columns:
@@ -452,7 +462,7 @@ class TreePerfAnalyzer:
         df_unique_args = df_filtered.groupby(str_col_names, dropna=False, sort=False).agg(agg_dict)
         df_unique_args.columns = ['_'.join(col).strip() for col in df_unique_args.columns.values]
         df_unique_args.reset_index(inplace=True)
-        
+
         # 3. Rename columns for clarity
         rename_map = {'UID_count': 'operation_count'}
         for col in columns_to_keep_first:
@@ -473,7 +483,7 @@ class TreePerfAnalyzer:
         # 5. Sort the DataFrame by the sum of total_direct_kernel_time
         if 'total_direct_kernel_time_sum' in df_unique_args.columns:
             df_unique_args = df_unique_args.sort_values(by="total_direct_kernel_time_sum", ascending=False).reset_index(drop=True)
-        
+
         # 6. Calculate percentage of total time and cumulative percentage if requested
         if include_pct and 'total_direct_kernel_time_sum' in df_unique_args.columns:
             total_duration_ms = df_unique_args['total_direct_kernel_time_sum'].sum()
@@ -482,12 +492,12 @@ class TreePerfAnalyzer:
         return df_unique_args
 
     def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if event.get('cat') in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
-        gpu_event_analyser = GPUEventAnalyser(kernel_events)
+        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
+        gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
 
-    def get_kernel_details(self, kernel_event, 
+    def get_kernel_details(self, kernel_event,
                            launcher_detail=False, cpu_op_detail = True, nn_module_detail=False):
         """
         Extract detailed information for a given kernel event.
@@ -512,7 +522,7 @@ class TreePerfAnalyzer:
             return tuple(list_to_tuple(item) for item in obj) if isinstance(obj, list) else obj
 
         # Verify that the event is a kernel event.
-        if kernel_event.get('cat') != 'kernel':
+        if self.event_to_category(kernel_event) != 'kernel':
             return None
 
         kernel_details = {
@@ -536,7 +546,7 @@ class TreePerfAnalyzer:
         cpu_op = None
         evt = launcher
         while evt:
-            if evt.get('cat') == 'cpu_op':
+            if self.event_to_category(evt) == 'cpu_op':
                 cpu_op = evt
                 break
             evt = self.tree.get_parent_event(evt)
@@ -571,7 +581,7 @@ class TreePerfAnalyzer:
             # Attempt to find the nn.Module parent event.
             evt = kernel_event
             while evt:
-                if evt.get('cat') == 'python_function' and evt['name'].startswith('nn.Module:'):
+                if self.event_to_category(evt) == 'python_function' and evt['name'].startswith('nn.Module:'):
                     nn_module_event = evt
                     break
                 evt = self.tree.get_parent_event(evt)
@@ -618,9 +628,9 @@ class TreePerfAnalyzer:
 
         # Extract details for all kernel events.
         for event in self.tree.events:
-            if event.get('cat') != 'kernel':
+            if self.event_to_category(event) != 'kernel':
                 continue
-            details = self.get_kernel_details(event, 
+            details = self.get_kernel_details(event,
                                                 launcher_detail=launcher_detail,
                                                 cpu_op_detail=cpu_op_detail,
                                                 nn_module_detail=nn_module_detail)

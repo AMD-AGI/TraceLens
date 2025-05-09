@@ -22,6 +22,9 @@
 
 from math import prod
 import math
+import os
+import re
+import subprocess
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
@@ -36,7 +39,7 @@ def name2bpe(name):
         8: ['double', 'long int'],
         4: ['float', 'scalar'],
         2: ['c10::half', 'c10::bfloat16'],
-        1: ['c10::float8_e4m3fnuz'],
+        1: ['c10::float8_e4m3fnuz', 'unsigned char'],
     }
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
@@ -54,12 +57,31 @@ def is_tensortype(dtype):
     elif dtype.lower() in ['long int', 'scalar']:
         return False
 
+
+def torch_dtype_map(dtype):
+    """
+    This function maps a PyTorch data type to a gemmologist data type.
+    Args:
+        dtype (str): The name of the PyTorch data type.
+    Returns:
+        str: The name of the gemmologist data type.
+    """
+    dict_dtype2gemmologist = {
+        'float': 'fp32',
+        'double': 'fp64',
+        'c10::half': 'fp16',
+        'c10::bfloat16': 'bf16',
+        'c10::float8_e4m3fnuz': 'fp8'
+    }
+    return dict_dtype2gemmologist.get(dtype.lower(), None)
+
 # 1. GEMM
 class GEMM:
     """
     This is the base class for all GEMM operations.
     If you want to add a new GEMM operation, you should inherit from this class.
     """
+    cache_gemm_results = {}  # This is used to cache gemm results
     def __init__(self, event, arch=None, detail_level=0):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
@@ -70,23 +92,24 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
-       
+
         if self.parsed_kernel_info is not None:
             self.param_details['transpose'] = self.parsed_kernel_info['transpose']
 
         self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
 
-        if detail_level > 0:
-            if arch is None:
-                raise ValueError("arch must be provided if detail_level > 0")
-            if self.parsed_kernel_info is None:
-                raise ValueError("parsed_kernel_info must be provided if detail_level > 0")
-            self.param_details['mt_m'] = self.parsed_kernel_info['mt_m']
-            self.param_details['mt_n'] = self.parsed_kernel_info['mt_n']
-            self.param_details['depth_u'] = self.parsed_kernel_info['depth_u']
-            dim_eff_info = self.dim_efficiency(arch)
-            self.param_details.update(dim_eff_info)
+        if arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, dtype)
+            else:
+                # TODO: use naive roofline model
+                pass
 
     @staticmethod
     def get_param_details(event):
@@ -138,49 +161,52 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u):
-        """
-        args:
-        num_cus: number of compute units (CUs) aka Streaming Multiprocessors (SMs)
-        M: M dimension of the matrix multiplication passed to the BLAS library
-        N: N dimension of the matrix multiplication passed to the BLAS library
-        K: K dimension of the matrix multiplication passed to the BLAS library
-        mt_m: macro tile size in M dimension
-        mt_n: macro tile size in N dimension
-        depth_u: depth tile size
-        """
-        # Tile quantization
-        M_pad = math.ceil(M / mt_m) * mt_m
-        N_pad = math.ceil(N / mt_n) * mt_n
-        tile_eff = (M * N) / (M_pad * N_pad)
-        
-        # Wave quantization
-        num_blocks = M_pad * N_pad // (mt_m * mt_n)
-        num_rounds = math.ceil(num_blocks / num_cus)
-        wq_eff = num_blocks / (num_rounds * num_cus)
-        
-        # Net dimensional efficiency = tile efficiency * wave efficiency
-        dim_eff = tile_eff * wq_eff
-        return {
-            'num_tiles': num_blocks,
-            'tile_eff': tile_eff,
-            'wq_eff': wq_eff,
-            'dim_eff': dim_eff,
-        }
-    
-    def dim_efficiency(self, arch_dict):
-        """
-        args:
-        arch_dict: dictionary with the architecture information
-        """
-        num_cus = arch_dict['num_cus']
-        # blas library swaps M and N from torch
-        M, N = self.N, self.M
-        K = self.K
-        mt_m = self.parsed_kernel_info['mt_m']
-        mt_n = self.parsed_kernel_info['mt_n']
-        depth_u = self.parsed_kernel_info['depth_u']
-        return self.dim_efficiency_func(num_cus, M, N, K, mt_m, mt_n, depth_u)
+    def get_gemmologist_time(arch, M, N, K, dtype):
+        missing_inputs = []
+        if M is None:
+            missing_inputs.append("M")
+        if N is None:
+            missing_inputs.append("N")
+        if K is None:
+            missing_inputs.append("K")
+        if dtype is None:
+            missing_inputs.append("dtype")
+        if "name" not in arch:
+            missing_inputs.append("arch['name']")
+        assert not missing_inputs, f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
+        # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
+        gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
+        cmd = [
+            "./bin/gemmologist.py",
+            "-m", str(M),
+            "-n", str(N),
+            "-k", str(K),
+            "--dtype", dtype,
+            "-d", "1",
+            "-a", arch["name"],
+            "--topn", "1"
+        ]
+        if "freq_mhz" in arch:
+            cmd.append("--freq_mhz")
+            cmd.append(str(arch["freq_mhz"]))
+
+        # Check if the result is already in the cache
+        cache_key = tuple(cmd)
+        if cache_key in GEMM.cache_gemm_results:
+            return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
+
+        # Run the command
+        result = subprocess.run(cmd, cwd=gemmologist_path, capture_output=True, text=True)
+        stdout = result.stdout
+        stderr = result.stderr
+        log = re.findall(r"Time=\d+\.\d+", stdout)
+        if len(log) > 0:
+            gemmologist_time = float(re.sub("Time=", "", str(log[0])))
+            # Cache the result
+            GEMM.cache_gemm_results[cache_key] = gemmologist_time
+            return gemmologist_time, " ".join(cmd)
+        else:
+            raise AssertionError("Not able to simulate in gemmologist", cmd, stdout, stderr)
 
 class aten_mm(GEMM):
     """
@@ -418,7 +444,7 @@ class aten_baddbmm(GEMM):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
-    
+
 # TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
 class aten_linear(GEMM):
 
@@ -461,6 +487,7 @@ class tex_ts_te_gemm_ts(GEMM):
 
     def get_param_details(self, event):
         input_dims = event['args']['Input Dims']
+    
         C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
 
         # index 4 and 9 are transa and transb respectively
@@ -469,7 +496,16 @@ class tex_ts_te_gemm_ts(GEMM):
         trans_a = concrete_inputs[4] == '1'
         trans_b = concrete_inputs[9] == '1'
 
-
+        if trans_a!=self.parsed_kernel_info['transpose'][0]:
+            print(event)
+            print(event['kernel_names'])
+            print("tex_ts::te_gemm_ts cpu_op transpose info does not match GPU kernel transpose info")
+            
+        elif trans_b!=self.parsed_kernel_info['transpose'][1]:
+            print(event)
+            print(event['kernel_names'])
+            print("tex_ts::te_gemm_ts cpu_op transpose info does not match GPU kernel transpose info")
+            
         # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/common/gemm/cublaslt_gemm.cu#L330C17-L330C23
         if trans_a:
             M = A_shape[0]
@@ -495,7 +531,129 @@ class tex_ts_te_gemm_ts(GEMM):
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
-            stride_B = tuple(event['args']['Input Strides'][5])
+            stride_B = tuple(event['args']['Input Strides'][2])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {"M": M, "N": N, "K": K, "bias": bias,
+                "stride_A": stride_A, "stride_B": stride_B,
+                "dtype_A_B": dtype_A_B}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+      
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[3])
+
+        return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
+                             bpe_bias=self.bpe_bias,
+                             bpe_output=self.bpe_output)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+
+class layer_norm_linear_backward(GEMM):
+    """
+    _LayerNormLinearBackward is a linear op in TransformerEngine 2.0
+
+    https://github.com/NVIDIA/TransformerEngine/blob/8d0187f116832003cc800daeee54ae82cafaa0e9/transformer_engine/pytorch/module/layernorm_linear.py#L474
+
+    """
+
+    def __init__(self, event, arch=None, detail_level=0):
+        super().__init__(event, arch, detail_level)
+
+    def get_param_details(self, event):
+
+        mat_a_dim1 = event['args']['Input Dims'][0][0]
+        mat_a_dim2 = event['args']['Input Dims'][0][1]
+        mat_a_dim3 = event['args']['Input Dims'][0][2]
+        mat_a_type = event['args']['Input type'][0]
+
+        grad_output = (mat_a_dim1 * mat_a_dim2, mat_a_dim3)
+        grad_output_type = mat_a_type
+
+        if trans_a == 0 and trans_b == 0:
+            mat_a_dim1, mat_a_dim2 = input_dim_data["_LayerNormLinear"]["weight"]
+            mat_b_dim1, mat_b_dim2 = input_dim_data["_LayerNormLinearBackward"]["grad_output"]
+            mat_a_type = input_dim_data["_LayerNormLinear"]["weight_type"]
+            mat_b_type = input_dim_data["_LayerNormLinearBackward"]["grad_output_type"]
+
+        elif trans_a == 0 and trans_b == 1:
+            mat_a_dim1, mat_a_dim2 = input_dim_data["_LayerNormLinear"]["input"]
+            mat_b_dim1, mat_b_dim2 = input_dim_data["_LayerNormLinearBackward"][
+                "grad_output"
+            ]
+            mat_a_type = input_dim_data["_LayerNormLinear"]["input_type"]
+            mat_b_type = input_dim_data["_LayerNormLinearBackward"]["grad_output_type"]
+        else:
+            raise ValueError("Unknown GEMM operation")
+        
+
+
+        if len(event['args']['Input Dims'])>=4:
+            input_index = 0
+            weight_index = 3
+        else:
+            input_index = 0
+            weight_index = 2
+
+        if len(event['args']['Input Dims'])>0:
+            mat_a_dim1 = event['args']['Input Dims'][input_index][0]
+            mat_a_dim2 = event['args']['Input Dims'][input_index][1]
+            mat_a_dim3 = event['args']['Input Dims'][input_index][2]
+            # mat_a_dim2 is the batch size. This is combined with sequence length.
+            input_dim = (mat_a_dim1 * mat_a_dim2, mat_a_dim3)
+            # input type is always the first
+            input_type = event['Input type'][0]
+        else:
+            input_dim = None
+            input_type = None
+
+        if len(event['args']['Input Dims'][weight_index])>1:
+            mat_d_dim1 = event['args']['Input Dims'][weight_index][0]
+            mat_d_dim2 = event['args']['Input Dims'][weight_index][1]
+            weight_dim = (mat_d_dim1, mat_d_dim2)
+            # weight type is always the fourth
+            weight_type = event['Input type'][3]
+        else:
+            weight_dim = None
+            weight_type = None
+
+        trans_a, trans_b = self.parsed_kernel_info['transpose']
+
+        assert (
+            trans_a == 1 and trans_b == 0
+        ), "_LayerNormLinear forward transpose values are not correct"
+
+        mat_a_dim1, mat_a_dim2 = weight_dim
+        mat_b_dim1, mat_b_dim2 = input_dim
+        mat_a_type = weight_type
+        mat_b_type = input_type
+
+        M = mat_a_dim1 if trans_a else mat_a_dim2
+        K = mat_a_dim2 if trans_a else mat_a_dim1
+        N = mat_b_dim2 if trans_b else mat_b_dim1
+
+        bias_term = event['args']['Concrete Inputs'][9]
+
+        if bias_term == 'True':
+            bias = True
+        elif bias_term == 'False':
+            bias = False
+        else:
+            bias = False
+
+        # dtype A, B, bias
+        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][4])
+
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][2])
         except KeyError:
             stride_A = stride_B = None
 
@@ -524,7 +682,7 @@ class tex_ts_te_gemm_ts(GEMM):
                              bpe_output=self.bpe_output)
 
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
+        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
 
