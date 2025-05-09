@@ -526,8 +526,8 @@ class tex_ts_te_gemm_ts(GEMM):
         else:
             bias = True
 
-        # dtype A, B, bias
-        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5], event['args']['Input type'][10])
+        # dtype A, B, output, bias
+        dtype_A_B = (event['args']['Input type'][0], event['args']['Input type'][5], event['args']['Input type'][10], event['args']['Input type'][18])
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
@@ -662,20 +662,15 @@ class layer_norm_linear_backward(GEMM):
                 "dtype_A_B": dtype_A_B}
 
     def bytes(self):
+
         dtype_A_B = self.param_details['dtype_A_B']
       
-        print(dtype_A_B)
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_bias = name2bpe(dtype_A_B[2])
-        print(self.bpe_mat1)
-        print(self.bpe_mat2)
-        print(self.bpe_bias)
+       
         # assume output dtype lowest of inputs, ignore scalars alpha and beta for now
         # TODO: correct later if better way found
-
-        if self.bpe_mat1 is None or self.bpe_mat2 is None or self.bpe_bias is None 
-        self.bpe_output = min(self.bpe_mat1, self.bpe_mat2, self.bpe_bias)
 
         return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
                              bpe_bias=self.bpe_bias,
