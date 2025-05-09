@@ -783,8 +783,6 @@ class SDPA:
 
     @staticmethod
     def flops_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl):
-        if causal:
-            raise ValueError("Not implemented for causal=True")
         if dropout != 0.0:
             raise ValueError(f"Not implemented for dropout={dropout}")
         flops_recompute_qk = 2 * B * N_Q * H * d_k * N_K if flash_impl else 0
