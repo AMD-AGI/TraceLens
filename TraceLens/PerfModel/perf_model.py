@@ -744,66 +744,82 @@ class SDPA:
         self.event = event
         self.param_details = self.get_param_details(event)
         # get useful stuff from the param_details
-        self.B, self.N_Q, self.H, self.d_k, self.N_K = (self.param_details[key] for key in ['B', 'N_Q', 'H', 'd_k', 'N_K'])
-
+        # self.B, self.N_Q, self.H, self.d_k, self.N_K = (self.param_details[key] for key in ['B', 'N_Q', 'H', 'd_k', 'N_K'])
+        self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h = (self.param_details[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h'])
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
 
     @staticmethod
-    def flops_func(B, N_Q, H, d_k, N_K, dropout, causal):
+    def flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal):
         # ref: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L29
-        flops_qk = 2 * B * N_Q * H * d_k * N_K
+        flops_qk = B * H_Q * (2 * N_Q * N_KV * d_h)
         # not including softmax for now as flops are order of d_k smaller
-        flops_pv = 2 * B * N_Q * H * N_K *d_k
+        flops_pv = B * H_Q * (2 * N_Q * d_h * N_KV)
         total_flops = flops_qk + flops_pv
         if causal:
-            if N_Q == N_K:
+            if N_Q == N_KV:
                 total_flops /= 2
             else:
-                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_K}")
+                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_KV}")
         return total_flops
     def flops(self):
-        return self.flops_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
+        return self.flops_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
                                 self.param_details['dropout'], self.param_details['causal'])
 
     @staticmethod
-    def bytes_func(B, N_Q, H, d_k, N_K, dropout, causal, bytes_per_element):
+    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, bytes_per_element):
         if dropout != 0.0:
             raise ValueError(f"Not implemented for dropout={dropout}")
-        elems_q_read = B * N_Q * d_k * H
-        elems_kv_read = 2 * B * N_K * d_k * H
-        elems_out_write = B * N_Q * d_k * H
+        elems_q_read = B * N_Q * H_Q * d_h
+        elems_kv_read = 2 * B * N_KV * H_KV * d_h
+        elems_out_write = B * N_Q * H_Q * d_h
         total_elems_moved = elems_q_read + elems_kv_read + elems_out_write
         return total_elems_moved * bytes_per_element
     #TODO make bytes_per_element based on profile info
     def bytes(self, bytes_per_element=2):
-        return self.bytes_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
+        return self.bytes_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
                                 self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
 
     @staticmethod
-    def flops_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl):
+    def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, flash_impl):
         if dropout != 0.0:
             raise ValueError(f"Not implemented for dropout={dropout}")
-        flops_recompute_qk = 2 * B * N_Q * H * d_k * N_K if flash_impl else 0
+        total_flops = 0
+        if flash_impl:
+            # 0. recompute qk
+            flops_recompute_qk = B * H_Q * (2 * N_Q * N_KV * d_h)
+            total_flops += flops_recompute_qk
+            # 0.1 recompute softmax P - ignored as it is small
 
         # not including softmax for now
-        flops_v_grad = 2 * B * N_Q * H * d_k * N_K
-        flops_s_grad = 2 * B * N_Q * H * d_k * N_K
-        flops_q_grad = 2 * B * N_Q * H * d_k * N_K
-        flops_k_grad = 2 * B * N_Q * H * d_k * N_K
+        # 1. V_grad = P_grad^T.matmul(O)
+        flops_vgrad = B * H_Q * (2 * N_KV * N_Q  * d_h) 
+        flops_vgrad +=  B * N_KV * d_h * (H_Q//H_KV -1 ) # reduce from H_Q to H_KV for GQA
+        total_flops += flops_vgrad
+        # 2. P_grad = O_grad.matmul(V^T)
+        flops_pgrad = B * H_Q * (2 * N_Q * N_KV * d_h)
+        total_flops += flops_pgrad
+        # 3. S_grad = f(P_grad, P) -  ignored as it is small
+        # 4. Q_grad = S_grad.matmul(K)
+        flops_q_grad = B * H_Q * (2 * N_Q * N_KV * d_h)
+        total_flops += flops_q_grad
+        # 5. K_grad = S_grad^T.matmul(Q)
+        flops_k_grad = B * H_Q * (2 * N_KV * N_Q * d_h)
+        flops_k_grad += B * N_KV * d_h * (H_Q//H_KV -1 ) # reduce from H_Q to H_KV for GQA
+        total_flops += flops_k_grad
 
-        total_flops = flops_v_grad + flops_s_grad + flops_q_grad + flops_k_grad + flops_recompute_qk
         if causal:
-            if N_Q == N_K:
+            if N_Q == N_KV:
                 total_flops /= 2
             else:
-                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_K}")
+                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_KV}")
         return total_flops
 
     def flops_bwd(self):
-        return self.flops_bwd_func(self.B, self.N_Q, self.H, self.d_k, self.N_K,
-                                    self.param_details['dropout'], self.param_details['causal'], self.param_details['flash_impl'])
+        return self.flops_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
+                                    self.param_details['dropout'], self.param_details['causal'],
+                                    self.param_details['flash_impl'])
 
     # @staticmethod
     # def bytes_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl, bytes_per_element):
@@ -816,12 +832,13 @@ class flash_attention(SDPA):
     @staticmethod
     def get_param_details(event):
         input_dims = event['args']['Input Dims']
-        B, N_Q, H, d_k = input_dims[0]
-        _, N_K, _, _ = input_dims[1]
-        _, _, _, _ = input_dims[2]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        B, N_Q, H_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, N_KV, H_KV, _ = input_dims[1]
         dropout = float(event['args']['Concrete Inputs'][3])
         causal = eval(event['args']['Concrete Inputs'][5])
-        return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout, "causal": causal, "flash_impl": True}
 
 class flash_attention_backward(flash_attention):
@@ -852,9 +869,10 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
         # scale: Optional[float]
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
-
-        B, H, N_Q, d_k = input_dims[0]
-        _, _, N_K, _ = input_dims[1]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        B, H_Q, N_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, H_KV, N_KV, _ = input_dims[1]
 
         dropout_p = 0.0
         if concrete_inputs[5] not in ('', 'None'):
@@ -865,9 +883,8 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
 
         is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
 
-        return {"B": B, "N_Q": N_Q, "N_K": N_K, "H": H, "d_k": d_k,
-                "dropout": dropout_p, "causal": is_causal, "flash_impl": False}
-
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, detail_level=0):
