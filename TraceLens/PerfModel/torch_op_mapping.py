@@ -30,11 +30,11 @@ op_to_perf_model_class_map = {
 
     # TEv2 pseudo ops
     '_Linear_yfwd_mm': perf_model.aten_mm,
-    '_Linear_xgrad_mm': perf_model.aten_mm,
-    '_Linear_wgrad_mm': perf_model.aten_mm,
+    '_LinearBackward_xgrad_mm': perf_model.aten_mm,
+    '_LinearBackward_wgrad_mm': perf_model.aten_mm,
     '__LayerNormLinear_yfwd_mm': perf_model.aten_mm,
-    '__LayerNormLinear_xgrad_mm': perf_model.aten_mm,
-    '__LayerNormLinear_wgrad_mm': perf_model.aten_mm,
+    '__LayerNormLinearBackward_xgrad_mm': perf_model.aten_mm,
+    '__LayerNormLinearBackward_wgrad_mm': perf_model.aten_mm,
 
     'aten::bmm': perf_model.aten_bmm,
     'tex_ts::te_gemm_ts': perf_model.tex_ts_te_gemm_ts,
