@@ -23,6 +23,7 @@
 from collections import defaultdict
 from typing import Dict, Any, Callable
 import TraceLens.util
+from .util import tev2_create_pseudo_host_mm_ops
 
 class TraceToTree:
     def __init__(self, events_data,
@@ -43,6 +44,7 @@ class TraceToTree:
         self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
+        self.name2event_uids = defaultdict(list)
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
@@ -119,6 +121,7 @@ class TraceToTree:
 
         for event in events_sorted:
             event['tree'] = True
+            self.name2event_uids[event[TraceLens.util.TraceEventUtils.TraceKeys.Name]].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
 
             pid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.PID)
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
@@ -157,6 +160,7 @@ class TraceToTree:
             event.setdefault('children', []).append(corresponding_gpu_event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
             corresponding_gpu_event['parent'] = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
             corresponding_gpu_event['tree'] = True
+            self.name2event_uids[corresponding_gpu_event[TraceLens.util.TraceEventUtils.TraceKeys.Name]].append(corresponding_gpu_event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
 
             # set the parents['gpu_events'] to the corresponding gpu event
             event['gpu_events'] = [corresponding_gpu_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]] # runtime event will have only one corresponding gpu event
@@ -181,6 +185,9 @@ class TraceToTree:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
+
+        tev2_create_pseudo_host_mm_ops(self)
+
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
 
