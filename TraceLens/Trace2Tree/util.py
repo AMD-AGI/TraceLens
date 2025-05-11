@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import re
+import logging
 
 def get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event: dict) -> list[dict]:
     """
@@ -42,20 +43,20 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
         B_grad = Y_grad.sum(dim=0)
     """
     if fwd_op_event.get('name') != expected_name:
-        print(f"[Warning] Expected op name {expected_name}, found {fwd_op_event['name']}")
+        logging.warning(f"[Warning] Expected op name {expected_name}, found {fwd_op_event['name']}")
         return
     prefix = expected_name
 
     fwd_gpu_event_ids = fwd_op_event.get('gpu_events', [])
     if not fwd_gpu_event_ids:
-        print(f"[Warning] No GPU events found for fwd UID {fwd_op_event['UID']}")
+        logging.warning(f"[Warning] No GPU events found for fwd UID {fwd_op_event['UID']}")
         return
 
     fwd_gpu_events = [trace_tree.get_UID2event(uid) for uid in fwd_gpu_event_ids]
     fwd_gemm_kernels = [e for e in fwd_gpu_events if is_gemm_kernel(e)]
 
     if len(fwd_gemm_kernels) != 1:
-        print(f"[Warning] Expected 1 GEMM kernel in fwd, found {len(fwd_gemm_kernels)}")
+        logging.warning(f"[Warning] Expected 1 GEMM kernel in fwd, found {len(fwd_gemm_kernels)}")
         return
 
     yfwd_kernel = fwd_gemm_kernels[0]
@@ -63,7 +64,7 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
     # Link to backward
     bwd_ops = get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event)
     if not bwd_ops:
-        print(f"[Warning] No backward op found for fwd UID {fwd_op_event['UID']}")
+        logging.warning(f"[Warning] No backward op found for fwd UID {fwd_op_event['UID']}")
         return
 
     bprop_gpu_event_ids = [uid for bwd_op in bwd_ops for uid in bwd_op.get('gpu_events', [])]
@@ -75,7 +76,7 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
     bprop_gemm_kernels = sorted(bprop_gemm_kernels, key=lambda e: get_launcher_start(e)) #which 
 
     if len(bprop_gemm_kernels) != 2:
-        print(f"[Warning] Expected 2 GEMM kernels in bwd, found {len(bprop_gemm_kernels)}")
+        logging.warning(f"[Warning] Expected 2 GEMM kernels in bwd, found {len(bprop_gemm_kernels)}")
         return
 
     # Transformer Engine first launches xgrad, then wgrad
@@ -89,7 +90,7 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
         W_shape, inp_shape = input_dims[w_idx], input_dims[x_idx]
         W_dtype, inp_dtype = input_types[w_idx], input_types[x_idx]
     except Exception as e:
-        print(f"[Warning] Missing shape info in fwd UID {fwd_op_event['UID']}: {e}")
+        logging.warning(f"[Warning] Missing shape info in fwd UID {fwd_op_event['UID']}: {e}")
         return
 
     assert inp_shape[-1] == W_shape[1]
