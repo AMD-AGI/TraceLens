@@ -225,7 +225,6 @@ def tev2_create_pseudo_host_mm_ops(trace_tree):
         X_grad = Y_grad.matmul(W)
         W_grad = Y_grad^T.matmul(X)
     """
-    # unque_evt_names = trace_tree.name2event_uids
     if '_Linear' in trace_tree.name2event_uids and 'tex_ts::te_gemm_ts' not in trace_tree.name2event_uids:
         fwd_op_events = [trace_tree.get_UID2event(uid) for uid in trace_tree.name2event_uids['_Linear']]
         for fwd_op_event in fwd_op_events:
