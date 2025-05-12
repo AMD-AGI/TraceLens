@@ -445,33 +445,6 @@ class aten_baddbmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
-# TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
-class aten_linear(GEMM):
-
-    @staticmethod
-    def get_param_details(event):
-        input_dims = event['args']['Input Dims']
-        input_shape = input_dims[0]
-        weight_shape = input_dims[1]
-        bias = bool(input_dims[2])
-        K = input_shape[-1]
-        N = weight_shape[0]
-        # Compute M as the product of all dimensions except the last one
-        M = 1
-        for dim in input_shape[:-1]:
-            M *= dim
-
-        # TODO: remove repeated code, this is not cool
-        dtype_A_B = tuple(event['args']['Input type'][:2])
-        try:
-            stride_A = tuple(event['args']['Input Strides'][0])
-            stride_B = tuple(event['args']['Input Strides'][1])
-        except KeyError:
-            stride_A = stride_B = None
-
-        return {"M": M, "N": N, "K": K, "bias": bias,
-                "stride_A": stride_A, "stride_B": stride_B,
-                "dtype_A_B": dtype_A_B}
 
 class tex_ts_te_gemm_ts(GEMM):
     """
