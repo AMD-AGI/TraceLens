@@ -128,3 +128,4 @@ class TraceFuse:
             print(f"Writing to file: {gz_output_file}")
             json.dump(json_data_out, f, indent=4)
         print(f"Data successfully written to {gz_output_file}")
+        return gz_output_file
