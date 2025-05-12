@@ -34,8 +34,9 @@ class transformer_engine_attention(SDPA):
         _, N_KV, H_KV, _ = k_shape 
         is_causal = True
         dropout_p = 0.0
+        flash_impl = True
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
-                "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": flash_impl}
 
 def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
