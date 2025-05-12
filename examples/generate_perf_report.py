@@ -35,14 +35,14 @@ def main():
 
         if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']:
             # For GEMM: create a single table that covers both fwd and bwd.
-            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True)
+            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
             df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
             op_dfs[op_cat] = df_ops
         else:
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
-            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True)
+            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
             df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(df_ops_fwd, agg_metrics)
-            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_names=True)
+            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_names=True, include_args=True)
             df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(df_ops_bwd, agg_metrics)
             op_dfs[f"{op_cat}_fwd"] = df_ops_fwd
             op_dfs[f"{op_cat}_bwd"] = df_ops_bwd
