@@ -162,7 +162,7 @@ class TreePerfAnalyzer:
 
     def build_df_perf_metrics(self, events, bwd=False,
                               non_data_mov=False, include_kernel_names=False, include_args=False,
-                              dict_name_to_perf_model=None)
+                              dict_name_to_perf_model=None):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
             return pd.DataFrame()
