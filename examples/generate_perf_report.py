@@ -19,15 +19,17 @@ def main():
             gpu_arch_json = json.load(f)
     perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_json_path, arch=gpu_arch_json)
 
+    agg_metrics = ['mean', 'median', 'std', 'min', 'max']
+
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers()
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
+    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, agg_metrics, include_pct=True)
 
     # Dictionary to hold the op-specific DataFrames
     op_dfs = {}
 
-    agg_metrics = ['mean', 'median', 'std', 'min', 'max']
 
     for op_cat, op_names in dict_cat2names.items():
         # Filter events belonging to the current category
