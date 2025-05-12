@@ -25,7 +25,9 @@ def main():
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers()
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
-    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, agg_metrics, include_pct=True)
+    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
+                                                                                        agg_metrics=agg_metrics, 
+                                                                                        include_pct=True)
 
     # Dictionary to hold the op-specific DataFrames
     op_dfs = {}
