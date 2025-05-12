@@ -21,9 +21,9 @@
 # SOFTWARE.
 
 from . import perf_model
+from collections import defaultdict
 
 op_to_perf_model_class_map = {
-    'aten::linear': perf_model.aten_linear,
     'aten::mm': perf_model.aten_mm,
     'aten::addmm': perf_model.aten_addmm,
     'aten::_scaled_mm': perf_model.aten_scaled_mm,
@@ -62,3 +62,20 @@ for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
+
+dict_base_class2category = {
+    perf_model.GEMM: 'GEMM',
+    perf_model.CONV: 'CONV',
+    perf_model.SDPA: 'SDPA',
+    perf_model.UnaryElementwise: 'UnaryElementwise',
+    perf_model.BinaryElementwise: 'BinaryElementwise',
+}
+dict_cat2names = defaultdict(list)
+for op_name, perf_model_class in op_to_perf_model_class_map.items():
+    base_classes = perf_model_class.__bases__
+    assert len(base_classes) == 1, f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_classes: {base_classes}"
+    base_class = base_classes[0]
+    cat =  dict_base_class2category.get(base_class)
+    if cat is None:
+        raise ValueError(f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_class: {base_classes}")
+    dict_cat2names[cat].append(op_name)

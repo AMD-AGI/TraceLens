@@ -82,7 +82,7 @@ class GEMM:
     If you want to add a new GEMM operation, you should inherit from this class.
     """
     cache_gemm_results = {}  # This is used to cache gemm results
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
@@ -445,33 +445,6 @@ class aten_baddbmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
-# TODO: maybe deprecate aten linear as it will call aten::mm or aten::addmm
-class aten_linear(GEMM):
-
-    @staticmethod
-    def get_param_details(event):
-        input_dims = event['args']['Input Dims']
-        input_shape = input_dims[0]
-        weight_shape = input_dims[1]
-        bias = bool(input_dims[2])
-        K = input_shape[-1]
-        N = weight_shape[0]
-        # Compute M as the product of all dimensions except the last one
-        M = 1
-        for dim in input_shape[:-1]:
-            M *= dim
-
-        # TODO: remove repeated code, this is not cool
-        dtype_A_B = tuple(event['args']['Input type'][:2])
-        try:
-            stride_A = tuple(event['args']['Input Strides'][0])
-            stride_B = tuple(event['args']['Input Strides'][1])
-        except KeyError:
-            stride_A = stride_B = None
-
-        return {"M": M, "N": N, "K": K, "bias": bias,
-                "stride_A": stride_A, "stride_B": stride_B,
-                "dtype_A_B": dtype_A_B}
 
 class tex_ts_te_gemm_ts(GEMM):
     """
@@ -482,8 +455,8 @@ class tex_ts_te_gemm_ts(GEMM):
 
     """
 
-    def __init__(self, event, arch=None, detail_level=0):
-        super().__init__(event, arch, detail_level)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
 
     def get_param_details(self, event):
         input_dims = event['args']['Input Dims']
@@ -550,7 +523,7 @@ class tex_ts_te_gemm_ts(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = self.param_details['input_shape'], self.param_details['filter_shape']
@@ -737,7 +710,7 @@ class aten_conv_bwd(aten_conv):
         return self.bytes_bwd(bytes_per_element)
 class SDPA:
 
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         # S = QK^T
         # P = softmax(S)
         # O = PV
@@ -887,7 +860,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
 class UnaryElementwise:
 
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.nelems = prod(self.param_details['op_shape'])
@@ -934,7 +907,7 @@ class aten_unary_elementwise(UnaryElementwise):
                 "stride_input": stride_input, "stride_output": stride_output}
 class BinaryElementwise:
 
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         broadcast_shape = self.get_broadcast_shape(self.param_details['shape_in1'], self.param_details['shape_in2'])
