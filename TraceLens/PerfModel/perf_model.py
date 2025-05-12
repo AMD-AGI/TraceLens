@@ -82,7 +82,7 @@ class GEMM:
     If you want to add a new GEMM operation, you should inherit from this class.
     """
     cache_gemm_results = {}  # This is used to cache gemm results
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
@@ -455,8 +455,8 @@ class tex_ts_te_gemm_ts(GEMM):
 
     """
 
-    def __init__(self, event, arch=None, detail_level=0):
-        super().__init__(event, arch, detail_level)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
 
     def get_param_details(self, event):
         input_dims = event['args']['Input Dims']
@@ -523,7 +523,7 @@ class tex_ts_te_gemm_ts(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = self.param_details['input_shape'], self.param_details['filter_shape']
@@ -710,7 +710,7 @@ class aten_conv_bwd(aten_conv):
         return self.bytes_bwd(bytes_per_element)
 class SDPA:
 
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         # S = QK^T
         # P = softmax(S)
         # O = PV
@@ -860,7 +860,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
 class UnaryElementwise:
 
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.nelems = prod(self.param_details['op_shape'])
@@ -907,7 +907,7 @@ class aten_unary_elementwise(UnaryElementwise):
                 "stride_input": stride_input, "stride_output": stride_output}
 class BinaryElementwise:
 
-    def __init__(self, event, arch=None, detail_level=0):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         broadcast_shape = self.get_broadcast_shape(self.param_details['shape_in1'], self.param_details['shape_in2'])
