@@ -53,6 +53,7 @@ def main():
     with pd.ExcelWriter(args.output_xlsx_path) as writer:
         df_gpu_timeline.to_excel(writer, sheet_name='gpu_timeline', index=False)
         df_kernel_launchers_summary.to_excel(writer, sheet_name='kernel_launchers_summary', index=False)
+        df_kernel_launchers_unique_args.to_excel(writer, sheet_name='kernel_launchers_unique_args', index=False)
         
         # Write each op category DataFrame
         for sheet_name, df in op_dfs.items():
