@@ -39,7 +39,7 @@ def name2bpe(name):
         8: ['double', 'long int'],
         4: ['float', 'scalar'],
         2: ['c10::half', 'c10::bfloat16'],
-        1: ['c10::float8_e4m3fnuz', 'unsigned char'],
+        1: ['c10::float8_e4m3fnuz', 'unsigned char', 'fp8'],
     }
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
@@ -71,7 +71,8 @@ def torch_dtype_map(dtype):
         'double': 'fp64',
         'c10::half': 'fp16',
         'c10::bfloat16': 'bf16',
-        'c10::float8_e4m3fnuz': 'fp8'
+        'c10::float8_e4m3fnuz': 'fp8',
+        'fp8': 'fp8',
     }
     return dict_dtype2gemmologist.get(dtype.lower(), None)
 
@@ -517,6 +518,45 @@ class tex_ts_te_gemm_ts(GEMM):
         raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
+
+class tev2_pseudo_gemm(GEMM):
+    # TODO: need to cleanup and reuse perf models better
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        A_shape, B_shape = input_dims[0], input_dims[1]
+        M = A_shape[0]
+        N = B_shape[1]
+        K = A_shape[1]
+
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        dtype_out = event['args']['Input type'][2]
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][1])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {"M": M, "N": N, "K": K, "bias": False,
+                "stride_A": stride_A, "stride_B": stride_B,
+                "dtype_A_B": dtype_A_B, "dtype_out": dtype_out}
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+        self.bpe_in = name2bpe(dtype_A_B[0])
+
+        dtype_out = self.param_details['dtype_out']
+        # irrespective of the input dtype, the output dtype is always fp16/bf16
+        bpe_out = 2 
+        return super().bytes(bpe_mat1=self.bpe_in, bpe_mat2=self.bpe_in,
+                             bpe_bias=self.bpe_in, # does not matter
+                             bpe_output=self.bpe_out) # out dtype is not always provided. #TODO: use out dtype if provided
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aten::mm is not defined.")
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Backward pass for aten::mm is not defined.")
 
 
 # 2. Convolution
