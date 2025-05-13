@@ -397,8 +397,7 @@ class TraceToTree:
 
     def _link_backward_flow_map(self):
 
-        print('link_backward_flow_map')
-        self.backward_flow_map_uid2uid = {}
+        self.backward_flow_map_uid2uid = defaultdict(list)
 
         for event in self.events:
 
@@ -408,26 +407,13 @@ class TraceToTree:
                     seq_num = event['args']['Sequence number']
                     uids = self.seq_num2event_uids_map[seq_num]
 
-                    if '_LayerNormLinear' in event["name"]:
-                        print('event:',event)
-                        print('uids:',uids)
-
                     for uid in uids:
 
                         flow_event = self.get_UID2event(uid)
-
                         flow_event_fwd_thread_id = flow_event['args']['Fwd thread id']
-
                         event_fwd_thread_id = event['args']['Fwd thread id']
-
-                        if '_LayerNormLinear' in event["name"]:
-                            print('uid:',uid)
-                            print('flow_event:',flow_event)
-                            print('event_fwd_thread_id-1:',event_fwd_thread_id-1)
-                            print('flow_event_fwd_thread_id:', flow_event_fwd_thread_id)
-                            print("'parent' in event.keys():",'parent' in event.keys())
-
-                        if flow_event_fwd_thread_id==(event_fwd_thread_id-1):# and ('parent' in event.keys()):
+                    
+                        if flow_event_fwd_thread_id==(event_fwd_thread_id-1):
                             print('backward flow found')
                             self.backward_flow_map_uid2uid[event['UID']] = flow_event['UID']
                             break

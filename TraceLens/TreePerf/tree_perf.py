@@ -96,18 +96,35 @@ class TreePerfAnalyzer:
         return not any(pattern in event['name'] for pattern in DATA_MOVEMENT_PATTERNS)
 
 
-    def recurse_parent(self, event, parents_to_search):
+    def call_recurse_parent(self, event, parents_to_search):
 
+        self._flow_parents = []
+
+        self._recurse_parent(event, parents_to_search)
+
+        return self._flow_parents
+
+    def _recurse_parent(self, event, parents_to_search):
+
+        if event['name'] in parents_to_search:
+            self._flow_parents.append(event)
+
+        # follow backward flow as well if exists
+        if self.tree.backward_flow_map_uid2uid[event['UID']]:
+
+            flow_event_uid = self.tree.backward_flow_map_uid2uid[event['UID']]
+            flow_event = self.tree.get_UID2event(flow_event_uid)
+            self._recurse_parent(flow_event, parents_to_search)
+
+        # no more parents
         if 'parent' not in event.keys():
             return None
-        if event['name'] in parents_to_search:
-            return event
         
         parent_uid = event['parent']
         parent_event = self.tree.get_UID2event(parent_uid)
-        parent_event = self.recurse_parent(parent_event, parents_to_search)
+        parent_event = self._recurse_parent(parent_event, parents_to_search)
 
-        return parent_event
+        return None
 
     def compute_perf_metrics(self, event, bwd=False, 
                              non_data_mov=False, perf_model_class=None,
@@ -142,10 +159,10 @@ class TreePerfAnalyzer:
         if 'general_gemm' in event['name']:
             print(event)
             parents_to_search = ['_Linear', '_LinearBackward', '_LayerNormLinear', '_LayerNormLinearBackward']
-            parent_event = self.recurse_parent(event, parents_to_search)
+            parent_events = self.call_recurse_parent(event, parents_to_search)
             print('parent event found')
-            print(parent_event)
-            event = parent_event
+            print(parent_events)
+            #event = parent_event
  
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:

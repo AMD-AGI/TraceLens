@@ -35,6 +35,10 @@ op_to_perf_model_class_map = {
     'aten::convolution': perf_model.aten_conv,
 }
 
+op_to_perf_model_class_map.update(perf_model.general_gemm_class_map)
+
+
+
 unary_elemwise_ops = [
     'aten::copy', 'aten::copy_',
     'atem::clamp_min', 'aten::clamp_min_',
