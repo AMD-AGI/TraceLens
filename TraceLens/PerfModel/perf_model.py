@@ -552,9 +552,9 @@ class tev2_pseudo_gemm(GEMM):
                              bpe_bias=self.bpe_in, # does not matter
                              bpe_output=self.bpe_out) # out dtype is not always provided. #TODO: use out dtype if provided
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for aten::mm is not defined.")
+        raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Backward pass for aten::mm is not defined.")
+        raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
 
 # 2. Convolution
