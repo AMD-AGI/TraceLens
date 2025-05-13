@@ -530,7 +530,6 @@ class tev2_pseudo_gemm(GEMM):
         K = A_shape[1]
 
         dtype_A_B = tuple(event['args']['Input type'][:2])
-        dtype_out = event['args']['Input type'][2]
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
             stride_B = tuple(event['args']['Input Strides'][1])
@@ -539,7 +538,7 @@ class tev2_pseudo_gemm(GEMM):
 
         return {"M": M, "N": N, "K": K, "bias": False,
                 "stride_A": stride_A, "stride_B": stride_B,
-                "dtype_A_B": dtype_A_B, "dtype_out": dtype_out}
+                "dtype_A_B": dtype_A_B}
 
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
@@ -547,9 +546,8 @@ class tev2_pseudo_gemm(GEMM):
             raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
         self.bpe_in = name2bpe(dtype_A_B[0])
 
-        dtype_out = self.param_details['dtype_out']
         # irrespective of the input dtype, the output dtype is always fp16/bf16
-        bpe_out = 2 
+        self.bpe_out = 2 
         return super().bytes(bpe_mat1=self.bpe_in, bpe_mat2=self.bpe_in,
                              bpe_bias=self.bpe_in, # does not matter
                              bpe_output=self.bpe_out) # out dtype is not always provided. #TODO: use out dtype if provided
