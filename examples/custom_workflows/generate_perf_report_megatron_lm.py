@@ -56,7 +56,7 @@ def main():
 
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
-    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers()
+    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
     df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
                                                                                         agg_metrics=agg_metrics, 
