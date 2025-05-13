@@ -32,7 +32,7 @@ def is_gemm_kernel(kernel_event: dict) -> bool:
     return is_rocm_gemm or is_cuda_gemm
 
 def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: str, 
-                               w_idx: int, x_idx: int):
+                               w_idx: int, x_idx: int, fp8_bool_idx: int):
     """
     Create pseudo matmul ops for forward and backward passes.
     fwd pass:
@@ -95,6 +95,11 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
 
     assert inp_shape[-1] == W_shape[1]
     assert W_dtype == inp_dtype
+
+    is_fp8 = fwd_op_event['args']['Concrete Inputs'][fp8_bool_idx] == 'True'
+    if is_fp8:
+        W_dtype = 'fp8'
+        inp_dtype = 'fp8'
 
     X_shape = (math.prod(inp_shape[:-1]), inp_shape[-1])
     Y_grad_shape = (X_shape[0], W_shape[0])
@@ -190,6 +195,7 @@ def create_host_mm_ops_from_linear_op(trace_tree, fwd_op_event: dict):
         expected_name='_Linear',
         w_idx=0,
         x_idx=1,
+        fp8_bool_idx=4
     )
 
 def create_host_mm_ops_from_layernormlinear_op(trace_tree, fwd_op_event: dict):
@@ -200,6 +206,7 @@ def create_host_mm_ops_from_layernormlinear_op(trace_tree, fwd_op_event: dict):
         expected_name='_LayerNormLinear',
         w_idx=3,
         x_idx=0,
+        fp8_bool_idx=7
     )
 
 def tev2_create_pseudo_host_mm_ops(trace_tree):
