@@ -552,9 +552,9 @@ class tex_ts_te_gemm_ts(GEMM):
                              bpe_output=self.bpe_output)
 
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+        raise NotImplementedError("Backward pass for tex_ts::te_gemm_ts is not defined.")
 
 class general_gemm(GEMM):
     """
@@ -565,11 +565,11 @@ class general_gemm(GEMM):
     """
 
     def __init__(self, event, parent_events, arch=None, detail_level=0):
-        super().__init__(event, arch, detail_level)
         self.parent_events = parent_events
         self.arch = arch
         self.detail_level = detail_level
-
+        super().__init__(event, arch, detail_level)
+        
     def get_param_details(self, event):
 
         trans_a = self.parsed_kernel_info['transpose'][0]
@@ -577,7 +577,7 @@ class general_gemm(GEMM):
 
         input_dim_data = {}
         perf_model_dict = {}
-        # get input data from parent events
+        # get input data from parent events, e.g. _LinearBackward requires input data from _Linear
         for parent_event in self.parent_events:
 
             perf_model_class_name = parent_event['name']
@@ -619,7 +619,7 @@ class general_gemm(GEMM):
         raise NotImplementedError("Backward pass for general_gemm is not defined.")
     
 class linear(GEMM):
-    """ OK
+    """
     _Linear is a linear op in TransformerEngine 2.0
 
     https://github.com/NVIDIA/TransformerEngine/blob/0e45e138c08af8f3b38e46eea58e2e9dbe628d42/transformer_engine/pytorch/module/linear.py#L77
@@ -640,19 +640,32 @@ class linear(GEMM):
         mat_a_type = event['args']['Input type'][0]
         mat_b_type = event['args']['Input type'][1]
 
+        bias_term = event['args']['Concrete Inputs'][3]
+
+        if bias_term == 'True':
+            bias = True
+        elif bias_term == 'False':
+            bias = False
+        else:
+            bias = False
+
+        bias_type = event['args']['Input type'][2]
+
         return {
             "weight": (mat_a_dim1, mat_a_dim2),
             "input": (mat_b_dim1, mat_b_dim2),
             "weight_type": mat_a_type,
             "input_type": mat_b_type,
+            "bias": bias,
+            "bias_type": bias_type,
         }
 
     def get_param_details(self, event, input_params):
 
-        weight_dim = input_params['weight']
-        input_dim = input_params['input']
-        weight_type = input_params['weight_type']
-        input_type = input_params['input_type']
+        weight_dim = input_params['_Linear']['weight']
+        input_dim = input_params['_Linear']['input']
+        weight_type = input_params['_Linear']['weight_type']
+        input_type = input_params['_Linear']['input_type']
 
         trans_a, trans_b = self.parsed_kernel_info['transpose']
 
@@ -669,17 +682,11 @@ class linear(GEMM):
         K = mat_a_dim2 if trans_a else mat_a_dim1
         N = mat_b_dim2 if trans_b else mat_b_dim1
 
-        bias_term = event['args']['Concrete Inputs'][3]
-
-        if bias_term == 'True':
-            bias = True
-        elif bias_term == 'False':
-            bias = False
-        else:
-            bias = False
+        bias = input_params['_Linear']['bias']
+        bias_type = input_params['_Linear']['bias_type']
 
         # dtype A, B, bias
-        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][2])
+        dtype_A_B = (mat_a_type, mat_b_type, bias_type)
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
@@ -723,7 +730,6 @@ class linear_backward(GEMM):
 
     def get_input_params(self, event):
 
-
         mat_a_dim1 = event['args']['Input Dims'][0][0]
         mat_a_dim2 = event['args']['Input Dims'][0][1]
 
@@ -752,10 +758,11 @@ class linear_backward(GEMM):
         K = mat_a_dim2 if trans_a else mat_a_dim1
         N = mat_b_dim2 if trans_b else mat_b_dim1
 
-        bias = input_params["_Linear"]["bias_term"]
+        bias = input_params["_Linear"]["bias"]
+        bias_type = input_params["_Linear"]["bias_type"]
 
         # dtype A, B, bias
-        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][2])
+        dtype_A_B = (mat_a_type, mat_b_type, bias_type)
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
@@ -781,9 +788,9 @@ class linear_backward(GEMM):
                              bpe_output=self.bpe_output)
 
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for _Linear is not defined.")
+        raise NotImplementedError("Backward pass for _LinearBackward is not defined.")
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Backward pass for _Linear is not defined.")
+        raise NotImplementedError("Backward pass for _LinearBackward is not defined.")
      
 class layer_norm_linear(GEMM):
     """
@@ -831,21 +838,30 @@ class layer_norm_linear(GEMM):
             weight_type = None
 
         bias_term = event['args']['Concrete Inputs'][5]
+        bias_type = event['args']['Input type'][4]
+
+        if bias_term == 'True':
+            bias = True
+        elif bias_term == 'False':
+            bias = False
+        else:
+            bias = False
 
         return {
         "weight": weight_dim,
         "input": input_dim,
         "weight_type": weight_type,
         "input_type": input_type,
-        "bias_term": bias_term,
+        "bias": bias,
+        "bias_type": bias_type,
         }
     
     def get_param_details(self, event, input_params):
 
-        weight_dim = input_params['weight']
-        input_dim = input_params['input']
-        weight_type = input_params['weight_type']
-        input_type = input_params['input_type']
+        weight_dim = input_params["_LayerNormLinear"]['weight']
+        input_dim = input_params["_LayerNormLinear"]['input']
+        weight_type = input_params["_LayerNormLinear"]['weight_type']
+        input_type = input_params["_LayerNormLinear"]['input_type']
 
         trans_a, trans_b = self.parsed_kernel_info['transpose']
 
@@ -862,17 +878,11 @@ class layer_norm_linear(GEMM):
         K = mat_a_dim2 if trans_a else mat_a_dim1
         N = mat_b_dim2 if trans_b else mat_b_dim1
 
-        bias_term = event['args']['Concrete Inputs'][5]
-
-        if bias_term == 'True':
-            bias = True
-        elif bias_term == 'False':
-            bias = False
-        else:
-            bias = False
+        bias = input_params["_LayerNormLinear"]['bias']
+        bias_type = input_params["_LayerNormLinear"]['bias_type']
 
         # dtype A, B, bias
-        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][4])
+        dtype_A_B = (mat_a_type, mat_b_type, bias_type)
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
@@ -890,6 +900,8 @@ class layer_norm_linear(GEMM):
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_bias = name2bpe(dtype_A_B[2])
+        # output dtype not defined, use input dtype
+        self.bpe_output = name2bpe(dtype_A_B[0])
 
         return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
                              bpe_bias=self.bpe_bias,
@@ -946,14 +958,15 @@ class layer_norm_linear_backward(GEMM):
         else:
             raise ValueError("Unknown GEMM operation")
             
-        bias = input_params["_LayerNormLinear"]["bias_term"]
+        bias = input_params["_LayerNormLinear"]["bias"]
+        bias_type = input_params["_LayerNormLinear"]["bias_type"]
 
         M = mat_a_dim1 if trans_a else mat_a_dim2
         K = mat_a_dim2 if trans_a else mat_a_dim1
         N = mat_b_dim2 if trans_b else mat_b_dim1
 
         # dtype A, B, bias
-        dtype_A_B = (mat_a_type, mat_b_type, event['args']['Input type'][4])
+        dtype_A_B = (mat_a_type, mat_b_type, bias_type)
 
         try:
             stride_A = tuple(event['args']['Input Strides'][0])
@@ -971,15 +984,17 @@ class layer_norm_linear_backward(GEMM):
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_bias = name2bpe(dtype_A_B[2])
+        # output dtype not defined, use input dtype
+        self.bpe_output = name2bpe(dtype_A_B[0])
 
         return super().bytes(bpe_mat1=self.bpe_mat1, bpe_mat2=self.bpe_mat2,
                              bpe_bias=self.bpe_bias,
                              bpe_output=self.bpe_output)
 
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.")
+        raise NotImplementedError("Backward pass for _LayerNormLinearBackward is not defined.")
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Backward pass for _LayerNormLinear is not defined.") 
+        raise NotImplementedError("Backward pass for _LayerNormLinearBackward is not defined.") 
 
 # 2. Convolution
 class CONV:

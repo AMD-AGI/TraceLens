@@ -33,10 +33,12 @@ op_to_perf_model_class_map = {
     'FlashAttnFunc': perf_model.flash_attention,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
     'aten::convolution': perf_model.aten_conv,
+    'general_gemm': perf_model.general_gemm,
+    '_Linear': perf_model.linear,
+    '_LinearBackward': perf_model.linear_backward,
+    '_LayerNormLinear': perf_model.layer_norm_linear,
+    '_LayerNormLinearBackward': perf_model.layer_norm_linear_backward,
 }
-
-op_to_perf_model_class_map.update(perf_model.general_gemm_class_map)
-
 
 
 unary_elemwise_ops = [

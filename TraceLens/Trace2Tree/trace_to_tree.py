@@ -414,7 +414,6 @@ class TraceToTree:
                         event_fwd_thread_id = event['args']['Fwd thread id']
                     
                         if flow_event_fwd_thread_id==(event_fwd_thread_id-1):
-                            print('backward flow found')
                             self.backward_flow_map_uid2uid[event['UID']] = flow_event['UID']
                             break
 

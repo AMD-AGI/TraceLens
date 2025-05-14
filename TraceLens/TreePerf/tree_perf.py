@@ -150,24 +150,27 @@ class TreePerfAnalyzer:
             busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
-        parents_to_search = ['_Linear', '_LinearBackward', '_LayerNormLinear', '_LayerNormLinearBackward']
-        if event['name'] in parents_to_search:
-            print('Parents to search found:')
-            print(event)
+        # Select the appropriate dictionary for FLOPS and memory functions
+        if perf_model_class is None:
+            print(event['name'])
+            if 'general_gemm' in event['name']:
+                event_name = 'general_gemm'
+            else:
+                event_name = event['name']
+            perf_model_class = op_to_perf_model_class_map[event_name]
 
         # handle te 2.0 general gemm python function case
         if 'general_gemm' in event['name']:
+            parents_to_search = ['_Linear', '_LinearBackward', '_LayerNormLinear', '_LayerNormLinearBackward']
             print(event)
             parents_to_search = ['_Linear', '_LinearBackward', '_LayerNormLinear', '_LayerNormLinearBackward']
             parent_events = self.call_recurse_parent(event, parents_to_search)
             print('parent event found')
             print(parent_events)
-            #event = parent_event
- 
-        # Select the appropriate dictionary for FLOPS and memory functions
-        if perf_model_class is None:
-            perf_model_class = op_to_perf_model_class_map[event['name']]
-        perf_model = perf_model_class(event, arch=self.arch, detail_level=detail_level)
+            perf_model = perf_model_class(event, parent_events, arch=self.arch, detail_level=detail_level)
+            
+        else:
+            perf_model = perf_model_class(event, arch=self.arch, detail_level=detail_level)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
 
