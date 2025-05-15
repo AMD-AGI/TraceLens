@@ -72,6 +72,7 @@ def torch_dtype_map(dtype):
         'c10::half': 'fp16',
         'c10::bfloat16': 'bf16',
         'c10::float8_e4m3fnuz': 'fp8',
+        'unsigned char': 'fp8',
         'fp8': 'fp8',
     }
     return dict_dtype2gemmologist.get(dtype.lower(), None)
