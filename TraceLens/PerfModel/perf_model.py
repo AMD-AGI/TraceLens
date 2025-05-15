@@ -844,13 +844,17 @@ class flash_attention(SDPA):
     @staticmethod
     def get_param_details(event):
         input_dims = event['args']['Input Dims']
-        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])
         B, N_Q, H_Q, d_h = q_shape
         assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
         _, N_KV, H_KV, _ = input_dims[1]
         dropout = float(event['args']['Concrete Inputs'][3])
         causal = eval(event['args']['Concrete Inputs'][5])
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
                 "dropout": dropout, "causal": causal, "flash_impl": True}
 
 class flash_attention_backward(flash_attention):
