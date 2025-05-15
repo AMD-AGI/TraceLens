@@ -43,6 +43,54 @@ class transformer_engine_attention(SDPA):
                 "q_strides": q_strides, "k_strides": k_strides, "v_strides": v_strides,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": flash_impl}
 
+from TraceLens.PerfModel import flash_attention
+
+class flash_attention_backward(flash_attention):
+
+    @staticmethod
+    def get_param_details(event):
+        # dout: torch.Tensor,
+        # q: torch.Tensor,
+        # k: torch.Tensor,
+        # v: torch.Tensor,
+        # out: torch.Tensor,
+        # softmax_lse: torch.Tensor,
+        # dq: Optional[torch.Tensor],
+        # dk: Optional[torch.Tensor],
+        # dv: Optional[torch.Tensor],
+        # dropout_p: float,
+        # softmax_scale: float,
+        # causal: bool,
+        # window_size_left: int,
+        # window_size_right: int,
+        # softcap: float,
+        # alibi_slopes: Optional[torch.Tensor],
+        # deterministic: bool,
+        # rng_state: Optional[torch.Tensor] = None,
+        input_dims = event['args']['Input Dims']
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        strides = event['args']['Input Strides']
+        d_out_stride = tuple(strides[0])
+        q_stride, k_stride, v_stride = tuple(strides[1]), tuple(strides[2]), tuple(strides[3])
+        out_stride = tuple(strides[4])
+        softmax_lse_stride = tuple(strides[5])
+        dq_stride, dk_stride, dv_stride = tuple(strides[6]), tuple(strides[7]), tuple(strides[8])
+        B, N_Q, H_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, N_KV, H_KV, _ = input_dims[2]
+        dropout = float(event['args']['Concrete Inputs'][9])
+        is_causal = eval(event['args']['Concrete Inputs'][11])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "d_out_stride": d_out_stride,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "out_stride": out_stride, "softmax_lse_stride": softmax_lse_stride,
+                "dq_stride": dq_stride, "dk_stride": dk_stride, "dv_stride": dv_stride,
+                "dropout": dropout, "causal": is_causal, "flash_impl": True}
+
+    def flops(self):
+        return self.flops_bwd()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json file')
@@ -73,12 +121,15 @@ def main():
     # update the dict_cat2names to include FusedAttnFunc
     dict_cat2names['SDPA'].append('FusedAttnFunc')
     dict_name_to_custom_perf_model = {'FusedAttnFunc': transformer_engine_attention}
+    dict_cat2names['FA_bwd'].append('flash_attn::_flash_attn_backward')
+    dict_name_to_custom_perf_model.update({'flash_attn::_flash_attn_backward': flash_attention_backward})
 
     for op_cat, op_names in dict_cat2names.items():
         # Filter events belonging to the current category
         op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
+        print(f"Processing {len(op_events)} events for category: {op_cat}")
 
-        if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']:
+        if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise', 'FA_bwd']:
             # For GEMM: create a single table that covers both fwd and bwd.
             df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True,
                                                         dict_name_to_perf_model=dict_name_to_custom_perf_model)
