@@ -29,6 +29,10 @@ class transformer_engine_attention(SDPA):
                 break
         assert q_idx is not None, "query index not found"
         q_shape, k_shape, v_shape = input_dims[q_idx: q_idx+3]
+        strides = event['args']['Input Strides']
+        q_strides, k_strides, v_strides = strides[q_idx: q_idx+3]
+        # convert stride to tuple
+        q_strides, k_strides, v_strides = tuple(q_strides), tuple(k_strides), tuple(v_strides)
         B, N_Q, H_Q, d_h = q_shape
         assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
         _, N_KV, H_KV, _ = k_shape 
@@ -36,6 +40,7 @@ class transformer_engine_attention(SDPA):
         dropout_p = 0.0
         flash_impl = True
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "q_strides": q_strides, "k_strides": k_strides, "v_strides": v_strides,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": flash_impl}
 
 def main():
