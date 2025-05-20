@@ -107,6 +107,21 @@ def get_df_fusion_opportunity(perf_analyzer, fusion_op_names):
     return df_fusion_study_grouped
 
 def get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=10, histogram_bins=100, topk=None):
+    """
+    Analyze short kernel events from the performance data and return two DataFrames:
+    a histogram of short kernel durations and a summary of top short kernels.
+
+    Args:
+        perf_analyzer (TreePerfAnalyzer): The performance analyzer object containing kernel data.
+        short_kernel_threshold_us (int, optional): Threshold in microseconds to classify a kernel as "short". Defaults to 10.
+        histogram_bins (int, optional): Number of bins for the histogram of short kernel durations. Defaults to 100.
+        topk (int, optional): Number of top short kernels to include in the summary. If None, include all. Defaults to None.
+
+    Returns:
+        tuple: A tuple containing:
+            - pd.DataFrame: Histogram of short kernel durations with columns ['bin_start', 'bin_end', 'count'].
+            - pd.DataFrame: Summary of top short kernels with detailed statistics and percentage contribution to total time.
+    """
     df_kernels = perf_analyzer.get_df_kernels()
     df_filtered = df_kernels[df_kernels['Kernel duration (µs)'] < short_kernel_threshold_us]
 
