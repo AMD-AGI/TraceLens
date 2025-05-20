@@ -46,7 +46,8 @@ op_to_perf_model_class_map = {
 
 unary_elemwise_ops = [
     'aten::copy', 'aten::copy_',
-    'atem::clamp_min', 'aten::clamp_min_',
+    'aten::clamp_min', 'aten::clamp_min_',
+    'aten::clamp_max', 'aten::clamp_max_',
     'aten::sigmoid',
 ]
 
