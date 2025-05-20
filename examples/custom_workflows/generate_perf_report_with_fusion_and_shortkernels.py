@@ -35,7 +35,22 @@ def get_next_host_op(perf_analyzer, host_op):
 
 
 def get_df_fusion_opportunity(perf_analyzer, fusion_op_names):
+    """
+    Identifies fusion opportunities from performance data and returns a grouped DataFrame summarizing them.
 
+    Parameters:
+        perf_analyzer (TreePerfAnalyzer): An instance of TreePerfAnalyzer containing performance data.
+        fusion_op_names (list of str): A list of operation names to consider as fusion candidates.
+
+    Returns:
+        pandas.DataFrame: A DataFrame summarizing fusion opportunities. Key columns include:
+            - 'combo': Combination of fusion candidate and post-fusion operation.
+            - 'first kernel by fusion post op duration_mean': Mean duration of the first kernel after fusion.
+            - 'first kernel by fusion post op duration_std': Standard deviation of the duration.
+            - 'first kernel by fusion post op duration_sum': Total duration of the first kernel.
+            - 'first kernel by fusion post op duration_count': Count of occurrences.
+            - 'estimated saved time percent': Estimated percentage of time saved by fusion.
+    """
     fusion_candidates = [e for e in perf_analyzer.tree.events if e['name'] in fusion_op_names]
 
     list_dicts_info = []
