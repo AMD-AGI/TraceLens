@@ -38,7 +38,7 @@ def find_user_annotation(event_iter: Iterable[dict[str, Any]], user_annotation_n
     return None
 
 def find_user_annotation_in_trace_file(json_file: Path, user_annotation_name: str) -> Optional[dict[str, Any]]:
-    with gzip.open(json_file, 'rt') if json_file.suffix == ".gz" else open(json_file, "rb") as f:
+    with gzip.open(json_file, 'rt') if json_file.suffix == ".gz" else open(json_file, "r", encoding="UTF-8") as f:
         return find_user_annotation(ijson.items(f, "traceEvents.item"), user_annotation_name=user_annotation_name)
 
 def filter_trace_events_to_range(events: Iterable[dict[str, Any]], start: Decimal, end: Decimal) -> list[dict[str, Any]]:
