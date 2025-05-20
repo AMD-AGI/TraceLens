@@ -24,7 +24,7 @@ def get_arg_parser() -> argparse.ArgumentParser:
                         epilog="""Example: To filter a section profiled with torch.autograd.profiler.record_function("my_annotation"), use: python filter_trace.py trace.json.gz --annotation "my_annotation" --output filtered.json.gz""")
     parser.add_argument('filename', type=str, help=".json or .gz trace file to filter")
     parser.add_argument("--annotation", type=str, help="Name of the user annotation to filter by", required=True)
-    parser.add_argument("--output", type=str, help="Output file name with .json or .gz extension", default="filtered.json.gz", required=True)
+    parser.add_argument("--output", type=str, help="Output file name with .json or .gz extension", default="filtered.json.gz")
     parser.add_argument("--allow-overwrite", action='store_true', help="Allow overwriting the output file if it exists")
     return parser
 
