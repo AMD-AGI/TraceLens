@@ -81,6 +81,7 @@ def analyze_traces(
     node_replay=False,
     dry_run=False,
     save_all_kernels=False,
+    xlsx_path=None,
 ):
     all_traces_grouped = parse_traces(base_dirpath, ext, include_only)
 
@@ -95,7 +96,8 @@ def analyze_traces(
         dfs_all = {group: None for group in group2ops}
 
         prefix = "_".join(include_only)
-        xlsx_path = osp.join(parent_dirpath, f"{prefix}_performance_report.xlsx")
+        if xlsx_path is None:
+            xlsx_path = osp.join(parent_dirpath, f"{prefix}_performance_report.xlsx")
 
         print("==================== Creating performance report ====================")
         print(f"Parent directory: {parent_dirpath}")
@@ -239,10 +241,11 @@ def main():
     parser.add_argument("-r", action="store_true", help="Run node replay for GEMMs and CONVs that contribute 99 pct to group-specific execution time.")
     parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")
     parser.add_argument("-a", action="store_true", help="Save all individual kernels from all ranks (sheets kernels_0 ... kernels_n).")
+    parser.add_argument("-o", type=str, default=None, help=".xlsx file to save outputs to")
 
     args = parser.parse_args()
 
-    analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.a)
+    analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.a, xlsx_path=args.o)
 
 if __name__ == "__main__":
     main()
