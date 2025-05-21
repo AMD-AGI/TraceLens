@@ -54,10 +54,12 @@ pad_ops_launchers = [
 
 upsample_ops_launchers = [
     "aten::upsample_nearest3d", "aten::upsample_nearest2d",
+    "aten::upsample_bicubic2d"
 ]
 
 norm_ops_launchers = [
     "aten::native_group_norm",
+    "aten::native_layer_norm",
 ]
 
 attn_ops_launchers = [
