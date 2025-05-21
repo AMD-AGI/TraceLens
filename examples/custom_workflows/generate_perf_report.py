@@ -63,10 +63,10 @@ from perf_report_utils import (
     build_grouped_breakdown,
     build_kernel_launchers_summary,
     collect_df_perf_metrics_per_group,
-    group2ops,
     parse_traces,
     ram_stats_gb,
 )
+from perf_report_configs import group2ops
 from TraceLens import NcclAnalyser, TreePerfAnalyzer
 
 # Static methods
