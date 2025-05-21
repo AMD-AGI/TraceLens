@@ -3,7 +3,7 @@ import json
 import argparse
 import warnings
 import torch
-from TraceLens.EventReplay.utils import TensorCfg, build_tensor, benchmark_func, summarize_tensor, dict_profile2torchdtype
+from .utils import TensorCfg, build_tensor, benchmark_func, summarize_tensor, dict_profile2torchdtype
 
 def _get_args_kwargs_from_ir(event_replay_IR: dict[str, any], device: str = 'cuda') -> tuple[list[any], dict[str, any]]:
     # (Copy the implementation of _get_args_kwargs_from_ir from Step 1 here)
