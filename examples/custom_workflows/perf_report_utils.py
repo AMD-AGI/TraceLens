@@ -1,9 +1,11 @@
 import glob
+import numpy as np
 import os.path as osp
 from collections import defaultdict
 
 import pandas as pd
 import psutil
+from typing import Callable
 from perf_report_configs import all_ops_launchers, grouped_breakdown_mapping
 from TraceLens import TreePerfAnalyzer
 
@@ -79,14 +81,20 @@ def build_grouped_breakdown(df_kernel_launchers, df_gpu_timelines):
     })
 
     times = []
+    assigned_to_group = np.zeros(len(df_kernel_launchers), dtype=bool)
     for ops_launchers in grouped_breakdown_mapping.values():
-        time = df_kernel_launchers[df_kernel_launchers["name"].isin(ops_launchers)]["time_ms_avg"].sum() / 1000
+        if isinstance(ops_launchers, Callable):
+            mask = np.array([ops_launchers(x) for x in df_kernel_launchers["name"]])
+        else:
+            mask = df_kernel_launchers["name"].isin(ops_launchers)
+        assigned_to_group[mask] = True
+        time = df_kernel_launchers[mask]["time_ms_avg"].sum() / 1000
         times.append(time)
 
     times.extend([
         df_gpu_timelines[df_gpu_timelines["type"] == "total_comm_time"]["time_ms_avg"].sum() / 1000,
         df_gpu_timelines[df_gpu_timelines["type"] == "total_memcpy_time"]["time_ms_avg"].sum() / 1000,
-        df_kernel_launchers[~df_kernel_launchers["name"].isin(all_ops_launchers)]["time_ms_avg"].sum() / 1000,
+        df_kernel_launchers[~assigned_to_group]["time_ms_avg"].sum() / 1000,
     ])
 
     times.append(sum(times))

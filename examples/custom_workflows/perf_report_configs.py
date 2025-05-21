@@ -73,6 +73,9 @@ concat_ops_launchers = [
 
 all_ops_launchers = gemm_ops + conv_ops_launchers + pad_ops_launchers + upsample_ops_launchers + norm_ops_launchers + attn_ops_launchers + unary_elemwise_ops + binary_elemwise_ops + concat_ops_launchers
 
+def check_triton_fn(op_name: str) -> bool:
+    return op_name.startswith("triton_")
+    
 grouped_breakdown_mapping = {
     "Attention": attn_ops_launchers,
     "GEMM": gemm_ops,
@@ -81,5 +84,6 @@ grouped_breakdown_mapping = {
     "UpSample": upsample_ops_launchers,
     "Pad": pad_ops_launchers,
     "Elemwise": unary_elemwise_ops + binary_elemwise_ops,
-    "Concat": concat_ops_launchers
+    "Concat": concat_ops_launchers,
+    "Triton": check_triton_fn,
 }
