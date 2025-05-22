@@ -91,13 +91,18 @@ def analyze_traces(
     pattern = f"{rank_pattern}(\\d+)"
 
     for parent_dirpath, filenames in all_traces_grouped.items():
+        if xlsx_path is not None and len(all_traces_grouped) > 1:
+            print("Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path.")
+            return
+
         df_kernel_launchers_all = None
         df_gpu_timelines_all = None
         dfs_all = {group: None for group in group2ops}
 
-        prefix = "_".join(include_only)
-        if xlsx_path is None:
-            xlsx_path = osp.join(parent_dirpath, f"{prefix}_performance_report.xlsx")
+        parent_dirname = osp.basename(parent_dirpath)
+        prefix = "_".join([parent_dirname, *include_only])
+
+        xlsx_path = xlsx_path or osp.join(parent_dirpath, f"{prefix}_performance_report.xlsx")
 
         print("==================== Creating performance report ====================")
         print(f"Parent directory: {parent_dirpath}")
@@ -109,6 +114,7 @@ def analyze_traces(
 
         if dry_run:
             print("==================== End of dry run ====================")
+            xlsx_path = None
             continue
 
         if osp.exists(xlsx_path):
@@ -229,6 +235,7 @@ def analyze_traces(
 
             del nccl_analyser
 
+        xlsx_path = None
         gc.collect()
 
 
@@ -241,11 +248,11 @@ def main():
     parser.add_argument("-r", action="store_true", help="Run node replay for GEMMs and CONVs that contribute 99 pct to group-specific execution time.")
     parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")
     parser.add_argument("-a", action="store_true", help="Save all individual kernels from all ranks (sheets kernels_0 ... kernels_n).")
-    parser.add_argument("-o", type=str, default=None, help=".xlsx file to save outputs to")
+    parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel performance report. Note that this works only with a single base/parent directory containing one set of traces.")
 
     args = parser.parse_args()
 
-    analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.a, xlsx_path=args.o)
+    analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.a, args.o)
 
 if __name__ == "__main__":
     main()
