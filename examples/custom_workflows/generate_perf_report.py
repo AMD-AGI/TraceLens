@@ -180,7 +180,7 @@ def analyze_traces(
                 df_all_summary.to_excel(writer, sheet_name=group, index=False)
 
             if node_replay and group in ["gemm", "conv"]:
-                df_node_replay_results = run_node_replay(group, df_all_summary)
+                df_node_replay_results = run_node_replay(group, df_all_summary, parent_dirpath)
 
                 with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
                     df_node_replay_results.to_excel(writer, sheet_name=f"{group}_node_replay", index=True)

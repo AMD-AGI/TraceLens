@@ -206,19 +206,19 @@ def run_subprocess_cmd(cmd: Union[str, List[str]], shell: bool = False) -> Optio
         return None
 
 
-def get_logging_envvars(group: str, i: int) -> Dict[str, str]:
+def get_logging_envvars(group: str, i: int, base_path: str) -> Dict[str, str]:
     logging_envvars = None
 
     if group == "gemm":
         logging_envvars = {
             "HIPBLASLT_LOG_MASK": "32",
-            "HIPBLASLT_LOG_FILE": f"./hipblaslt-bench-{i}.log",
+            "HIPBLASLT_LOG_FILE": osp.join(base_path, f"hipblaslt-bench-{i}.log"),
         }
 
     elif group == "conv":
         logging_envvars = {
             "MIOPEN_ENABLE_LOGGING_CMD": "1",
-            "MIOPEN_LOG_FILE": f"./miopen-driver-{i}.log"
+            "MIOPEN_LOG_FILE": osp.join(base_path, f"miopen-driver-{i}.log"),
         }
 
     return logging_envvars
@@ -233,6 +233,8 @@ def prepare_hipblaslt_bench_cmd(log_file: str):
         [r"s/--iters [0-9]*/--iters 100/g", log_file],
         [r"s/--rotating [0-9]*/--rotating 512/g", log_file],
         [r"s/$/ --flush --initialization trig_float --use_gpu_timer --print_kernel_info/", log_file],
+        # hipBLASLT 0.15 bug, remove aux_type flag due to warning: --use_e not set but --aux_type is provided
+        [r"s/--aux_type f32_r//g", log_file],
     ]
 
     for mod in modify:
@@ -298,7 +300,7 @@ def run_microbenchmarking(group: str, logging_envvars: Dict[str, str]) -> float:
     return bench_time_mean
 
 
-def run_node_replay(group, df_ops_summary):
+def run_node_replay(group, df_ops_summary, base_path):
     if df_ops_summary is None:
         print(f"No events to replay from group {group}")
         return
@@ -327,7 +329,7 @@ def run_node_replay(group, df_ops_summary):
         replayer = EventReplayer(event, device="cuda")
 
         # Get group-specific logging environment variables
-        logging_envvars = get_logging_envvars(group, i)
+        logging_envvars = get_logging_envvars(group, i, base_path)
 
         # Log hipblaslt-bench/MIOpenDriver commands (pass envvars, no warmup, 1 active step)
         with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as executor:
@@ -376,26 +378,34 @@ def run_node_replay(group, df_ops_summary):
     return df_results
 
 
-def run_standalone_node_replay(base_dirpath, ext="json", include_only=["rank_0"], dry_run=False):
+def run_standalone_node_replay(base_dirpath, ext="json", include_only=["rank_0"], dry_run=False, xlsx_path=None):
     all_traces_grouped = parse_traces(base_dirpath, ext, include_only)
 
     if all_traces_grouped is None:
         return
 
     for parent_dirpath, filenames in all_traces_grouped.items():
+        if xlsx_path is not None and len(all_traces_grouped) > 1:
+            print("Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path.")
+            return
+        
         dfs_all = {group: None for group in group2ops}
-        prefix = "_".join(include_only)
-        xlsx_path = osp.join(parent_dirpath, f"{prefix}_node_replay_report.xlsx")
+        
+        parent_dirname = osp.basename(parent_dirpath)
+        prefix = "_".join([parent_dirname, *include_only])
+
+        xlsx_path = xlsx_path or osp.join(parent_dirpath, f"{prefix}_node_replay_report.xlsx")
 
         print("==================== Creating node replay report ====================")
         print(f"Parent directory: {parent_dirpath}")
-        print(f"Excel file (dummy): {osp.basename(xlsx_path)}")
+        print(f"Excel file: {osp.basename(xlsx_path)}")
         print(f"Filters: {', '.join(include_only)}")
         print("Traces:")
         print(*filenames, sep="\n")
 
         if dry_run:
             print("==================== End of dry run ====================")
+            xlsx_path = None
             continue
 
         if osp.exists(xlsx_path):
@@ -420,8 +430,14 @@ def run_standalone_node_replay(base_dirpath, ext="json", include_only=["rank_0"]
         for group, df_ops in dfs_all.items():
             df_ops_summary = summarize_df_perf_metrics(df_ops, agg_metrics=["mean", "std"])
             df_ops_summary["kernel_time_sum_cum_pct"] = df_ops_summary["Kernel Time (µs)_sum"].cumsum() / df_ops_summary["Kernel Time (µs)_sum"].sum()
-            df_results = run_node_replay(group, df_ops_summary)
+            df_results = run_node_replay(group, df_ops_summary, parent_dirpath)
             print(df_results.to_string())
+            
+            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+                df_results.to_excel(writer, sheet_name=f"{group}_node_replay", index=True)
+                
+        xlsx_path = None
+        gc.collect()
 
 
 def main():
@@ -430,10 +446,11 @@ def main():
     parser.add_argument("-e", type=str, default="json", help="Extension to use for identifying trace files. json and gz are supported.")
     parser.add_argument("-f", type=str, nargs='+', default=["rank_0"], help="Select files containing given substring(s) in their name.")
     parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")
+    parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel node replay report. Note that this works only with a single base/parent directory containing one set of traces.")
 
     args = parser.parse_args()
 
-    run_standalone_node_replay(args.b, args.e, args.f, args.d)
+    run_standalone_node_replay(args.b, args.e, args.f, args.d, args.o)
 
 
 if __name__ == "__main__":
