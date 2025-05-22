@@ -1,3 +1,5 @@
+from TraceLens.PerfModel.torch_op_mapping import unary_elemwise_ops, binary_elemwise_ops
+
 # These ops are used for calculating detailed performance metrics for these ops
 # https://github.com/AMD-AIG-AIMA/TraceLens/blob/main/TraceLens/PerfModel/torch_op_mapping.py
 gemm_ops = [
@@ -18,20 +20,6 @@ attn_ops = [
     "FlashAttnFunc",
     "flash_attn::_flash_attn_forward",
     "aten::_scaled_dot_product_cudnn_attention",
-]
-
-unary_elemwise_ops = [
-    "aten::copy", "aten::copy_",
-    "aten::clamp_min", "aten::clamp_min_",
-    "aten::sigmoid",
-]
-
-binary_elemwise_ops = [
-    "aten::div", "aten::div_",
-    "aten::mul", "aten::mul_",
-    "aten::add", "aten::add_",
-    "aten::sigmoid_backward",
-    "aten::threshold_backward",
 ]
 
 group2ops = {
@@ -63,10 +51,10 @@ norm_ops_launchers = [
 ]
 
 attn_ops_launchers = [
-    "aten::_scaled_dot_product_cudnn_attention",
+    "aten::_cudnn_attention_forward",
+    "aten::_efficient_attention_forward",
     "flash_attn::_flash_attn_forward",
     "flash_attn::_flash_attn_varlen_forward",
-    "aten::_efficient_attention_forward",
 ]
 
 concat_ops_launchers = [
