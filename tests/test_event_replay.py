@@ -41,7 +41,7 @@ def profile_resnet(path=None):
 def benchmark_func(func, warmup, avg_steps):
     """
     Benchmark a function with warmup and average steps.
-    Disclaimer: This method would be innacurate for very short ops.
+    Disclaimer: This method would be inaccurate for very short ops.
     TODO: 
         (1) improve this by using a more precise timer
         (2) move to TraceLens.utils
