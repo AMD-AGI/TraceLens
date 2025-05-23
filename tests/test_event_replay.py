@@ -230,7 +230,7 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
     perf_analyzer = TreePerfAnalyzer.from_file(full_run_trace_path)
 
     event_names_to_test = ["aten::convolution", "aten::convolution_backward", 
-                        "aten::native_batch_norm", "aten::native_batch_norm",
+                        "aten::native_batch_norm", "aten::native_batch_norm_backward",
                         "aten::addmm", "aten::mm", 
                         "aten::clamp_min_", "aten::threshold_backward",
                         "aten::add_",
