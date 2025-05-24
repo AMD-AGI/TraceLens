@@ -20,21 +20,14 @@ class TensorCfg:
     dtype: str
     strides: List[int]
 
-def build_tensor(tensor_cfg: TensorCfg, device: str = 'cuda') -> torch.Tensor:
-    """
-    Build a tensor from the dummy tensor.
-    
-    Args:
-        tensor_cfg (TensorCfg): The dummy tensor.
-    
-    Returns:
-        torch.Tensor: The built tensor.
-    """
-    # random normally distributed tensor
-    dtype = dict_profile2torchdtype[tensor_cfg.dtype]
-    tensor = torch.randn(tensor_cfg.shape, dtype=dtype, device=device)
-    tensor = tensor.as_strided(size=tensor_cfg.shape, stride=tensor_cfg.strides)
-    return tensor
+def build_tensor(cfg: TensorCfg, device: str='cuda') -> torch.Tensor:
+    dtype  = dict_profile2torchdtype[cfg.dtype]
+    size   = cfg.shape
+    stride = cfg.strides
+    # allocate *exactly* the storage needed for that stride/shape
+    t = torch.empty_strided(size, stride, dtype=dtype, device=device)
+    t.normal_()                     # or whatever init you like
+    return t
 
 def summarize_tensor(tensor: torch.Tensor) -> str:
     """
