@@ -143,6 +143,8 @@ class EventReplayer:
                 schema_type = schema_type[:-1]
                 if profiled_type == '':
                     continue
+                elif profiled_type == 'ScalarList' and event['args']['Concrete Inputs'][idx] == '[]':
+                    continue
             if schema_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
                 if profiled_type not in list_profile_tensor_types:
                     is_match = False
@@ -229,8 +231,17 @@ class EventReplayer:
             arg_name = full_args_schema[idx]['arg_name']
             arg_type = full_args_schema[idx]['arg_type']
 
+            if verbose:
+                print(f"Processing arg {idx}: {arg_name} ({arg_type})")
+                print(f"Profiled args type: {event['args']['Input type'][idx]}")
+                print(f"Profiled args dims: {event['args']['Input Dims'][idx]}")
+                print(f"Profiled args strides: {event['args']['Input Strides'][idx]}")
+                print(f"Concrete Inputs: {event['args']['Concrete Inputs'][idx]}")
+
             if arg_type.endswith('?') and event['args']['Input type'][idx] == '':
                 value = None
+            elif arg_type.endswith('?') and event['args']['Concrete Inputs'][idx] == '[]':
+                value = []
             else:
                 if arg_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
                     value = TensorCfg(shape=event['args']['Input Dims'][idx],
@@ -251,11 +262,6 @@ class EventReplayer:
                     else:
                         raise ValueError(f"Unsupported arg type: {arg_type}")
             if verbose:
-                print(f"Processing arg {idx}: {arg_name} ({arg_type})")
-                print(f"Profiled args type: {event['args']['Input type'][idx]}")
-                print(f"Profiled args dims: {event['args']['Input Dims'][idx]}")
-                print(f"Profiled args strides: {event['args']['Input Strides'][idx]}")
-                print(f"Concrete Inputs: {event['args']['Concrete Inputs'][idx]}")
                 print(f"Parsed value: {value}")
                 print(f"Positional/Keyword: {'Positional' if idx < len(pos_args_schema) else 'Keyword'}")
                 print('-' * 80)
