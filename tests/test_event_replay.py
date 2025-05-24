@@ -1,6 +1,8 @@
 import time
 import pandas as pd
 import argparse
+import json
+import subprocess
 
 import torch
 import torchvision.models as torchvision_models
@@ -152,7 +154,7 @@ def profile_the_replay(replayer):
     return "/tmp/replay_trace.json"
 
 def compare_event_replay(perf_analyzer, list_unique_evts, verbose=False):
-    
+    list_replay_ir = []
     rows = []
     for evt_dict in list_unique_evts:
         evt = evt_dict['event']
@@ -215,8 +217,9 @@ def compare_event_replay(perf_analyzer, list_unique_evts, verbose=False):
         row['diff'] = diff
         row['kernels_match'] = len(diff) == 0
         rows.append(row)
+        list_replay_ir.append(my_replayer.get_repro_info())
     df = pd.DataFrame(rows)
-    return df
+    return df, list_replay_ir
 
 def test_resnet(full_run_trace_path=None, output_csv_path=None):
     """
@@ -245,18 +248,37 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
     ]
 
     # now we have a list of unique events
-    df_results = compare_event_replay(perf_analyzer, list_unique_evts)
+    df_results, list_replay_ir = compare_event_replay(perf_analyzer, list_unique_evts)
 
     # see how many kernel_match failed
     num_kernels_match = df_results['kernels_match'].sum()
-    if num_kernels_match == len(df_results):
-        print("All kernels match")
-    else:
-        print(f"Number of kernels that do not match: {len(df_results) - num_kernels_match} out of {len(df_results)}")
-
+    assert num_kernels_match == len(df_results), \
+        f"Number of kernels that do not match: {len(df_results) - num_kernels_match} out of {len(df_results)}"
+    print("All kernels match between the replayed events and the original events.")
     # save the dataframe to a csv file
     df_results.to_csv(output_csv_path, index=False)
     print(f"Results saved to {output_csv_path}")
+
+    # save the replay IRs to a json file
+    replay_ir_path = output_csv_path.replace('.csv', '_replay_ir.json')
+    
+    # now we test the batched replay
+    from TraceLens import EventReplay
+    dir_batched_replay = os.path.dirname(EventReplay.__file__)
+    batched_replay_file = os.path.join(dir_batched_replay, "batched_replay.py")
+    print(f"Running batched replay from directory: {dir_batched_replay}")
+    cmd = [
+        "python",          # run as "python ..."
+        batched_replay_file, # path to the batched replay script
+        replay_ir_path, # path to the replay IR file
+    ]
+    result = subprocess.run(cmd, cwd=dir_batched_replay,
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error running batched replay: {result.stderr}")
+    else:
+        print("Batched replay completed successfully.")
+        print(result.stdout)    
 
 # # --- Example Usage (remains the same logic) ---
 if __name__ == "__main__":
