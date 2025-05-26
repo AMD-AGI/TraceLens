@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roofline_analyzer"
+version = "0.1.1"
+description = "A functional programming oriented roofline analysis tool"
+readme = "README.md"
+authors = [
+    {name = "Tyko Niemi", email = "tyko.niemi@amd.com"}
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pandas>=1.3.0",
+    "openpyxl>=3.0.9",
+    "matplotlib>=3.4.0",
+    "numpy>=1.20.0",
+    "tomli>=2.0.0",
+    "typer>=0.4.0",
+    "rich>=10.0.0",
+]
+
+[project.scripts]
+roofline-analyze = "roofline_analyzer.main:app"
