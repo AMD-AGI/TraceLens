@@ -1,0 +1,18 @@
+[accelerator]
+max_memory_bandwidth = 5.3  # TB/s
+# MI300X Peak memory bandwidth
+# https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
+max_compute_teraflops = 1300  # TFLOPS
+# MI300X Peak bfloat16
+# https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
+max_achievable_teraflops = 708  # TFLOPS
+# MI300X MAF bfloat16
+# https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+
+[excel]
+sheet_name = "gemm"
+flops_per_byte_column = "FLOPS/Byte_first"
+performance_column = "Non-Data-Mov TFLOPS/s_mean"
+
+[output]
+prefix = "export-roofline"
