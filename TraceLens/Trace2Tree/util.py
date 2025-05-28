@@ -24,7 +24,6 @@ def set_bookkeeping_attr(tree, event: dict):
     tree.seq_num2event_uids_map[seq_num].append(UID)
 
 def is_gemm_kernel(kernel_event: dict) -> bool:
-    assert kernel_event['cat'] == 'kernel'
     kernel_name = kernel_event['name']
     pattern = r'.*C.*_A.*_B.*'
     is_rocm_gemm = bool(re.match(pattern, kernel_name))
@@ -127,7 +126,7 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
             'Input Dims': [X_shape, W_shape[::-1]],
             'Input type': [inp_dtype, inp_dtype],
             'Sequence number': seq_num,
-            'External id': yfwd_kernel['args']['correlation'],
+            'External id': yfwd_kernel['args']['External id'],
             'Pseudo op': True
         },
         'children': [Yfwd_launcher.get('UID')],
@@ -152,7 +151,7 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
             'Input Dims': [Y_grad_shape, W_shape],
             'Input type': [inp_dtype, inp_dtype],
             'Sequence number': seq_num,
-            'External id': xgrad_kernel['args']['correlation'],
+            'External id': xgrad_kernel['args']['External id'],
             'Pseudo op': True
         },
         'children': [Xgrad_launcher.get('UID')],
@@ -176,7 +175,7 @@ def _create_host_mm_ops_common(trace_tree, fwd_op_event: dict, expected_name: st
             'Input Dims': [Y_grad_shape[::-1], X_shape],
             'Input type': [inp_dtype, inp_dtype],
             'Sequence number': seq_num,
-            'External id': wgrad_kernel['args']['correlation'],
+            'External id': wgrad_kernel['args']['External id'],
             'Pseudo op': True
         },
         'children': [Wgrad_launcher.get('UID')],

@@ -215,18 +215,19 @@ class GPUEventAnalyser:
         return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
 
     @staticmethod
-    def get_breakdown_df_from_dict(dict_metrics: dict):
+    def get_breakdown_df_from_dict(dict_metrics: dict, rank=None):
         df = pd.DataFrame(dict_metrics.items(), columns=['type', 'time'])
         # convert time to ms by div by 1e3
         df['time ms'] = df['time'] / 1e3
         df['percent'] = df['time'] / df.loc[df['type'] == 'total_time', 'time'].values[0] * 100
         df = df.drop(columns=['time'])
+        df['rank'] = rank
 
         return df
 
-    def get_breakdown_df(self):
+    def get_breakdown_df(self, rank=None):
         dict_metrics = self.compute_metrics()
-        return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
+        return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics, rank=rank)
 
 # Pytorch GPU event analyser inherits everything from the base class
 class PytorchGPUEventAnalyser(GPUEventAnalyser):
