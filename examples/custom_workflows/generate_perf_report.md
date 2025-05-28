@@ -68,9 +68,6 @@ Generate performance report for one configuration using traces from all ranks:
 
 # Narrow down search using base path
 python <path to generate_perf_report.py> -b results/013_profile_544p_bs1 -f step_8
-
-# Narrow down search using filters
-python <path to generate_perf_report.py> -b results -f 013_profile_544p_bs1 step_8
 ```
 
 Generate performance reports for single ranks:
