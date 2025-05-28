@@ -44,20 +44,6 @@ def name2bpe(name):
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
 
-def is_tensortype(dtype):
-    """
-    This function checks if a data type is a tensor type.
-    Args:
-        dtype (str): The name of the data type.
-    Returns:
-        bool: True if the data type is a tensor type, False if not. If the data type is not recognized, None is returned.
-    """
-    if dtype.lower() in ['float', 'double', 'c10::half', 'c10::bfloat16', 'c10::float8_e4m3fnuz']:
-        return True
-    elif dtype.lower() in ['long int', 'scalar']:
-        return False
-
-
 def torch_dtype_map(dtype):
     """
     This function maps a PyTorch data type to a gemmologist data type.
@@ -1003,7 +989,9 @@ class BinaryElementwise:
         if dtype_out is not None:
             self.bpe_out = name2bpe(dtype_out)
         elif self.bpe_in1 and self.bpe_in2:
-            if is_tensortype(dtype_in1) and is_tensortype(dtype_in2):
+            in1_is_tensor = prod(self.param_details['shape_in1']) > 1
+            in2_is_tensor = prod(self.param_details['shape_in2']) > 1
+            if in1_is_tensor and in2_is_tensor:
                 # cast to higher precision if both are tensors
                 self.bpe_out = max(self.bpe_in1, self.bpe_in2)
             else:
