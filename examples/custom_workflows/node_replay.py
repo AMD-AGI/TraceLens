@@ -379,13 +379,13 @@ def run_node_replay(group, df_ops_summary, base_path):
 
 
 def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", include_only=["rank_0"], dry_run=False, xlsx_path=None):
-    all_traces_grouped = parse_traces(base_dirpath, ext, include_only, rank_pattern)
+    all_traces_grouped_sorted = parse_traces(base_dirpath, ext, include_only, rank_pattern)
 
-    if all_traces_grouped is None:
+    if all_traces_grouped_sorted is None:
         return
 
-    for parent_dirpath, filenames in all_traces_grouped.items():
-        if xlsx_path is not None and len(all_traces_grouped) > 1:
+    for parent_dirpath, filenames in all_traces_grouped_sorted.items():
+        if xlsx_path is not None and len(all_traces_grouped_sorted) > 1:
             print("Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path.")
             return
         
