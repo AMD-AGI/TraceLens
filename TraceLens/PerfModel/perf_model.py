@@ -989,8 +989,8 @@ class BinaryElementwise:
         if dtype_out is not None:
             self.bpe_out = name2bpe(dtype_out)
         elif self.bpe_in1 and self.bpe_in2:
-            in1_is_tensor = prod(self.param_details['shape_in1']) > 1
-            in2_is_tensor = prod(self.param_details['shape_in2']) > 1
+            in1_is_tensor = self.param_details['shape_in1'] != ()
+            in2_is_tensor = self.param_details['shape_in2'] != ()
             if in1_is_tensor and in2_is_tensor:
                 # cast to higher precision if both are tensors
                 self.bpe_out = max(self.bpe_in1, self.bpe_in2)
