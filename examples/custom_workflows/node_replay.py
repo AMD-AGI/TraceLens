@@ -378,8 +378,8 @@ def run_node_replay(group, df_ops_summary, base_path):
     return df_results
 
 
-def run_standalone_node_replay(base_dirpath, ext="json", include_only=["rank_0"], dry_run=False, xlsx_path=None):
-    all_traces_grouped = parse_traces(base_dirpath, ext, include_only)
+def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", include_only=["rank_0"], dry_run=False, xlsx_path=None):
+    all_traces_grouped = parse_traces(base_dirpath, ext, include_only, rank_pattern)
 
     if all_traces_grouped is None:
         return
@@ -443,6 +443,7 @@ def run_standalone_node_replay(base_dirpath, ext="json", include_only=["rank_0"]
 def main():
     parser = argparse.ArgumentParser(description="Parse and summarize traces produced by torch profiler using TraceLens.")
     parser.add_argument("-b", type=str, required=True, help="Path to base directory which contains profiling experiments as subdirectories.")
+    parser.add_argument("-p", type=str, default="rank_", help="Pattern to use for finding the rank of a trace from filename. Supports <string><sep> where separator can be empty, - or _.")
     parser.add_argument("-e", type=str, default="json", help="Extension to use for identifying trace files. json and gz are supported.")
     parser.add_argument("-f", type=str, nargs='+', default=["rank_0"], help="Select files containing given substring(s) in their name.")
     parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")

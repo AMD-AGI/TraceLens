@@ -1,4 +1,5 @@
 import glob
+import re
 import numpy as np
 import os.path as osp
 from collections import defaultdict
@@ -29,7 +30,9 @@ def ram_stats_gb():
     return f"RAM used/available/utilization (GB): {ram_used()}/{ram_available()}/{ram_utilization()}"
 
 
-def parse_traces(base_dirpath, ext="json", include_only=["rank_0"]):
+def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern="rank_"):
+    pattern = f"{rank_pattern}(\\d+)"
+    
     if ext not in ["json", "gz"]:
         print(f"==================== Invalid extension {ext}, json and gz are supported ====================")
 
@@ -45,8 +48,12 @@ def parse_traces(base_dirpath, ext="json", include_only=["rank_0"]):
     all_traces_grouped = defaultdict(list)
     for filepath in all_traces:
         all_traces_grouped[osp.abspath(osp.dirname(filepath))].append(osp.basename(filepath))
+        
+    all_traces_grouped_sorted = {}
+    for parent_dirpath, filenames in all_traces_grouped.items():
+        all_traces_grouped_sorted[parent_dirpath] = sorted(filenames, key=lambda x: int(re.search(pattern, x).group(1)))
 
-    return all_traces_grouped
+    return all_traces_grouped_sorted
 
 
 def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
