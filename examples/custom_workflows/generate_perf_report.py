@@ -1,56 +1,3 @@
-"""
-Using TraceLens, this script produces a performance report in Excel format from .json traces produced by torch profiler.
-Tested with main branch @ 8f40079.
-
-Note that the trace .json files are located recursively - this script does not depend on a certain directory structure.
-Outputs are saved in the same directory where the .json files are located.
-
-Example directory tree:
-
-profiling_fa_cudnn
-    results_013_profile_nv_cudnn
-        traces
-            huvideo_traces_rank_0_step_3.json
-            ...
-            huvideo_traces_rank_7_step_3.json
-
-    results_013_profile_nv_fa
-        traces
-            huvideo_traces_rank_0_step_3.json
-            ...
-            huvideo_traces_rank_7_step_3.json
-    results_013_profile_rocm_fa
-        traces
-            huvideo_traces_rank_0_step_3.json
-            ...
-            huvideo_traces_rank_7_step_3.json
-
-Example usage:
-
-Analyze all .json trace files containing rocm_fa and step_3 in their full path.
-
-Trace files include rank number using the pattern rank_0, rank_1, ..., rank_n.
-Script uses this pattern to recognize rank numbers, thus we give -p rank_
-
-python analyze_traces_tracelens.py -b profiling_fa_cudnn -f rocm_fa step_3 -p rank_
-
-Targeting:
-
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_0_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_1_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_2_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_3_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_4_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_5_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_6_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_7_step_3.json
-
-NOTE: add -r flag for running microbenchmarking comparison for the most important GEMMs and CONVs.
-      add -d flag for launching a dry run (check if correct files will be targeted).
-      add -e flag for specifying extension. json and gz are currently supported, json is used by default
-      add -a flag for saving all kernels from all ranks (produces a lot of data).
-"""
-
 import argparse
 import gc
 import os.path as osp
@@ -242,12 +189,12 @@ def analyze_traces(
 def main():
     parser = argparse.ArgumentParser(description="Parse and summarize traces produced by torch profiler using TraceLens.")
     parser.add_argument("-b", type=str, required=True, help="Path to base directory which contains profiling experiments as subdirectories.")
-    parser.add_argument("-p", type=str, default="rank_", help="Pattern to use for finding the rank of a trace. Supports <string><sep> where separator can be empty, - or _.")
+    parser.add_argument("-p", type=str, default="rank_", help="Pattern to use for finding the rank of a trace from filename. Supports <string><sep> where separator can be empty, - or _.")
     parser.add_argument("-e", type=str, default="json", help="Extension to use for identifying trace files. json and gz are supported.")
-    parser.add_argument("-f", type=str, nargs='+', default=["rank_0"], help="Select files containing given substring(s) in their name.")
+    parser.add_argument("-f", type=str, nargs='+', default=["rank_0"], help="Select files containing given substring(s) in their full filepaths.")
     parser.add_argument("-r", action="store_true", help="Run node replay for GEMMs and CONVs that contribute 99 pct to group-specific execution time.")
     parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")
-    parser.add_argument("-a", action="store_true", help="Save all individual kernels from all ranks (sheets kernels_0 ... kernels_n).")
+    parser.add_argument("-a", action="store_true", help="Save all individual kernels from all ranks (sheets kernels_0 ... kernels_n). Produces a lot of data")
     parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel performance report. Note that this works only with a single base/parent directory containing one set of traces.")
 
     args = parser.parse_args()
