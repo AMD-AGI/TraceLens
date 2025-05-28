@@ -30,15 +30,15 @@ def analyze_traces(
     save_all_kernels=False,
     xlsx_path=None,
 ):
-    all_traces_grouped = parse_traces(base_dirpath, ext, include_only)
-
-    if all_traces_grouped is None:
-        return
-
+    all_traces_grouped_sorted = parse_traces(base_dirpath, ext, include_only, rank_pattern)
+    
     pattern = f"{rank_pattern}(\\d+)"
 
-    for parent_dirpath, filenames in all_traces_grouped.items():
-        if xlsx_path is not None and len(all_traces_grouped) > 1:
+    if all_traces_grouped_sorted is None:
+        return
+
+    for parent_dirpath, filenames in all_traces_grouped_sorted.items():
+        if xlsx_path is not None and len(all_traces_grouped_sorted) > 1:
             print("Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path.")
             return
 
@@ -74,10 +74,6 @@ def analyze_traces(
         for filename in filenames:
             filepath = osp.join(parent_dirpath, filename)
             match = re.search(pattern, filename)
-            if not match:
-                print("==================== Failed to extract rank number from trace filename ====================")
-                continue
-
             rank = int(match.group(1))
 
             print(f"Starting TreePerfAnalyzer with {filename}")
