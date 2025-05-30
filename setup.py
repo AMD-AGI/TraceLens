@@ -7,6 +7,8 @@ setup(
     package_dir={"": "."},
     install_requires=[
         'pandas',
+        'tqdm',
+        'backports.strenum;python_version<"3.11"',
     ],
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open('README.md').read(),

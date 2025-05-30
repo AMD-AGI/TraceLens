@@ -6,6 +6,13 @@ from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
 
 def main():
+
+    # check openpyxl is installed
+    try:
+        import openpyxl
+    except ImportError:
+        raise ImportError("openpyxl is required to write Excel files for perf report gen. Please install it using 'pip install openpyxl'.")
+
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json file')
     parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')

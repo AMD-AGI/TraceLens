@@ -41,6 +41,7 @@ op_to_perf_model_class_map = {
     'aten::baddbmm': perf_model.aten_baddbmm,
     'FlashAttnFunc': perf_model.flash_attention,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
+    'aten::_scaled_dot_product_efficient_attention': perf_model.aten__scaled_dot_product_efficient_attention,
     'aten::convolution': perf_model.aten_conv,
 }
 

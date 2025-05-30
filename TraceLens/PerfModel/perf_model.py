@@ -44,20 +44,6 @@ def name2bpe(name):
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
 
-def is_tensortype(dtype):
-    """
-    This function checks if a data type is a tensor type.
-    Args:
-        dtype (str): The name of the data type.
-    Returns:
-        bool: True if the data type is a tensor type, False if not. If the data type is not recognized, None is returned.
-    """
-    if dtype.lower() in ['float', 'double', 'c10::half', 'c10::bfloat16', 'c10::float8_e4m3fnuz']:
-        return True
-    elif dtype.lower() in ['long int', 'scalar']:
-        return False
-
-
 def torch_dtype_map(dtype):
     """
     This function maps a PyTorch data type to a gemmologist data type.
@@ -901,6 +887,41 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
 
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
+
+class aten__scaled_dot_product_efficient_attention(SDPA):
+    # Seems to have the exact same signature as aten::_scaled_dot_product_cudnn_attention
+    # Tensor query, 
+    # Tensor key, 
+    # Tensor value, 
+    # Tensor? attn_bias, 
+    # bool compute_log_sumexp, 
+    # float dropout_p=0., 
+    # bool is_causal=False, 
+    # *, 
+    # float? scale=None
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        B, H_Q, N_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, H_KV, N_KV, _ = input_dims[1]
+
+        dropout_p = 0.0
+        if concrete_inputs[5] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[5])
+            except (ValueError, TypeError):
+                pass
+
+        is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
+        # scale = float(concrete_inputs[7]) if concrete_inputs[7] not in ('', 'None') else None
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
+
 class UnaryElementwise:
 
     def __init__(self, event, arch=None):
@@ -968,7 +989,9 @@ class BinaryElementwise:
         if dtype_out is not None:
             self.bpe_out = name2bpe(dtype_out)
         elif self.bpe_in1 and self.bpe_in2:
-            if is_tensortype(dtype_in1) and is_tensortype(dtype_in2):
+            in1_is_tensor = self.param_details['shape_in1'] != ()
+            in2_is_tensor = self.param_details['shape_in2'] != ()
+            if in1_is_tensor and in2_is_tensor:
                 # cast to higher precision if both are tensors
                 self.bpe_out = max(self.bpe_in1, self.bpe_in2)
             else:

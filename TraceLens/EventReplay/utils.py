@@ -1,14 +1,22 @@
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 import time
-import torch
 
+_torch_module = None
+def _get_torch_or_raise() -> Any: # Changed return type to Any for flexibility
+    """Lazily imports and returns the torch module."""
+    global _torch_module
+    if _torch_module is None:
+        try:
+            import torch
+            _torch_module = torch
+        except ImportError:
+            raise ImportError(
+                "PyTorch is required for EventReplayer functionality that is being used. "
+                "Please install PyTorch."
+            )
+    return _torch_module
 
 list_profile_tensor_types = ['float', 'c10::Half', 'c10::BFloat16']
-dict_profile2torchdtype = {
-    'float': torch.float32,
-    'c10::Half': torch.float16,
-    'c10::BFloat16': torch.bfloat16,
-}
 
 from dataclasses import dataclass
 @dataclass
@@ -20,23 +28,24 @@ class TensorCfg:
     dtype: str
     strides: List[int]
 
-def build_tensor(tensor_cfg: TensorCfg, device: str = 'cuda') -> torch.Tensor:
-    """
-    Build a tensor from the dummy tensor.
-    
-    Args:
-        tensor_cfg (TensorCfg): The dummy tensor.
-    
-    Returns:
-        torch.Tensor: The built tensor.
-    """
-    # random normally distributed tensor
-    dtype = dict_profile2torchdtype[tensor_cfg.dtype]
-    tensor = torch.randn(tensor_cfg.shape, dtype=dtype, device=device)
-    tensor = tensor.as_strided(size=tensor_cfg.shape, stride=tensor_cfg.strides)
-    return tensor
 
-def summarize_tensor(tensor: torch.Tensor) -> str:
+def build_tensor(cfg: TensorCfg, device: str='cuda') -> 'torch.Tensor':
+
+    torch = _get_torch_or_raise()
+    dict_profile2torchdtype = {
+        'float': torch.float32,
+        'c10::Half': torch.float16,
+        'c10::BFloat16': torch.bfloat16,
+    }
+    dtype  = dict_profile2torchdtype[cfg.dtype]
+    size   = cfg.shape
+    stride = cfg.strides
+    # allocate *exactly* the storage needed for that stride/shape
+    t = torch.empty_strided(size, stride, dtype=dtype, device=device)
+    t.normal_()                     # or whatever init you like
+    return t
+
+def summarize_tensor(tensor: 'torch.Tensor') -> str:
     """
     Summarize the tensor information.
     
@@ -59,6 +68,7 @@ def benchmark_func(func, device, warmup=50, avg_steps=100):
     Returns:
         float: Average time taken per iteration in microseconds.
     """
+    torch = _get_torch_or_raise()
     # Warmup phase
     for _ in range(warmup):
         func()

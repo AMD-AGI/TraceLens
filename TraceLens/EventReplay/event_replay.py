@@ -28,13 +28,10 @@ from typing import Dict, Any, List, Optional, Tuple
 import re
 import warnings
 import time
-try:
-    import torch
-except ImportError:
-    raise ImportError("PyTorch is required for EventReplayer")
 
-from .utils import (TensorCfg, build_tensor, benchmark_func,
-                    list_profile_tensor_types, dict_profile2torchdtype)
+from .utils import (_get_torch_or_raise, TensorCfg, build_tensor,
+                    list_profile_tensor_types)
+
 class EventReplayer:
     def __init__(self, event: Dict[str, Any], device: str = 'cuda', lazy: bool = False, verbose: bool = False):
         """
@@ -65,7 +62,8 @@ class EventReplayer:
     def replay(self):
         """
         Replay the event using the matched schema and event replay IR.
-        """        
+        """
+        torch = _get_torch_or_raise()
         # Get the function from the schema
         func, _ = torch._C._jit_get_operation(self.event['name'])
         
@@ -80,7 +78,8 @@ class EventReplayer:
     
     
     @staticmethod
-    def _search_schema(event: Dict[str, Any], verbose: bool = False) -> Optional[torch._C.FunctionSchema]:
+    def _search_schema(event: Dict[str, Any], verbose: bool = False) -> Optional['torch._C.FunctionSchema']:
+        torch = _get_torch_or_raise()
         all_schemas = torch._C._jit_get_all_schemas()
         op_schemas = [s for s in all_schemas if s.name == event['name']]
         # print each schema in separate line
@@ -105,7 +104,7 @@ class EventReplayer:
         raise ValueError(f"Cannot find matching schema for {event['name']}. Please check the event data and schema.")
     
     @staticmethod
-    def _is_schema_match(event: Dict[str, Any], schema: torch._C.FunctionSchema, verbose: bool = False) -> bool:
+    def _is_schema_match(event: Dict[str, Any], schema: 'torch._C.FunctionSchema', verbose: bool = False) -> bool:
         """
         Check if the event matches the schema.
         
@@ -142,6 +141,8 @@ class EventReplayer:
             if schema_type.endswith('?'):
                 schema_type = schema_type[:-1]
                 if profiled_type == '':
+                    continue
+                elif profiled_type == 'ScalarList' and event['args']['Concrete Inputs'][idx] == '[]':
                     continue
             if schema_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
                 if profiled_type not in list_profile_tensor_types:
@@ -194,7 +195,7 @@ class EventReplayer:
         
     
     @staticmethod
-    def _get_event_replay_IR(event: Dict[str, Any], schema: torch._C.FunctionSchema, verbose: bool = False) -> Dict[str, Any]:
+    def _get_event_replay_IR(event: Dict[str, Any], schema: 'torch._C.FunctionSchema', verbose: bool = False) -> Dict[str, Any]:
         """
         Get the event replay IR from the event and schema.
         
@@ -229,8 +230,17 @@ class EventReplayer:
             arg_name = full_args_schema[idx]['arg_name']
             arg_type = full_args_schema[idx]['arg_type']
 
+            if verbose:
+                print(f"Processing arg {idx}: {arg_name} ({arg_type})")
+                print(f"Profiled args type: {event['args']['Input type'][idx]}")
+                print(f"Profiled args dims: {event['args']['Input Dims'][idx]}")
+                print(f"Profiled args strides: {event['args']['Input Strides'][idx]}")
+                print(f"Concrete Inputs: {event['args']['Concrete Inputs'][idx]}")
+
             if arg_type.endswith('?') and event['args']['Input type'][idx] == '':
                 value = None
+            elif arg_type.endswith('?') and event['args']['Concrete Inputs'][idx] == '[]':
+                value = []
             else:
                 if arg_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
                     value = TensorCfg(shape=event['args']['Input Dims'][idx],
@@ -251,11 +261,6 @@ class EventReplayer:
                     else:
                         raise ValueError(f"Unsupported arg type: {arg_type}")
             if verbose:
-                print(f"Processing arg {idx}: {arg_name} ({arg_type})")
-                print(f"Profiled args type: {event['args']['Input type'][idx]}")
-                print(f"Profiled args dims: {event['args']['Input Dims'][idx]}")
-                print(f"Profiled args strides: {event['args']['Input Strides'][idx]}")
-                print(f"Concrete Inputs: {event['args']['Concrete Inputs'][idx]}")
                 print(f"Parsed value: {value}")
                 print(f"Positional/Keyword: {'Positional' if idx < len(pos_args_schema) else 'Keyword'}")
                 print('-' * 80)
@@ -270,7 +275,7 @@ class EventReplayer:
         
     
     @staticmethod
-    def _get_args_kwargs(event_replay_IR: Dict[str, Any], device: str = 'cuda') -> tuple[List[torch.Tensor], Dict[str, Any]]:
+    def _get_args_kwargs(event_replay_IR: Dict[str, Any], device: str = 'cuda') -> tuple[List['torch.Tensor'], Dict[str, Any]]:
         """
         Get the arguments and keyword arguments from the event replay IR.
         

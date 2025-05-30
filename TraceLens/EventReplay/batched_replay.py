@@ -3,7 +3,7 @@ import json
 import argparse
 import warnings
 import torch
-from .utils import TensorCfg, build_tensor, benchmark_func, summarize_tensor, dict_profile2torchdtype
+from utils import TensorCfg, build_tensor, benchmark_func
 
 def _get_args_kwargs_from_ir(event_replay_IR: dict[str, any], device: str = 'cuda') -> tuple[list[any], dict[str, any]]:
     # (Copy the implementation of _get_args_kwargs_from_ir from Step 1 here)
@@ -95,7 +95,13 @@ if __name__ == "__main__":
         # Optionally add synchronization for accurate timing if needed (cuda specific)
         if args.device == 'cuda': torch.cuda.synchronize()
         # --- Call the function ---
-        result = func(*pos_args, **kwargs)
+        try:
+            result = func(*pos_args, **kwargs)
+        except Exception as e:
+            print(f"  Error: Failed to execute '{op_name}'. Error: {e}")
+            if args.stop_on_error: raise
+            errors += 1
+            continue
         # --- Benchmark the function ---
         mean_time_us = benchmark_func(lambda: func(*pos_args, **kwargs), args.device, warmup=50, avg_steps=100)
         print(f"  Average time taken: {mean_time_us:.2f} microseconds")

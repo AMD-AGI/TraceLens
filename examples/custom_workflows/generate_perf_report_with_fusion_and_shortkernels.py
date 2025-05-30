@@ -138,7 +138,7 @@ def get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=10, histogram
     agg_dict = {
         'Kernel duration (µs)': ['sum', 'count', 'mean'],
     }
-    df_grouped = df_filtered.groupby(['Parent cpu_op', 'Input dims', 'Input strides', 'Concrete Inputs', 'Kernel name']).agg(agg_dict)
+    df_grouped = df_filtered.groupby(['Parent cpu_op', 'Input dims', 'Input strides', 'Concrete Inputs', 'Kernel name'], sort=False).agg(agg_dict)
 
     # Flatten multi-level column names
     df_grouped.columns = ['_'.join(col).strip() for col in df_grouped.columns]
@@ -164,6 +164,14 @@ def get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=10, histogram
 
 
 def main():
+
+    # check openpyxl is installed
+    try:
+        import openpyxl
+    except ImportError:
+        raise ImportError("openpyxl is required to write Excel files for perf report gen. Please install it using 'pip install openpyxl'.")
+
+
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json file')
     parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')
