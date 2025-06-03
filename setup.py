@@ -38,7 +38,7 @@ setup(
     python_requires='>=3.6',
     entry_points={
         "console_scripts": [
-            "TraceLens_perf_reporting_multiple_ranks = TraceLens.examples.generate_perf_report_multiple_ranks_trace_files:main",
+            "TraceLens_perf_reporting_multiple_ranks = TraceLens.Reporting.generate_perf_report_multiple_ranks_trace_files:main",
         ],
     },
 )
