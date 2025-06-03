@@ -60,8 +60,6 @@ def torch_dtype_map(dtype):
         'c10::half': 'fp16',
         'c10::bfloat16': 'bf16',
         'c10::float8_e4m3fnuz': 'fp8',
-        'c10::float8_e4m3fn': 'fp8',
-        'c10::float8_e5m2': 'fp8',
         'unsigned char': 'fp8',
         'fp8': 'fp8',
     }
@@ -95,6 +93,19 @@ class GEMM:
 
         self.B, self.M, self.N, self.K = self.param_details['B'], self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
+
+
+        if arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
+            else:
+                # TODO: use naive roofline model
+                pass
 
     @staticmethod
     def get_param_details(event):
@@ -944,7 +955,7 @@ class SDPA:
     def bytes_bwd(self, bytes_per_element=2):
         # Same as forward for now
         return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                   self.param_details['causal'], bytes_per_element)
+                               self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
 
     
     def get_simulation_time(self):
@@ -1016,15 +1027,14 @@ class SDPA:
                 pv_time = 0
                 if type(self).__name__ == "flash_attention":
                     force_to_l1 = True
-                    # ∇Q is tiled — but it is not partitioned exclusively across thread blocks the same way ∇K and ∇V are.
-                    # Instead, multiple thread blocks may contribute to the same ∇Q tile, which is why atomics are needed on ∇Q
-                    block_N_Q = min(self.N_Q, self.N_Q)
-                    block_N_KV = min(128, self.N_KV)
+                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
+                    # and Q tile size is 128 for all the cases observed
+                    block_N_Q = min(128, self.N_Q)
+                    #block_N_KV = min(self.N_KV, self.N_KV)
 
                 num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
-                num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
-                # Partition happens on ∇K and ∇V and not ∇Q
-                total_num_blocks = num_blocks_N_KV * self.B * self.H_Q
+                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
+                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
                 num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
 
 
@@ -1067,23 +1077,23 @@ class SDPA:
                                                 name2bpe(self.param_details['dtype_A_B'][0]),
                                                 1, force_to_l1=force_to_l1, num_cus=1)
 
+                # ∇K and ∇V require partial sums from many Q blocks, because each Q block attends to
+                # the full K / V sequence.
                 # We assume that we use atomics for adding up the gradients together
-                atomic_latency_global_ns = 400 #ns for global memory
+                atomic_latency_global_ns = 1000 #ns for global memory
                 atomic_latency_local_ns = 40 #ns for shared memory/ L1
-                # This is the tile size for ∇K. For every tile of ∇Q, we need to accumulate the conntributions
-                # from all the ∇K blocks
-                k_tile = block_N_KV
+                k_tile = 64
                 warp_size = 64
 
                 # Shared-memory tile reduction:
-                # Each block uses atomics only once per (k_tile × d)
+                # Each block only atomics once per (K_tile × d)
                 # This optimization won't be there for now possibly?
-                num_k_tiles = math.ceil(block_N_KV / k_tile)
+                kv_tiles = math.ceil(block_N_KV / k_tile)
 
                 # Warp-level reduction:
                 # Each warp atomics once per d vector
                 #warps_per_block = (block_N_Q * self.d_h) // warp_size
-                warp_reduction_updates_per_block_global = math.ceil(num_k_tiles * math.ceil(self.d_h / warp_size))
+                warp_reduction_updates_per_block_global = math.ceil(kv_tiles * math.ceil(self.d_h / warp_size))
                 total_updates_global = warp_reduction_updates_per_block_global * num_waves
 
                 warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(self.d_h / warp_size))
