@@ -7,7 +7,7 @@ from TraceLens import TreePerfAnalyzer
 def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument('--profile_path', type=str, required=True, help='Path to the profile.json file')
-    parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')
+    parser.add_argument('--output_xlsx_path', default='tmp.xlsx', type=str, required=False, help='Path to the output Excel file')
     args = parser.parse_args()
 
     perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_path)
@@ -65,6 +65,7 @@ def main():
 
     # Write all DataFrames to separate sheets in an Excel workbook
     with pd.ExcelWriter(args.output_xlsx_path) as writer:
+        print(df_gpu_timeline)
         df_gpu_timeline.to_excel(writer, sheet_name='gpu_timeline', index=False)
         df_kernel_launchers_summary.to_excel(writer, sheet_name='kernel_launchers_summary', index=False)
         

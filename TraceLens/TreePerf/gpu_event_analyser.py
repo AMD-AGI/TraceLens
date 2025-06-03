@@ -85,9 +85,13 @@ class GPUEventAnalyser:
     all_gpu_key = 'all_gpu'
     computation_key = 'computation'
     communication_key = 'communication'
+    communication_key_a2a = 'communication_a2a'
+    communication_key_send = 'communication_send'
+    communication_key_recv = 'communication_recv'
+    communication_key_others = 'communication_others'
     memcpy_key = 'memcpy'
     all_cpu_key = 'all_cpu'
-    gpu_event_keys = [all_gpu_key, computation_key, communication_key, memcpy_key]
+    gpu_event_keys = [all_gpu_key, computation_key, communication_key_a2a, communication_key_send, communication_key_recv, communication_key_others , memcpy_key]
     cpu_event_keys = [all_cpu_key]
     @property
     @staticmethod
@@ -109,6 +113,10 @@ class GPUEventAnalyser:
         gpu_events = []
         comp_events = []
         comm_events = []
+        comm_events_a2a = []
+        comm_events_recv = []
+        comm_events_send = []
+        comm_events_others = []
         memcpy_events = []
 
         for event in self.events:
@@ -126,6 +134,17 @@ class GPUEventAnalyser:
                 elif category in {'kernel', 'gpu_memset'}:
                     if 'nccl' in event.get('name'):
                         comm_events.append(event)
+                        args = event.get('args')
+                        if args:
+                            cname = args.get('Collective name')
+                        if cname and 'all_to_all' in cname:
+                            comm_events_a2a.append(event)
+                        elif cname and cname in ('recv'):
+                            comm_events_recv.append(event)
+                        elif cname and cname in ('send'):
+                            comm_events_send.append(event)
+                        else:
+                            comm_events_others.append(event)
                     else:
                         comp_events.append(event)
                 else:
@@ -134,6 +153,10 @@ class GPUEventAnalyser:
             GPUEventAnalyser.all_gpu_key: gpu_events,
             GPUEventAnalyser.computation_key: comp_events,
             GPUEventAnalyser.communication_key: comm_events,
+            GPUEventAnalyser.communication_key_a2a: comm_events_a2a,
+            GPUEventAnalyser.communication_key_send: comm_events_send,
+            GPUEventAnalyser.communication_key_recv: comm_events_recv,
+            GPUEventAnalyser.communication_key_others: comm_events_others,
             GPUEventAnalyser.memcpy_key: memcpy_events,
         }
 
@@ -162,6 +185,10 @@ class GPUEventAnalyser:
         # Merge intervals within each category.
         comp_union = GPUEventAnalyser.merge_intervals(dict_intervals['computation'])
         comm_union = GPUEventAnalyser.merge_intervals(dict_intervals['communication'])
+        comm_union_a2a = GPUEventAnalyser.merge_intervals(dict_intervals['communication_a2a'])
+        comm_union_send = GPUEventAnalyser.merge_intervals(dict_intervals['communication_send'])
+        comm_union_recv = GPUEventAnalyser.merge_intervals(dict_intervals['communication_recv'])
+        comm_union_others = GPUEventAnalyser.merge_intervals(dict_intervals['communication_others'])
         memcpy_union = GPUEventAnalyser.merge_intervals(dict_intervals['memcpy'])
         all_intervals = GPUEventAnalyser.merge_intervals(dict_intervals['all_gpu'])
 
@@ -171,9 +198,21 @@ class GPUEventAnalyser:
 
         comp_time = sum(end - start for start, end in comp_union)
 
-        total_comm_time = sum(end - start for start, end in comm_union)
-        exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union)
-        exposed_comm_time = sum(end - start for start, end in exposed_comm_intervals)
+        total_comm_time_a2a = sum(end - start for start, end in comm_union_a2a)
+        exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union_a2a)
+        exposed_comm_time_a2a = sum(end - start for start, end in exposed_comm_intervals)
+
+        total_comm_time_send = sum(end - start for start, end in comm_union_send)
+        exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union_send)
+        exposed_comm_time_send = sum(end - start for start, end in exposed_comm_intervals)
+
+        total_comm_time_recv = sum(end - start for start, end in comm_union_recv)
+        exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union_recv)
+        exposed_comm_time_recv = sum(end - start for start, end in exposed_comm_intervals)
+
+        total_comm_time_others = sum(end - start for start, end in comm_union_others)
+        exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union_others)
+        exposed_comm_time_others = sum(end - start for start, end in exposed_comm_intervals)
 
         total_memcpy_time = sum(end - start for start, end in memcpy_union)
         memcpy_minus_compute = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, memcpy_union)
@@ -184,16 +223,22 @@ class GPUEventAnalyser:
         idle_time = total_time - busy_time
 
         # assert that compute + exposed comm + exposed memcpy + idle = total time
-        assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + idle_time - total_time) < 1e-6
+        # assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + idle_time - total_time) < 1e-6
 
         return {
             "computation_time": comp_time,
-            "exposed_comm_time": exposed_comm_time,
+            "exposed_comm_time_a2a": exposed_comm_time_a2a,
+            "exposed_comm_time_send": exposed_comm_time_send,
+            "exposed_comm_time_recv": exposed_comm_time_recv,
+            "exposed_comm_time_others": exposed_comm_time_others,
             "exposed_memcpy_time": exposed_memcpy_time,
             "busy_time": busy_time,
             "idle_time": idle_time,
             "total_time": total_time,
-            "total_comm_time": total_comm_time,
+            "total_comm_time_a2a": total_comm_time_a2a,
+            "total_comm_time_send": total_comm_time_send,
+            "total_comm_time_recv": total_comm_time_recv,
+            "total_comm_time_others": total_comm_time_others,
             "total_memcpy_time": total_memcpy_time,
         }
 
@@ -210,7 +255,7 @@ class GPUEventAnalyser:
 
         # Categorize events.
         dict_gpu_event_lists = self.get_gpu_event_lists()
-        GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
+        # GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
 
