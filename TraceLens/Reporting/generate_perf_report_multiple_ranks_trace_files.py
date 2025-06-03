@@ -46,18 +46,21 @@ def get_trace_files(
 def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument("--profile_path", type=str, required=True, help="Path to the profile.json file")
+    parser.add_argument("--scan_subfolders", help="Scan subfolders for trace files", choices=[True, False], default=True)
     parser.add_argument("--output_xlsx_path", type=str, required=True, help="Path to the output Excel file",)
     parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
     args = parser.parse_args()
 
-    
+    output_folder = Path(os.path.dirname(args.output_xlsx_path))
+    output_folder.mkdir(parents=True, exist_ok=True)
+
     # Load the arch json
     gpu_arch_json = None
     if args.gpu_arch_json_path:
         with open(args.gpu_arch_json_path, 'r') as f:
             gpu_arch_json = json.load(f)
 
-    trace_files = get_trace_files(args.profile_path)
+    trace_files = get_trace_files(directory=args.profile_path, scan_subfolders=args.scan_subfolders)
 
     # Dictionary to hold the op-specific DataFrames
     op_dfs = {}
@@ -81,6 +84,8 @@ def main():
     df_gpu_timeline = []
     df_kernel_launchers = []
     for rank, trace_file in enumerate(sorted(trace_files)):
+
+        print(trace_file)
         
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=trace_file, arch=gpu_arch_json)
 
