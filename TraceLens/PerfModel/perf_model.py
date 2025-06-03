@@ -151,7 +151,7 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def get_gemmologist_time(arch, M, N, K, B, dtype):
+    def get_gemmologist_time(arch, M, N, K, B, dtype, force_cache=False):
         missing_inputs = []
         if M is None:
             missing_inputs.append("M")
@@ -181,6 +181,10 @@ class GEMM:
         if "freq_mhz" in arch:
             cmd.append("--freq_mhz")
             cmd.append(str(arch["freq_mhz"]))
+
+        if force_cache:
+            cmd.append("--initial_placement")
+            cmd.append("L2")
 
         # Check if the result is already in the cache
         cache_key = tuple(cmd)
@@ -737,6 +741,53 @@ class aten_conv_bwd(aten_conv):
 
     def bytes(self, bytes_per_element):
         return self.bytes_bwd(bytes_per_element)
+
+class Softmax:
+    """
+    Softmax operation
+    """
+
+    @staticmethod
+    def flops_func(M, N, B=1):
+        # softmax is O(N) for each element, so total is O(N^2)
+        return B * M * N 
+
+    @staticmethod
+    def bytes_func(M, N, bytes_per_element, B=1):
+        return B * M * N * bytes_per_element
+
+    @staticmethod
+    def flops(M, N, B=1):
+        return Softmax.flops_func(M, N, B)
+
+    @staticmethod
+    def bytes(M, N, bytes_per_element, B=1):
+        return Softmax.bytes_func(M, N, bytes_per_element, B)
+
+    @staticmethod
+    def flops_bwd(M, N, B=1):
+        # Backward pass for softmax is also O(N^2) for each element
+        return B * M * N
+
+    @staticmethod
+    def bytes_bwd(M, N, bytes_per_element, B=1):
+        return B * M * N * bytes_per_element
+
+    @staticmethod
+    def get_time(arch, M, N, bytes_per_element, B=1):
+        flops = Softmax.flops_func(M, N, B)
+        bytes_moved = Softmax.bytes_func(M, N, bytes_per_element, B)
+        ew_ops_per_cycle_simd = 256
+
+        if not arch:
+            raise ValueError("Architecture information is required.")
+        
+        compute_time = M * N / (arch['num_cus'] * arch['gemm_units_per_cu'] *\
+                                        ew_ops_per_cycle_simd) / \
+                                        arch['freq_mhz']   
+        memory_time = bytes_moved / arch['mem_bw_gbps']
+        return max(compute_time, memory_time)
+
 class SDPA:
 
     def __init__(self, event, arch=None):
@@ -748,6 +799,32 @@ class SDPA:
         # get useful stuff from the param_details
         # self.B, self.N_Q, self.H, self.d_k, self.N_K = (self.param_details[key] for key in ['B', 'N_Q', 'H', 'd_k', 'N_K'])
         self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h = (self.param_details[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h'])
+        if arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                
+                force_to_cache = False
+                if type(self).__name__ == "flash_attention":
+                    force_to_cache = True
+                # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
+                self.qkt_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.d_h, N=self.N_KV,
+                                                                 B=self.B * self.H_Q, dtype=dtype, 
+                                                                 force_cache=force_to_cache)
+
+                self.softmax_time = Softmax.get_time(arch, self.N_Q, self.N_KV, \
+                                                     name2bpe(self.param_details['dtype_A_B'][0]), \
+                                                     self.B * self.H_Q)
+                # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
+                self.pv_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.N_KV, N=self.d_h,
+                                                             B=self.B * self.H_Q, dtype=dtype)
+                self.sdpa_time = self.qkt_time + self.softmax_time + self.pv_time
+            else:
+                # TODO: use naive roofline model
+                pass
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
