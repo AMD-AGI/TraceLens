@@ -12,7 +12,6 @@ except ImportError:
         from backports.strenum import StrEnum
     # fallback for Python 3.10
     except ImportError:
-        #from enum import Enum as StrEnum
         from strenum import StrEnum
     
 
