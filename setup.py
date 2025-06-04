@@ -1,24 +1,11 @@
 import sys
 from setuptools import setup, find_packages
 
-# Conditionally exclude files based on Python version
-if sys.version_info < (3, 11):
-    # backports.strenum issue with Python < 3.11 
-    #excluded_files = ['TraceLens.TreePerf.jax_analyses.py']
-    excluded_files = ['TraceLens/TreePerf/jax_analyses.py']
-    #excluded_files = ["*jax*.py"]
-    print(excluded_files)
-else:
-    excluded_files = []
-
-
 
 setup(
     name='TraceLens',
     version='0.1.0',
     packages=find_packages(where='.'),  # Will pick up 'TraceLens' automatically
-    #packages=find_packages(exclude=excluded_files),  # Will pick up 'TraceLens' automatically
-    #package_dir={"": "."},
     install_requires=[
         'pandas',
         'tqdm',
