@@ -145,7 +145,8 @@ class TreePerfAnalyzer:
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
 
-        if hasattr(perf_model, "gemmologist_time"):
+        # SDPA is covered separately. This is just for the gemms and not gemms part of SDPA
+        if hasattr(perf_model, "gemmologist_time") and not hasattr(perf_model, "sdpa_time"):
             dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
             dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
             dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
