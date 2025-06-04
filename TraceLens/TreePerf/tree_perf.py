@@ -150,6 +150,10 @@ class TreePerfAnalyzer:
             dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
             dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
 
+        if hasattr(perf_model, "sdpa_time"):
+            dict_metrics['SDPA Time (µs)'] = perf_model.sdpa_time
+            dict_metrics['SDPA TFLOPS/s'] = (gflops / 1e3) / (perf_model.sdpa_time / 1e6) if perf_model.sdpa_time > 0 else float('nan')
+
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
