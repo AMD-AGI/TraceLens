@@ -152,8 +152,8 @@ class TreePerfAnalyzer:
             dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
 
         if hasattr(perf_model, "sdpa_time"):
-            dict_metrics['SDPA Time (µs)'] = perf_model.sdpa_time
-            dict_metrics['SDPA TFLOPS/s'] = (gflops / 1e3) / (perf_model.sdpa_time / 1e6) if perf_model.sdpa_time > 0 else float('nan')
+            dict_metrics['SDPA Simulated Time (µs)'] = perf_model.sdpa_time
+            dict_metrics['SDPA Simulated TFLOPS/s'] = (gflops / 1e3) / (perf_model.sdpa_time / 1e6) if perf_model.sdpa_time > 0 else float('nan')
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -243,6 +243,10 @@ class TreePerfAnalyzer:
             dict_agg['Gemmologist TFLOPS/s'] = 'first'
             dict_agg['Gemmologist Time (µs)'] = 'first'
             dict_agg['Gemmologist cmd'] = 'first'
+        if 'SDPA Simulated Time (µs)' in df_perf_metrics.columns:
+            # first since it should be same for the group
+            dict_agg['SDPA Simulated Time (µs)'] = 'first'
+            dict_agg['SDPA Simulated TFLOPS/s'] = 'first'
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
