@@ -750,11 +750,15 @@ class Softmax:
     @staticmethod
     def flops_func(M, N, B=1):
         # softmax is O(N) for each element, so total is O(N^2)
-        return B * M * N 
+        # 3 ops : Exponent, Division and Addition
+        # Let's assume for now exponent and division are implement by LUT and hence
+        # take 1 cycle
+        return B * M * (3 * N)
 
     @staticmethod
     def bytes_func(M, N, bytes_per_element, B=1):
-        return B * M * N * bytes_per_element
+        # Input and output sizes are same
+        return 2 * B * M * N * bytes_per_element
 
     @staticmethod
     def flops(M, N, B=1):
@@ -766,15 +770,16 @@ class Softmax:
 
     @staticmethod
     def flops_bwd(M, N, B=1):
-        # Backward pass for softmax is also O(N^2) for each element
-        return B * M * N
+        # Backward is same as fwd for now
+        return B * M * (3 * N)
 
     @staticmethod
     def bytes_bwd(M, N, bytes_per_element, B=1):
-        return B * M * N * bytes_per_element
+        # Input and output sizes are same
+        return 2 * B * M * N * bytes_per_element
 
     @staticmethod
-    def get_time(arch, M, N, bytes_per_element, B=1):
+    def get_time(arch, M, N, bytes_per_element, B=1, force_to_cache=False):
         flops = Softmax.flops_func(M, N, B)
         bytes_moved = Softmax.bytes_func(M, N, bytes_per_element, B)
         ew_ops_per_cycle_simd = 256
@@ -784,8 +789,11 @@ class Softmax:
         
         compute_time = M * N / (arch['num_cus'] * arch['gemm_units_per_cu'] *\
                                         ew_ops_per_cycle_simd) / \
-                                        arch['freq_mhz']   
-        memory_time = bytes_moved / arch['mem_bw_gbps']
+                                        arch['freq_mhz']
+        if force_to_cache:
+            memory_time = bytes_moved / (arch['l2_bw_gbps'] * 1000)
+        else:
+            memory_time = bytes_moved / (arch['mem_bw_gbps'] * 1000)
         return max(compute_time, memory_time)
 
 class SDPA:
@@ -817,7 +825,7 @@ class SDPA:
 
                 self.softmax_time = Softmax.get_time(arch, self.N_Q, self.N_KV, \
                                                      name2bpe(self.param_details['dtype_A_B'][0]), \
-                                                     self.B * self.H_Q)
+                                                     self.B * self.H_Q, force_to_cache=force_to_cache)
                 # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
                 self.pv_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.N_KV, N=self.d_h,
                                                              B=self.B * self.H_Q, dtype=dtype)
@@ -913,6 +921,7 @@ class flash_attention(SDPA):
         input_dims = event['args']['Input Dims']
         q_idx, k_idx, v_idx = 0, 1, 2
         q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        dtype_A_B = tuple(event['args']['Input type'][:2])
         strides = event['args']['Input Strides']
         q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])
         B, N_Q, H_Q, d_h = q_shape
@@ -922,7 +931,7 @@ class flash_attention(SDPA):
         causal = eval(event['args']['Concrete Inputs'][5])
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
-                "dropout": dropout, "causal": causal, "flash_impl": True}
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B}
 
 class flash_attention_backward(flash_attention):
 
