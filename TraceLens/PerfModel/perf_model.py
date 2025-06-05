@@ -151,7 +151,7 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def get_gemmologist_time(arch, M, N, K, B, dtype, force_cache=False):
+    def get_gemmologist_time(arch, M, N, K, B, dtype, force_to_l1=False):
         missing_inputs = []
         if M is None:
             missing_inputs.append("M")
@@ -182,9 +182,12 @@ class GEMM:
             cmd.append("--freq_mhz")
             cmd.append(str(arch["freq_mhz"]))
 
-        if force_cache:
-            cmd.append("--initial_placement")
-            cmd.append("L2")
+        if "mem_bw_gbps" in arch:
+            cmd.append("--hbm_bw")
+            # In case of flash attention when everything happens in cache, we change the
+            # memory bw to l1 bandwidth so as to simulate the same
+            mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
+            cmd.append(str(mem_bw))
 
         # Check if the result is already in the cache
         cache_key = tuple(cmd)
@@ -779,7 +782,7 @@ class Softmax:
         return 2 * B * M * N * bytes_per_element
 
     @staticmethod
-    def get_time(arch, M, N, bytes_per_element, B=1, force_to_cache=False):
+    def get_time(arch, M, N, bytes_per_element, B=1, force_to_l1=False):
         flops = Softmax.flops_func(M, N, B)
         bytes_moved = Softmax.bytes_func(M, N, bytes_per_element, B)
         ew_ops_per_cycle_simd = 256
@@ -790,8 +793,9 @@ class Softmax:
         compute_time = M * N / (arch['num_cus'] * arch['gemm_units_per_cu'] *\
                                         ew_ops_per_cycle_simd) / \
                                         arch['freq_mhz']
-        if force_to_cache:
-            memory_time = bytes_moved / (arch['l2_bw_gbps'] * 1000)
+        # This is in case of flash attention
+        if force_to_l1:
+            memory_time = bytes_moved / (arch['l1_bw_gbps'] * 1000)
         else:
             memory_time = bytes_moved / (arch['mem_bw_gbps'] * 1000)
         return max(compute_time, memory_time)
@@ -815,20 +819,20 @@ class SDPA:
                 if dtype is None:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
                 
-                force_to_cache = False
+                force_to_l1 = False
                 if type(self).__name__ == "flash_attention":
-                    force_to_cache = True
+                    force_to_l1 = True
                 # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
                 self.qkt_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.d_h, N=self.N_KV,
                                                                  B=self.B * self.H_Q, dtype=dtype, 
-                                                                 force_cache=force_to_cache)
+                                                                 force_to_l1=force_to_l1)
 
                 self.softmax_time = Softmax.get_time(arch, self.N_Q, self.N_KV, \
                                                      name2bpe(self.param_details['dtype_A_B'][0]), \
-                                                     self.B * self.H_Q, force_to_cache=force_to_cache)
+                                                     self.B * self.H_Q, force_to_l1=force_to_l1)
                 # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
                 self.pv_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.N_KV, N=self.d_h,
-                                                             B=self.B * self.H_Q, dtype=dtype)
+                                                             B=self.B * self.H_Q, dtype=dtype, force_to_l1=force_to_l1)
                 self.sdpa_time = self.qkt_time + self.softmax_time + self.pv_time
             else:
                 # TODO: use naive roofline model
