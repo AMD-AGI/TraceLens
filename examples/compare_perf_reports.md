@@ -1,0 +1,71 @@
+## Compare TraceLens Performance Reports
+
+---
+
+### 1 .  What It Takes In
+
+| Input              | Description                                                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `*.xlsx` files     | TraceLens reports you want to compare. Provide **at least two**.                                                           |
+| Optional `--names` | Human-readable tags for each report. If omitted, the script falls back to the base filenames (handy, but sometimes messy). |
+
+---
+
+### 2 .  How to Call It
+
+```bash
+python compare_tracelens_reports.py \
+    baseline.xlsx \
+    candidate.xlsx \
+    --names baseline candidate \
+    --sheets all \
+    -o comparison.xlsx
+```
+
+Common flags:
+
+| Flag           | Default           | Purpose                                                                                          |
+| -------------- | ----------------- | ------------------------------------------------------------------------------------------------ |
+| `-o, --output` | `comparison.xlsx` | Name of the merged workbook.                                                                     |
+| `--names`      | `<file stem>`     | Custom tags (must match the number of reports).                                                  |
+| `--sheets`     | `all`             | Limit processing to a subset:<br>`gpu_timeline`, `ops_summary`, `ops_all`, `roofline`, or `all`. |
+
+---
+
+### 3 .  What Comes Out
+
+The script writes **one workbook** (`comparison.xlsx` unless you override it) containing multiple sheets:
+
+| Sheet          | When You Get It                  | What It Shows                                                                                                                                                                                                                                                                                                      |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gpu_timeline` | `--sheets gpu_timeline` or `all` | End-to-end GPU activity by **type** (`compute`, `memcpy`, etc.) with per-report timings plus:<br>- `time ms__<tag>_diff`<br>- `time ms__<tag>_pct`                                                                                                                                                                 |
+| `ops_summary`  | `--sheets ops_summary` or `all`  | Per-op aggregates keyed on **`name`**. Sorted by the baseline’s `total_direct_kernel_time_ms`. Unhelpful columns (e.g., cumulative %) are stripped from non-baseline reports.                                                                                                                                      |
+| `ops_all_*`    | `--sheets ops_all` or `all`      | Three sheets **per variant tag**:<br>• `ops_all_intersect_<tag>` – op instances present in both baseline and variant.<br>• `ops_all_only_baseline_<tag>` – ops only the baseline ran.<br>• `ops_all_only_variant_<tag>` – ops only the variant ran.<br>Columns irrelevant to a given view are hidden, not deleted. |
+| `<roofline>_*` | `--sheets roofline` or `all`     | Same intersect / only\_\* breakdown for each roofline group:<br>`GEMM`, `SDPA_fwd`, `SDPA_bwd`, `CONV_fwd`, `CONV_bwd`, `UnaryElementwise`, `BinaryElementwise`.                                                                                                                                                   |
+
+Hidden columns stay in the file (for power users) but are invisible in Excel by default.
+
+---
+
+### 4 .  Diff Math
+
+For every metric you ask it to track (`diff_cols` in the code), the script computes:
+
+```text
+metric__<tag>_diff      # variant - baseline
+metric__<tag>_pct       # 100 * diff / baseline
+```
+---
+
+### 5 .  Design Decisions You Should Know
+
+* **Outer merge, never inner** – if an op vanished, you’ll see it.
+* **Baseline = first report** – choose wisely.
+* **Column prefixing** – every metric becomes `<tag>::metric`, so you can safely concatenate arbitrary reports.
+* **Sheet-specific pruning** – the script aggressively hides noise (e.g., median, UID) to keep the output readable. You can always unhide them in Excel if you need them.
+* **Excel 31-char rule** – sheet names are truncated to fit; no data loss, just shorter labels.
+
+---
+
+### 6 .  Future Enhancements
+1. Morphology-aware diffing – Understand the call stack tree and compare at lowest common call stack level. For example, if a baseline leaf op is 'cudnn_convolution' and the variant is 'miopen_convolution', the diff algorithm should recognize that lowest common level is 'convolution' and compare the two.
