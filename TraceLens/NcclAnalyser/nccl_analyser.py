@@ -53,7 +53,7 @@ class NcclAnalyser:
         self.collective_type2name = {
             'allreduce':     ['allreduce', 'allreduce_coalesced'],
             'reducescatter': ['reducescatter', '_reduce_scatter_base', 'reduce_scatter_tensor_coalesced'],
-            'allgather':     ['allgather', 'all_gather', '_allgather_base', 'all_gather_into_tensor_coalesced'],
+            'allgather':     ['allgather', 'all_gather', '_allgather_base', 'all_gather_into_tensor_coalesced', 'allgather_into_tensor_coalesced'],
             'alltoall':      ['all_to_all'],
             'alltoallv':     ['all_to_allv'],
         }
