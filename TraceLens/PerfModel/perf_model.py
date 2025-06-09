@@ -80,11 +80,13 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
+        if not hasattr(self.param_details, 'B'):
+            self.param_details['B'] = 1
 
         if self.parsed_kernel_info is not None:
             self.param_details['transpose'] = self.parsed_kernel_info['transpose']
 
-        self.M, self.N, self.K = self.param_details['M'], self.param_details['N'], self.param_details['K']
+        self.B, self.M, self.N, self.K = self.param_details['B'], self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
 
         if arch is not None:
@@ -94,7 +96,7 @@ class GEMM:
                 dtype = self.param_details.get("gemmologist_dtype")
                 if dtype is None:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, dtype)
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
             else:
                 # TODO: use naive roofline model
                 pass
@@ -149,7 +151,7 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def get_gemmologist_time(arch, M, N, K, dtype):
+    def get_gemmologist_time(arch, M, N, K, B, dtype):
         missing_inputs = []
         if M is None:
             missing_inputs.append("M")
@@ -157,6 +159,8 @@ class GEMM:
             missing_inputs.append("N")
         if K is None:
             missing_inputs.append("K")
+        if B is None:
+            B = 1
         if dtype is None:
             missing_inputs.append("dtype")
         if "name" not in arch:
@@ -166,13 +170,13 @@ class GEMM:
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
         cmd = [
             "./bin/gemmologist.py",
+            "-b", str(B),
             "-m", str(M),
             "-n", str(N),
             "-k", str(K),
             "--dtype", dtype,
             "-d", "1",
-            "-a", arch["name"],
-            "--topn", "1"
+            "-a", arch["name"]
         ]
         if "freq_mhz" in arch:
             cmd.append("--freq_mhz")
