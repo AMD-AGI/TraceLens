@@ -42,16 +42,59 @@ def get_trace_files(
 
     return trace_files
 
+def export_data_df(
+    data_df: pd.DataFrame,
+    output_folder_path: Path,
+    output_filename: str,
+    output_table_format: list = [".xlsx", ".csv"],
+    suffix: str = "_summary_statistics",
+    verbose: int = 0,
+) -> None:
+    """
+    Exports a pandas DataFrame to one or more file formats (.xlsx, .csv) in the specified output directory.
+
+    Args:
+        data_df (pd.DataFrame): The DataFrame containing data to export.
+        output_folder_path (Path): The directory where the output file(s) will be saved.
+        output_filename (str): The base name of the output file.
+        output_table_format (list, optional): A list of desired file extensions (e.g. [".xlsx", ".csv"]).
+        suffix (str, optional): Suffix added to the output filename before the extension. Defaults to "_summary_statistics".
+        verbose (int, optional): If > 0, prints additional information during processing. Defaults to 0.
+
+    Returns:
+        None
+    """
+    if verbose:
+        print(f"Exporting data to {output_folder_path}")
+    if verbose > 3:
+        print(f"Data: {data_df}")
+    for output_table_format in output_table_format:
+        if output_table_format == ".xlsx":
+            output_path = output_folder_path.joinpath(
+                output_filename + suffix
+            ).with_suffix(".xlsx")
+            if verbose:
+                print(f"Exporting summary statistics to {output_path}")
+
+            data_df.to_excel(output_path, index=False)
+        elif output_table_format == ".csv":
+            output_path = output_folder_path.joinpath(
+                output_filename + suffix
+            ).with_suffix(".csv")
+            if verbose:
+                print(f"Exporting summary statistics to {output_path}")
+            data_df.to_csv(output_path, index=False)
 
 def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument("--profile_path", type=str, required=True, help="Path to the profile.json file")
     parser.add_argument("--scan_subfolders", help="Scan subfolders for trace files", choices=[True, False], default=True)
-    parser.add_argument("--output_xlsx_path", type=str, required=True, help="Path to the output Excel file",)
+    parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
+    parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".xlsx", ".csv"], choices=[".xlsx", ".csv"], help="output table save formats, .xlsx or .csv or both")
     parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
     args = parser.parse_args()
 
-    output_folder = Path(os.path.dirname(args.output_xlsx_path))
+    output_folder = Path(args.output_path)
     output_folder.mkdir(parents=True, exist_ok=True)
 
     # Load the arch json
@@ -158,26 +201,79 @@ def main():
     df_gpu_timeline_summary.reset_index(inplace=True)
     df_gpu_timeline_summary.columns = [col[0] for col in df_gpu_timeline_summary.columns.values]
     
+    output_filename = "trace_analysis_results"
+    
+    export_data_df(
+            df_gpu_timeline,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_gpu_timeline",
+    )
 
-    # Write all DataFrames to separate sheets in an Excel workbook
-    with pd.ExcelWriter(args.output_xlsx_path) as writer:
-        df_gpu_timeline.to_excel(writer, sheet_name='gpu_timeline', index=False)
-        
-        df_gpu_timeline_summary.to_excel(writer, sheet_name='gpu_timeline_summary', index=False)
+    export_data_df(
+            df_gpu_timeline_summary,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_gpu_timeline_summary",
+    )
 
-        df_kernel_launchers_summary.to_excel(writer, sheet_name='kernel_launchers_summary', index=False)
-        df_kernel_launchers_unique_args.to_excel(writer, sheet_name='kernel_launchers_unique_args', index=False)
-        
-        # Write each op category DataFrame
-        for sheet_name, df in op_dfs.items():
-            df_cat  = pd.concat(df, ignore_index=True)
-            df_cat.to_excel(writer, sheet_name=sheet_name, index=False)
+    export_data_df(
+            df_kernel_launchers_summary,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_kernel_launchers_summary",
+    )
 
-        df_nccl_summary.to_excel(writer, sheet_name='nccl_summary', index=False)
-        df_nccl_long.to_excel(writer, sheet_name='nccl_long', index=False)
-        df_nccl_implicit_sync_cat.to_excel(writer, sheet_name='nccl_implicit_sync_cat', index=False)
+    export_data_df(
+            df_kernel_launchers_unique_args,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_kernel_launchers_unique_args",
+    )
 
-    print(f"DataFrames successfully written to {args.output_xlsx_path}")
+    # Write each op category DataFrame
+    for sheet_name, df in op_dfs.items():
+        df_cat  = pd.concat(df, ignore_index=True)
+        if df_cat.empty:
+            continue
+
+        export_data_df(
+            df_cat,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_"+sheet_name,
+        )
+
+    export_data_df(
+            df_nccl_summary,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_nccl_summary",
+    )
+
+    export_data_df(
+            df_nccl_long,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_nccl_long",
+    )
+
+    export_data_df(
+            df_nccl_implicit_sync_cat,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix="_nccl_implicit_sync_cat",
+    )
+
+    print(f"DataFrames successfully written to {args.output_path}")
 
 if __name__ == "__main__":
     main()
