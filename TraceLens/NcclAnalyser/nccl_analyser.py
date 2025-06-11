@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import gzip
 import os
 import json
 import pandas as pd
@@ -83,8 +84,12 @@ class NcclAnalyser:
         self.rank2trace_data.clear()
         for rank, filepath in enumerate(self.list_profile_filepaths):
             print(f"Loading rank {rank} from {filepath}")
-            with open(filepath, 'r') as f:
-                raw_data = json.load(f)
+            if filepath.endswith('json'):
+                with open(filepath, 'r') as f:
+                    raw_data = json.load(f)
+            elif filepath.endswith('json.gz'):
+                with gzip.open(filepath, 'rt') as f:
+                    raw_data = json.load(f)
 
             nccl_events = [e for e in raw_data['traceEvents'] if self._nccl_filter_event_fn(e)]
 
