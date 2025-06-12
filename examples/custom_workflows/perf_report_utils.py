@@ -6,6 +6,7 @@ from collections import defaultdict
 
 import pandas as pd
 import psutil
+import warnings
 from typing import Callable
 from perf_report_configs import all_ops_launchers, grouped_breakdown_mapping
 from TraceLens import TreePerfAnalyzer
@@ -107,5 +108,10 @@ def build_grouped_breakdown(df_kernel_launchers, df_gpu_timelines):
     times.append(sum(times))
 
     df_grouped_breakdown["Time (s)"] = times
+
+    if np.count_nonzero(~assigned_to_group) > 0:
+        names_other_group = df_kernel_launchers[~assigned_to_group]["name"].unique().tolist()
+        warnings.warn(f"{np.count_nonzero(~assigned_to_group)} kernel launchers were assigned to the \"Other\" group: {names_other_group} "
+              "Check the grouped_breakdown_mapping to ensure all relevant kernel launchers are appropriately grouped.")
 
     return df_grouped_breakdown
