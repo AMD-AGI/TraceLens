@@ -25,8 +25,6 @@ import gzip
 from collections import defaultdict
 import math
 
-from ..util import DataLoader
-
 class TraceFuse:
     def __init__(self, profile_filepaths_list_or_dict):
         """
@@ -43,8 +41,9 @@ class TraceFuse:
         elif isinstance(profile_filepaths_list_or_dict, dict):
             self.rank2filepath = profile_filepaths_list_or_dict
 
-        filename = next(iter(self.rank2filepath.values()))
-        data = DataLoader.load_data(filename)
+        # get the first file to set the linking key and offset multiplier
+        with open(next(iter(self.rank2filepath.values())), 'r') as f:
+            data = json.load(f)
         events = data['traceEvents']
         self._set_linking_key(events)
 
@@ -100,7 +99,8 @@ class TraceFuse:
 
         for rank, filepath in self.rank2filepath.items():
             print(f"Processing file: {filepath}")
-            data = DataLoader.load_data(filepath)
+            with open(filepath, 'r') as f:
+                data = json.load(f)
 
             processed_events = []
             for event in data['traceEvents']:
@@ -128,4 +128,3 @@ class TraceFuse:
             print(f"Writing to file: {gz_output_file}")
             json.dump(json_data_out, f, indent=4)
         print(f"Data successfully written to {gz_output_file}")
-        return gz_output_file

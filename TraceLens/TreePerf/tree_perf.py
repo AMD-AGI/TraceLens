@@ -304,7 +304,7 @@ class TreePerfAnalyzer:
                 kernel_launchers.append(event)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, rank=None, id_cols=False, include_kernel_names=False):
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -330,9 +330,6 @@ class TreePerfAnalyzer:
                 metrics_event['external_id'] = event['args'].get('External id')
             if include_kernel_names:
                 metrics_event['kernel_names'] = event['kernel_names']
-            if rank is not None:
-                metrics_event['rank'] = rank
-
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -461,10 +458,10 @@ class TreePerfAnalyzer:
             df_unique_args['Cumulative Percentage (%)'] = df_unique_args['Percentage (%)'].cumsum()
         return df_unique_args
 
-    def get_df_gpu_timeline(self, rank=None):
+    def get_df_gpu_timeline(self):
         kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
         gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
-        df = gpu_event_analyser.get_breakdown_df(rank=rank)
+        df = gpu_event_analyser.get_breakdown_df()
         return df
 
     def get_kernel_details(self, kernel_event,
