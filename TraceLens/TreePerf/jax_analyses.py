@@ -8,7 +8,12 @@ from typing import Callable
 try:
     from enum import StrEnum
 except ImportError:
-    from backports.strenum import StrEnum
+    try:
+        from backports.strenum import StrEnum
+    # fallback for Python 3.10
+    except ImportError:
+        from strenum import StrEnum
+    
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
