@@ -4,12 +4,7 @@ import json
 try:
     from enum import StrEnum
 except ImportError:
-    try:
-        from backports.strenum import StrEnum
-    # fallback for Python 3.10
-    except ImportError:
-        from strenum import StrEnum
-
+    from backports.strenum import StrEnum
 from typing import List, Dict, Callable, Tuple
 
 # generic data loader class for json, json.gz, or tensorboard pb files

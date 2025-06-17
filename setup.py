@@ -1,6 +1,4 @@
-import sys
 from setuptools import setup, find_packages
-
 
 setup(
     name='TraceLens',
@@ -11,8 +9,6 @@ setup(
         'pandas',
         'tqdm',
         'backports.strenum;python_version<"3.11"',
-        'StrEnum;python_version<"3.11"',
-        'openpyxl',
     ],
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open('README.md').read(),
@@ -24,9 +20,4 @@ setup(
         'Operating System :: OS Independent',
     ],
     python_requires='>=3.6',
-    entry_points={
-        "console_scripts": [
-            "TraceLens_perf_reporting_multiple_ranks = TraceLens.Reporting.generate_perf_report_multiple_ranks_trace_files:main",
-        ],
-    },
 )
