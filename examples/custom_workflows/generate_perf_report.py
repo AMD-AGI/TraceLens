@@ -164,10 +164,10 @@ def analyze_traces(
 
             # Build and write nccl related summaries from all ranks
             with pd.ExcelWriter(xlsx_path, mode="a") as writer:
-                nccl_analyser.build_df_summary_nccl_implicit_sync_cat(agg_metrics=["mean"]).to_excel(writer, sheet_name="summary_nccl_implicit_sync_cat", index=False)
+                nccl_analyser.build_df_summary_nccl_implicit_sync_cat(agg_metrics=["mean"], strict_metadata_check=False).to_excel(writer, sheet_name="summary_nccl_implicit_sync_cat", index=False)
                 nccl_analyser.build_df_long().to_excel(writer, sheet_name="long", index=False)
-                nccl_analyser.build_df_nccl_implicit_sync_cat().to_excel(writer, sheet_name="nccl_implicit_sync_cat", index=False)
-                nccl_analyser.build_df_nccl_implicit_sync_cat(detailed=True).to_excel(writer, sheet_name="nccl_implicit_sync_cat_detailed", index=False)
+                nccl_analyser.build_df_nccl_implicit_sync_cat(strict_metadata_check=False).to_excel(writer, sheet_name="nccl_implicit_sync_cat", index=False)
+                nccl_analyser.build_df_nccl_implicit_sync_cat(detailed=True, strict_metadata_check=False).to_excel(writer, sheet_name="nccl_implicit_sync_cat_detailed", index=False)
                 df_all2allv = nccl_analyser.build_df_nccl_all2allv()
                 if df_all2allv is not None:
                     df_all2allv.to_excel(writer, sheet_name="nccl_all2allv", index=False)
