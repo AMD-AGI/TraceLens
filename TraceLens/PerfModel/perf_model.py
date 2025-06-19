@@ -70,10 +70,13 @@ class GEMM:
     If you want to add a new GEMM operation, you should inherit from this class.
     """
     cache_gemm_results = {}  # This is used to cache gemm results
-    def __init__(self, event, arch=None):
+    def __init__(self, event, arch=None, python_path=None):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
+        self.arch = arch
+        self.python_path = python_path
+
         for kernel_name in event['kernel_names']:
             # TODO: think you really wanna pass around dicts instead of objects?
             self.parsed_kernel_info = gemm_name_parser(kernel_name)
@@ -88,18 +91,6 @@ class GEMM:
 
         self.B, self.M, self.N, self.K = self.param_details['B'], self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
-
-        if arch is not None:
-            if os.environ.get('GEMMOLOGIST_PATH') is not None:
-                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
-                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
-            else:
-                # TODO: use naive roofline model
-                pass
 
     @staticmethod
     def get_param_details(event):
@@ -151,7 +142,7 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def get_gemmologist_time(arch, M, N, K, B, dtype, force_to_l1=False):
+    def get_gemmologist_time(arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None):
         missing_inputs = []
         if M is None:
             missing_inputs.append("M")
@@ -168,6 +159,7 @@ class GEMM:
         assert not missing_inputs, f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
         # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
         gemmologist_path = os.environ.get('GEMMOLOGIST_PATH')
+    
         cmd = [
             "./bin/gemmologist.py",
             "-b", str(B),
@@ -178,15 +170,29 @@ class GEMM:
             "-d", "1",
             "-a", arch["name"]
         ]
+
+        # Windows does need a python executable for running gemmologist
+        if not python_path and os.name == 'nt':
+            raise AssertionError("Python executable path need to be specified in Windows for running Gemmologist.")
+        # Add the python executable path if it is given
+        if python_path:
+            cmd.insert(0, python_path)
+
         if "freq_mhz" in arch:
             cmd.append("--freq_mhz")
             cmd.append(str(arch["freq_mhz"]))
+
+        if num_cus:
+            cmd.append("--cus")
+            cmd.append(str(num_cus))
 
         if "mem_bw_gbps" in arch:
             cmd.append("--hbm_bw")
             # In case of flash attention when everything happens in cache, we change the
             # memory bw to l1 bandwidth so as to simulate the same
             mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
+            #if num_cus and num_cus != arch['num_cus']:
+            #    mem_bw = round(mem_bw / arch['num_cus'] * num_cus)
             cmd.append(str(mem_bw))
 
         # Check if the result is already in the cache
@@ -206,6 +212,23 @@ class GEMM:
             return gemmologist_time, " ".join(cmd)
         else:
             raise AssertionError("Not able to simulate in gemmologist", cmd, stdout, stderr)
+
+    def get_simulation_time(self):
+        simulation_time = None
+        if self.arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                simulation_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(self.arch, self.M, self.N, self.K, self.B,
+                                                                                  dtype, self.python_path)
+            else:
+                # TODO: use naive roofline model
+                pass
+        return simulation_time
+
 
 class aten_mm(GEMM):
     """
@@ -454,7 +477,7 @@ class tex_ts_te_gemm_ts(GEMM):
 
     """
 
-    def __init__(self, event, arch=None):
+    def __init__(self, event, arch=None, python_path=None):
         super().__init__(event, arch)
 
     def get_param_details(self, event):
@@ -559,7 +582,7 @@ class tev2_pseudo_gemm(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
-    def __init__(self, event, arch=None):
+    def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = self.param_details['input_shape'], self.param_details['filter_shape']
@@ -773,24 +796,27 @@ class Softmax:
 
     @staticmethod
     def flops_bwd(M, N, B=1):
-        # Backward is same as fwd for now
-        return B * M * (3 * N)
+        # Forward pass of softmax is recomputed for backward
+        return 2 * Softmax.flops_func(M, N, B)
 
     @staticmethod
     def bytes_bwd(M, N, bytes_per_element, B=1):
-        # Input and output sizes are same
-        return 2 * B * M * N * bytes_per_element
+        # Forward pass of softmax is recomputed for backward
+        return 2 * Softmax.bytes_func(M, N, bytes_per_element, B)
 
     @staticmethod
-    def get_time(arch, M, N, bytes_per_element, B=1, force_to_l1=False):
-        flops = Softmax.flops_func(M, N, B)
-        bytes_moved = Softmax.bytes_func(M, N, bytes_per_element, B)
+    def get_time(arch, M, N, bytes_per_element, B=1, force_to_l1=False, bwd=False, num_cus=None):
+        flops = Softmax.flops(M, N, B) if not bwd else Softmax.flops_bwd(M, N, B)
+        bytes_moved = Softmax.bytes(M, N, bytes_per_element, B) if not bwd else Softmax.bytes_bwd(M, N, bytes_per_element, B)
         ew_ops_per_cycle_simd = 256
 
         if not arch:
             raise ValueError("Architecture information is required.")
-        
-        compute_time = M * N / (arch['num_cus'] * arch['gemm_units_per_cu'] *\
+
+        if not num_cus:
+            num_cus = arch['num_cus']
+
+        compute_time = flops / ( num_cus * arch['gemm_units_per_cu'] *\
                                         ew_ops_per_cycle_simd) / \
                                         arch['freq_mhz']
         # This is in case of flash attention
@@ -802,41 +828,18 @@ class Softmax:
 
 class SDPA:
 
-    def __init__(self, event, arch=None):
+    def __init__(self, event, arch=None, python_path=None):
         # S = QK^T
         # P = softmax(S)
         # O = PV
         self.event = event
         self.param_details = self.get_param_details(event)
+        self.arch = arch
+        self.python_path = python_path
         # get useful stuff from the param_details
         # self.B, self.N_Q, self.H, self.d_k, self.N_K = (self.param_details[key] for key in ['B', 'N_Q', 'H', 'd_k', 'N_K'])
         self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h = (self.param_details[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h'])
-        if arch is not None:
-            if os.environ.get('GEMMOLOGIST_PATH') is not None:
-                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
-                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                
-                force_to_l1 = False
-                if type(self).__name__ == "flash_attention":
-                    force_to_l1 = True
-                # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
-                self.qkt_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.d_h, N=self.N_KV,
-                                                                 B=self.B * self.H_Q, dtype=dtype, 
-                                                                 force_to_l1=force_to_l1)
 
-                self.softmax_time = Softmax.get_time(arch, self.N_Q, self.N_KV, \
-                                                     name2bpe(self.param_details['dtype_A_B'][0]), \
-                                                     self.B * self.H_Q, force_to_l1=force_to_l1)
-                # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
-                self.pv_time, _ = GEMM.get_gemmologist_time(arch, M=self.N_Q, K=self.N_KV, N=self.d_h,
-                                                             B=self.B * self.H_Q, dtype=dtype, force_to_l1=force_to_l1)
-                self.sdpa_time = self.qkt_time + self.softmax_time + self.pv_time
-            else:
-                # TODO: use naive roofline model
-                pass
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
@@ -907,6 +910,23 @@ class SDPA:
                 raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_KV}")
         return total_flops
 
+    @staticmethod
+    def bytes_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, bytes_per_element):
+        if dropout != 0.0:
+            raise ValueError(f"Not implemented for dropout={dropout}")
+        # This will be done for recompute in flash attention
+        elems_q_read = B * N_Q * H_Q * d_h
+        elems_kv_read = 2 * B * N_KV * H_KV * d_h
+
+        elems_o_grad_read = B * N_Q * H_Q * d_h
+        # grad for q, k and v
+        elems_q_grad_write = B * N_Q * H_Q * d_h
+        elems_kv_grad_write = 2 * B * N_KV * H_KV * d_h
+
+        total_elems_moved = (elems_q_read + elems_kv_read + elems_o_grad_read +
+                             elems_q_grad_write + elems_kv_grad_write)
+        return total_elems_moved * bytes_per_element
+
     def flops_bwd(self):
         return self.flops_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
                                     self.param_details['dropout'], self.param_details['causal'],
@@ -915,8 +935,136 @@ class SDPA:
     # @staticmethod
     # def bytes_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl, bytes_per_element):
     def bytes_bwd(self, bytes_per_element=2):
-        # not implemented for now
-        return None
+        # Same as forward for now
+        return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
+                               self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
+
+    
+    def get_simulation_time(self):
+        simulated_time = None
+        if self.arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+
+                force_to_l1 = False
+                block_N_Q = self.N_Q
+                block_N_KV = self.N_KV
+                if type(self).__name__ == "flash_attention":
+                    force_to_l1 = True
+                    block_N_Q = min(128, self.N_Q)
+                    block_N_KV = min(self.N_KV, self.N_KV)
+
+                num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
+                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
+                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
+                num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
+
+                # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
+                qkt_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=self.d_h, N=block_N_KV,
+                                                            B=1, dtype=dtype,
+                                                            python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
+
+                qkt_time = num_waves * qkt_time
+
+                softmax_time = num_waves * Softmax.get_time(self.arch, block_N_Q, block_N_KV,
+                                                                                   name2bpe(
+                                                                                       self.param_details['dtype_A_B'][
+                                                                                           0]),
+                                                                                   1,
+                                                                                   force_to_l1=force_to_l1, num_cus=1)
+                # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
+                pv_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=block_N_KV, N=self.d_h,
+                                                           B=1, dtype=dtype,
+                                                           python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
+                pv_time = num_waves * pv_time
+                # We have to read the first block of q/k/v and write last block of q_grad/k_grad/v_grad
+                # Assuming the sequence block size of 2048 for GPU
+                mem_time = self.bytes(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
+                            (self.arch['mem_bw_gbps'] * 1000) * num_waves
+                simulated_time = qkt_time + softmax_time + pv_time + mem_time
+            else:
+                # TODO: use naive roofline model
+                pass
+        return simulated_time
+
+    def get_simulation_time_bwd(self):
+        simulated_time = None
+        if self.arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+
+                force_to_l1 = False
+                block_N_Q = self.N_Q
+                block_N_KV = self.N_KV
+                qkt_time = 0
+                pv_time = 0
+                if type(self).__name__ == "flash_attention":
+                    force_to_l1 = True
+                    block_N_Q = min(128, self.N_Q)
+                    block_N_KV = min(self.N_KV, self.N_KV)
+
+                num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
+                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
+                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
+                num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
+
+
+                qkt_fwd_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=self.d_h, N=block_N_KV,
+                                                        B=1,
+                                                        dtype=dtype,
+                                                        python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
+
+                qkt_fwd_time = num_waves * qkt_fwd_time
+
+
+                # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
+                pv_fwd_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=block_N_KV, N=self.d_h,
+                                                        B=1, dtype=dtype,
+                                                        python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
+                pv_fwd_time = num_waves * pv_fwd_time
+                #pv_fwd_time, _ =  math.ceil(self.N_Q / 512) * math.ceil(self.N_KV / 512) * GEMM.get_gemmologist_time(self.arch, M=512, K=512, N=self.d_h,
+                #                                       B=self.B * self.H_Q, dtype=dtype,
+                #                                       python_path=self.python_path, force_to_l1=force_to_l1)
+
+                if type(self).__name__ == "flash_attention":
+                    # In case of flash attention we have to recompute
+                    # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
+                    qkt_time = qkt_fwd_time
+                    pv_time = pv_fwd_time
+
+                # We don't need to go to gemmologist to calculate these,
+                # as we already have the times
+                p_grad_time = qkt_fwd_time
+                v_grad_time = pv_fwd_time
+                q_grad_time = pv_fwd_time
+                k_grad_time = pv_fwd_time
+
+                #p_grad_time = pv_fwd_time
+                #v_grad_time = qkt_fwd_time
+                #q_grad_time = qkt_fwd_time
+                #k_grad_time = qkt_fwd_time
+
+                softmax_time = num_waves * Softmax.get_time(self.arch, block_N_Q, block_N_KV,
+                                                name2bpe(self.param_details['dtype_A_B'][0]),
+                                                1, force_to_l1=force_to_l1, num_cus=1)
+                # We have to read the first block of q/k/v and write last block of q_grad/k_grad/v_grad
+                # Assuming the sequence block size of 512 for GPU
+                mem_time = self.bytes_bwd(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
+                            (self.arch['mem_bw_gbps'] * 1000) * num_waves
+                simulated_time = qkt_time + pv_time + p_grad_time + v_grad_time + q_grad_time + k_grad_time + softmax_time + mem_time
+            else:
+                # TODO: use naive roofline model
+                pass
+        return simulated_time
+
 
 class flash_attention(SDPA):
 
@@ -1018,7 +1166,7 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
 
 class UnaryElementwise:
 
-    def __init__(self, event, arch=None):
+    def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.nelems = prod(self.param_details['op_shape'])
@@ -1065,7 +1213,7 @@ class aten_unary_elementwise(UnaryElementwise):
                 "stride_input": stride_input, "stride_output": stride_output}
 class BinaryElementwise:
 
-    def __init__(self, event, arch=None):
+    def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.param_details = self.get_param_details(event)
         broadcast_shape = self.get_broadcast_shape(self.param_details['shape_in1'], self.param_details['shape_in2'])
