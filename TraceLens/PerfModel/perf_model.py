@@ -1055,11 +1055,38 @@ class SDPA:
                 softmax_time = num_waves * Softmax.get_time(self.arch, block_N_Q, block_N_KV,
                                                 name2bpe(self.param_details['dtype_A_B'][0]),
                                                 1, force_to_l1=force_to_l1, num_cus=1)
+
+                # ∇K and ∇V require partial sums from many Q blocks, because each Q block attends to
+                # the full K / V sequence.
+                # We assume that we use atomics for adding up the gradients together
+                atomic_latency_global_ns = 1000 #ns for global memory
+                atomic_latency_local_ns = 40 #ns for shared memory/ L1
+                k_tile = 64
+                warp_size = 64
+
+                # Shared-memory tile reduction:
+                # Each block only atomics once per (K_tile × d)
+                # This optimization won't be there for now possibly?
+                kv_tiles = math.ceil(block_N_KV / k_tile)
+
+                # Warp-level reduction:
+                # Each warp atomics once per d vector
+                #warps_per_block = (block_N_Q * self.d_h) // warp_size
+                warp_reduction_updates_per_block_global = math.ceil(kv_tiles * math.ceil(self.d_h / warp_size))
+                total_updates_global = warp_reduction_updates_per_block_global * num_waves
+
+                warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(self.d_h / warp_size))
+                total_updates_local = warp_reduction_updates_per_block_local * num_waves
+
+                # Total atomic time (serialized across all blocks)
+                total_atomic_time_us = (atomic_latency_global_ns * total_updates_global +
+                                        atomic_latency_local_ns * total_updates_local) / 1e3
+
                 # We have to read the first block of q/k/v and write last block of q_grad/k_grad/v_grad
                 # Assuming the sequence block size of 512 for GPU
                 mem_time = self.bytes_bwd(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
                             (self.arch['mem_bw_gbps'] * 1000) * num_waves
-                simulated_time = qkt_time + pv_time + p_grad_time + v_grad_time + q_grad_time + k_grad_time + softmax_time + mem_time
+                simulated_time = qkt_time + pv_time + p_grad_time + v_grad_time + q_grad_time + k_grad_time + softmax_time + total_atomic_time_us + mem_time
             else:
                 # TODO: use naive roofline model
                 pass
