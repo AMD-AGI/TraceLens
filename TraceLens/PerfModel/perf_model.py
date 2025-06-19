@@ -191,8 +191,8 @@ class GEMM:
             # In case of flash attention when everything happens in cache, we change the
             # memory bw to l1 bandwidth so as to simulate the same
             mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
-            #if num_cus and num_cus != arch['num_cus']:
-            #    mem_bw = round(mem_bw / arch['num_cus'] * num_cus)
+            if num_cus and num_cus != arch['num_cus']:
+                mem_bw = round(mem_bw / arch['num_cus'] * num_cus)
             cmd.append(str(mem_bw))
 
         # Check if the result is already in the cache
