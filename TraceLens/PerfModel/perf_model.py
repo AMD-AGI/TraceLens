@@ -983,8 +983,7 @@ class SDPA:
                                                            B=1, dtype=dtype,
                                                            python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
                 pv_time = num_waves * pv_time
-                # We have to read the first block of q/k/v and write last block of q_grad/k_grad/v_grad
-                # Assuming the sequence block size of 2048 for GPU
+                # We have to read the first block and write the last block
                 mem_time = self.bytes(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
                             (self.arch['mem_bw_gbps'] * 1000) * num_waves
                 simulated_time = qkt_time + softmax_time + pv_time + mem_time
@@ -1086,8 +1085,7 @@ class SDPA:
                 total_atomic_time_us = (atomic_latency_global_ns * total_updates_global +
                                         atomic_latency_local_ns * total_updates_local) / 1e3
 
-                # We have to read the first block of q/k/v and write last block of q_grad/k_grad/v_grad
-                # Assuming the sequence block size of 512 for GPU
+                # We have to read the first block and write the last block
                 mem_time = self.bytes_bwd(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
                             (self.arch['mem_bw_gbps'] * 1000) * num_waves
                 simulated_time = qkt_time + pv_time + p_grad_time + v_grad_time + q_grad_time + k_grad_time + softmax_time + total_atomic_time_us + mem_time
