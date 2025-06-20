@@ -955,8 +955,10 @@ class SDPA:
                 block_N_KV = self.N_KV
                 if type(self).__name__ == "flash_attention":
                     force_to_l1 = True
+                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
+                    # and Q tile size is 128 for all the cases observed
                     block_N_Q = min(128, self.N_Q)
-                    block_N_KV = min(self.N_KV, self.N_KV)
+                    #block_N_KV = min(self.N_KV, self.N_KV)
 
                 num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
                 #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
@@ -1008,8 +1010,10 @@ class SDPA:
                 pv_time = 0
                 if type(self).__name__ == "flash_attention":
                     force_to_l1 = True
+                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
+                    # and Q tile size is 128 for all the cases observed
                     block_N_Q = min(128, self.N_Q)
-                    block_N_KV = min(self.N_KV, self.N_KV)
+                    #block_N_KV = min(self.N_KV, self.N_KV)
 
                 num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
                 #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
