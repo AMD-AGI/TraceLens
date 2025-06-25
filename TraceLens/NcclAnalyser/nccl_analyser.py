@@ -20,10 +20,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import gzip
 import os
 import json
 import pandas as pd
 import warnings
+import gzip
+
+from ..util import DataLoader
 
 def list_to_tuple(obj):
     if isinstance(obj, list):
@@ -53,7 +57,7 @@ class NcclAnalyser:
         self.collective_type2name = {
             'allreduce':     ['allreduce', 'allreduce_coalesced'],
             'reducescatter': ['reducescatter', '_reduce_scatter_base', 'reduce_scatter_tensor_coalesced'],
-            'allgather':     ['allgather', 'all_gather', '_allgather_base', 'all_gather_into_tensor_coalesced'],
+            'allgather':     ['allgather', 'all_gather', '_allgather_base', 'all_gather_into_tensor_coalesced', 'allgather_into_tensor_coalesced'],
             'alltoall':      ['all_to_all'],
             'alltoallv':     ['all_to_allv'],
         }
@@ -83,8 +87,7 @@ class NcclAnalyser:
         self.rank2trace_data.clear()
         for rank, filepath in enumerate(self.list_profile_filepaths):
             print(f"Loading rank {rank} from {filepath}")
-            with open(filepath, 'r') as f:
-                raw_data = json.load(f)
+            raw_data = DataLoader.load_data(filepath)
 
             nccl_events = [e for e in raw_data['traceEvents'] if self._nccl_filter_event_fn(e)]
 

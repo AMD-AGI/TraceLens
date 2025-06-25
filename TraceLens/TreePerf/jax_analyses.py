@@ -8,7 +8,11 @@ from typing import Callable
 try:
     from enum import StrEnum
 except ImportError:
-    from backports.strenum import StrEnum
+    try:
+        from backports.strenum import StrEnum
+    # fallback for Python 3.10
+    except ImportError:
+        from strenum import StrEnum
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
@@ -334,6 +338,7 @@ class JaxAnalyses:
                 'f16': 'fp16',
                 'bf16': 'bf16',
                 'f8': 'fp8',
+                'fp8': 'fp8',
             }
             return {
                 "M": hlo_args["M"],
@@ -357,6 +362,7 @@ class JaxAnalyses:
                 "f16": 2,
                 "bf16": 2,
                 "f8": 1,
+                "fp8": 1,
             }
             dtype_A_B = self.param_details['dtype_A_B']
             bpe = size_map[dtype_A_B[0]]
@@ -386,7 +392,7 @@ class JaxAnalyses:
         event_copy[JaxAnalyses.JaxKernelEventArgs.hlo_op] = op_params
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
-        perf_model = perf_model_class(event_copy, arch=arch, detail_level=1 if arch is not None else 0)
+        perf_model = perf_model_class(event_copy, arch=arch)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
         time = event[TraceEventUtils.TraceKeys.Duration]
@@ -534,6 +540,7 @@ class JaxProfileProcessor:
                 if any(k in dict_line["custom_call_target"] for k in gemm_keys):
                     if "f8" in str(custom_call_target[0]):
                         dict_line["type"]="fp8"
+                        dict_line["computation"]="gemm"
                     else:
                         # use the input type to determine the GEMM type
                         gemm_type = JaxProfileProcessor.get_operand_type(hlo_ops, operands[0])
@@ -544,7 +551,7 @@ class JaxProfileProcessor:
         return (key,dict_line)
     @staticmethod
     def get_operand_type(hlo_ops: dict, operand : str) -> str:
-        dtypes = ["bf16", "f16", "f32", "f8"]
+        dtypes = ["bf16", "f16", "f32", "f8", "fp8"]
         # if the operand is a slice of something else, then the type might be at the beginning of the operand name
         for t in dtypes:
             if operand.startswith(t):
@@ -569,7 +576,7 @@ class JaxProfileProcessor:
 
             else:
                 raise ValueError(str_size)
-        dtypes=["bf16", "f16", "f32"]
+        dtypes=["bf16", "f16", "f32", "f8", "fp8"]
         gemm_dict={}
         for opname,op in hlo_ops.items():
             if "gemm" in op["computation"].lower():

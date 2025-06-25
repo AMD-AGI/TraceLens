@@ -92,6 +92,19 @@ class GEMM:
         self.B, self.M, self.N, self.K = self.param_details['B'], self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
 
+
+        if arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
+            else:
+                # TODO: use naive roofline model
+                pass
+
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
