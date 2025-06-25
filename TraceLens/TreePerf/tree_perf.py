@@ -50,12 +50,13 @@ class TreePerfAnalyzer:
         tree = TraceToTree(data, event_to_category=categorizer)
         return TreePerfAnalyzer(tree, jax=jax, event_to_category=categorizer, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
+    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax = False, python_path=None, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
         self.add_python_func = add_python_func
         self.arch = arch
+        self.python_path = python_path
         self.event_to_category = event_to_category
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
@@ -119,7 +120,7 @@ class TreePerfAnalyzer:
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = op_to_perf_model_class_map[event['name']]
-        perf_model = perf_model_class(event, arch=self.arch)
+        perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
 
@@ -145,10 +146,23 @@ class TreePerfAnalyzer:
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
 
-        if hasattr(perf_model, "gemmologist_time"):
-            dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
-            dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
-            dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
+        if hasattr(perf_model, "get_simulation_time") and not bwd:
+            # This is for the case where we have a simulated time
+            # for the forward pass, but not for the backward pass
+            simulated_time = perf_model.get_simulation_time()
+            if simulated_time:
+                dict_metrics['Simulated Time (µs)']= simulated_time
+                dict_metrics['Simulated TFLOPS/s'] = (gflops / 1e3) / (
+                            simulated_time / 1e6) if simulated_time > 0 else float('nan')
+
+        if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
+            # This is for the case where we have a simulated time
+            # for the forward pass, but not for the backward pass
+            simulated_time = perf_model.get_simulation_time_bwd()
+            if simulated_time:
+                dict_metrics['Simulated Time (µs)'] = simulated_time
+                dict_metrics['Simulated TFLOPS/s'] = (gflops / 1e3) / (
+                            simulated_time / 1e6) if simulated_time > 0 else float('nan')
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -233,11 +247,10 @@ class TreePerfAnalyzer:
         dict_agg['FLOPS/Byte'] = 'first'
         dict_agg['TB/s'] = agg_metrics
         dict_agg['TFLOPS/s'] = agg_metrics
-        if 'Gemmologist Time (µs)' in df_perf_metrics.columns:
+        if 'Simulated Time (µs)' in df_perf_metrics.columns:
             # first since it should be same for the group
-            dict_agg['Gemmologist TFLOPS/s'] = 'first'
-            dict_agg['Gemmologist Time (µs)'] = 'first'
-            dict_agg['Gemmologist cmd'] = 'first'
+            dict_agg['Simulated Time (µs)'] = 'first'
+            dict_agg['Simulated TFLOPS/s'] = 'first'
         if 'Non-Data-Mov TFLOPS/s' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov TFLOPS/s'] = agg_metrics
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:

@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json file')
     parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')
+    parser.add_argument('--python_path', type=str, default=None, help='Path to the python executable')
     parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
     args = parser.parse_args()
 
@@ -24,7 +25,8 @@ def main():
     if args.gpu_arch_json_path:
         with open(args.gpu_arch_json_path, 'r') as f:
             gpu_arch_json = json.load(f)
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_json_path, arch=gpu_arch_json)
+
+    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_json_path, arch=gpu_arch_json, python_path=args.python_path)
 
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
 
