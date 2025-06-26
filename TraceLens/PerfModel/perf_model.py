@@ -1009,14 +1009,15 @@ class SDPA:
                 pv_time = 0
                 if type(self).__name__ == "flash_attention":
                     force_to_l1 = True
-                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
-                    # and Q tile size is 128 for all the cases observed
-                    block_N_Q = min(128, self.N_Q)
-                    #block_N_KV = min(self.N_KV, self.N_KV)
+                    # ∇Q is tiled — but it is not partitioned exclusively across thread blocks the same way ∇K and ∇V are.
+                    # Instead, multiple thread blocks may contribute to the same ∇Q tile, which is why atomics are needed on ∇Q
+                    block_N_Q = min(self.N_Q, self.N_Q)
+                    block_N_KV = min(128, self.N_KV)
 
                 num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
-                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
-                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
+                num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
+                # Partition happens on ∇K and ∇V and not ∇Q
+                total_num_blocks = num_blocks_N_KV * self.B * self.H_Q
                 num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
 
 
@@ -1059,23 +1060,23 @@ class SDPA:
                                                 name2bpe(self.param_details['dtype_A_B'][0]),
                                                 1, force_to_l1=force_to_l1, num_cus=1)
 
-                # ∇K and ∇V require partial sums from many Q blocks, because each Q block attends to
-                # the full K / V sequence.
                 # We assume that we use atomics for adding up the gradients together
-                atomic_latency_global_ns = 1000 #ns for global memory
+                atomic_latency_global_ns = 400 #ns for global memory
                 atomic_latency_local_ns = 40 #ns for shared memory/ L1
-                k_tile = 64
+                # This is the tile size for ∇K. For every tile of ∇Q, we need to accumulate the conntributions
+                # from all the ∇K blocks
+                k_tile = block_N_KV
                 warp_size = 64
 
                 # Shared-memory tile reduction:
-                # Each block only atomics once per (K_tile × d)
+                # Each block uses atomics only once per (k_tile × d)
                 # This optimization won't be there for now possibly?
-                kv_tiles = math.ceil(block_N_KV / k_tile)
+                num_k_tiles = math.ceil(block_N_KV / k_tile)
 
                 # Warp-level reduction:
                 # Each warp atomics once per d vector
                 #warps_per_block = (block_N_Q * self.d_h) // warp_size
-                warp_reduction_updates_per_block_global = math.ceil(kv_tiles * math.ceil(self.d_h / warp_size))
+                warp_reduction_updates_per_block_global = math.ceil(num_k_tiles * math.ceil(self.d_h / warp_size))
                 total_updates_global = warp_reduction_updates_per_block_global * num_waves
 
                 warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(self.d_h / warp_size))
