@@ -214,14 +214,14 @@ class TraceToTree:
         return None
 
 
-    def traverse_subtree_and_print(self, node: Dict[str, Any], prune_non_gpu: bool = True, cpu_op_fields: tuple[str] = ()) -> None:
+    def traverse_subtree_and_print(self, node: Dict[str, Any], prune_non_gpu: bool = True, cpu_op_fields: tuple[str, ...] = ()) -> None:
         """
         Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
 
         Args:
             node (Dict[str, Any]): The root node of the subtree.
             prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
-            cpu_op_fields (tuple[str]): Optional tuple to specify printing additional details for CPU operations. 
+            cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations. 
                 It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
 
         Prints:
