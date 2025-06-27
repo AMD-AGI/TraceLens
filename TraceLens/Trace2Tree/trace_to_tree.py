@@ -214,20 +214,23 @@ class TraceToTree:
         return None
 
 
-    def traverse_subtree_and_print(self, node: Dict[str, Any], prune_non_gpu: bool = True) -> None:
+    def traverse_subtree_and_print(self, node: Dict[str, Any], prune_non_gpu: bool = True, cpu_op_detail:list = []) -> None:
         """
         Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
 
         Args:
             node (Dict[str, Any]): The root node of the subtree.
             prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
+            cpu_op_detail (dict): Optional list to specify printing additional details for CPU operations.
 
         Prints:
             A structured representation of the subtree with details about each event.
         """
-        self._traverse_subtree_recursive(node, prune_non_gpu, _prefix="", is_last=True)
+        self._traverse_subtree_recursive(node, prune_non_gpu, cpu_op_detail=cpu_op_detail,
+                                        _prefix="", is_last=True)
 
-    def _traverse_subtree_recursive(self, node: Dict[str, Any], prune_non_gpu: bool,
+    def _traverse_subtree_recursive(self, node: Dict[str, Any], prune_non_gpu: bool, 
+                                    cpu_op_detail: list,
                                 _prefix: str, is_last: bool) -> None:
         connector = "└── " if is_last else "├── "
         name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, 'Unknown')
@@ -243,6 +246,17 @@ class TraceToTree:
 
         print(print_str)
 
+        if cat == 'cpu_op':
+            args = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {})
+            cpu_detail_prefix = _prefix + ("    " if is_last else "│   ") + "|   "
+            for detail in cpu_op_detail:
+                if detail in args:
+                    detail_value = args[detail]
+                    print_str = f"{cpu_detail_prefix}{detail}: {detail_value}"
+                    print(print_str)
+            if len(cpu_op_detail) > 0:
+                print(cpu_detail_prefix)
+
         children = self.get_children_events(node)
         if prune_non_gpu:
             children = [child for child in children if 'non_gpu_path' not in child]
@@ -252,7 +266,8 @@ class TraceToTree:
 
         for i, child in enumerate(children):
             self._traverse_subtree_recursive(child, prune_non_gpu,
-                                            new_prefix, is_last=(i == child_count - 1))
+                                            cpu_op_detail=cpu_op_detail,
+                                            _prefix=new_prefix, is_last=(i == child_count - 1))
 
     def traverse_parents_and_print(self, node):
         depth = 0
