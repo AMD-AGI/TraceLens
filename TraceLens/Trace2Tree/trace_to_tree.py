@@ -250,12 +250,14 @@ class TraceToTree:
         if cat == 'cpu_op':
             args = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {})
             cpu_detail_prefix = _prefix + ("    " if is_last else "│   ") + "|   "
+            details_emitted = False
             for detail in cpu_op_fields:
                 if detail in args:
                     detail_value = args[detail]
                     print_str = f"{cpu_detail_prefix}{detail}: {detail_value}"
                     print(print_str)
-            if len(cpu_op_fields) > 0:
+                    details_emitted = True
+            if details_emitted:
                 print(cpu_detail_prefix)
 
         children = self.get_children_events(node)
