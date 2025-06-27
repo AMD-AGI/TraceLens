@@ -7,6 +7,7 @@ from .NcclAnalyser.nccl_analyser import NcclAnalyser
 from .util import DataLoader,TraceEventUtils
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
+from .Reporting import *
 
 __all__ = [
     "TreePerfAnalyzer",
@@ -22,4 +23,5 @@ __all__ = [
     "EventReplayer",
     "DataLoader",
     "TraceEventUtils",
+    "Reporting",
 ]

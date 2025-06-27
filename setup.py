@@ -11,6 +11,8 @@ setup(
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
         'openpyxl',
+        'tensorboard-plugin-profile==2.19.0',
+        'tensorflow',
     ],
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open('README.md').read(),
