@@ -43,6 +43,7 @@ op_to_perf_model_class_map = {
     'flash_attn::_flash_attn_forward': perf_model.flash_attention,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
     'aten::_scaled_dot_product_efficient_attention': perf_model.aten__scaled_dot_product_efficient_attention,
+    'aten::_scaled_dot_product_flash_attention': perf_model.aten__scaled_dot_product_flash_attention,
     'aten::convolution': perf_model.aten_conv,
 }
 
