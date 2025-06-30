@@ -92,6 +92,19 @@ class GEMM:
         self.B, self.M, self.N, self.K = self.param_details['B'], self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
 
+
+        if arch is not None:
+            if os.environ.get('GEMMOLOGIST_PATH') is not None:
+                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
+                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+                dtype = self.param_details.get("gemmologist_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
+            else:
+                # TODO: use naive roofline model
+                pass
+
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
@@ -1009,15 +1022,14 @@ class SDPA:
                 pv_time = 0
                 if type(self).__name__ == "flash_attention":
                     force_to_l1 = True
-                    # ∇Q is tiled — but it is not partitioned exclusively across thread blocks the same way ∇K and ∇V are.
-                    # Instead, multiple thread blocks may contribute to the same ∇Q tile, which is why atomics are needed on ∇Q
-                    block_N_Q = min(self.N_Q, self.N_Q)
-                    block_N_KV = min(128, self.N_KV)
+                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
+                    # and Q tile size is 128 for all the cases observed
+                    block_N_Q = min(128, self.N_Q)
+                    #block_N_KV = min(self.N_KV, self.N_KV)
 
                 num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
-                num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
-                # Partition happens on ∇K and ∇V and not ∇Q
-                total_num_blocks = num_blocks_N_KV * self.B * self.H_Q
+                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
+                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
                 num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
 
 
@@ -1060,23 +1072,23 @@ class SDPA:
                                                 name2bpe(self.param_details['dtype_A_B'][0]),
                                                 1, force_to_l1=force_to_l1, num_cus=1)
 
+                # ∇K and ∇V require partial sums from many Q blocks, because each Q block attends to
+                # the full K / V sequence.
                 # We assume that we use atomics for adding up the gradients together
-                atomic_latency_global_ns = 400 #ns for global memory
+                atomic_latency_global_ns = 1000 #ns for global memory
                 atomic_latency_local_ns = 40 #ns for shared memory/ L1
-                # This is the tile size for ∇K. For every tile of ∇Q, we need to accumulate the conntributions
-                # from all the ∇K blocks
-                k_tile = block_N_KV
+                k_tile = 64
                 warp_size = 64
 
                 # Shared-memory tile reduction:
-                # Each block uses atomics only once per (k_tile × d)
+                # Each block only atomics once per (K_tile × d)
                 # This optimization won't be there for now possibly?
-                num_k_tiles = math.ceil(block_N_KV / k_tile)
+                kv_tiles = math.ceil(block_N_KV / k_tile)
 
                 # Warp-level reduction:
                 # Each warp atomics once per d vector
                 #warps_per_block = (block_N_Q * self.d_h) // warp_size
-                warp_reduction_updates_per_block_global = math.ceil(num_k_tiles * math.ceil(self.d_h / warp_size))
+                warp_reduction_updates_per_block_global = math.ceil(kv_tiles * math.ceil(self.d_h / warp_size))
                 total_updates_global = warp_reduction_updates_per_block_global * num_waves
 
                 warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(self.d_h / warp_size))
@@ -1193,6 +1205,37 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
 
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
+
+class aten__scaled_dot_product_flash_attention(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        # the order of arguments for aten::_scaled_dot_product_flash_attention is:
+        # query: Tensor
+        # key: Tensor
+        # value: Tensor
+        # dropout_p: float
+        # is_causal: bool
+        # return_debug_mask: bool
+        # *
+        # scale: Optional[float]
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        B, H_Q, N_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, H_KV, N_KV, _ = input_dims[1]
+        dropout_p = 0.0
+        if concrete_inputs[3] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[3])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[4].lower() == 'true' if concrete_inputs[4] not in ('', 'None') else False
+        # scale = float(concrete_inputs[5]) if concrete_inputs[5] not in ('', 'None') else None
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
 
 class UnaryElementwise:
 
