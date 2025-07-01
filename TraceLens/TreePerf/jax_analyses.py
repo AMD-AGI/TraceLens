@@ -95,7 +95,7 @@ class JaxAnalyses:
         return categorized_events, uncategorized_events
 
     @staticmethod
-    def create_breakdown_df(events: dict, total_time, num_gpus: int):
+    def create_breakdown_df(events: dict, total_time, num_gpus: int = 8):
         df = pd.DataFrame.from_dict(events, orient='index', columns=['count', 'time'])
         # convert time to ms by div by 1e3
         df['time ms'] = df['time'] / 1e3
