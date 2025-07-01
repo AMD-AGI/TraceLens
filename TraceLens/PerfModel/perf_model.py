@@ -25,6 +25,7 @@ import math
 import os
 import re
 import subprocess
+import warnings
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
@@ -257,7 +258,8 @@ class aten_mm(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_mm. ")
         self.bpe = name2bpe(dtype_A_B[0])
         return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
                              bpe_bias=self.bpe, # does not matter
@@ -294,7 +296,8 @@ class aten_addmm(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_addmm. ")
         self.bpe = name2bpe(dtype_A_B[0])
         # setting bias bpe to be the same as the input matrices is not totally correct
         # TODO: correct later
@@ -336,7 +339,8 @@ class aten_scaled_mm(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_scaled_mm. ")
         self.bpe = name2bpe(dtype_A_B[0])
         # assumption:
         # for fp8 the output dtype is fp16
@@ -399,7 +403,8 @@ class aten_bmm(GEMM):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_bmm. ")
 
         bpe = name2bpe(dtype_A_B[0])
         per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
@@ -454,7 +459,8 @@ class aten_baddbmm(GEMM):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_baddbmm. ")
 
         bpe = name2bpe(dtype_A_B[0])
         per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
