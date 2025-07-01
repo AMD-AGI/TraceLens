@@ -502,7 +502,8 @@ class JaxProfileProcessor:
     def process_line(hlo_ops: dict, line: str):
         line_processed=line.strip()
         if (("metadata" in line_processed and not(re.search(r"\)$",line_processed)) and not(re.search(r"^ROOT",line_processed)))
-            or any(t in line_processed for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"])):
+            or any(t in line_processed for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"])
+            and not(line_processed.startswith("HloModule "))):
             k,v=JaxProfileProcessor.get_dict(hlo_ops, line_processed)
             hlo_ops[k]=v
             return True
