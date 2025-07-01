@@ -28,4 +28,3 @@ jobs:
         run: |
           pip install pytest
           pytest tests/test_subtract_intervals.py
-        working-directory: ./tracelens
