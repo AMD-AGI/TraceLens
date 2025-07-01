@@ -845,7 +845,7 @@ class SDPA:
         raise NotImplementedError
 
     @staticmethod
-    def flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal):
+    def flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal):
         # ref: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L29
         flops_qk = B * H_Q * (2 * N_Q * N_KV * d_h)
         # not including softmax for now as flops are order of d_k smaller
@@ -859,12 +859,10 @@ class SDPA:
         return total_flops
     def flops(self):
         return self.flops_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                self.param_details['dropout'], self.param_details['causal'])
+                                self.param_details['causal'])
 
     @staticmethod
-    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, bytes_per_element):
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal, bytes_per_element):
         elems_q_read = B * N_Q * H_Q * d_h
         elems_kv_read = 2 * B * N_KV * H_KV * d_h
         elems_out_write = B * N_Q * H_Q * d_h
@@ -873,12 +871,10 @@ class SDPA:
     #TODO make bytes_per_element based on profile info
     def bytes(self, bytes_per_element=2):
         return self.bytes_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
+                                self.param_details['causal'], bytes_per_element)
 
     @staticmethod
-    def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, flash_impl):
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+    def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal, flash_impl):
         total_flops = 0
         if flash_impl:
             # 0. recompute qk
@@ -911,9 +907,7 @@ class SDPA:
         return total_flops
 
     @staticmethod
-    def bytes_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, bytes_per_element):
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+    def bytes_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal, bytes_per_element):
         # This will be done for recompute in flash attention
         elems_q_read = B * N_Q * H_Q * d_h
         elems_kv_read = 2 * B * N_KV * H_KV * d_h
@@ -929,7 +923,7 @@ class SDPA:
 
     def flops_bwd(self):
         return self.flops_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                    self.param_details['dropout'], self.param_details['causal'],
+                                    self.param_details['causal'],
                                     self.param_details['flash_impl'])
 
     # @staticmethod
@@ -937,7 +931,7 @@ class SDPA:
     def bytes_bwd(self, bytes_per_element=2):
         # Same as forward for now
         return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                               self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
+                                   self.param_details['causal'], bytes_per_element)
 
     
     def get_simulation_time(self):
