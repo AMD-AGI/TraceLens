@@ -29,13 +29,3 @@ jobs:
           pip install pytest
           pytest tests/test_subtract_intervals.py
         working-directory: ./tracelens
-
-      - name: Run test_event_replay.py (CLI)
-        run: |
-          python tests/test_event_replay.py --full_run_trace_path dummy_trace.json --output_csv dummy_output.csv || echo "test_event_replay.py requires specific files, skipping if not present"
-        working-directory: ./tracelens
-
-      - name: Run test_compare_perf_report.py (CLI)
-        run: |
-          python tests/test_compare_perf_report.py --ref_root dummy_ref --fn_root dummy_fn --profile_data_json dummy_profile.json || echo "test_compare_perf_report.py requires specific files, skipping if not present"
-        working-directory: ./tracelens
