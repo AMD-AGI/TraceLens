@@ -25,6 +25,7 @@ import math
 import os
 import re
 import subprocess
+import warnings
 from .kernel_name_parser import gemm_name_parser
 
 def name2bpe(name):
@@ -91,19 +92,6 @@ class GEMM:
 
         self.B, self.M, self.N, self.K = self.param_details['B'], self.param_details['M'], self.param_details['N'], self.param_details['K']
         self.bias = self.param_details['bias']
-
-
-        if arch is not None:
-            if os.environ.get('GEMMOLOGIST_PATH') is not None:
-                if not os.path.exists(os.environ.get('GEMMOLOGIST_PATH')):
-                    raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
-            else:
-                # TODO: use naive roofline model
-                pass
 
     @staticmethod
     def get_param_details(event):
@@ -270,7 +258,8 @@ class aten_mm(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_mm. ")
         self.bpe = name2bpe(dtype_A_B[0])
         return super().bytes(bpe_mat1=self.bpe, bpe_mat2=self.bpe,
                              bpe_bias=self.bpe, # does not matter
@@ -307,7 +296,8 @@ class aten_addmm(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_addmm. ")
         self.bpe = name2bpe(dtype_A_B[0])
         # setting bias bpe to be the same as the input matrices is not totally correct
         # TODO: correct later
@@ -349,7 +339,8 @@ class aten_scaled_mm(GEMM):
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_scaled_mm. ")
         self.bpe = name2bpe(dtype_A_B[0])
         # assumption:
         # for fp8 the output dtype is fp16
@@ -412,7 +403,8 @@ class aten_bmm(GEMM):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_bmm. ")
 
         bpe = name2bpe(dtype_A_B[0])
         per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
@@ -467,7 +459,8 @@ class aten_baddbmm(GEMM):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
-            raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_baddbmm. ")
 
         bpe = name2bpe(dtype_A_B[0])
         per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
@@ -858,7 +851,7 @@ class SDPA:
         raise NotImplementedError
 
     @staticmethod
-    def flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal):
+    def flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal):
         # ref: https://github.com/Dao-AILab/flash-attention/blob/main/benchmarks/benchmark_flash_attention.py#L29
         flops_qk = B * H_Q * (2 * N_Q * N_KV * d_h)
         # not including softmax for now as flops are order of d_k smaller
@@ -872,12 +865,10 @@ class SDPA:
         return total_flops
     def flops(self):
         return self.flops_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                self.param_details['dropout'], self.param_details['causal'])
+                                self.param_details['causal'])
 
     @staticmethod
-    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, bytes_per_element):
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal, bytes_per_element):
         elems_q_read = B * N_Q * H_Q * d_h
         elems_kv_read = 2 * B * N_KV * H_KV * d_h
         elems_out_write = B * N_Q * H_Q * d_h
@@ -886,12 +877,10 @@ class SDPA:
     #TODO make bytes_per_element based on profile info
     def bytes(self, bytes_per_element=2):
         return self.bytes_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
+                                self.param_details['causal'], bytes_per_element)
 
     @staticmethod
-    def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, flash_impl):
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+    def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal, flash_impl):
         total_flops = 0
         if flash_impl:
             # 0. recompute qk
@@ -924,9 +913,7 @@ class SDPA:
         return total_flops
 
     @staticmethod
-    def bytes_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, dropout, causal, bytes_per_element):
-        if dropout != 0.0:
-            raise ValueError(f"Not implemented for dropout={dropout}")
+    def bytes_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h, causal, bytes_per_element):
         # This will be done for recompute in flash attention
         elems_q_read = B * N_Q * H_Q * d_h
         elems_kv_read = 2 * B * N_KV * H_KV * d_h
@@ -942,7 +929,7 @@ class SDPA:
 
     def flops_bwd(self):
         return self.flops_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                                    self.param_details['dropout'], self.param_details['causal'],
+                                    self.param_details['causal'],
                                     self.param_details['flash_impl'])
 
     # @staticmethod
@@ -950,7 +937,7 @@ class SDPA:
     def bytes_bwd(self, bytes_per_element=2):
         # Same as forward for now
         return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                               self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
+                                   self.param_details['causal'], bytes_per_element)
 
     
     def get_simulation_time(self):
@@ -1022,14 +1009,15 @@ class SDPA:
                 pv_time = 0
                 if type(self).__name__ == "flash_attention":
                     force_to_l1 = True
-                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
-                    # and Q tile size is 128 for all the cases observed
-                    block_N_Q = min(128, self.N_Q)
-                    #block_N_KV = min(self.N_KV, self.N_KV)
+                    # ∇Q is tiled — but it is not partitioned exclusively across thread blocks the same way ∇K and ∇V are.
+                    # Instead, multiple thread blocks may contribute to the same ∇Q tile, which is why atomics are needed on ∇Q
+                    block_N_Q = min(self.N_Q, self.N_Q)
+                    block_N_KV = min(128, self.N_KV)
 
                 num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
-                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
-                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
+                num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
+                # Partition happens on ∇K and ∇V and not ∇Q
+                total_num_blocks = num_blocks_N_KV * self.B * self.H_Q
                 num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
 
 
@@ -1072,23 +1060,23 @@ class SDPA:
                                                 name2bpe(self.param_details['dtype_A_B'][0]),
                                                 1, force_to_l1=force_to_l1, num_cus=1)
 
-                # ∇K and ∇V require partial sums from many Q blocks, because each Q block attends to
-                # the full K / V sequence.
                 # We assume that we use atomics for adding up the gradients together
-                atomic_latency_global_ns = 1000 #ns for global memory
+                atomic_latency_global_ns = 400 #ns for global memory
                 atomic_latency_local_ns = 40 #ns for shared memory/ L1
-                k_tile = 64
+                # This is the tile size for ∇K. For every tile of ∇Q, we need to accumulate the conntributions
+                # from all the ∇K blocks
+                k_tile = block_N_KV
                 warp_size = 64
 
                 # Shared-memory tile reduction:
-                # Each block only atomics once per (K_tile × d)
+                # Each block uses atomics only once per (k_tile × d)
                 # This optimization won't be there for now possibly?
-                kv_tiles = math.ceil(block_N_KV / k_tile)
+                num_k_tiles = math.ceil(block_N_KV / k_tile)
 
                 # Warp-level reduction:
                 # Each warp atomics once per d vector
                 #warps_per_block = (block_N_Q * self.d_h) // warp_size
-                warp_reduction_updates_per_block_global = math.ceil(kv_tiles * math.ceil(self.d_h / warp_size))
+                warp_reduction_updates_per_block_global = math.ceil(num_k_tiles * math.ceil(self.d_h / warp_size))
                 total_updates_global = warp_reduction_updates_per_block_global * num_waves
 
                 warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(self.d_h / warp_size))
@@ -1205,6 +1193,37 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
 
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": False}    
+
+class aten__scaled_dot_product_flash_attention(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        # the order of arguments for aten::_scaled_dot_product_flash_attention is:
+        # query: Tensor
+        # key: Tensor
+        # value: Tensor
+        # dropout_p: float
+        # is_causal: bool
+        # return_debug_mask: bool
+        # *
+        # scale: Optional[float]
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        B, H_Q, N_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, H_KV, N_KV, _ = input_dims[1]
+        dropout_p = 0.0
+        if concrete_inputs[3] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[3])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[4].lower() == 'true' if concrete_inputs[4] not in ('', 'None') else False
+        # scale = float(concrete_inputs[5]) if concrete_inputs[5] not in ('', 'None') else None
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
 
 class UnaryElementwise:
 
