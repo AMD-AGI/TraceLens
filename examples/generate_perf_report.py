@@ -34,6 +34,7 @@ def main():
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
+    df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
     df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
                                                                                         agg_metrics=agg_metrics, 
                                                                                         include_pct=True)
@@ -63,6 +64,7 @@ def main():
     # Write all DataFrames to separate sheets in an Excel workbook
     with pd.ExcelWriter(args.output_xlsx_path) as writer:
         df_gpu_timeline.to_excel(writer, sheet_name='gpu_timeline', index=False)
+        df_kernel_launchers_summary_by_category.to_excel(writer, sheet_name='kernel_launchers_summary_by_category', index=False)
         df_kernel_launchers_summary.to_excel(writer, sheet_name='kernel_launchers_summary', index=False)
         df_kernel_launchers_unique_args.to_excel(writer, sheet_name='kernel_launchers_unique_args', index=False)
         
