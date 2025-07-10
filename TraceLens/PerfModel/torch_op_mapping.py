@@ -83,3 +83,51 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
     if cat is None:
         raise ValueError(f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_class: {base_classes}")
     dict_cat2names[cat].append(op_name)
+
+def categorize_torch_op(row):
+    """
+    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Args:
+        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+    Returns:
+        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'BN_fwd', 'BN_bwd',
+             'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+    """
+
+    debug = False
+    if row['name'] in dict_cat2names['GEMM']:
+        return 'GEMM'
+    elif row['name'] in ['aten::convolution', 
+                         'aten::miopen_convolution', 'aten::cudnn_convolution']:
+        return 'CONV_fwd'
+    elif row['name'] == 'aten::convolution_backward':
+        return 'CONV_bwd'
+    elif row['name'] in ['aten::batch_norm',
+                         'aten::native_batch_norm', 
+                         'aten::miopen_batch_norm', 'aten::cudnn_batch_norm']:
+        return 'BN_fwd'
+    elif row['name'] in ['aten::native_batch_norm_backward', 
+                         'aten::miopen_batch_norm_backward', 'aten::cudnn_batch_norm_backward']:
+        return 'BN_bwd'
+    elif row['name'] in dict_cat2names['SDPA']:
+        return 'SDPA_fwd'
+    elif row['name'] in ['FlashAttnFuncBackward',
+                         'flash_attn::_flash_attn_backward',
+                         'aten::_scaled_dot_product_cudnn_attention_backward',
+                         'aten::_scaled_dot_product_efficient_attention_backward',
+                         'aten::_scaled_dot_product_flash_attention_backward']:
+        return 'SDPA_bwd'
+    elif row['name'].startswith('triton'):
+        return 'triton'
+    kernel_name = row['kernel_names'][0]
+    if kernel_name.startswith('void at::native'):
+        if debug:
+            print("Found ATen native kernel:", kernel_name[:64])
+        if 'elementwise' in kernel_name:
+            return 'elementwise'
+        elif 'reduce' in kernel_name:
+            return 'reduce'
+        elif 'multi_tensor_apply' in kernel_name:
+            return 'multi_tensor_apply'
+    # if none of the above cases match, return 'other'
+    return 'other'
