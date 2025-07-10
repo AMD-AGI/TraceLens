@@ -957,7 +957,42 @@ class SDPA:
         return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
                                self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
 
-    
+    @staticmethod
+    def calculate_simulated_time_sdpa_fwd(arch, dtype, python_path,dtype_A_B, bytes,
+                                          B, H_Q, N_Q, N_KV, d_h, mem_bw_gbps, fa=True):
+        force_to_l1 = False
+        block_N_Q = N_Q
+        block_N_KV = N_KV
+
+        if fa:
+            force_to_l1 = True
+            # Every Q tile block goes through full K and V, so we keep block_N_KV same
+            # and Q tile size is 128 for all the cases observed
+            block_N_Q = min(128, N_Q)
+            # block_N_KV = min(self.N_KV, self.N_KV)
+
+        num_blocks_N_Q = math.ceil(N_Q / block_N_Q)
+        # num_blocks_N_KV = math.ceil(N_KV / block_N_KV)
+        total_num_blocks = num_blocks_N_Q * B * H_Q
+        num_waves = math.ceil(total_num_blocks / arch['num_cus'])
+
+        qkt_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=d_h, N=block_N_KV,
+                                                B=1, dtype=dtype,
+                                                python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
+        qkt_time = num_waves * qkt_time
+
+        softmax_time = num_waves * Softmax.get_time(arch, block_N_Q, block_N_KV,
+                                                    name2bpe(dtype_A_B),
+                                                    1, force_to_l1=force_to_l1, num_cus=1)
+        pv_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=block_N_KV, N=d_h,
+                                               B=1, dtype=dtype,
+                                               python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
+        pv_time = num_waves * pv_time
+
+        mem_time = bytes / N_Q / N_KV * block_N_Q * block_N_KV / \
+                   (mem_bw_gbps * 1000) * num_waves
+        return qkt_time + softmax_time + pv_time + mem_time
+
     def get_simulation_time(self):
         simulated_time = None
         if self.arch is not None:
@@ -967,47 +1002,106 @@ class SDPA:
                 dtype = self.param_details.get("gemmologist_dtype")
                 if dtype is None:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-
-                force_to_l1 = False
-                block_N_Q = self.N_Q
-                block_N_KV = self.N_KV
-                if type(self).__name__ == "flash_attention":
-                    force_to_l1 = True
-                    # Every Q tile block goes through full K and V, so we keep block_N_KV same
-                    # and Q tile size is 128 for all the cases observed
-                    block_N_Q = min(128, self.N_Q)
-                    #block_N_KV = min(self.N_KV, self.N_KV)
-
-                num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
-                #num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
-                total_num_blocks = num_blocks_N_Q * self.B * self.H_Q
-                num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
-
-                # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
-                qkt_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=self.d_h, N=block_N_KV,
-                                                            B=1, dtype=dtype,
-                                                            python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
-
-                qkt_time = num_waves * qkt_time
-
-                softmax_time = num_waves * Softmax.get_time(self.arch, block_N_Q, block_N_KV,
-                                                                                   name2bpe(
-                                                                                       self.param_details['dtype_A_B'][
-                                                                                           0]),
-                                                                                   1,
-                                                                                   force_to_l1=force_to_l1, num_cus=1)
-                # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
-                pv_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=block_N_KV, N=self.d_h,
-                                                           B=1, dtype=dtype,
-                                                           python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
-                pv_time = num_waves * pv_time
-                # We have to read the first block and write the last block
-                mem_time = self.bytes(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
-                            (self.arch['mem_bw_gbps'] * 1000) * num_waves
-                simulated_time = qkt_time + softmax_time + pv_time + mem_time
+                bytes = self.bytes(name2bpe(self.param_details['dtype_A_B'][0]))
+                fa = True if type(self).__name__ == "flash_attention" else False
+                simulated_time = SDPA.calculate_simulated_time_sdpa_fwd(self.arch, dtype,
+                    self.python_path, self.param_details['dtype_A_B'][0], bytes, self.B,
+                    self.H_Q, self.N_Q, self.N_KV, self.d_h, self.arch['mem_bw_gbps'],fa)
             else:
                 # TODO: use naive roofline model
                 pass
+        return simulated_time
+
+    @staticmethod
+    def calculate_simulated_time_sdpa_bwd(arch, dtype, python_path, dtype_A_B, bytes,
+                                          B, H_Q, N_Q, N_KV, d_h, mem_bw_gbps, fa=True):
+        force_to_l1 = False
+        block_N_Q = N_Q
+        block_N_KV = N_KV
+        qkt_time = 0
+        pv_time = 0
+
+        if fa:
+            force_to_l1 = True
+            # ∇Q is tiled — but it is not partitioned exclusively across thread blocks the same way ∇K and ∇V are.
+            # Instead, multiple thread blocks may contribute to the same ∇Q tile, which is why atomics are needed on ∇Q
+            block_N_Q = min(N_Q, N_Q)
+            block_N_KV = min(128, N_KV)
+
+        num_blocks_N_Q = math.ceil(N_Q / block_N_Q)
+        num_blocks_N_KV = math.ceil(N_KV / block_N_KV)
+        # Partition happens on ∇K and ∇V and not ∇Q
+        total_num_blocks = num_blocks_N_KV * B * H_Q
+        num_waves = math.ceil(total_num_blocks / arch['num_cus'])
+
+        qkt_fwd_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=d_h, N=block_N_KV,
+                                                    B=1,
+                                                    dtype=dtype,
+                                                    python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
+
+        qkt_fwd_time = num_waves * qkt_fwd_time
+
+        # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
+        pv_fwd_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=block_N_KV, N=d_h,
+                                                   B=1, dtype=dtype,
+                                                   python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
+        pv_fwd_time = num_waves * pv_fwd_time
+        # pv_fwd_time, _ =  math.ceil(self.N_Q / 512) * math.ceil(self.N_KV / 512) * GEMM.get_gemmologist_time(self.arch, M=512, K=512, N=self.d_h,
+        #                                       B=self.B * self.H_Q, dtype=dtype,
+        #                                       python_path=self.python_path, force_to_l1=force_to_l1)
+
+        if fa:
+            # In case of flash attention we have to recompute
+            # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
+            qkt_time = qkt_fwd_time
+            pv_time = pv_fwd_time
+
+        # We don't need to go to gemmologist to calculate these,
+        # as we already have the times
+        p_grad_time = qkt_fwd_time
+        v_grad_time = pv_fwd_time
+        q_grad_time = pv_fwd_time
+        k_grad_time = pv_fwd_time
+
+        # p_grad_time = pv_fwd_time
+        # v_grad_time = qkt_fwd_time
+        # q_grad_time = qkt_fwd_time
+        # k_grad_time = qkt_fwd_time
+
+        softmax_time = num_waves * Softmax.get_time(arch, block_N_Q, block_N_KV,
+                                                    name2bpe(dtype_A_B), 1, force_to_l1=force_to_l1, num_cus=1)
+
+        # We assume that we use atomics for adding up the gradients together
+        atomic_latency_global_ns = 400  # ns for global memory
+        atomic_latency_local_ns = 40  # ns for shared memory/ L1
+        # This is the tile size for ∇K. For every tile of ∇Q, we need to accumulate the contributions
+        # from all the ∇K blocks
+        k_tile = block_N_KV
+        warp_size = 64
+
+        # Shared-memory tile reduction:
+        # Each block uses atomics only once per (k_tile × d)
+        # This optimization won't be there for now possibly?
+        num_k_tiles = math.ceil(block_N_KV / k_tile)
+
+        # Warp-level reduction:
+        # Each warp atomics once per d vector
+        # warps_per_block = (block_N_Q * self.d_h) // warp_size
+        warp_reduction_updates_per_block_global = math.ceil(num_k_tiles * math.ceil(d_h / warp_size))
+        total_updates_global = warp_reduction_updates_per_block_global * num_waves
+
+        warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(d_h / warp_size))
+        total_updates_local = warp_reduction_updates_per_block_local * num_waves
+
+        # Total atomic time (serialized across all blocks)
+        total_atomic_time_us = (atomic_latency_global_ns * total_updates_global +
+                                atomic_latency_local_ns * total_updates_local) / 1e3
+
+        # We have to read the first block and write the last block
+        mem_time = bytes / N_Q / N_KV * block_N_Q * block_N_KV / \
+                   (arch['mem_bw_gbps'] * 1000) * num_waves
+        simulated_time = qkt_time + pv_time + p_grad_time + v_grad_time + q_grad_time + \
+                         k_grad_time + softmax_time + total_atomic_time_us + mem_time
         return simulated_time
 
     def get_simulation_time_bwd(self):
@@ -1020,94 +1114,11 @@ class SDPA:
                 if dtype is None:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
 
-                force_to_l1 = False
-                block_N_Q = self.N_Q
-                block_N_KV = self.N_KV
-                qkt_time = 0
-                pv_time = 0
-                if type(self).__name__ == "flash_attention":
-                    force_to_l1 = True
-                    # ∇Q is tiled — but it is not partitioned exclusively across thread blocks the same way ∇K and ∇V are.
-                    # Instead, multiple thread blocks may contribute to the same ∇Q tile, which is why atomics are needed on ∇Q
-                    block_N_Q = min(self.N_Q, self.N_Q)
-                    block_N_KV = min(128, self.N_KV)
-
-                num_blocks_N_Q = math.ceil(self.N_Q / block_N_Q)
-                num_blocks_N_KV = math.ceil(self.N_KV / block_N_KV)
-                # Partition happens on ∇K and ∇V and not ∇Q
-                total_num_blocks = num_blocks_N_KV * self.B * self.H_Q
-                num_waves = math.ceil(total_num_blocks / self.arch['num_cus'])
-
-
-                qkt_fwd_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=self.d_h, N=block_N_KV,
-                                                        B=1,
-                                                        dtype=dtype,
-                                                        python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
-
-                qkt_fwd_time = num_waves * qkt_fwd_time
-
-
-                # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
-                pv_fwd_time, _ = GEMM.get_gemmologist_time(self.arch, M=block_N_Q, K=block_N_KV, N=self.d_h,
-                                                        B=1, dtype=dtype,
-                                                        python_path=self.python_path, force_to_l1=force_to_l1, num_cus=1)
-                pv_fwd_time = num_waves * pv_fwd_time
-                #pv_fwd_time, _ =  math.ceil(self.N_Q / 512) * math.ceil(self.N_KV / 512) * GEMM.get_gemmologist_time(self.arch, M=512, K=512, N=self.d_h,
-                #                                       B=self.B * self.H_Q, dtype=dtype,
-                #                                       python_path=self.python_path, force_to_l1=force_to_l1)
-
-                if type(self).__name__ == "flash_attention":
-                    # In case of flash attention we have to recompute
-                    # B = B * H_Q, M = N_Q, N = N_KV, K = d_H
-                    qkt_time = qkt_fwd_time
-                    pv_time = pv_fwd_time
-
-                # We don't need to go to gemmologist to calculate these,
-                # as we already have the times
-                p_grad_time = qkt_fwd_time
-                v_grad_time = pv_fwd_time
-                q_grad_time = pv_fwd_time
-                k_grad_time = pv_fwd_time
-
-                #p_grad_time = pv_fwd_time
-                #v_grad_time = qkt_fwd_time
-                #q_grad_time = qkt_fwd_time
-                #k_grad_time = qkt_fwd_time
-
-                softmax_time = num_waves * Softmax.get_time(self.arch, block_N_Q, block_N_KV,
-                                                name2bpe(self.param_details['dtype_A_B'][0]),
-                                                1, force_to_l1=force_to_l1, num_cus=1)
-
-                # We assume that we use atomics for adding up the gradients together
-                atomic_latency_global_ns = 400 #ns for global memory
-                atomic_latency_local_ns = 40 #ns for shared memory/ L1
-                # This is the tile size for ∇K. For every tile of ∇Q, we need to accumulate the conntributions
-                # from all the ∇K blocks
-                k_tile = block_N_KV
-                warp_size = 64
-
-                # Shared-memory tile reduction:
-                # Each block uses atomics only once per (k_tile × d)
-                # This optimization won't be there for now possibly?
-                num_k_tiles = math.ceil(block_N_KV / k_tile)
-
-                # Warp-level reduction:
-                # Each warp atomics once per d vector
-                #warps_per_block = (block_N_Q * self.d_h) // warp_size
-                warp_reduction_updates_per_block_global = math.ceil(num_k_tiles * math.ceil(self.d_h / warp_size))
-                total_updates_global = warp_reduction_updates_per_block_global * num_waves
-
-                warp_reduction_updates_per_block_local = math.ceil(k_tile * math.ceil(self.d_h / warp_size))
-                total_updates_local = warp_reduction_updates_per_block_local * num_waves
-
-                # Total atomic time (serialized across all blocks)
-                total_atomic_time_us = (atomic_latency_global_ns * total_updates_global +
-                                        atomic_latency_local_ns * total_updates_local) / 1e3
-
-                # We have to read the first block and write the last block
-                mem_time = self.bytes_bwd(name2bpe(self.param_details['dtype_A_B'][0])) / self.N_Q / self.N_KV * block_N_Q * block_N_KV /\
-                            (self.arch['mem_bw_gbps'] * 1000) * num_waves
-                simulated_time = qkt_time + pv_time + p_grad_time + v_grad_time + q_grad_time + k_grad_time + softmax_time + total_atomic_time_us + mem_time
+                bytes = self.bytes_bwd(name2bpe(self.param_details['dtype_A_B'][0]))
+                fa = True if type(self).__name__ == "flash_attention" else False
+                simulated_time = SDPA.calculate_simulated_time_sdpa_bwd(self.arch, dtype,
+                    self.python_path, self.param_details['dtype_A_B'][0], bytes, self.B,
+                    self.H_Q, self.N_Q, self.N_KV, self.d_h, self.arch['mem_bw_gbps'], fa)
             else:
                 # TODO: use naive roofline model
                 pass
