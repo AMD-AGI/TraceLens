@@ -474,14 +474,11 @@ class TreePerfAnalyzer:
         return df_unique_args
 
     @staticmethod
-    def get_df_kernel_launchers_summary_by_category(df_kernel_launchers: pd.DataFrame,
-                                            agg_metrics=['mean'], include_pct=False) -> pd.DataFrame:
-        """
+    def get_df_kernel_launchers_summary_by_category(df_kernel_launchers: pd.DataFrame) -> pd.DataFrame:
+        """                            
         Generate a DataFrame with breakdown of kernel launchers by category.
         Args:
             df_kernel_launchers (pd.DataFrame): DataFrame containing kernel launchers.
-            agg_metrics (list): List of aggregation metrics to apply. ex: ['mean', 'std', 'median']
-            include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
         Returns:
             pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
         """
