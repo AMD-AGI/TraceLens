@@ -338,10 +338,14 @@ class aten_scaled_mm(GEMM):
 
     def bytes(self):
         dtype_A_B = self.param_details['dtype_A_B']
-        if dtype_A_B[0] != dtype_A_B[1]:
+        bpeA = name2bpe(dtype_A_B[0])
+        bpeB = name2bpe(dtype_A_B[1])
+        assert bpeA is not None and bpeB is not None, \
+            f"Data types of A and B are not supported: {dtype_A_B}"
+        if bpeA != bpeB:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
             warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_scaled_mm. ")
-        self.bpe = name2bpe(dtype_A_B[0])
+        self.bpe = bpeA  # or bpeB, they are the same
         # assumption:
         # for fp8 the output dtype is fp16
         # for fp16, bf16, fp32 the output dtype is the same as the input dtype
