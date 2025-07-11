@@ -40,7 +40,8 @@ def name2bpe(name):
         8: ['double', 'long int'],
         4: ['float', 'scalar'],
         2: ['c10::half', 'c10::bfloat16'],
-        1: ['c10::float8_e4m3fnuz', 'unsigned char', 'fp8'],
+        1: ['c10::float8_e4m3fnuz', 'c10::float8_e4m3fn', 'c10::float8_e5m2',
+            'unsigned char', 'fp8'],
     }
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
@@ -59,6 +60,8 @@ def torch_dtype_map(dtype):
         'c10::half': 'fp16',
         'c10::bfloat16': 'bf16',
         'c10::float8_e4m3fnuz': 'fp8',
+        'c10::float8_e4m3fn': 'fp8',
+        'c10::float8_e5m2': 'fp8',
         'unsigned char': 'fp8',
         'fp8': 'fp8',
     }
@@ -344,7 +347,7 @@ class aten_scaled_mm(GEMM):
             f"Data types of A and B are not supported: {dtype_A_B}"
         if bpeA != bpeB:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
-            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_scaled_mm. ")
+            warnings.warn(f"Data sizes of A and B are different: {dtype_A_B} for aten_scaled_mm. ")
         self.bpe = bpeA  # or bpeB, they are the same
         # assumption:
         # for fp8 the output dtype is fp16
