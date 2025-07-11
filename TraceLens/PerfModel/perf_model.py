@@ -46,6 +46,23 @@ def name2bpe(name):
     dict_dtype2bpe = {dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes}
     return dict_dtype2bpe.get(name.lower(), None)
 
+def gemmologist_dtype_map(dtype):
+    """
+    This function maps a PyTorch data type to a gemmologist data type.
+    Args:
+        dtype (str): The name of the pytorch data type.
+    Returns:
+        str: The name of the PyTorch data type.
+    """
+    dict_dtype2gemmologist = {
+        'fp32':'float',
+        'fp64':'double',
+        'fp16':'c10::half',
+        'bf16':'c10::bfloat16',
+        'fp8':'c10::float8_e4m3fnuz'
+    }
+    return dict_dtype2gemmologist.get(dtype.lower(), None)
+
 def torch_dtype_map(dtype):
     """
     This function maps a PyTorch data type to a gemmologist data type.
@@ -157,7 +174,7 @@ class GEMM:
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     @staticmethod
-    def get_gemmologist_time(arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None):
+    def get_simulation_time_func(arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None):
         missing_inputs = []
         if M is None:
             missing_inputs.append("M")
@@ -237,7 +254,7 @@ class GEMM:
                 dtype = self.param_details.get("gemmologist_dtype")
                 if dtype is None:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                simulation_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(self.arch, self.M, self.N, self.K, self.B,
+                simulation_time, self.gemmologist_cmd = GEMM.get_simulation_time_func(self.arch, self.M, self.N, self.K, self.B,
                                                                                   dtype, self.python_path)
             else:
                 # TODO: use naive roofline model
@@ -958,8 +975,8 @@ class SDPA:
                                self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
 
     @staticmethod
-    def calculate_simulated_time_sdpa_fwd(arch, dtype, python_path,dtype_A_B, bytes,
-                                          B, H_Q, N_Q, N_KV, d_h, mem_bw_gbps, fa=True):
+    def get_simulation_time_func(arch, dtype, python_path,dtype_A_B, bytes,
+                                          B, H_Q, N_Q, N_KV, d_h, fa=True):
         force_to_l1 = False
         block_N_Q = N_Q
         block_N_KV = N_KV
@@ -976,7 +993,7 @@ class SDPA:
         total_num_blocks = num_blocks_N_Q * B * H_Q
         num_waves = math.ceil(total_num_blocks / arch['num_cus'])
 
-        qkt_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=d_h, N=block_N_KV,
+        qkt_time, _ = GEMM.get_simulation_time_func(arch, M=block_N_Q, K=d_h, N=block_N_KV,
                                                 B=1, dtype=dtype,
                                                 python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
         qkt_time = num_waves * qkt_time
@@ -984,13 +1001,13 @@ class SDPA:
         softmax_time = num_waves * Softmax.get_time(arch, block_N_Q, block_N_KV,
                                                     name2bpe(dtype_A_B),
                                                     1, force_to_l1=force_to_l1, num_cus=1)
-        pv_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=block_N_KV, N=d_h,
+        pv_time, _ = GEMM.get_simulation_time_func(arch, M=block_N_Q, K=block_N_KV, N=d_h,
                                                B=1, dtype=dtype,
                                                python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
         pv_time = num_waves * pv_time
 
         mem_time = bytes / N_Q / N_KV * block_N_Q * block_N_KV / \
-                   (mem_bw_gbps * 1000) * num_waves
+                   (arch['mem_bw_gbps'] * 1000) * num_waves
         return qkt_time + softmax_time + pv_time + mem_time
 
     def get_simulation_time(self):
@@ -1004,17 +1021,17 @@ class SDPA:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
                 bytes = self.bytes(name2bpe(self.param_details['dtype_A_B'][0]))
                 fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.calculate_simulated_time_sdpa_fwd(self.arch, dtype,
+                simulated_time = SDPA.get_simulation_time_func(self.arch, dtype,
                     self.python_path, self.param_details['dtype_A_B'][0], bytes, self.B,
-                    self.H_Q, self.N_Q, self.N_KV, self.d_h, self.arch['mem_bw_gbps'],fa)
+                    self.H_Q, self.N_Q, self.N_KV, self.d_h, fa)
             else:
                 # TODO: use naive roofline model
                 pass
         return simulated_time
 
     @staticmethod
-    def calculate_simulated_time_sdpa_bwd(arch, dtype, python_path, dtype_A_B, bytes,
-                                          B, H_Q, N_Q, N_KV, d_h, mem_bw_gbps, fa=True):
+    def get_simulation_time_bwd_func(arch, dtype, python_path, dtype_A_B, bytes,
+                                          B, H_Q, N_Q, N_KV, d_h, fa=True):
         force_to_l1 = False
         block_N_Q = N_Q
         block_N_KV = N_KV
@@ -1034,7 +1051,7 @@ class SDPA:
         total_num_blocks = num_blocks_N_KV * B * H_Q
         num_waves = math.ceil(total_num_blocks / arch['num_cus'])
 
-        qkt_fwd_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=d_h, N=block_N_KV,
+        qkt_fwd_time, _ = GEMM.get_simulation_time_func(arch, M=block_N_Q, K=d_h, N=block_N_KV,
                                                     B=1,
                                                     dtype=dtype,
                                                     python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
@@ -1042,7 +1059,7 @@ class SDPA:
         qkt_fwd_time = num_waves * qkt_fwd_time
 
         # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
-        pv_fwd_time, _ = GEMM.get_gemmologist_time(arch, M=block_N_Q, K=block_N_KV, N=d_h,
+        pv_fwd_time, _ = GEMM.get_simulation_time_func(arch, M=block_N_Q, K=block_N_KV, N=d_h,
                                                    B=1, dtype=dtype,
                                                    python_path=python_path, force_to_l1=force_to_l1, num_cus=1)
         pv_fwd_time = num_waves * pv_fwd_time
@@ -1116,9 +1133,9 @@ class SDPA:
 
                 bytes = self.bytes_bwd(name2bpe(self.param_details['dtype_A_B'][0]))
                 fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.calculate_simulated_time_sdpa_bwd(self.arch, dtype,
+                simulated_time = SDPA.get_simulation_time_bwd_func(self.arch, dtype,
                     self.python_path, self.param_details['dtype_A_B'][0], bytes, self.B,
-                    self.H_Q, self.N_Q, self.N_KV, self.d_h, self.arch['mem_bw_gbps'], fa)
+                    self.H_Q, self.N_Q, self.N_KV, self.d_h, fa)
             else:
                 # TODO: use naive roofline model
                 pass
