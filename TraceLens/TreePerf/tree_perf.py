@@ -296,6 +296,18 @@ class TreePerfAnalyzer:
         for event in self.tree.events:
             if self.event_to_category(event) != 'cpu_op':
                 continue
+
+            if event['name'] == 'execute':
+                parent = self.tree.get_parent_event(event)
+                list_kernel_uids = parent.get('gpu_events', [])
+                list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
+                parent['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+                parent['direct_kernel_count'] = len(list_kernels)
+                parent['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+                parent['op category'] = categorize_torch_op(parent)
+                kernel_launchers.append(parent)
+                continue # no need to check children of this event
+
             kernel_launcher = False
             # total_direct_kernel_time = 0
             # direct_kernel_count = 0
