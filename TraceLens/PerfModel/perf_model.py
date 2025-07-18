@@ -119,7 +119,7 @@ class GEMM:
                 dtype = self.param_details.get("gemmologist_dtype")
                 if dtype is None:
                     dtype = torch_dtype_map(self.param_details['dtype_A_B'][0])
-                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_gemmologist_time(arch, self.M, self.N, self.K, self.B, dtype)
+                self.gemmologist_time, self.gemmologist_cmd = GEMM.get_simulation_time_func(arch, self.M, self.N, self.K, self.B, dtype, self.python_path)
             else:
                 # TODO: use naive roofline model
                 pass
@@ -971,8 +971,8 @@ class SDPA:
     # def bytes_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl, bytes_per_element):
     def bytes_bwd(self, bytes_per_element=2):
         # Same as forward for now
-        return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h,
-                               self.param_details['dropout'], self.param_details['causal'], bytes_per_element)
+        return self.bytes_bwd_func(self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h
+                                   , self.param_details['causal'], bytes_per_element)
 
     @staticmethod
     def get_simulation_time_func(arch, dtype, python_path,dtype_A_B, bytes,
