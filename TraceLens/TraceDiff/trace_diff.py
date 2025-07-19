@@ -15,6 +15,7 @@ class TraceDiff:
         self.db2 = []
         self.pod1 = set()
         self.pod2 = set()
+        self.merged_tree = None  # Will hold the merged tree structure
 
     def _add_subtree_to_pod_recursive(
         self, node: Dict[str, Any], pod: set, tree: TraceToTree
@@ -45,20 +46,13 @@ class TraceDiff:
 
     def get_diff_boundaries(self):
         """
-        Compare two trees and identify the boundaries of differences between them.
-
-        This function performs a depth-first traversal of two trees and identifies
-        the points of differences (PODs) and difference boundaries (DBs) between them.
-        It checks for differences in node names, shapes, and children, and records
-        the necessary instructions for insertions, deletions, and replacements.
-
+        Compare two trees and identify the boundaries of differences between them using recursive Wagner-Fischer and DFS, matching the reference tree.py algorithm.
         Returns:
             - db1 (list[dict]): List of difference boundaries in tree1.
             - db2 (list[dict]): List of difference boundaries in tree2.
             - pod1 (set): Set of points of differences in tree1.
             - pod2 (set): Set of points of differences in tree2.
         """
-
         tree1 = self.baseline
         tree2 = self.variant
 
@@ -68,122 +62,12 @@ class TraceDiff:
         def get_children(tree, node):
             return tree.get_children_events(node)
 
-        def get_gpu_children(tree, node):
-            return node.get("gpu_events", [])
+        def add_to_pod(node, pod, tree):
+            # Add node and all its descendants to pod
+            pod.add(node.get(TraceLens.util.TraceEventUtils.TraceKeys.UID))
+            for child in get_children(tree, node):
+                add_to_pod(child, pod, tree)
 
-        def dfs(node1: Dict[str, Any], node2: Dict[str, Any]):
-            # If either node is already a POD, skip
-            uid1 = node1.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-            uid2 = node2.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-            if uid1 in self.pod1 or uid2 in self.pod2:
-                return
-
-            # Compare node names
-            name1 = get_name(node1)
-            name2 = get_name(node2)
-            if name1 != name2:
-                self.db1.append(node1)
-                self.db2.append(node2)
-                self.add_to_pod(node1, self.pod1, tree1)
-                self.add_to_pod(node2, self.pod2, tree2)
-                return
-
-            # Get children
-            children1 = get_children(tree1, node1)
-            children2 = get_children(tree2, node2)
-
-            # If number of children differ
-            if len(children1) != len(children2):
-                if not (children1 and children2):
-                    self.db1.append(node1)
-                    self.db2.append(node2)
-                    self.add_to_pod(node1, self.pod1, tree1)
-                    self.add_to_pod(node2, self.pod2, tree2)
-                    return
-                names1 = set(get_name(child) for child in children1)
-                names2 = set(get_name(child) for child in children2)
-                intersection = names1 & names2
-                if names1 == names2:
-                    pass
-                elif intersection:
-                    diff1 = names1 - intersection
-                    diff2 = names2 - intersection
-                    for child in children1:
-                        if get_name(child) in diff1:
-                            self.add_to_pod(child, self.pod1, tree1)
-                    for child in children2:
-                        if get_name(child) in diff2:
-                            self.add_to_pod(child, self.pod2, tree2)
-                else:
-                    self.db1.append(node1)
-                    self.db2.append(node2)
-                    self.add_to_pod(node1, self.pod1, tree1)
-                    self.add_to_pod(node2, self.pod2, tree2)
-                    return
-            # If both are leaf nodes
-            elif not children1 and not children2:
-                self.db1.append(node1)
-                self.db2.append(node2)
-                return
-            else:
-                # GPU children comparison (if available)
-                gpu_children1 = get_gpu_children(tree1, node1)
-                gpu_children2 = get_gpu_children(tree2, node2)
-
-                if not gpu_children1 and not gpu_children2:
-                    pass
-                elif len(gpu_children1) == len(gpu_children2):
-                    pass
-                elif not (gpu_children1 and gpu_children2):
-                    self.db1.append(node1)
-                    self.db2.append(node2)
-                    self.add_to_pod(node1, self.pod1, tree1)
-                    self.add_to_pod(node2, self.pod2, tree2)
-                    return
-                else:
-                    names1 = set(
-                        get_name(tree1.get_UID2event(uid)) for uid in gpu_children1
-                    )
-                    names2 = set(
-                        get_name(tree2.get_UID2event(uid)) for uid in gpu_children2
-                    )
-                    intersection = names1 & names2
-                    if names1 == names2:
-                        pass
-                    elif intersection:
-                        diff1 = names1 - intersection
-                        diff2 = names2 - intersection
-                        for uid in gpu_children1:
-                            if get_name(tree1.get_UID2event(uid)) in diff1:
-                                self.add_to_pod(
-                                    tree1.get_UID2event(uid), self.pod1, tree1
-                                )
-                        for uid in gpu_children2:
-                            if get_name(tree2.get_UID2event(uid)) in diff2:
-                                self.add_to_pod(
-                                    tree2.get_UID2event(uid), self.pod2, tree2
-                                )
-                    else:
-                        self.db1.append(node1)
-                        self.db2.append(node2)
-                        self.add_to_pod(node1, self.pod1, tree1)
-                        self.add_to_pod(node2, self.pod2, tree2)
-                        return
-            # Recursively traverse the children
-            for c1, c2 in zip(children1, children2):
-                dfs(c1, c2)
-
-        # Start DFS from the root nodes (assume first cpu_root_nodes[0] is root)
-        if not tree1.cpu_root_nodes or not tree2.cpu_root_nodes:
-            raise ValueError(
-                "Both trees must have at least one root node in cpu_root_nodes."
-            )
-
-        # Get the CPU root nodes
-        roots1 = tree1.cpu_root_nodes
-        roots2 = tree2.cpu_root_nodes
-
-        # Use Wagner-Fischer algorithm (edit distance) to align roots by name
         def wagner_fischer(seq1, seq2):
             m, n = len(seq1), len(seq2)
             dp = [[0] * (n + 1) for _ in range(m + 1)]
@@ -200,9 +84,9 @@ class TraceDiff:
                     else:
                         cost = 1
                     dp[i][j] = min(
-                        dp[i - 1][j] + 1,  # deletion
-                        dp[i][j - 1] + 1,  # insertion
-                        dp[i - 1][j - 1] + cost,  # substitution
+                        dp[i - 1][j] + 1,
+                        dp[i][j - 1] + 1,
+                        dp[i - 1][j - 1] + cost,
                     )
             # Backtrack to get the operations
             i, j = m, n
@@ -211,18 +95,10 @@ class TraceDiff:
                 if (
                     i > 0
                     and j > 0
-                    and (
-                        get_name(tree1.get_UID2event(seq1[i - 1]))
-                        == get_name(tree2.get_UID2event(seq2[j - 1]))
-                        or dp[i][j] == dp[i - 1][j - 1] + 1
-                    )
+                    and get_name(tree1.get_UID2event(seq1[i - 1]))
+                    == get_name(tree2.get_UID2event(seq2[j - 1]))
                 ):
-                    if get_name(tree1.get_UID2event(seq1[i - 1])) == get_name(
-                        tree2.get_UID2event(seq2[j - 1])
-                    ):
-                        ops.append(("match", i - 1, j - 1))
-                    else:
-                        ops.append(("replace", i - 1, j - 1))
+                    ops.append(("match", i - 1, j - 1))
                     i -= 1
                     j -= 1
                 elif i > 0 and (j == 0 or dp[i][j] == dp[i - 1][j] + 1):
@@ -234,27 +110,476 @@ class TraceDiff:
             ops.reverse()
             return ops
 
-        # Find differences in roots by name
+        def dfs(node1, node2):
+            # If either node is already a POD, skip
+            uid1 = node1.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+            uid2 = node2.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+            if uid1 in self.pod1 or uid2 in self.pod2:
+                return
+
+            name1 = get_name(node1)
+            name2 = get_name(node2)
+            if name1 != name2:
+                self.db1.append(node1)
+                self.db2.append(node2)
+                add_to_pod(node1, self.pod1, tree1)
+                add_to_pod(node2, self.pod2, tree2)
+                return
+
+            children1 = get_children(tree1, node1)
+            children2 = get_children(tree2, node2)
+            seq1 = [
+                child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                for child in children1
+            ]
+            seq2 = [
+                child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                for child in children2
+            ]
+            ops = wagner_fischer(seq1, seq2)
+            idx1, idx2 = 0, 0
+            for op, i, j in ops:
+                if op == "match":
+                    child1 = tree1.get_UID2event(seq1[i])
+                    child2 = tree2.get_UID2event(seq2[j])
+                    dfs(child1, child2)
+                    idx1 += 1
+                    idx2 += 1
+                elif op == "delete":
+                    child1 = tree1.get_UID2event(seq1[i])
+                    self.db1.append(child1)
+                    add_to_pod(child1, self.pod1, tree1)
+                    idx1 += 1
+                elif op == "insert":
+                    child2 = tree2.get_UID2event(seq2[j])
+                    self.db2.append(child2)
+                    add_to_pod(child2, self.pod2, tree2)
+                    idx2 += 1
+
+        # Start DFS from the root nodes
+        if not tree1.cpu_root_nodes or not tree2.cpu_root_nodes:
+            raise ValueError(
+                "Both trees must have at least one root node in cpu_root_nodes."
+            )
+        roots1 = tree1.cpu_root_nodes
+        roots2 = tree2.cpu_root_nodes
         ops = wagner_fischer(roots1, roots2)
         for op, i, j in ops:
             if op == "match":
                 node1 = tree1.get_UID2event(roots1[i])
                 node2 = tree2.get_UID2event(roots2[j])
                 dfs(node1, node2)
-            elif op == "replace":
-                node1 = tree1.get_UID2event(roots1[i])
-                node2 = tree2.get_UID2event(roots2[j])
-                self.db1.append(node1)
-                self.db2.append(node2)
-                self.add_to_pod(node1, self.pod1, tree1)
-                self.add_to_pod(node2, self.pod2, tree2)
             elif op == "delete":
                 node1 = tree1.get_UID2event(roots1[i])
                 self.db1.append(node1)
-                self.add_to_pod(node1, self.pod1, tree1)
+                add_to_pod(node1, self.pod1, tree1)
             elif op == "insert":
                 node2 = tree2.get_UID2event(roots2[j])
                 self.db2.append(node2)
-                self.add_to_pod(node2, self.pod2, tree2)
-
+                add_to_pod(node2, self.pod2, tree2)
         return self.db1, self.db2, self.pod1, self.pod2
+
+    def merge_trees(self):
+        """
+        Merges the two trees using the PODs from get_diff_boundaries, inspired by merge_tree_from_pod, but returns a flat list of merged event dicts.
+        Each merged event has a unique merged_id, children as merged_id references, and root merged_ids. Compatible with TraceToTree format.
+        Returns: (merged_events, merged_root_ids)
+        """
+
+        # Helper to create a merged event
+        def make_event(merged_id, uid1, uid2, merged_type, children):
+            return {
+                "merged_id": merged_id,
+                "uid1": uid1,
+                "uid2": uid2,
+                "merged_type": merged_type,
+                "children": children,  # list of merged_id
+            }
+
+        # Build lookup for UID to node for both trees
+        baseline_uid2node = {}
+        variant_uid2node = {}
+        for node in self.baseline.events:
+            if isinstance(node, dict):
+                baseline_uid2node[
+                    node.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                ] = node
+        for node in self.variant.events:
+            if isinstance(node, dict):
+                variant_uid2node[
+                    node.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                ] = node
+
+        # Recursive merge using PODs, but build flat event list
+        merged_events = []
+        merged_id_counter = [0]
+        uid_pair_to_merged_id = {}
+
+        def safe_children(tree, uid):
+            node = tree.get(uid, None)
+            if node is None or not isinstance(node, dict):
+                return []
+            return node.get("children", [])
+
+        def get_name_by_uid(tree, uid):
+            node = tree.get(uid)
+            return (
+                node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+                if node
+                else None
+            )
+
+        def merge_from_pod(uid1, uid2, parent_merged_id=None):
+            key = (uid1, uid2)
+            if key in uid_pair_to_merged_id:
+                return uid_pair_to_merged_id[key]
+            merged_id = merged_id_counter[0]
+            merged_id_counter[0] += 1
+            uid_pair_to_merged_id[key] = merged_id
+            if uid1 and uid2:
+                merged_type = "combined"
+            elif uid1:
+                merged_type = "trace1"
+            else:
+                merged_type = "trace2"
+            children1 = safe_children(baseline_uid2node, uid1)
+            children2 = safe_children(variant_uid2node, uid2)
+            # Wagner-Fischer to align children
+            ops = []
+            if children1 or children2:
+                m, n = len(children1), len(children2)
+                dp = [[0] * (n + 1) for _ in range(m + 1)]
+                for i in range(m + 1):
+                    dp[i][0] = i
+                for j in range(n + 1):
+                    dp[0][j] = j
+                for i in range(1, m + 1):
+                    for j in range(1, n + 1):
+                        name1 = get_name_by_uid(baseline_uid2node, children1[i - 1])
+                        name2 = get_name_by_uid(variant_uid2node, children2[j - 1])
+                        cost = 0 if name1 == name2 else 1
+                        dp[i][j] = min(
+                            dp[i - 1][j] + 1,
+                            dp[i][j - 1] + 1,
+                            dp[i - 1][j - 1] + cost,
+                        )
+                i, j = m, n
+                while i > 0 or j > 0:
+                    if (
+                        i > 0
+                        and j > 0
+                        and get_name_by_uid(baseline_uid2node, children1[i - 1])
+                        == get_name_by_uid(variant_uid2node, children2[j - 1])
+                    ):
+                        ops.append(("match", i - 1, j - 1))
+                        i -= 1
+                        j -= 1
+                    elif i > 0 and (j == 0 or dp[i][j] == dp[i - 1][j] + 1):
+                        ops.append(("delete", i - 1, None))
+                        i -= 1
+                    else:
+                        ops.append(("insert", None, j - 1))
+                        j -= 1
+                ops.reverse()
+            child_merged_ids = []
+            for op, i, j in ops:
+                if op == "match":
+                    child_uid1 = children1[i]
+                    child_uid2 = children2[j]
+                    child_merged_id = merge_from_pod(child_uid1, child_uid2, merged_id)
+                    child_merged_ids.append(child_merged_id)
+                elif op == "delete":
+                    child_uid1 = children1[i]
+                    child_merged_id = merge_from_pod(child_uid1, None, merged_id)
+                    child_merged_ids.append(child_merged_id)
+                elif op == "insert":
+                    child_uid2 = children2[j]
+                    child_merged_id = merge_from_pod(None, child_uid2, merged_id)
+                    child_merged_ids.append(child_merged_id)
+            event = make_event(merged_id, uid1, uid2, merged_type, child_merged_ids)
+            merged_events.append(event)
+            return merged_id
+
+        # Find root UIDs
+        roots1 = list(self.baseline.cpu_root_nodes)
+        roots2 = list(self.variant.cpu_root_nodes)
+        merged_root_ids = []
+
+        # Handle POD roots in baseline
+        for uid1 in roots1[:]:
+            if uid1 in self.pod1:
+                merged_root_ids.append(merge_from_pod(uid1, None))
+                roots1.remove(uid1)
+
+        # Handle POD roots in variant
+        for uid2 in roots2[:]:
+            if uid2 in self.pod2:
+                merged_root_ids.append(merge_from_pod(None, uid2))
+                roots2.remove(uid2)
+
+        # Now, match remaining roots by name and merge as 'combined'
+        name_to_uid1 = {get_name_by_uid(baseline_uid2node, uid): uid for uid in roots1}
+        name_to_uid2 = {get_name_by_uid(variant_uid2node, uid): uid for uid in roots2}
+        matched_names = set(name_to_uid1.keys()) & set(name_to_uid2.keys())
+        for name in matched_names:
+            uid1 = name_to_uid1[name]
+            uid2 = name_to_uid2[name]
+            merged_root_ids.append(merge_from_pod(uid1, uid2))
+            roots1.remove(uid1)
+            roots2.remove(uid2)
+
+        # If any roots remain (unmatched), merge them as single-sided
+        for uid1 in roots1:
+            merged_root_ids.append(merge_from_pod(uid1, None))
+        for uid2 in roots2:
+            merged_root_ids.append(merge_from_pod(None, uid2))
+
+        self.merged_tree = (merged_events, merged_root_ids)
+        return self.merged_tree
+
+    def print_merged_tree(self, output_file="merged_tree_output.txt"):
+        if self.merged_tree is None:
+            raise ValueError(
+                "merged_tree is not initialized. Call merge_trees() first."
+            )
+        (merged_events, merged_root_ids) = self.merged_tree
+        output_lines = []
+        merged_id_to_event = {event["merged_id"]: event for event in merged_events}
+
+        def get_op_name(uid, tree_uid2node):
+            node = tree_uid2node.get(uid)
+            if node is None:
+                return None
+            name = node.get("name") if "name" in node else node.get("Name")
+            if name is None:
+                try:
+                    import TraceLens.util
+
+                    name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+                except Exception:
+                    pass
+            return name if name else str(uid)
+
+        baseline_uid2node = {
+            event.get("UID"): event
+            for event in getattr(self.baseline, "events", [])
+            if isinstance(event, dict)
+        }
+        variant_uid2node = {
+            event.get("UID"): event
+            for event in getattr(self.variant, "events", [])
+            if isinstance(event, dict)
+        }
+
+        def print_merged_tree_to_lines(merged_id, prefix="", is_last=True):
+            node = merged_id_to_event[merged_id]
+            merge_type = node["merged_type"]
+            name1 = (
+                get_op_name(node["uid1"], baseline_uid2node)
+                if node["uid1"] is not None
+                else None
+            )
+            name2 = (
+                get_op_name(node["uid2"], variant_uid2node)
+                if node["uid2"] is not None
+                else None
+            )
+            connector = "└── " if is_last else "├── "
+            if merge_type == "combined":
+                if name1 == name2 and name1 is not None:
+                    line = f"{prefix}{connector}{name1}"
+                else:
+                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
+            elif merge_type == "trace1":
+                line = f"{prefix}{connector}>> {merge_type}: {name1}"
+            elif merge_type == "trace2":
+                line = f"{prefix}{connector}<< {merge_type}: {name2}"
+            else:
+                line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
+            output_lines.append(line)
+            # Sort children by merge_type order: combined, trace1, trace2
+            children = [merged_id_to_event[cid] for cid in node["children"]]
+            combined = [
+                c["merged_id"] for c in children if c["merged_type"] == "combined"
+            ]
+            trace1 = [c["merged_id"] for c in children if c["merged_type"] == "trace1"]
+            trace2 = [c["merged_id"] for c in children if c["merged_type"] == "trace2"]
+            sorted_children = combined + trace1 + trace2
+            child_count = len(sorted_children)
+            for i, cid in enumerate(sorted_children):
+                new_prefix = prefix + ("    " if is_last else "│   ")
+                print_merged_tree_to_lines(
+                    cid, new_prefix, is_last=(i == child_count - 1)
+                )
+
+        for i, root_id in enumerate(merged_root_ids):
+            print_merged_tree_to_lines(
+                root_id, prefix="", is_last=(i == len(merged_root_ids) - 1)
+            )
+
+        with open(output_file, "w") as f:
+            for line in output_lines:
+                f.write(line + "\n")
+
+    def print_diff_stats(self, output_file="diff_stats.csv"):
+        """
+        For combined ops on a GPU path with non-combined children, output CSV with columns:
+        name, input_shape, total_kernel_time_trace1, total_kernel_time_trace2, kernel_names_trace1, kernel_names_trace2
+        """
+        import csv
+
+        if self.merged_tree is None:
+            raise ValueError(
+                "merged_tree is not initialized. Call merge_trees() first."
+            )
+        (merged_events, merged_root_ids) = self.merged_tree
+        merged_id_to_event = {event["merged_id"]: event for event in merged_events}
+        baseline_uid2node = {
+            event.get("UID"): event
+            for event in getattr(self.baseline, "events", [])
+            if isinstance(event, dict)
+        }
+        variant_uid2node = {
+            event.get("UID"): event
+            for event in getattr(self.variant, "events", [])
+            if isinstance(event, dict)
+        }
+
+        def get_op_name(uid, tree_uid2node):
+            node = tree_uid2node.get(uid)
+            if node is None:
+                return None
+            name = node.get("name") if "name" in node else node.get("Name")
+            if name is None:
+                try:
+                    import TraceLens.util
+
+                    name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+                except Exception:
+                    pass
+            return name if name else str(uid)
+
+        def get_input_shape(node):
+            args = node.get("args", {})
+            shape = args.get("Input Dims")
+            if shape is not None:
+                return str(shape)
+            return ""
+
+        def get_duration(node):
+            dur = node.get("dur")
+            if dur is not None:
+                return dur
+            try:
+                import TraceLens.util
+
+                dur = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
+            except Exception:
+                pass
+            return dur
+
+        def is_gpu_path(node):
+            return not node.get("non_gpu_path", False)
+
+        def is_kernel(node):
+            cat = node.get("cat") or node.get("category")
+            if cat is None:
+                try:
+                    import TraceLens.util
+
+                    cat = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+                except Exception:
+                    pass
+            return cat == "kernel"
+
+        def get_kernel_info_subtree(root_uid, tree_uid2node):
+            kernel_names = []
+            total_time = 0.0
+            stack = [root_uid]
+            visited = set()
+            while stack:
+                uid = stack.pop()
+                if uid in visited:
+                    continue
+                visited.add(uid)
+                node = tree_uid2node.get(uid)
+                if node is None:
+                    continue
+                if is_kernel(node):
+                    kname = node.get("name") or node.get("Name")
+                    if kname is None:
+                        try:
+                            import TraceLens.util
+
+                            kname = node.get(
+                                TraceLens.util.TraceEventUtils.TraceKeys.Name
+                            )
+                        except Exception:
+                            pass
+                    # Shorten kernel name if too long
+                    if kname and len(kname) > 40:
+                        kname = kname[:37] + "..."
+                    kernel_names.append(kname)
+                    dur = get_duration(node)
+                    if dur:
+                        try:
+                            total_time += float(dur)
+                        except Exception:
+                            pass
+                # Traverse children
+                for child_uid in node.get("children", []):
+                    stack.append(child_uid)
+            return kernel_names, total_time
+
+        rows = []
+
+        def traverse(merged_id):
+            node = merged_id_to_event[merged_id]
+            if node["merged_type"] == "combined":
+                event1 = baseline_uid2node.get(node["uid1"])
+                event2 = variant_uid2node.get(node["uid2"])
+                if event1 and event2 and is_gpu_path(event1) and is_gpu_path(event2):
+                    children = [merged_id_to_event[cid] for cid in node["children"]]
+                    has_non_combined_child = any(
+                        c["merged_type"] != "combined" for c in children
+                    )
+                    if has_non_combined_child:
+                        name = get_op_name(
+                            node["uid1"], baseline_uid2node
+                        ) or get_op_name(node["uid2"], variant_uid2node)
+                        input_shape = get_input_shape(event1) or get_input_shape(event2)
+                        kernel_names1, total_time1 = get_kernel_info_subtree(
+                            node["uid1"], baseline_uid2node
+                        )
+                        kernel_names2, total_time2 = get_kernel_info_subtree(
+                            node["uid2"], variant_uid2node
+                        )
+                        rows.append(
+                            {
+                                "name": name,
+                                "input_shape": input_shape,
+                                "total_kernel_time_trace1": total_time1,
+                                "total_kernel_time_trace2": total_time2,
+                                "kernel_names_trace1": ";".join(kernel_names1),
+                                "kernel_names_trace2": ";".join(kernel_names2),
+                            }
+                        )
+            for cid in node["children"]:
+                traverse(cid)
+
+        for root_id in merged_root_ids:
+            traverse(root_id)
+
+        with open(output_file, "w", newline="") as csvfile:
+            fieldnames = [
+                "name",
+                "kernel_names_trace1",
+                "kernel_names_trace2",
+                "total_kernel_time_trace1",
+                "total_kernel_time_trace2",
+                "input_shape",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
