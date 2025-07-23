@@ -10,16 +10,17 @@ import importlib.util
 import subprocess
 import sys
 
-def ensure_package(package_name):
-    if importlib.util.find_spec(package_name) is None:
-        print(f"Package '{package_name}' is not installed.")
-        choice = input(f"Do you want to install '{package_name}' via pip? [y/N]: ").strip().lower()
-        if choice == 'y':
+def request_install(package_name):
+    choice = input(f"Do you want to install '{package_name}' via pip? [y/N]: ").strip().lower()
+    if choice == 'y':
+        try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-        else:
-            print(f"Skipping installation of '{package_name}'.")
+        except subprocess.CalledProcessError:
+            print(f"Failed to install '{package_name}'. Please install it manually. Exiting.")
+            sys.exit(1)
     else:
-        print(f"Package '{package_name}' is already installed.")
+        print(f"Skipping installation of '{package_name}' and exiting.")
+        sys.exit(1)
 
 def get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=10, histogram_bins=100, topk=None):
     """
@@ -186,9 +187,9 @@ def main():
             args.output_xlsx_path = base_path + '_perf_report.xlsx'
         try:
             import openpyxl
-        except Exception as e:
+        except (ImportError, ModuleNotFoundError) as e:
             print(f"Error importing openpyxl: {e}")
-            ensure_package('openpyxl')
+            request_install('openpyxl')
 
         with pd.ExcelWriter(args.output_xlsx_path, engine='openpyxl') as writer:
             for sheet_name, df in dict_name2df.items():
