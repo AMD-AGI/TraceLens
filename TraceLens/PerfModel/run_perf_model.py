@@ -2,9 +2,6 @@ import argparse
 import os
 import sys
 
-# Optional: Add current directory to path if needed
-#sys.path.append(os.getcwd())
-
 from TraceLens.PerfModel.perf_model import GEMM, SDPA, gemmologist_dtype_map
 
 def main():
@@ -45,7 +42,11 @@ def main():
     }
 
     if args.op == "gemm":
-        print("Calling GEMM.get_simulation_time_func...")
+        #print("Calling GEMM.get_simulation_time_func...")
+        # check if GEMMOLOGIST_PATH is set, otherwise give error message
+        if (not os.environ.get('GEMMOLOGIST_PATH')) or \
+                (not os.path.exists(os.environ.get('GEMMOLOGIST_PATH'))):
+            raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
         time, cmd = GEMM.get_simulation_time_func(
             arch=arch, M=args.M, N=args.N, K=args.K, B=args.B,
             dtype=args.dtype, python_path=args.python_path
@@ -53,17 +54,21 @@ def main():
         print(f"GEMM simulation time (us): {time}")
         flops = GEMM.flops_func(args.M, args.N, args.K, None)
         tflops_per_gpu_per_s = (flops / 1e12) / (time / 1e6) if time > 0 else float('nan')
-        print(f"GEMM FLOPS/GPU/s: {tflops_per_gpu_per_s}")
+        print(f"GEMM TFLOPS/GPU/s: {tflops_per_gpu_per_s}")
         print(f"Command used: {cmd}")
 
     elif args.op == "sdpa":
         if None in {args.H_Q, args.N_Q, args.N_KV, args.d_h}:
             raise ValueError("For SDPA, --H_Q, --N_Q, --N_KV, and --d_h are required.")
+        # check if GEMMOLOGIST_PATH is set, otherwise give error message
+        if (not os.environ.get('GEMMOLOGIST_PATH')) or \
+                (not os.path.exists(os.environ.get('GEMMOLOGIST_PATH'))):
+            raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
         dtype_A_B = gemmologist_dtype_map(args.dtype)
         if args.backward:
             bytes = SDPA.bytes_bwd_func(args.B, args.N_Q, args.H_Q, args.N_KV, args.H_KV, args.d_h, None, bytes_per_element)
             flops = SDPA.flops_bwd_func(args.B, args.N_Q, args.H_Q, args.N_KV, args.H_KV, args.d_h, None, flash_impl=True)
-            print("Calling SDPA.get_simulation_time_bwd_func...")
+            #print("Calling SDPA.get_simulation_time_bwd_func...")
             time = SDPA.get_simulation_time_bwd_func(
                 arch=arch, dtype=args.dtype, python_path=args.python_path,
                 dtype_A_B=dtype_A_B, bytes=bytes,
@@ -73,7 +78,7 @@ def main():
         else:
             bytes = SDPA.bytes_func(args.B, args.N_Q, args.H_Q, args.N_KV, args.H_KV, args.d_h, None, bytes_per_element)
             flops = SDPA.flops_func(args.B, args.N_Q, args.H_Q, args.N_KV, args.H_KV, args.d_h, None)
-            print("Calling SDPA.get_simulation_time_func...")
+            #print("Calling SDPA.get_simulation_time_func...")
             time = SDPA.get_simulation_time_func(
                 arch=arch, dtype=args.dtype, python_path=args.python_path,
                 dtype_A_B=dtype_A_B, bytes=bytes,
@@ -81,7 +86,7 @@ def main():
             )
             print(f"SDPA Forward simulated time (us): {time}")
         tflops_per_gpu_per_s = (flops / 1e12) / (time / 1e6) if time > 0 else float('nan')
-        print(f"SDPA FLOPS/GPU/s: {tflops_per_gpu_per_s}")
+        print(f"SDPA TFLOPS/GPU/s: {tflops_per_gpu_per_s}")
 
 if __name__ == "__main__":
     main()
