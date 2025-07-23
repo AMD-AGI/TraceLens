@@ -375,6 +375,10 @@ def main() -> None:
             merge_keys = ['name'] + [col for col in df_roofline_ref.columns if cond(col)]
             diff_cols = ['Kernel Time (µs)_sum', 'Kernel Time (µs)_mean', "name_count",
                          'TFLOPS/s_mean', 'TB/s_mean']
+            # if any of dfs is empty, skip this sheet
+            if any(df.empty for df in dfs):
+                print(f"Skipping roofline sheet '{sheet}' because one of the reports is empty.")
+                continue
 
             # Load the roofline sheet for each report
             roofline_diff = build_df_dff(
@@ -402,7 +406,7 @@ def main() -> None:
                 cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Write workbook ────────────────────────────────────────────────────────
-    with pd.ExcelWriter(args.output) as xls:
+    with pd.ExcelWriter(args.output, engine='openpyxl') as xls:
         for sheet_name, df in results.items():
             # if df is empty, skip writing it
             if df.empty:

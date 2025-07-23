@@ -95,10 +95,11 @@ class JaxAnalyses:
         return categorized_events, uncategorized_events
 
     @staticmethod
-    def create_breakdown_df(events: dict, total_time):
+    def create_breakdown_df(events: dict, total_time, num_gpus: int = 8):
         df = pd.DataFrame.from_dict(events, orient='index', columns=['count', 'time'])
         # convert time to ms by div by 1e3
         df['time ms'] = df['time'] / 1e3
+        df['time ms per gpu'] = df['time ms'] / num_gpus
         df['percent'] = df['time'] / total_time * 100
         df = df.drop(columns=['time'])
         df = df.sort_values("percent", ascending=False)
@@ -139,8 +140,8 @@ class JaxAnalyses:
                                                                            group_by_gpu = False,
                                                                            group_by_name = group_kernels_by_name)
 
-        categorized_df = JaxAnalyses.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"] * num_gpus)
-        uncategorized_df = JaxAnalyses.create_breakdown_df(uncategorized_times, categorized_times[JaxAnalyses.UncategorizedEventKey][1])
+        categorized_df = JaxAnalyses.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"] * num_gpus, num_gpus)
+        uncategorized_df = JaxAnalyses.create_breakdown_df(uncategorized_times, categorized_times[JaxAnalyses.UncategorizedEventKey][1], num_gpus)
         return analyzer.get_breakdown_df_from_dict(average_gpu_metrics), categorized_df, uncategorized_df
 
     @staticmethod
@@ -500,8 +501,9 @@ class JaxProfileProcessor:
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
         line_processed=line.strip()
-        if (("metadata" in line_processed and not(re.search(r"\)$",line_processed)) and not(re.search(r"^ROOT",line_processed)))
-            or any(t in line_processed for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"])):
+        if (("metadata" in line_processed and not(re.search(r"\)$",line_processed)) and not(line_processed.startswith("ROOT")))
+            or any(t in line_processed for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"])
+            and not(line_processed.startswith("HloModule "))):
             k,v=JaxProfileProcessor.get_dict(hlo_ops, line_processed)
             hlo_ops[k]=v
             return True

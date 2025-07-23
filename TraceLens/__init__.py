@@ -12,6 +12,7 @@ from .util import DataLoader, TraceEventUtils
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 from .TraceDiff.trace_diff import TraceDiff
+from .Reporting import *
 
 __all__ = [
     "TreePerfAnalyzer",
@@ -28,4 +29,5 @@ __all__ = [
     "DataLoader",
     "TraceEventUtils",
     "TraceDiff",
+    "Reporting",
 ]

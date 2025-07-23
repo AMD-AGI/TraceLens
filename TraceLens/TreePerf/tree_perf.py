@@ -30,7 +30,7 @@ from typing import Dict, Any, Callable
 import warnings
 import pprint
 import pandas as pd
-from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map
+from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.trace_to_tree import TraceToTree
@@ -296,6 +296,18 @@ class TreePerfAnalyzer:
         for event in self.tree.events:
             if self.event_to_category(event) != 'cpu_op':
                 continue
+
+            if event['name'] == 'execute':
+                parent = self.tree.get_parent_event(event)
+                list_kernel_uids = parent.get('gpu_events', [])
+                list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
+                parent['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+                parent['direct_kernel_count'] = len(list_kernels)
+                parent['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+                parent['op category'] = categorize_torch_op(parent)
+                kernel_launchers.append(parent)
+                continue # no need to check children of this event
+
             kernel_launcher = False
             # total_direct_kernel_time = 0
             # direct_kernel_count = 0
@@ -314,6 +326,7 @@ class TreePerfAnalyzer:
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
                 event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+                event['op category'] = categorize_torch_op(event)
                 kernel_launchers.append(event)
         return kernel_launchers
 
@@ -328,6 +341,7 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {'name': event['name'],
+                             'op category': event['op category'],
                              'UID': event['UID'],
                             'total_direct_kernel_time': event['total_direct_kernel_time'],
                             'direct_kernel_count': event['direct_kernel_count']}
@@ -470,6 +484,31 @@ class TreePerfAnalyzer:
             df_unique_args['Percentage (%)'] = (df_unique_args['total_direct_kernel_time_sum'] / total_duration_ms) * 100
             df_unique_args['Cumulative Percentage (%)'] = df_unique_args['Percentage (%)'].cumsum()
         return df_unique_args
+
+    @staticmethod
+    def get_df_kernel_launchers_summary_by_category(df_kernel_launchers: pd.DataFrame) -> pd.DataFrame:
+        """                            
+        Generate a DataFrame with breakdown of kernel launchers by category.
+        Args:
+            df_kernel_launchers (pd.DataFrame): DataFrame containing kernel launchers.
+        Returns:
+            pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
+        """
+        df_temp = df_kernel_launchers.copy()
+        df_agg = df_temp.groupby('op category').agg({'total_direct_kernel_time': ['sum', 'count']})
+        df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
+        df_agg.reset_index(inplace=True)
+        df_agg.rename(columns={'total_direct_kernel_time_count': 'Count'}, inplace=True)
+        df_agg.sort_values(by='total_direct_kernel_time_sum', ascending=False, inplace=True)
+        df_agg['total_direct_kernel_time_ms'] = df_agg['total_direct_kernel_time_sum'] / 1000
+        # remove the us col as we will use ms col
+        df_agg.drop(columns=['total_direct_kernel_time_sum'], inplace=True)
+        total_duration_ms = df_agg['total_direct_kernel_time_ms'].sum()
+        df_agg['Percentage (%)'] = (df_agg['total_direct_kernel_time_ms'] / total_duration_ms) * 100
+        df_agg['Cumulative Percentage (%)'] = df_agg['Percentage (%)'].cumsum()
+        df_agg.reset_index(drop=True, inplace=True)
+
+        return df_agg
 
     def get_df_gpu_timeline(self):
         kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]

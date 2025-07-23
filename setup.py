@@ -9,6 +9,10 @@ setup(
         'pandas',
         'tqdm',
         'backports.strenum;python_version<"3.11"',
+        'StrEnum;python_version<"3.11"',
+        # 'openpyxl',
+        # 'tensorboard-plugin-profile==2.19.0',
+        # 'tensorflow',
     ],
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open('README.md').read(),
@@ -20,4 +24,9 @@ setup(
         'Operating System :: OS Independent',
     ],
     python_requires='>=3.6',
+    entry_points={
+        "console_scripts": [
+            "TraceLens_jax_analysis_perf_reporting = TraceLens.Reporting.generate_perf_report_jax_analysis:main",
+        ],
+    },
 )

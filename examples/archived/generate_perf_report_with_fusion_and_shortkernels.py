@@ -92,6 +92,9 @@ def get_df_fusion_opportunity(perf_analyzer, fusion_op_names):
         
     # Create DataFrame from the list of dictionaries
     df_fusion_study = pd.DataFrame(list_dicts_info)
+    if df_fusion_study.empty:
+        print("No fusion opportunities found.")
+        return pd.DataFrame()
     df_fusion_study['combo'] = df_fusion_study['fusion candidate'] + ' -> ' + df_fusion_study['fusion post op']
     df_fusion_study_grouped = df_fusion_study.groupby(['combo']).agg(
         {
