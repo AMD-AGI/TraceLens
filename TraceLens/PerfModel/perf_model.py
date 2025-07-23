@@ -1252,16 +1252,16 @@ class aiter__flash_attn_forward(SDPA):
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
-        B, H_Q, N_Q, d_h = q_shape
+        B, N_Q, H_Q, d_h = q_shape
         assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, H_KV, N_KV, _ = input_dims[1]
+        _, N_KV, H_KV, _ = input_dims[1]
         dropout_p = 0.0
-        if concrete_inputs[10] not in ('', 'None'):
+        if concrete_inputs[3] not in ('', 'None'):
             try:
-                dropout_p = float(concrete_inputs[10])
+                dropout_p = float(concrete_inputs[3])
             except (ValueError, TypeError):
                 pass
-        is_causal = concrete_inputs[11].lower() == 'true' if concrete_inputs[11] not in ('', 'None') else False
+        is_causal = concrete_inputs[5].lower() == 'true' if concrete_inputs[5] not in ('', 'None') else False
 
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
