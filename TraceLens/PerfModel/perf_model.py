@@ -1266,6 +1266,40 @@ class aiter__flash_attn_forward(SDPA):
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
 
+class aiter__flash_attn_backward(SDPA):
+    
+    @staticmethod
+    def get_param_details(event):
+        # the order of arguments for aiter::_flash_attn_backward is:
+        # q: torch.Tensor
+        # k: torch.Tensor
+        # v: torch.Tensor
+        # dropout_p: float
+        # softmax_scale: float
+        # causal: bool
+        # window_size_left: int
+        # window_size_right: int
+        # bias: Optional[torch.Tensor]
+        # alibi_slopes: Optional[torch.Tensor]
+        # return_lse: bool
+        # return_softmax: bool
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        B, N_Q, H_Q, d_h = q_shape
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        _, N_KV, H_KV, _ = input_dims[1]
+        dropout_p = 0.0
+        if concrete_inputs[10] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[10])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[12].lower() == 'true' if concrete_inputs[12] not in ('', 'None') else False
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
+
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
