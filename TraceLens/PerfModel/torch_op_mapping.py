@@ -20,53 +20,48 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from . import perf_model
 from collections import defaultdict
 
-from . import perf_model
-
 op_to_perf_model_class_map = {
-    "aten::mm": perf_model.aten_mm,
-    "aten::addmm": perf_model.aten_addmm,
-    "aten::_scaled_mm": perf_model.aten_scaled_mm,
+    'aten::mm': perf_model.aten_mm,
+    'aten::addmm': perf_model.aten_addmm,
+    'aten::_scaled_mm': perf_model.aten_scaled_mm,
+
     # TEv2 pseudo ops
-    "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
-    "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
-    "_LinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
-    "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
-    "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    "aten::bmm": perf_model.aten_bmm,
-    "tex_ts::te_gemm_ts": perf_model.tex_ts_te_gemm_ts,
-    "aten::baddbmm": perf_model.aten_baddbmm,
-    "FlashAttnFunc": perf_model.flash_attention,
-    "flash_attn::_flash_attn_forward": perf_model.flash_attention,
-    "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,
-    "aten::_scaled_dot_product_efficient_attention": perf_model.aten__scaled_dot_product_efficient_attention,
-    "aten::_scaled_dot_product_flash_attention": perf_model.aten__scaled_dot_product_flash_attention,
-    "aten::convolution": perf_model.aten_conv,
+    '_Linear_yfwd_mm': perf_model.tev2_pseudo_gemm,
+    '_LinearBackward_xgrad_mm': perf_model.tev2_pseudo_gemm,
+    '_LinearBackward_wgrad_mm': perf_model.tev2_pseudo_gemm,
+    '_LayerNormLinear_yfwd_mm': perf_model.tev2_pseudo_gemm,
+    '_LayerNormLinearBackward_xgrad_mm': perf_model.tev2_pseudo_gemm,
+    '_LayerNormLinearBackward_wgrad_mm': perf_model.tev2_pseudo_gemm,
+
+    'aten::bmm': perf_model.aten_bmm,
+    'tex_ts::te_gemm_ts': perf_model.tex_ts_te_gemm_ts,
+    'aten::baddbmm': perf_model.aten_baddbmm,
+    'FlashAttnFunc': perf_model.flash_attention,
+    'flash_attn::_flash_attn_forward': perf_model.flash_attention,
+    'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
+    'aten::_scaled_dot_product_efficient_attention': perf_model.aten__scaled_dot_product_efficient_attention,
+    'aten::_scaled_dot_product_flash_attention': perf_model.aten__scaled_dot_product_flash_attention,
+    'aten::convolution': perf_model.aten_conv,
     "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
 }
 
 unary_elemwise_ops = [
-    "aten::copy",
-    "aten::copy_",
-    "aten::clamp_min",
-    "aten::clamp_min_",
-    "aten::clamp_max",
-    "aten::clamp_max_",
-    "aten::sigmoid",
+    'aten::copy', 'aten::copy_',
+    'aten::clamp_min', 'aten::clamp_min_',
+    'aten::clamp_max', 'aten::clamp_max_',
+    'aten::sigmoid',
 ]
 
 binary_elemwise_ops = [
-    "aten::div",
-    "aten::div_",
-    "aten::mul",
-    "aten::mul_",
-    "aten::add",
-    "aten::add_",
-    "aten::sigmoid_backward",
-    "aten::threshold_backward",
+    'aten::div', 'aten::div_',
+    'aten::mul', 'aten::mul_',
+    'aten::add', 'aten::add_',
+    'aten::sigmoid_backward',
+    'aten::threshold_backward',
 ]
 
 for op in unary_elemwise_ops:
@@ -75,26 +70,21 @@ for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
 
 dict_base_class2category = {
-    perf_model.GEMM: "GEMM",
-    perf_model.CONV: "CONV",
-    perf_model.SDPA: "SDPA",
-    perf_model.UnaryElementwise: "UnaryElementwise",
-    perf_model.BinaryElementwise: "BinaryElementwise",
+    perf_model.GEMM: 'GEMM',
+    perf_model.CONV: 'CONV',
+    perf_model.SDPA: 'SDPA',
+    perf_model.UnaryElementwise: 'UnaryElementwise',
+    perf_model.BinaryElementwise: 'BinaryElementwise',
 }
 dict_cat2names = defaultdict(list)
 for op_name, perf_model_class in op_to_perf_model_class_map.items():
     base_classes = perf_model_class.__bases__
-    assert (
-        len(base_classes) == 1
-    ), f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_classes: {base_classes}"
+    assert len(base_classes) == 1, f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_classes: {base_classes}"
     base_class = base_classes[0]
-    cat = dict_base_class2category.get(base_class)
+    cat =  dict_base_class2category.get(base_class)
     if cat is None:
-        raise ValueError(
-            f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_class: {base_classes}"
-        )
+        raise ValueError(f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_class: {base_classes}")
     dict_cat2names[cat].append(op_name)
-
 
 def categorize_torch_op(row):
     """
@@ -107,29 +97,20 @@ def categorize_torch_op(row):
     """
 
     debug = False
-    if row["name"] in dict_cat2names["GEMM"]:
-        return "GEMM"
-    elif row["name"] in [
-        "aten::convolution",
-        "aten::miopen_convolution",
-        "aten::cudnn_convolution",
-    ]:
-        return "CONV_fwd"
-    elif row["name"] == "aten::convolution_backward":
-        return "CONV_bwd"
-    elif row["name"] in [
-        "aten::batch_norm",
-        "aten::native_batch_norm",
-        "aten::miopen_batch_norm",
-        "aten::cudnn_batch_norm",
-    ]:
-        return "BN_fwd"
-    elif row["name"] in [
-        "aten::native_batch_norm_backward",
-        "aten::miopen_batch_norm_backward",
-        "aten::cudnn_batch_norm_backward",
-    ]:
-        return "BN_bwd"
+    if row['name'] in dict_cat2names['GEMM']:
+        return 'GEMM'
+    elif row['name'] in ['aten::convolution', 
+                         'aten::miopen_convolution', 'aten::cudnn_convolution']:
+        return 'CONV_fwd'
+    elif row['name'] == 'aten::convolution_backward':
+        return 'CONV_bwd'
+    elif row['name'] in ['aten::batch_norm',
+                         'aten::native_batch_norm', 
+                         'aten::miopen_batch_norm', 'aten::cudnn_batch_norm']:
+        return 'BN_fwd'
+    elif row['name'] in ['aten::native_batch_norm_backward', 
+                         'aten::miopen_batch_norm_backward', 'aten::cudnn_batch_norm_backward']:
+        return 'BN_bwd'
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
@@ -144,17 +125,17 @@ def categorize_torch_op(row):
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
-    elif row["name"].startswith("triton"):
-        return "triton"
-    kernel_name = row["kernel_names"][0]
-    if kernel_name.startswith("void at::native"):
+    elif row['name'].startswith('triton'):
+        return 'triton'
+    kernel_name = row['kernel_names'][0]
+    if kernel_name.startswith('void at::native'):
         if debug:
             print("Found ATen native kernel:", kernel_name[:64])
-        if "elementwise" in kernel_name:
-            return "elementwise"
-        elif "reduce" in kernel_name:
-            return "reduce"
-        elif "multi_tensor_apply" in kernel_name:
-            return "multi_tensor_apply"
+        if 'elementwise' in kernel_name:
+            return 'elementwise'
+        elif 'reduce' in kernel_name:
+            return 'reduce'
+        elif 'multi_tensor_apply' in kernel_name:
+            return 'multi_tensor_apply'
     # if none of the above cases match, return 'other'
-    return "other"
+    return 'other'
