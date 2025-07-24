@@ -1300,6 +1300,13 @@ class aiter__flash_attn_backward(SDPA):
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
 
+    def flops(self):
+        return self.flops_bwd()
+    
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
