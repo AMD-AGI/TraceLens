@@ -45,6 +45,8 @@ op_to_perf_model_class_map = {
     'aten::_scaled_dot_product_efficient_attention': perf_model.aten__scaled_dot_product_efficient_attention,
     'aten::_scaled_dot_product_flash_attention': perf_model.aten__scaled_dot_product_flash_attention,
     'aten::convolution': perf_model.aten_conv,
+    "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
+    "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
 }
 
 unary_elemwise_ops = [
@@ -109,14 +111,20 @@ def categorize_torch_op(row):
     elif row['name'] in ['aten::native_batch_norm_backward', 
                          'aten::miopen_batch_norm_backward', 'aten::cudnn_batch_norm_backward']:
         return 'BN_bwd'
-    elif row['name'] in dict_cat2names['SDPA']:
-        return 'SDPA_fwd'
-    elif row['name'] in ['FlashAttnFuncBackward',
-                         'flash_attn::_flash_attn_backward',
-                         'aten::_scaled_dot_product_cudnn_attention_backward',
-                         'aten::_scaled_dot_product_efficient_attention_backward',
-                         'aten::_scaled_dot_product_flash_attention_backward']:
-        return 'SDPA_bwd'
+    # SDPA ops: distinguish forward and backward
+    sdpa_bwd_names = [
+        "FlashAttnFuncBackward",
+        "flash_attn::_flash_attn_backward",
+        "aten::_scaled_dot_product_cudnn_attention_backward",
+        "aten::_scaled_dot_product_efficient_attention_backward",
+        "aten::_scaled_dot_product_flash_attention_backward",
+        "aiter::_flash_attn_backward",
+    ]
+    if row["name"] in dict_cat2names["SDPA"]:
+        if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
+            return "SDPA_bwd"
+        else:
+            return "SDPA_fwd"
     elif row['name'].startswith('triton'):
         return 'triton'
     kernel_name = row['kernel_names'][0]
