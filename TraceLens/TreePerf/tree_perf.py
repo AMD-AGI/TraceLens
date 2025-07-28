@@ -115,7 +115,10 @@ class TreePerfAnalyzer:
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
             busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
-        event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+        event['kernel_details'] = [ {'name': kernel['name'],
+                                     'dur': kernel['dur'],
+                                     'stream': kernel.get('args', {}).get('stream', None)}
+                                    for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
@@ -175,7 +178,7 @@ class TreePerfAnalyzer:
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
 
     def build_df_perf_metrics(self, events, bwd=False,
-                              non_data_mov=False, include_kernel_names=False, include_args=False,
+                              non_data_mov=False, include_kernel_details=False, include_args=False,
                               dict_name_to_perf_model=None):
         if len(events) == 0:
             warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
@@ -206,8 +209,9 @@ class TreePerfAnalyzer:
 
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
-            if include_kernel_names:
-                metrics_event['kernel_names'] = event['kernel_names']
+            if include_kernel_details:
+                if 'kernel_details' in event:
+                    metrics_event['kernel_details'] = event['kernel_details']
             rows.append(metrics_event)
 
         self._show_warnings(list_warn_non_zero_flops_and_zero_time,
@@ -256,8 +260,8 @@ class TreePerfAnalyzer:
         if 'Non-Data-Mov Kernel Time (µs)' in df_perf_metrics.columns:
             dict_agg['Non-Data-Mov Kernel Time (µs)'] = ['sum']
         # this is a quick fix, we need to veriify it matches in the group
-        if 'kernel_names' in df_perf_metrics.columns:
-            dict_agg['kernel_names'] = 'first'
+        if 'kernel_details' in df_perf_metrics.columns:
+            dict_agg['kernel_details'] = 'first'
         args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
         for arg in args_cols:
             if arg in df_perf_metrics.columns:
@@ -303,7 +307,10 @@ class TreePerfAnalyzer:
                 list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
                 parent['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 parent['direct_kernel_count'] = len(list_kernels)
-                parent['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+                parent['kernel_details'] = [{'name': kernel['name'],
+                                             'dur': kernel['dur'],
+                                             'stream': kernel.get('args', {}).get('stream', None)}
+                                            for kernel in list_kernels]
                 parent['op category'] = categorize_torch_op(parent)
                 kernel_launchers.append(parent)
                 continue # no need to check children of this event
@@ -325,12 +332,15 @@ class TreePerfAnalyzer:
             if kernel_launcher:
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
-                event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
+                event['kernel_details'] = [{'name': kernel['name'],
+                                           'dur': kernel['dur'],
+                                           'stream': kernel.get('args', {}).get('stream', None)}
+                                          for kernel in list_kernels]
                 event['op category'] = categorize_torch_op(event)
                 kernel_launchers.append(event)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -355,8 +365,9 @@ class TreePerfAnalyzer:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
                 metrics_event['external_id'] = event['args'].get('External id')
-            if include_kernel_names:
-                metrics_event['kernel_names'] = event['kernel_names']
+            if include_kernel_details:
+                if 'kernel_details' in event:
+                    metrics_event['kernel_details'] = event['kernel_details']
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -447,9 +458,9 @@ class TreePerfAnalyzer:
         if 'UID' in df_filtered.columns:
             agg_dict['UID'] = ['first', 'count']
             columns_to_keep_first.append('UID')
-        if 'kernel_names' in df_filtered.columns:
-            agg_dict['kernel_names'] = 'first'
-            columns_to_keep_first.append('kernel_names')
+        if 'kernel_details' in df_filtered.columns:
+            agg_dict['kernel_details'] = 'first'
+            columns_to_keep_first.append('kernel_details')
         for col in actual_grouping_cols:
             agg_dict[col] = 'first'
             columns_to_keep_first.append(col)

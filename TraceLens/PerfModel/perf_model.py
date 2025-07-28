@@ -95,8 +95,11 @@ class GEMM:
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
-
-        for kernel_name in event['kernel_names']:
+        if 'kernel_names' in event and len(event['kernel_names']) > 0:
+            kernel_names = event['kernel_names']
+        elif 'kernel_details' in event and len(event['kernel_details']) > 0:
+            kernel_names = [kernel['name'] for kernel in event['kernel_details']]
+        for kernel_name in kernel_names:
             # TODO: think you really wanna pass around dicts instead of objects?
             self.parsed_kernel_info = gemm_name_parser(kernel_name)
             if self.parsed_kernel_info is not None:
