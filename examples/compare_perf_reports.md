@@ -14,7 +14,7 @@
 ### 2 .  How to Call It
 
 ```bash
-python compare_tracelens_reports.py \
+python compare_perf_reports.py \
     baseline.xlsx \
     candidate.xlsx \
     --names baseline candidate \
