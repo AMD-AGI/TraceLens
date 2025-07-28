@@ -293,7 +293,12 @@ def main() -> None:
         results["ops_summary"] = ops
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
+    alias = ["ops_all", "ops_unique_args"] # different names for different versions of perf reports
     if args.sheets in ("ops_all", "all"):
+        for sheet_name in alias:
+            if sheet_name in pd.ExcelFile(args.reports[0]).sheet_names:
+                ops_all_sheet = sheet_name
+                break
         keys = [
             "name",
             "Input type",
@@ -304,7 +309,7 @@ def main() -> None:
         diff_cols = ["total_direct_kernel_time_sum", "total_direct_kernel_time_mean", "operation_count"]
 
         dfs = [
-            load_sheet(path, sheet_name="ops_all")
+            load_sheet(path, sheet_name=ops_all_sheet)
             for path in args.reports
         ]
 
