@@ -430,23 +430,37 @@ class JaxAnalyses:
 
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata):
+        if event.get(TraceEventUtils.TraceKeys.Phase) == TraceEventUtils.TracePhases.Metadata:
             return "metadata"
+        
+        # Handle synthetic runtime events created by JAX integration
+        event_name = event.get(TraceEventUtils.TraceKeys.Name, '')
+        if event_name == 'cudaLaunchKernel' and event.get('cat') == 'cuda_runtime':
+            return "cuda_runtime"
+        
         elif (TraceEventUtils.TraceKeys.PID in event and TraceEventUtils.TraceKeys.TID in event):
             pid = event[TraceEventUtils.TraceKeys.PID]
             tid = event[TraceEventUtils.TraceKeys.TID]
-            ThreadName = metadata[pid][tid][TraceEventUtils.MetadataFields.ThreadName]
-            if ThreadName == JaxAnalyses.JaxSpecialThreads.FrameworkCallStack:
-                return "cpu_op"
-            elif ThreadName == JaxAnalyses.JaxSpecialThreads.XlaOps:
-                return "python function"
-            elif ThreadName.startswith("Stream"):
-                name = event[TraceEventUtils.TraceKeys.Name]
-                if any(name.lower().startswith(x) for x in ['copy', 'memcpy']):
-                    return "memcpy"
-                if any(name.lower().startswith(x) for x in ['memset']):
-                    return "memset"
-                return "kernel"
+            
+            # Check if thread metadata exists
+            if pid in metadata and tid in metadata[pid]:
+                ThreadName = metadata[pid][tid][TraceEventUtils.MetadataFields.ThreadName]
+                if ThreadName == JaxAnalyses.JaxSpecialThreads.FrameworkCallStack:
+                    return "cpu_op"
+                elif ThreadName == JaxAnalyses.JaxSpecialThreads.XlaOps:
+                    return "python function"
+                elif ThreadName.startswith("Stream"):
+                    name = event[TraceEventUtils.TraceKeys.Name]
+                    if any(name.lower().startswith(x) for x in ['copy', 'memcpy']):
+                        return "memcpy"
+                    if any(name.lower().startswith(x) for x in ['memset']):
+                        return "memset"
+                    return "kernel"
+            
+            # Handle synthetic runtime events by name if thread metadata is missing
+            if event_name == 'cudaLaunchKernel':
+                return "cuda_runtime"
+                
         return "Unknown"
 
     # returns a curried function to categorizes events based on the

@@ -5,6 +5,8 @@ from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
 
+from pathlib import Path
+
 def main():
 
     # check openpyxl is installed
@@ -16,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json file')
     parser.add_argument('--output_xlsx_path', type=str, required=True, help='Path to the output Excel file')
+    parser.add_argument('--output_dir', type=str, required=True, help='Path where to output csv files')
     parser.add_argument('--python_path', type=str, default=None, help='Path to the python executable')
     parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
     args = parser.parse_args()
@@ -71,6 +74,10 @@ def main():
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     print(f"DataFrames successfully written to {args.output_xlsx_path}")
+
+    # experimental csv output of the main summaries
+    df_gpu_timeline.to_csv(Path(args.output_dir).joinpath("trace_analysis_results_gpu_events_categorized_mean.csv"))
+    df_kernel_launchers_summary.to_csv(Path(args.output_dir).joinpath("trace_analysis_results_gpu_uncategorised_summary.csv"))
 
 if __name__ == "__main__":
     main()

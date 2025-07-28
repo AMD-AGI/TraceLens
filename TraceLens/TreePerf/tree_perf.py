@@ -119,7 +119,13 @@ class TreePerfAnalyzer:
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = op_to_perf_model_class_map[event['name']]
+            if self.jax:
+                # For JAX, try JAX-specific performance models first
+                from ..PerfModel.jax_op_mapping import get_jax_perf_model_class
+                perf_model_class = get_jax_perf_model_class(event['name'])
+            else:
+                # For PyTorch, use existing mapping
+                perf_model_class = op_to_perf_model_class_map[event['name']]
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
@@ -472,8 +478,14 @@ class TreePerfAnalyzer:
         return df_unique_args
 
     def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
-        gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
+        if self.jax:
+            # For JAX, JaxGPUEventAnalyser expects all events to filter by PID
+            all_events = [event for event in self.tree.events if event.get('tree')]
+            gpu_event_analyser = self.GPUEventAnalyser(all_events)
+        else:
+            # For PyTorch, filter to GPU events only
+            kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
+            gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
 

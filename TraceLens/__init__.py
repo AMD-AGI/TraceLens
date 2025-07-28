@@ -3,6 +3,7 @@ from .TreePerf.gpu_event_analyser import GPUEventAnalyser, PytorchGPUEventAnalys
 from .TreePerf.jax_analyses import JaxAnalyses
 from .TraceFusion.trace_fuse import TraceFuse
 from .Trace2Tree.trace_to_tree import TraceToTree
+from .Trace2Tree.jax_trace_to_tree import JaxTreePerfAnalyzer
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
 from .util import DataLoader,TraceEventUtils
 from .PerfModel import *
@@ -11,6 +12,7 @@ from .Reporting import *
 
 __all__ = [
     "TreePerfAnalyzer",
+    "JaxTreePerfAnalyzer",
     "GPUEventAnalyser",
     "PytorchGPUEventAnalyser",
     "JaxGPUEventAnalyser",
