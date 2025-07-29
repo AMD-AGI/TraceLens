@@ -1,9 +1,8 @@
-import json
-from pprint import pprint
 from typing import Any, Callable, Dict
 
-import TraceLens.util
+import pandas as pd
 
+import TraceLens.util
 from TraceLens import TraceToTree
 
 
@@ -16,6 +15,9 @@ class TraceDiff:
         self.pod1 = set()
         self.pod2 = set()
         self.merged_tree = None  # Will hold the merged tree structure
+        self.merged_uid_map = {}  # (tree_num, uid) -> corresponding_uid or -1
+        # Automatically merge trees and initialize UID map
+        self.merge_trees()
 
     def _add_subtree_to_pod_recursive(
         self, node: Dict[str, Any], pod: set, tree: TraceToTree
@@ -44,7 +46,7 @@ class TraceDiff:
 
         self._add_subtree_to_pod_recursive(node, pod, tree)
 
-    def get_diff_boundaries(self):
+    def calculate_diff_boundaries(self):
         """
         Compare two trees and identify the boundaries of differences between them using recursive Wagner-Fischer and DFS, matching the reference tree.py algorithm.
         Returns:
@@ -126,8 +128,12 @@ class TraceDiff:
                 add_to_pod(node2, self.pod2, tree2)
                 return
 
-            children1 = get_children(tree1, node1)
-            children2 = get_children(tree2, node2)
+            children1 = sorted(
+                get_children(tree1, node1), key=lambda child: child.get("ts", 0)
+            )
+            children2 = sorted(
+                get_children(tree2, node2), key=lambda child: child.get("ts", 0)
+            )
             seq1 = [
                 child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
                 for child in children1
@@ -161,8 +167,12 @@ class TraceDiff:
             raise ValueError(
                 "Both trees must have at least one root node in cpu_root_nodes."
             )
-        roots1 = tree1.cpu_root_nodes
-        roots2 = tree2.cpu_root_nodes
+        roots1 = sorted(
+            tree1.cpu_root_nodes, key=lambda uid: tree1.get_UID2event(uid).get("ts", 0)
+        )
+        roots2 = sorted(
+            tree2.cpu_root_nodes, key=lambda uid: tree2.get_UID2event(uid).get("ts", 0)
+        )
         ops = wagner_fischer(roots1, roots2)
         for op, i, j in ops:
             if op == "match":
@@ -185,6 +195,9 @@ class TraceDiff:
         Each merged event has a unique merged_id, children as merged_id references, and root merged_ids. Compatible with TraceToTree format.
         Returns: (merged_events, merged_root_ids)
         """
+
+        # Set the PODs and diff_boundaries
+        self.calculate_diff_boundaries()
 
         # Helper to create a merged event
         def make_event(merged_id, uid1, uid2, merged_type, children):
@@ -236,12 +249,18 @@ class TraceDiff:
             merged_id = merged_id_counter[0]
             merged_id_counter[0] += 1
             uid_pair_to_merged_id[key] = merged_id
+            # Build merged_uid_map for combined nodes
             if uid1 and uid2:
                 merged_type = "combined"
+                # Map both directions
+                self.merged_uid_map[(1, uid1)] = uid2
+                self.merged_uid_map[(2, uid2)] = uid1
             elif uid1:
                 merged_type = "trace1"
+                self.merged_uid_map[(1, uid1)] = -1
             else:
                 merged_type = "trace2"
+                self.merged_uid_map[(2, uid2)] = -1
             children1 = safe_children(baseline_uid2node, uid1)
             children2 = safe_children(variant_uid2node, uid2)
             # Wagner-Fischer to align children
@@ -305,39 +324,56 @@ class TraceDiff:
         roots2 = list(self.variant.cpu_root_nodes)
         merged_root_ids = []
 
-        # Handle POD roots in baseline
-        for uid1 in roots1[:]:
-            if uid1 in self.pod1:
+        # Sort roots by ts for deterministic order
+        roots1 = sorted(
+            roots1, key=lambda uid: baseline_uid2node.get(uid, {}).get("ts", 0)
+        )
+        roots2 = sorted(
+            roots2, key=lambda uid: variant_uid2node.get(uid, {}).get("ts", 0)
+        )
+
+        i, j = 0, 0
+        while i < len(roots1) and j < len(roots2):
+            uid1 = roots1[i]
+            uid2 = roots2[j]
+            in_pod1 = uid1 in self.pod1
+            in_pod2 = uid2 in self.pod2
+            if in_pod1 and not in_pod2:
                 merged_root_ids.append(merge_from_pod(uid1, None))
-                roots1.remove(uid1)
-
-        # Handle POD roots in variant
-        for uid2 in roots2[:]:
-            if uid2 in self.pod2:
+                i += 1
+            elif in_pod2 and not in_pod1:
                 merged_root_ids.append(merge_from_pod(None, uid2))
-                roots2.remove(uid2)
+                j += 1
+            elif in_pod1 and in_pod2:
+                # Both are PODs, treat as separate
+                merged_root_ids.append(merge_from_pod(uid1, None))
+                merged_root_ids.append(merge_from_pod(None, uid2))
+                i += 1
+                j += 1
+            else:
+                # Both are not PODs, merge as combined
+                merged_root_ids.append(merge_from_pod(uid1, uid2))
+                i += 1
+                j += 1
 
-        # Now, match remaining roots by name and merge as 'combined'
-        name_to_uid1 = {get_name_by_uid(baseline_uid2node, uid): uid for uid in roots1}
-        name_to_uid2 = {get_name_by_uid(variant_uid2node, uid): uid for uid in roots2}
-        matched_names = set(name_to_uid1.keys()) & set(name_to_uid2.keys())
-        for name in matched_names:
-            uid1 = name_to_uid1[name]
-            uid2 = name_to_uid2[name]
-            merged_root_ids.append(merge_from_pod(uid1, uid2))
-            roots1.remove(uid1)
-            roots2.remove(uid2)
-
-        # If any roots remain (unmatched), merge them as single-sided
-        for uid1 in roots1:
-            merged_root_ids.append(merge_from_pod(uid1, None))
-        for uid2 in roots2:
-            merged_root_ids.append(merge_from_pod(None, uid2))
+        # Handle remaining roots in either list
+        while i < len(roots1):
+            merged_root_ids.append(merge_from_pod(roots1[i], None))
+            i += 1
+        while j < len(roots2):
+            merged_root_ids.append(merge_from_pod(None, roots2[j]))
+            j += 1
 
         self.merged_tree = (merged_events, merged_root_ids)
         return self.merged_tree
 
-    def print_merged_tree(self, output_file="merged_tree_output.txt"):
+    def get_corresponding_uid(self, tree_num, uid):
+        """
+        Given a tree number (1 or 2) and a UID, return the corresponding UID from the other tree if combined, else -1.
+        """
+        return self.merged_uid_map.get((tree_num, uid), -1)
+
+    def print_merged_tree(self, output_file):
         if self.merged_tree is None:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
@@ -421,13 +457,11 @@ class TraceDiff:
             for line in output_lines:
                 f.write(line + "\n")
 
-    def print_diff_stats(self, output_file="diff_stats.csv"):
+    def print_diff_stats(self, output_file):
         """
         For combined ops on a GPU path with non-combined children, output CSV with columns:
         name, input_shape, total_kernel_time_trace1, total_kernel_time_trace2, kernel_names_trace1, kernel_names_trace2
         """
-        import csv
-
         if self.merged_tree is None:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
@@ -452,8 +486,6 @@ class TraceDiff:
             name = node.get("name") if "name" in node else node.get("Name")
             if name is None:
                 try:
-                    import TraceLens.util
-
                     name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
                 except Exception:
                     pass
@@ -471,8 +503,6 @@ class TraceDiff:
             if dur is not None:
                 return dur
             try:
-                import TraceLens.util
-
                 dur = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
             except Exception:
                 pass
@@ -485,12 +515,10 @@ class TraceDiff:
             cat = node.get("cat") or node.get("category")
             if cat is None:
                 try:
-                    import TraceLens.util
-
                     cat = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
                 except Exception:
                     pass
-            return cat == "kernel"
+            return cat in ("kernel", "gpu_memcpy")
 
         def get_kernel_info_subtree(root_uid, tree_uid2node):
             kernel_names = []
@@ -509,8 +537,6 @@ class TraceDiff:
                     kname = node.get("name") or node.get("Name")
                     if kname is None:
                         try:
-                            import TraceLens.util
-
                             kname = node.get(
                                 TraceLens.util.TraceEventUtils.TraceKeys.Name
                             )
@@ -570,16 +596,65 @@ class TraceDiff:
         for root_id in merged_root_ids:
             traverse(root_id)
 
-        with open(output_file, "w", newline="") as csvfile:
-            fieldnames = [
+        # Use pandas to write the DataFrame to CSV
+        df = pd.DataFrame(rows)
+        df.to_csv(output_file, index=False)
+
+    def diff_stats_summary(self, diff_stats_csv, output_file):
+        """
+        Create a summary CSV from the diff_stats.csv, grouping by name and input_shape, aggregating kernel times and names.
+        """
+        df = pd.read_csv(diff_stats_csv)
+        grouped = df.groupby(["name", "input_shape"])
+        summary = grouped.agg(
+            {
+                "total_kernel_time_trace1": "sum",
+                "total_kernel_time_trace2": "sum",
+                "kernel_names_trace1": lambda x: ";".join(x.dropna().astype(str)),
+                "kernel_names_trace2": lambda x: ";".join(x.dropna().astype(str)),
+            }
+        ).reset_index()
+        summary["avg_kernel_time_trace1"] = (
+            grouped["total_kernel_time_trace1"].mean().values
+        )
+        summary["avg_kernel_time_trace2"] = (
+            grouped["total_kernel_time_trace2"].mean().values
+        )
+        # Reorder columns
+        summary = summary[
+            [
                 "name",
-                "kernel_names_trace1",
-                "kernel_names_trace2",
-                "total_kernel_time_trace1",
-                "total_kernel_time_trace2",
                 "input_shape",
+                "total_kernel_time_trace1",
+                "avg_kernel_time_trace1",
+                "kernel_names_trace1",
+                "total_kernel_time_trace2",
+                "avg_kernel_time_trace2",
+                "kernel_names_trace2",
             ]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
+        ]
+        summary.to_csv(output_file, index=False)
+
+    def generate_tracediff_report(self, output_folder="rprt_diff"):
+        """
+        Generate all TraceDiff output reports in a single call.
+        Output files are written to the specified output folder (default 'rprt_diff').
+        Output file names are:
+            - merged_tree_output.txt
+            - diff_stats.csv
+            - diff_stats_summary.csv
+        """
+        import os
+
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        merged_tree_file = os.path.join(output_folder, "merged_tree_output.txt")
+        diff_stats_file = os.path.join(output_folder, "diff_stats.csv")
+        diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
+
+        self.print_merged_tree(output_file=merged_tree_file)
+        self.print_diff_stats(output_file=diff_stats_file)
+        self.diff_stats_summary(
+            diff_stats_csv=diff_stats_file, output_file=diff_stats_summary_file
+        )
