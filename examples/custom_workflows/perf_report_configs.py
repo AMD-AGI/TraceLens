@@ -42,7 +42,8 @@ pad_ops_launchers = [
 
 upsample_ops_launchers = [
     "aten::upsample_nearest3d", "aten::upsample_nearest2d",
-    "aten::upsample_bicubic2d"
+    "aten::upsample_bicubic2d",
+    "aten::_upsample_nearest_exact2d",
 ]
 
 norm_ops_launchers = [
@@ -55,6 +56,8 @@ attn_ops_launchers = [
     "aten::_efficient_attention_forward",
     "flash_attn::_flash_attn_forward",
     "flash_attn::_flash_attn_varlen_forward",
+    "FlashAttnFunc",
+    "FlashAttnVarlenFunc",
 ]
 
 concat_ops_launchers = [
