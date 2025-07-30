@@ -6,17 +6,11 @@ import datetime
 
 def main():
     parser = argparse.ArgumentParser(description='Generate GPU Kernel Profiling Dashboard')
-    parser.add_argument('--trace1', default="./trace_file/examples/trace1.pt.trace.json.gz", 
-                       help='Path to first trace file')
-    parser.add_argument('--trace2', default="./trace_file/examples/trace2.pt.trace.json.gz",
-                       help='Path to second trace file')
-    parser.add_argument('--name1', default="Trace_A", 
-                       help='Name for first trace (default: Trace_A)')
-    parser.add_argument('--name2', default="Trace_B", 
-                       help='Name for second trace (default: Trace_B)')
-    
-    parser.add_argument('--output', default="tm.html",
-                       help='Output HTML file name (default: tm_{timestamp}.html)')
+    parser.add_argument('--trace1', required=True, help='Path to first trace file (example: ./trace1.pt.trace.json.gz)')
+    parser.add_argument('--trace2', required=True, help='Path to second trace file (example: ./trace2.pt.trace.json.gz)')
+    parser.add_argument('--name1', default="Trace_A", help='Name for first trace (default: Trace_A)')
+    parser.add_argument('--name2', default="Trace_B", help='Name for second trace (default: Trace_B)')    
+    parser.add_argument('--output', default="tm.html",  help='Output HTML file name (default: tm_{timestamp}.html)')
     
     args = parser.parse_args()
     
