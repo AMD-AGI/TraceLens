@@ -13,13 +13,13 @@ conv_ops = [
 # TBA:
 # "aten::_efficient_attention_forward",
 # "aten::_scaled_dot_product_attention_math",
-# "aten::_scaled_dot_product_efficient_attention",
 # "aten::_scaled_dot_product_flash_attention",
 # "flash_attn::_flash_attn_varlen_forward",
 attn_ops = [
     "FlashAttnFunc",
     "flash_attn::_flash_attn_forward",
     "aten::_scaled_dot_product_cudnn_attention",
+    "aten::_scaled_dot_product_efficient_attention",
 ]
 
 group2ops = {
