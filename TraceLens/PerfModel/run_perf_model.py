@@ -42,11 +42,15 @@ def main():
     }
 
     if args.op == "gemm":
-        #print("Calling GEMM.get_simulation_time_func...")
+        # Check for m, n and k. They are required for gemm
+        if None in {args.M, args.N, args.K}:
+            raise ValueError(f"For GEMM, m, n and k values are required.")
+
         # check if GEMMOLOGIST_PATH is set, otherwise give error message
         if (not os.environ.get('GEMMOLOGIST_PATH')) or \
                 (not os.path.exists(os.environ.get('GEMMOLOGIST_PATH'))):
             raise ValueError(f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}")
+        # print("Calling GEMM.get_simulation_time_func...")
         time, cmd = GEMM.get_simulation_time_func(
             arch=arch, M=args.M, N=args.N, K=args.K, B=args.B,
             dtype=args.dtype, python_path=args.python_path
