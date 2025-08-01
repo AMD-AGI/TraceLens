@@ -30,7 +30,7 @@ from typing import Dict, Any, Callable
 import warnings
 import pprint
 import pandas as pd
-from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op
+from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op, dict_cat2names
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.trace_to_tree import TraceToTree
@@ -61,6 +61,9 @@ class TreePerfAnalyzer:
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
+        self.op_to_perf_model_class_map = op_to_perf_model_class_map
+        self.op_categorizer = categorize_torch_op
+        self.dict_cat2names = dict_cat2names
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
@@ -119,7 +122,7 @@ class TreePerfAnalyzer:
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = op_to_perf_model_class_map[event['name']]
+            perf_model_class = self.op_to_perf_model_class_map.get(event['name'])
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
@@ -315,7 +318,7 @@ class TreePerfAnalyzer:
                 parent['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 parent['direct_kernel_count'] = len(list_kernels)
                 parent['kernel_names'] = [kernel['name'] for kernel in list_kernels]
-                parent['op category'] = categorize_torch_op(parent)
+                parent['op category'] = self.op_categorizer(parent)
                 kernel_launchers.append(parent)
                 continue # no need to check children of this event
 
@@ -337,7 +340,7 @@ class TreePerfAnalyzer:
                 event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
                 event['direct_kernel_count'] = len(list_kernels)
                 event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
-                event['op category'] = categorize_torch_op(event)
+                event['op category'] = self.op_categorizer(event)
                 kernel_launchers.append(event)
         return kernel_launchers
 

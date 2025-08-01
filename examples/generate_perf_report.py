@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
-from TraceLens.PerfModel import dict_cat2names
 import importlib.util
 import subprocess
 import sys
@@ -79,6 +78,38 @@ def get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=10, histogram
         df_grouped = df_grouped.head(topk)
     return df_hist, df_grouped
 
+def apply_extension(perf_analyzer, extension_path):
+    extension_path = os.path.abspath(extension_path)
+    extension_name = os.path.splitext(os.path.basename(extension_path))[0]
+
+    spec = importlib.util.spec_from_file_location(extension_name, extension_path)
+    extension = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(extension)
+
+    if hasattr(extension, 'tree_postprocess_extension'):
+        print(f"Applying tree postprocess extension from {extension_path}")
+        tree_postprocess_extension = getattr(extension, 'tree_postprocess_extension')
+        tree_postprocess_extension(perf_analyzer.tree)
+        perf_analyzer.tree.label_non_gpu_paths()
+    
+    if hasattr(extension, 'perf_model_extension'):
+        print(f"Applying perf model extension from {extension_path}")
+        perf_model_extension = getattr(extension, 'perf_model_extension')
+        if not isinstance(perf_model_extension, dict):
+            raise ValueError(f"Expected perf_model_extension to be a dict, got {type(perf_model_extension)}")
+        perf_analyzer.op_to_perf_model_class_map.update(perf_model_extension)
+    if hasattr(extension, 'dict_cat2names_extension'):
+        print(f"Updating dict_cat2names with extension from {extension_path}")
+        if not isinstance(extension.dict_cat2names_extension, dict):
+            raise ValueError(f"Expected dict_cat2names_extension to be a dict, got {type(extension.dict_cat2names_extension)}")
+
+        # defaultdict(<class 'list'>,
+        for cat, names in extension.dict_cat2names_extension.items():
+            if cat not in perf_analyzer.dict_cat2names:
+                perf_analyzer.dict_cat2names[cat] = []
+            if not isinstance(names, list):
+                raise ValueError(f"Expected names to be a list, got {type(names)}")
+            perf_analyzer.dict_cat2names[cat].extend(names)
 
 def main():
 
@@ -104,6 +135,9 @@ def main():
     parser.add_argument('--topk_roofline_ops', type=int, default=None,
                         help='Rows to keep in the roofline table.')
 
+    parser.add_argument('--extension_file', type=str, default=None,
+                        help='Path to the extension file containing custom extensions for TraceTree and PerfModel.')
+
     parser.add_argument('--python_path', type=str, default=None, help='Path to the python executable for gemmologist')
     parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
 
@@ -116,6 +150,9 @@ def main():
             gpu_arch_json = json.load(f)
 
     perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_json_path, arch=gpu_arch_json, python_path=args.python_path)
+
+    if args.extension_file:
+        apply_extension(perf_analyzer, args.extension_file)
 
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
 
@@ -138,7 +175,7 @@ def main():
     perf_metrics_dfs = {}
 
 
-    for op_cat, op_names in dict_cat2names.items():
+    for op_cat, op_names in perf_analyzer.dict_cat2names.items():
         # Filter events belonging to the current category
         op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
 
