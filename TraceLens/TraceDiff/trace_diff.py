@@ -16,8 +16,37 @@ class TraceDiff:
         self.pod2 = set()
         self.merged_tree = None  # Will hold the merged tree structure
         self.merged_uid_map = {}  # (tree_num, uid) -> corresponding_uid or -1
+        self.diff_stats_df = pd.DataFrame()  # DataFrame for diff stats
+        self.diff_stats_summary_df = pd.DataFrame()  # DataFrame for diff stats summary
         # Automatically merge trees and initialize UID map
         self.merge_trees()
+
+    def get_diff_stats_df(self):
+        """
+        Return the detailed diff stats DataFrame (diff_stats_df).
+        If the DataFrame is empty, print a message to generate reports first.
+        """
+        if getattr(self, "diff_stats_df", None) is None or self.diff_stats_df.empty:
+            print(
+                "[TraceDiff] diff_stats_df is empty. Please run generate_tracediff_report() first."
+            )
+            return None
+        return self.diff_stats_df
+
+    def get_diff_stats_summary_df(self):
+        """
+        Return the summary diff stats DataFrame (diff_stats_summary_df).
+        If the DataFrame is empty, print a message to generate reports first.
+        """
+        if (
+            getattr(self, "diff_stats_summary_df", None) is None
+            or self.diff_stats_summary_df.empty
+        ):
+            print(
+                "[TraceDiff] diff_stats_summary_df is empty. Please run generate_tracediff_report() first."
+            )
+            return None
+        return self.diff_stats_summary_df
 
     def _add_subtree_to_pod_recursive(
         self, node: Dict[str, Any], pod: set, tree: TraceToTree
@@ -457,10 +486,11 @@ class TraceDiff:
             for line in output_lines:
                 f.write(line + "\n")
 
-    def print_diff_stats(self, output_file):
+    def generate_diff_stats(self):
         """
-        For combined ops on a GPU path with non-combined children, output CSV with columns:
+        For combined ops on a GPU path with non-combined children, generate a DataFrame with columns:
         name, input_shape, total_kernel_time_trace1, total_kernel_time_trace2, kernel_names_trace1, kernel_names_trace2
+        Stores the DataFrame in self.diff_stats_df and returns it.
         """
         if self.merged_tree is None:
             raise ValueError(
@@ -496,6 +526,27 @@ class TraceDiff:
             shape = args.get("Input Dims")
             if shape is not None:
                 return str(shape)
+            return ""
+
+        def get_concrete_inputs(node):
+            args = node.get("args", {})
+            val = args.get("Concrete Inputs")
+            if val is not None:
+                return str(val)
+            return ""
+
+        def get_input_strides(node):
+            args = node.get("args", {})
+            val = args.get("Input Strides")
+            if val is not None:
+                return str(val)
+            return ""
+
+        def get_input_type(node):
+            args = node.get("args", {})
+            val = args.get("Input type")
+            if val is not None:
+                return str(val)
             return ""
 
         def get_duration(node):
@@ -558,10 +609,14 @@ class TraceDiff:
             return kernel_names, total_time
 
         rows = []
+        visited_stats_nodes = set()
 
         def traverse(merged_id):
+            if merged_id in visited_stats_nodes:
+                return
             node = merged_id_to_event[merged_id]
-            if node["merged_type"] == "combined":
+            mt = node["merged_type"]
+            if mt == "combined":
                 event1 = baseline_uid2node.get(node["uid1"])
                 event2 = variant_uid2node.get(node["uid2"])
                 if event1 and event2 and is_gpu_path(event1) and is_gpu_path(event2):
@@ -573,7 +628,14 @@ class TraceDiff:
                         name = get_op_name(
                             node["uid1"], baseline_uid2node
                         ) or get_op_name(node["uid2"], variant_uid2node)
-                        input_shape = get_input_shape(event1) or get_input_shape(event2)
+                        input_shape1 = get_input_shape(event1)
+                        input_shape2 = get_input_shape(event2)
+                        concrete_inputs1 = get_concrete_inputs(event1)
+                        concrete_inputs2 = get_concrete_inputs(event2)
+                        input_strides1 = get_input_strides(event1)
+                        input_strides2 = get_input_strides(event2)
+                        input_type1 = get_input_type(event1)
+                        input_type2 = get_input_type(event2)
                         kernel_names1, total_time1 = get_kernel_info_subtree(
                             node["uid1"], baseline_uid2node
                         )
@@ -583,78 +645,210 @@ class TraceDiff:
                         rows.append(
                             {
                                 "name": name,
-                                "input_shape": input_shape,
+                                "input_shape_trace1": input_shape1,
+                                "input_shape_trace2": input_shape2,
+                                "concrete_inputs_trace1": concrete_inputs1,
+                                "concrete_inputs_trace2": concrete_inputs2,
+                                "input_strides_trace1": input_strides1,
+                                "input_strides_trace2": input_strides2,
+                                "input_type_trace1": input_type1,
+                                "input_type_trace2": input_type2,
                                 "total_kernel_time_trace1": total_time1,
                                 "total_kernel_time_trace2": total_time2,
                                 "kernel_names_trace1": ";".join(kernel_names1),
                                 "kernel_names_trace2": ";".join(kernel_names2),
                             }
                         )
+                        visited_stats_nodes.add(merged_id)
+                        return  # Do not traverse children further
+            elif mt == "trace1":
+                event1 = baseline_uid2node.get(node["uid1"])
+                if event1 and is_gpu_path(event1):
+                    name = get_op_name(node["uid1"], baseline_uid2node)
+                    input_shape1 = get_input_shape(event1)
+                    concrete_inputs1 = get_concrete_inputs(event1)
+                    input_strides1 = get_input_strides(event1)
+                    input_type1 = get_input_type(event1)
+                    kernel_names1, total_time1 = get_kernel_info_subtree(
+                        node["uid1"], baseline_uid2node
+                    )
+                    rows.append(
+                        {
+                            "name": name,
+                            "input_shape_trace1": input_shape1,
+                            "input_shape_trace2": "",
+                            "concrete_inputs_trace1": concrete_inputs1,
+                            "concrete_inputs_trace2": "",
+                            "input_strides_trace1": input_strides1,
+                            "input_strides_trace2": "",
+                            "input_type_trace1": input_type1,
+                            "input_type_trace2": "",
+                            "total_kernel_time_trace1": total_time1,
+                            "total_kernel_time_trace2": "",
+                            "kernel_names_trace1": ";".join(kernel_names1),
+                            "kernel_names_trace2": "",
+                        }
+                    )
+                    visited_stats_nodes.add(merged_id)
+                    return
+            elif mt == "trace2":
+                event2 = variant_uid2node.get(node["uid2"])
+                if event2 and is_gpu_path(event2):
+                    name = get_op_name(node["uid2"], variant_uid2node)
+                    input_shape2 = get_input_shape(event2)
+                    concrete_inputs2 = get_concrete_inputs(event2)
+                    input_strides2 = get_input_strides(event2)
+                    input_type2 = get_input_type(event2)
+                    kernel_names2, total_time2 = get_kernel_info_subtree(
+                        node["uid2"], variant_uid2node
+                    )
+                    rows.append(
+                        {
+                            "name": name,
+                            "input_shape_trace1": "",
+                            "input_shape_trace2": input_shape2,
+                            "concrete_inputs_trace1": "",
+                            "concrete_inputs_trace2": concrete_inputs2,
+                            "input_strides_trace1": "",
+                            "input_strides_trace2": input_strides2,
+                            "input_type_trace1": "",
+                            "input_type_trace2": input_type2,
+                            "total_kernel_time_trace1": "",
+                            "total_kernel_time_trace2": total_time2,
+                            "kernel_names_trace1": "",
+                            "kernel_names_trace2": ";".join(kernel_names2),
+                        }
+                    )
+                    visited_stats_nodes.add(merged_id)
+                    return
             for cid in node["children"]:
                 traverse(cid)
 
         for root_id in merged_root_ids:
             traverse(root_id)
 
-        # Use pandas to write the DataFrame to CSV
         df = pd.DataFrame(rows)
-        df.to_csv(output_file, index=False)
+        self.diff_stats_df = df
+        return df
 
-    def diff_stats_summary(self, diff_stats_csv, output_file):
+    def diff_stats_summary(self, diff_stats_df=None):
         """
-        Create a summary CSV from the diff_stats.csv, grouping by name and input_shape, aggregating kernel times and names.
+        Create a summary DataFrame from the diff_stats_df, grouping by name and input_shape, aggregating kernel times and names.
+        For non-combined nodes (i.e., where only trace1 or trace2 fields are filled), ensure the other trace's fields are blank in the summary as well.
+        Stores the summary DataFrame in self.diff_stats_summary_df and returns it.
         """
-        df = pd.read_csv(diff_stats_csv)
-        grouped = df.groupby(["name", "input_shape"])
+        if diff_stats_df is None:
+            diff_stats_df = self.diff_stats_df
+        df = diff_stats_df.copy()
+        # Ensure all relevant columns exist
+        for col in [
+            "name",
+            "input_shape_trace1",
+            "input_shape_trace2",
+            "concrete_inputs_trace1",
+            "concrete_inputs_trace2",
+            "input_strides_trace1",
+            "input_strides_trace2",
+            "input_type_trace1",
+            "input_type_trace2",
+            "total_kernel_time_trace1",
+            "total_kernel_time_trace2",
+            "kernel_names_trace1",
+            "kernel_names_trace2",
+        ]:
+            if col not in df.columns:
+                df[col] = ""
+
+        # Convert kernel time columns to numeric, coercing errors to NaN, then fillna(0) and ensure float dtype
+        for col in ["total_kernel_time_trace1", "total_kernel_time_trace2"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(float)
+
+        def join_or_blank(x):
+            vals = x.dropna().astype(str)
+            vals = vals[vals != ""]
+            return ";".join(vals) if len(vals) > 0 else ""
+
+        grouped = df.groupby(
+            ["name", "input_shape_trace1", "input_shape_trace2"], dropna=False
+        )
         summary = grouped.agg(
             {
                 "total_kernel_time_trace1": "sum",
                 "total_kernel_time_trace2": "sum",
-                "kernel_names_trace1": lambda x: ";".join(x.dropna().astype(str)),
-                "kernel_names_trace2": lambda x: ";".join(x.dropna().astype(str)),
+                "kernel_names_trace1": join_or_blank,
+                "kernel_names_trace2": join_or_blank,
+                "concrete_inputs_trace1": join_or_blank,
+                "concrete_inputs_trace2": join_or_blank,
+                "input_strides_trace1": join_or_blank,
+                "input_strides_trace2": join_or_blank,
+                "input_type_trace1": join_or_blank,
+                "input_type_trace2": join_or_blank,
             }
         ).reset_index()
+
+        def avg_or_blank(series):
+            vals = series.dropna()
+            if len(vals) == 0:
+                return ""
+            return vals.mean()
+
         summary["avg_kernel_time_trace1"] = (
-            grouped["total_kernel_time_trace1"].mean().values
+            grouped["total_kernel_time_trace1"].apply(avg_or_blank).values
         )
         summary["avg_kernel_time_trace2"] = (
-            grouped["total_kernel_time_trace2"].mean().values
+            grouped["total_kernel_time_trace2"].apply(avg_or_blank).values
         )
         # Reorder columns
         summary = summary[
             [
                 "name",
-                "input_shape",
+                "input_shape_trace1",
+                "input_shape_trace2",
+                "concrete_inputs_trace1",
+                "concrete_inputs_trace2",
+                "input_strides_trace1",
+                "input_strides_trace2",
+                "input_type_trace1",
+                "input_type_trace2",
                 "total_kernel_time_trace1",
                 "avg_kernel_time_trace1",
-                "kernel_names_trace1",
                 "total_kernel_time_trace2",
                 "avg_kernel_time_trace2",
+                "kernel_names_trace1",
                 "kernel_names_trace2",
             ]
         ]
-        summary.to_csv(output_file, index=False)
+        self.diff_stats_summary_df = summary
+        return summary
 
-    def generate_tracediff_report(self, output_folder="rprt_diff"):
+    def generate_tracediff_report(self):
         """
-        Generate all TraceDiff output reports in a single call.
-        Output files are written to the specified output folder (default 'rprt_diff').
+        Generate all TraceDiff output DataFrames and update the object variables.
+        This does NOT write any files. Use print_tracediff_report_files to save outputs.
+        """
+        self.generate_diff_stats()
+        self.diff_stats_summary(self.diff_stats_df)
+
+    def print_tracediff_report_files(self, output_folder="rprt_diff"):
+        """
+        Write all TraceDiff output reports to files in the specified output folder (default 'rprt_diff').
         Output file names are:
             - merged_tree_output.txt
             - diff_stats.csv
             - diff_stats_summary.csv
         """
         import os
-
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
-
         merged_tree_file = os.path.join(output_folder, "merged_tree_output.txt")
         diff_stats_file = os.path.join(output_folder, "diff_stats.csv")
         diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
-
         self.print_merged_tree(output_file=merged_tree_file)
-        self.print_diff_stats(output_file=diff_stats_file)
-        self.diff_stats_summary(
-            diff_stats_csv=diff_stats_file, output_file=diff_stats_summary_file
-        )
+        if self.diff_stats_df is not None and not self.diff_stats_df.empty:
+            self.diff_stats_df.to_csv(diff_stats_file, index=False)
+        else:
+            print(f"[TraceDiff] diff_stats_df is empty. Run generate_tracediff_report() first.")
+        if self.diff_stats_summary_df is not None and not self.diff_stats_summary_df.empty:
+            self.diff_stats_summary_df.to_csv(diff_stats_summary_file, index=False)
+        else:
+            print(f"[TraceDiff] diff_stats_summary_df is empty. Run generate_tracediff_report() first.")
