@@ -32,6 +32,7 @@ from typing import Dict, Any, Callable
 import warnings
 import pprint
 import pandas as pd
+import numpy as np
 
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op, dict_cat2names
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
