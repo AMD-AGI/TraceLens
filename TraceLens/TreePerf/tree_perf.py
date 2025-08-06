@@ -32,8 +32,8 @@ from typing import Dict, Any, Callable
 import warnings
 import pprint
 import pandas as pd
-import numpy as np
-from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op
+
+from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op, dict_cat2names
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.trace_to_tree import TraceToTree
@@ -64,6 +64,9 @@ class TreePerfAnalyzer:
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
+        self.op_to_perf_model_class_map = op_to_perf_model_class_map
+        self.op_categorizer = categorize_torch_op
+        self.dict_cat2names = dict_cat2names
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
@@ -125,7 +128,7 @@ class TreePerfAnalyzer:
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = op_to_perf_model_class_map[event['name']]
+            perf_model_class = self.op_to_perf_model_class_map.get(event['name'])
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
@@ -188,6 +191,7 @@ class TreePerfAnalyzer:
             return pd.DataFrame()
         rows = []
         list_warn_non_zero_flops_and_zero_time = []
+        list_warn_perf_metrics_failed = []
         list_no_bwd_events = []
         for event in events:
             metrics_event = {'cat': self.event_to_category(event), 'name': event['name'],
@@ -201,8 +205,12 @@ class TreePerfAnalyzer:
                 perf_model_class = dict_name_to_perf_model[event['name']]
             else:
                 perf_model_class = None
-            dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd,
-                                                          non_data_mov=non_data_mov, perf_model_class=perf_model_class)
+            try:
+                dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd,
+                                                            non_data_mov=non_data_mov, perf_model_class=perf_model_class)
+            except Exception as e:
+                list_warn_perf_metrics_failed.append(event)
+                continue
             # handle warnings
             if bwd and not event.get('bwd_events'):
                 list_no_bwd_events.append(event)
@@ -218,13 +226,17 @@ class TreePerfAnalyzer:
             rows.append(metrics_event)
 
         self._show_warnings(list_warn_non_zero_flops_and_zero_time,
-                            list_no_bwd_events, len(events))
+                            list_no_bwd_events,
+                            list_warn_perf_metrics_failed,
+                            len(events))
         df_perf_metrics = pd.DataFrame(rows)
         return df_perf_metrics
 
     @staticmethod
     def _show_warnings(list_warn_non_zero_flops_and_zero_time,
-                          list_no_bwd_events, total_events):
+                        list_no_bwd_events,
+                        list_warn_perf_metrics_failed,
+                        total_events):
         # we need to say a/b  events had this issue and one example is following
         # where b is total events
         if len(list_warn_non_zero_flops_and_zero_time) > 0:
@@ -233,7 +245,9 @@ class TreePerfAnalyzer:
         if len(list_no_bwd_events) > 0:
             warnings.warn(f"Found {len(list_no_bwd_events)}/{total_events} events without backward events.")
             warnings.warn(f"Example event: {pprint.pformat(list_no_bwd_events[0])}")
-
+        if len(list_warn_perf_metrics_failed) > 0:
+            warnings.warn(f"Found {len(list_warn_perf_metrics_failed)}/{total_events} events with failed performance metric computation.")
+            warnings.warn(f"Example event: {pprint.pformat(list_warn_perf_metrics_failed[0])}")
 
     def build_df_fwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=False)
@@ -314,7 +328,7 @@ class TreePerfAnalyzer:
                                              'dur': kernel['dur'],
                                              'stream': kernel.get('args', {}).get('stream', None)}
                                             for kernel in list_kernels]
-                parent['op category'] = categorize_torch_op(parent)
+                parent['op category'] = self.op_categorizer(parent)
                 kernel_launchers.append(parent)
                 continue # no need to check children of this event
 
@@ -339,7 +353,7 @@ class TreePerfAnalyzer:
                                            'dur': kernel['dur'],
                                            'stream': kernel.get('args', {}).get('stream', None)}
                                           for kernel in list_kernels]
-                event['op category'] = categorize_torch_op(event)
+                event['op category'] = self.op_categorizer(event)
                 kernel_launchers.append(event)
         return kernel_launchers
 

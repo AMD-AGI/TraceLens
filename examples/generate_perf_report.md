@@ -37,6 +37,7 @@ The script supports several optional arguments to customize the output report. B
 | `--topk_ops N`                    | `None`            | Limit the number of rows in the unique-args launcher table.                |
 | `--topk_short_kernels N`          | `None`            | Limit the number of rows in the short-kernel table.                         |
 | `--topk_roofline_ops N`           | `None`            | Limit the number of rows in the roofline sheet.                             |
+| `--extension_file`           | `None`            | Path to extension python file   
 | `--short_kernel_study`            | `False`           | Include short-kernel analysis in the report.                                |
 | `--short_kernel_threshold_us X`   | `10`              | Threshold (in microseconds) to classify a kernel as "short".               |
 | `--short_kernel_histogram_bins B` | `100`             | Number of bins to use for the short-kernel duration histogram.             |
@@ -58,4 +59,32 @@ python generate_perf_report.py \
   --profile_json_path traces/profile.json \
   --output_csvs_dir output_csvs/ \
   --topk_ops 50 \
+```
+
+## 🧩 Extensions: Custom Hooks for Tree and PerfModel
+
+The `--extension_file` argument allows users to inject custom logic into the performance report generation pipeline. This is useful for experimenting with:
+
+- Tree post-processing (e.g., injecting pseudo ops)
+- Custom performance models for new op types
+- Additional operation category definitions
+
+### 🔧 How to Use
+
+Pass a Python file path via `--extension_file`. The file can define one or more of the following optional symbols:
+
+| Symbol Name                  | Type      | Description                                                                 |
+|-----------------------------|-----------|-----------------------------------------------------------------------------|
+| `tree_postprocess_extension`| `Callable`| Called with `perf_analyzer.tree`. Use to modify the tree structure post-construction. |
+| `perf_model_extension`      | `dict`    | A mapping from op name (str) to a custom performance model class. These will override or extend existing models. |
+| `dict_cat2names_extension`  | `dict`    | Mapping from new category names to lists of op names, merged into the built-in op categories. |
+
+#### 📄 Example Extension File for MegatronLM in the examples dir
+
+### ✅ Example Usage
+
+```bash
+python generate_perf_report.py \
+  --profile_json_path traces/profile.json \
+  --extension_file my_extension.py
 ```
