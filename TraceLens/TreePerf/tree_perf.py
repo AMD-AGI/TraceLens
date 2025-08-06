@@ -23,6 +23,8 @@
 import json
 import gzip
 import os
+from functools import partial
+import copy
 from collections import defaultdict
 from typing import Dict, Any, Callable
 
@@ -30,6 +32,7 @@ from typing import Dict, Any, Callable
 import warnings
 import pprint
 import pandas as pd
+import numpy as np
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
@@ -261,7 +264,7 @@ class TreePerfAnalyzer:
             dict_agg['Non-Data-Mov Kernel Time (µs)'] = ['sum']
         # this is a quick fix, we need to veriify it matches in the group
         if 'kernel_details' in df_perf_metrics.columns:
-            dict_agg['kernel_details'] = 'first'
+            dict_agg['kernel_details'] = partial(TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics)
         args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
         for arg in args_cols:
             if arg in df_perf_metrics.columns:
@@ -416,6 +419,70 @@ class TreePerfAnalyzer:
         return df_agg
 
     @staticmethod
+    def _summarize_kernel_stats(series_of_kernel_lists, agg_metrics=['mean']):
+        """
+        Revised implementation for ordered kernel summarization.
+        """
+        METRIC_MAP = {
+            'mean': ('mean_duration_us', np.mean),
+            'median': ('median_duration_us', np.median),
+            'max': ('max_duration_us', np.max),
+            'min': ('min_duration_us', np.min),
+            'std': ('std_dev_duration_us', np.std)
+        }
+
+        # --- CHANGE: More robust way to get the template ---
+        # Find the first valid list in the series to use as a template.
+        try:
+            template = next(item for item in series_of_kernel_lists if isinstance(item, list) and item)
+        except StopIteration:
+            return [] # The series was empty or contained no valid lists.
+
+        # --- CHANGE: Collect durations BY INDEX, not by name ---
+        all_durations = [[] for _ in template]
+
+        for kernel_list in series_of_kernel_lists:
+            if isinstance(kernel_list, list):
+                # Basic validation to prevent errors and warn about inconsistencies
+                if len(kernel_list) != len(template):
+                    warnings.warn(f"Inconsistent kernel list length found. Skipping a row.", UserWarning)
+                    continue
+                
+                for i, kernel in enumerate(kernel_list):
+                    try:
+                        # Append the duration to the list corresponding to its position
+                        all_durations[i].append(kernel['dur'])
+                    except (KeyError, IndexError):
+                        warnings.warn(f"Malformed kernel event or index issue at index {i}. Skipping kernel: {kernel}", UserWarning)
+                        continue
+
+        # --- CHANGE: Create a deep copy to avoid modifying original data ---
+        summary_list = copy.deepcopy(template)
+
+        # Now, compute statistics and populate the summary list
+        for i, kernel_summary in enumerate(summary_list):
+            durations_for_this_index = all_durations[i]
+            dur_arr = np.array(durations_for_this_index)
+            
+            # --- CHANGE: Use consistent naming and clear up original 'dur' key ---
+            del kernel_summary['dur']
+
+            kernel_summary['count'] = len(dur_arr)
+            kernel_summary['total_duration_us'] = np.sum(dur_arr) # Use consistent key name
+            
+            if not durations_for_this_index:
+                # If no durations were collected (e.g., all rows skipped), skip metric calculation
+                continue
+
+            for metric in agg_metrics:
+                if metric in METRIC_MAP:
+                    metric_name, agg_func = METRIC_MAP[metric]
+                    # --- CHANGE: Use the consistent metric name directly ---
+                    kernel_summary[metric_name] = agg_func(dur_arr)
+                    
+        return summary_list
+
+    @staticmethod
     def get_df_kernel_launchers_unique_args(df_kernel_launchers: pd.DataFrame,
                                             event_name=None, agg_metrics=['mean'], include_pct=False) -> pd.DataFrame:
         """
@@ -459,7 +526,7 @@ class TreePerfAnalyzer:
             agg_dict['UID'] = ['first', 'count']
             columns_to_keep_first.append('UID')
         if 'kernel_details' in df_filtered.columns:
-            agg_dict['kernel_details'] = 'first'
+            agg_dict['kernel_details'] = partial(TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics)
             columns_to_keep_first.append('kernel_details')
         for col in actual_grouping_cols:
             agg_dict[col] = 'first'
@@ -477,6 +544,9 @@ class TreePerfAnalyzer:
         # uid needs to be mapped to ex_UID
         if 'UID_first' in df_unique_args.columns:
             rename_map['UID_first'] = 'ex_UID'
+        for col in df_unique_args.columns:
+            if col.startswith('kernel_details_'):
+                rename_map[col] = 'kernel_details_summary'
         df_unique_args.rename(columns=rename_map, inplace=True)
 
         # 4. Reorder columns: start with grouping + key metrics, then rest
