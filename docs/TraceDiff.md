@@ -1,6 +1,11 @@
 # TraceDiff
 
-TraceDiff is a Python API and tool within TraceLens for comparing two PyTorch Kineto trace files. It enables users to identify, visualize, and analyze the differences between two execution traces at the operation and kernel level. TraceDiff is especially useful for regression analysis, performance debugging, and understanding the impact of code or environment changes on GPU workloads.
+TraceDiff is a Python API and a component of TraceLens for comparing two PyTorch Kineto trace files. It allows users to identify, visualize, and analyze differences between execution traces at both the operation and kernel levels.
+
+Unlike a simple leaf-level operation comparison, TraceDiff considers the morphological structure of traces to automatically determine the lowest common node. This improves accuracy when dealing with differences in operator lowering at the host call stack — for example, `aten::convolution` lowering to `aten::miopen_convolution` on ROCm and `aten::cudnn_convolution` on CUDA. A leaf-level comparison alone would treat these as completely different operations, whereas TraceDiff can automatically match them at the appropriate level.
+
+TraceDiff is particularly useful for regression analysis, performance debugging, and assessing the impact of code or environment changes on GPU workloads.
+
 
 ---
 
@@ -20,26 +25,19 @@ TraceDiff is a Python API and tool within TraceLens for comparing two PyTorch Ki
 ### Example: Compare Two Traces and Generate Reports
 
 ```python
-from TraceLens import TraceToTree, TraceDiff
+from TraceLens import TreePerfAnalyzer, TraceDiff
 import json
 
-# Load two trace files
-trace_file1 = '/path/to/trace1.json'
-trace_file2 = '/path/to/trace2.json'
-with open(trace_file1, 'r') as f:
-    trace_data1 = json.load(f)
-with open(trace_file2, 'r') as f:
-    trace_data2 = json.load(f)
+# Load two trace files into tree perf analyzer
+trace_file1 = "/path/to/trace1.json"
+trace_file2 = "/path/to/trace2.json"
 
-# Build event trees
-events1 = trace_data1['traceEvents']
-events2 = trace_data2['traceEvents']
-tree1 = TraceToTree(events1)
-tree1.build_tree()
-tree2 = TraceToTree(events2)
-tree2.build_tree()
+perf_analyzer1 = TreePerfAnalyzer.from_file(trace_file1)
+perf_analyzer2 = TreePerfAnalyzer.from_file(trace_file2)
+tree1 = perf_analyzer1.tree
+tree2 = perf_analyzer2.tree
 
-# Compare and analyze
+# Compare and analyze the trees
 td = TraceDiff(tree1, tree2)
 td.generate_tracediff_report()  # Generates DataFrames, does NOT write files
 td.print_tracediff_report_files('rprt_diff')  # Writes all reports to files in 'rprt_diff/'
@@ -50,48 +48,43 @@ td.print_tracediff_report_files('rprt_diff')  # Writes all reports to files in '
 **Output files:**
 - `rprt_diff/merged_tree_output.txt`: Text visualization of the merged tree, showing matched and unmatched nodes.
 - `rprt_diff/diff_stats.csv`: Detailed kernel and op statistics for each operation (see below for example and explanation).
-- `rprt_diff/diff_stats_summary.csv`: Aggregated summary statistics by op name and input shape (see below for example and explanation).
+- `rprt_diff/diff_stats_unique_args_summary.csv`: Aggregated summary statistics by op name and unique args.
+- `rprt_diff/diff_stats_names_summary_df`: Aggregated summary stats by op name - giving top level summary.
 
 ---
 
 
 ## Output File Examples and Interpretation
 
-### diff_stats_summary.csv
+#### diff_stats_names_summary_df.csv
 
-This file provides a summary of kernel time and statistics for each operation, grouped by op name and input shape. It is useful for quickly comparing performance between two traces at a high level.
 
-**Example (first two rows):**
 
-| name           | input_shape_trace1                                      | input_shape_trace2                                      | total_kernel_time_trace1 | avg_kernel_time_trace1 | total_kernel_time_trace2 | avg_kernel_time_trace2 | kernel_names_trace1                | kernel_names_trace2                |
-|----------------|--------------------------------------------------------|--------------------------------------------------------|-------------------------|------------------------|-------------------------|------------------------|-------------------------------------|-------------------------------------|
-| FlashAttnFunc  | [[5,2048,32,64],[5,11040,32,64],...]                   | [[5,2048,32,64],[5,11040,32,64],...]                   | 3655.85                | 3655.85                | 2431.72                | 2431.72                | void flash_fwd_kernel<...           | void ck_tile::kentry<...           |
-| FlashAttnFunc  | [[5,2048,32,64],[5,2048,32,64],...]                    | [[5,2048,32,64],[5,2048,32,64],...]                    | 16351.01               | 681.29                 | 11369.84                | 473.74                 | void flash_fwd_kernel<...;...        | void ck_tile::kentry<...;...        |
+**Example (first 5 rows):**
 
-**Key columns:**
-- `name`: The operation name (e.g., FlashAttnFunc)
-- `input_shape_trace1/2`: Input shapes for the op in each trace
-- `total_kernel_time_trace1/2`: Total time spent in kernels for this op in each trace (microseconds)
-- `avg_kernel_time_trace1/2`: Average kernel time per instance
-- `kernel_names_trace1/2`: Semicolon-separated kernel names launched by this op
+| name                        | row_count | kernel_time_trace1_sum_ms | kernel_time_trace2_sum_ms | diff_sum_ms  | abs_diff_sum_ms |
+|-----------------------------|-----------|---------------------------|---------------------------|--------------|-----------------|
+| aten::convolution_backward  | 736       | 541.957809                | 366.136090                | -175.821719  | 198.297619      |
+| aten::_convolution          | 736       | 229.175081                | 157.807700                | -71.367381   | 85.731275       |
+| aten::_batch_norm_impl_index| 448       | 129.995936                | 43.081600                 | -86.914335   | 86.914335       |
+| aten::mm                    | 300       | 78.684444                 | 84.654093                 | 5.969649     | 11.982847       |
+| FlashAttnFuncBackward       | 25        | 59.776381                 | 54.930648                 | -4.845733    | 4.845733        |
 
-**How to use:**
-- Compare `total_kernel_time` and `avg_kernel_time` between traces to spot regressions or improvements.
-- Compare how arguments such as input shapes and data types change across backends.
-- Differences in `kernel_names` may indicate kernel fusion, codegen, or backend changes.
 
-### diff_stats.csv
+
+#### diff_stats.csv
 
 This file contains detailed statistics for every op instance, including input shapes, types, kernel times, and kernel names. It is useful for fine-grained analysis and debugging.
+
+#### diff_stats_unique_args_summary.csv
+
+Midway between the detailed op wise view and the name summary this is a summary per argument of an operation. 
 
 **How to use:**
 - Drill down to individual op instances to investigate outliers or mismatches.
 - Use the detailed input and kernel info to correlate with model code or trace events.
 
 ---
-
----
-
 
 ## Accessing DataFrames and UID Mapping
 
@@ -101,12 +94,16 @@ TraceDiff provides methods to access the detailed and summary DataFrames directl
 
 ```python
 # After running td.generate_tracediff_report():
-df = td.get_diff_stats_df()  # Detailed per-op DataFrame
-df_summary = td.get_diff_stats_summary_df()  # Summary DataFrame
+df_stats = td.diff_stats_df  # Detailed per-op DataFrame
+df_unique_args_summary = td.diff_stats_unique_args_summary_df
+df_name_summary = td.diff_stats_name_summary_df
+
 if df is not None:
     print(df.head())
-if df_summary is not None:
-    print(df_summary.head())
+if df_unique_args_summary is not None:
+    print(df_unique_args_summary.head())
+if df_name_summary is not None:
+    print(df_name_summary.head())
 ```
 
 ### UID Mapping Example
