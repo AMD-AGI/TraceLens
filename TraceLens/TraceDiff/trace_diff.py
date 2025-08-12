@@ -4,7 +4,7 @@ import pandas as pd
 
 import TraceLens.util
 from TraceLens import TraceToTree
-
+from ..TreePerf import GPUEventAnalyser
 
 class TraceDiff:
     def __init__(self, tree1: TraceToTree, tree2: TraceToTree):
@@ -572,41 +572,46 @@ class TraceDiff:
             return cat in ("kernel", "gpu_memcpy")
 
         def get_kernel_info_subtree(root_uid, tree_uid2node):
-            kernel_names = []
-            total_time = 0.0
-            stack = [root_uid]
-            visited = set()
-            while stack:
-                uid = stack.pop()
-                if uid in visited:
-                    continue
-                visited.add(uid)
-                node = tree_uid2node.get(uid)
-                if node is None:
-                    continue
-                if is_kernel(node):
-                    kname = node.get("name") or node.get("Name")
-                    if kname is None:
-                        try:
-                            kname = node.get(
-                                TraceLens.util.TraceEventUtils.TraceKeys.Name
-                            )
-                        except Exception:
-                            pass
-                    # Shorten kernel name if too long
-                    if kname and len(kname) > 40:
-                        kname = kname[:37] + "..."
-                    kernel_names.append(kname)
-                    dur = get_duration(node)
-                    if dur:
-                        try:
-                            total_time += float(dur)
-                        except Exception:
-                            pass
-                # Traverse children
-                for child_uid in node.get("children", []):
-                    stack.append(child_uid)
-            return kernel_names, total_time
+            node = tree_uid2node.get(root_uid)
+            gpu_event_uids = node['gpu_events']
+            gpu_events = [tree_uid2node.get(uid) for uid in gpu_event_uids]
+            kernel_names = [gpu_event['name'] for gpu_event in gpu_events]
+            kernel_time = GPUEventAnalyser(gpu_events).compute_metrics()['busy_time']
+            # kernel_names = []
+            # total_time = 0.0
+            # stack = [root_uid]
+            # visited = set()
+            # while stack:
+            #     uid = stack.pop()
+            #     if uid in visited:
+            #         continue
+            #     visited.add(uid)
+            #     node = tree_uid2node.get(uid)
+            #     if node is None:
+            #         continue
+            #     if is_kernel(node):
+            #         kname = node.get("name") or node.get("Name")
+            #         if kname is None:
+            #             try:
+            #                 kname = node.get(
+            #                     TraceLens.util.TraceEventUtils.TraceKeys.Name
+            #                 )
+            #             except Exception:
+            #                 pass
+            #         # Shorten kernel name if too long
+            #         if kname and len(kname) > 40:
+            #             kname = kname[:37] + "..."
+            #         kernel_names.append(kname)
+            #         dur = get_duration(node)
+            #         if dur:
+            #             try:
+            #                 total_time += float(dur)
+            #             except Exception:
+            #                 pass
+            #     # Traverse children
+            #     for child_uid in node.get("children", []):
+            #         stack.append(child_uid)
+            return kernel_names, kernel_time
 
         rows = []
         visited_stats_nodes = set()
@@ -636,10 +641,10 @@ class TraceDiff:
                         input_strides2 = get_input_strides(event2)
                         input_type1 = get_input_type(event1)
                         input_type2 = get_input_type(event2)
-                        kernel_names1, total_time1 = get_kernel_info_subtree(
+                        kernel_names1, kernel_time1 = get_kernel_info_subtree(
                             node["uid1"], baseline_uid2node
                         )
-                        kernel_names2, total_time2 = get_kernel_info_subtree(
+                        kernel_names2, kernel_time2 = get_kernel_info_subtree(
                             node["uid2"], variant_uid2node
                         )
                         rows.append(
@@ -653,10 +658,10 @@ class TraceDiff:
                                 "input_strides_trace2": input_strides2,
                                 "input_type_trace1": input_type1,
                                 "input_type_trace2": input_type2,
-                                "total_kernel_time_trace1": total_time1,
-                                "total_kernel_time_trace2": total_time2,
-                                "kernel_names_trace1": ";".join(kernel_names1),
-                                "kernel_names_trace2": ";".join(kernel_names2),
+                                "kernel_time_trace1": kernel_time1,
+                                "kernel_time_trace2": kernel_time2,
+                                "kernel_names_trace1": kernel_names1,
+                                "kernel_names_trace2": kernel_names2,
                             }
                         )
                         visited_stats_nodes.add(merged_id)
@@ -669,7 +674,7 @@ class TraceDiff:
                     concrete_inputs1 = get_concrete_inputs(event1)
                     input_strides1 = get_input_strides(event1)
                     input_type1 = get_input_type(event1)
-                    kernel_names1, total_time1 = get_kernel_info_subtree(
+                    kernel_names1, kernel_time1 = get_kernel_info_subtree(
                         node["uid1"], baseline_uid2node
                     )
                     rows.append(
@@ -683,9 +688,9 @@ class TraceDiff:
                             "input_strides_trace2": "",
                             "input_type_trace1": input_type1,
                             "input_type_trace2": "",
-                            "total_kernel_time_trace1": total_time1,
-                            "total_kernel_time_trace2": "",
-                            "kernel_names_trace1": ";".join(kernel_names1),
+                            "kernel_time_trace1": kernel_time1,
+                            "kernel_time_trace2": 0,
+                            "kernel_names_trace1": kernel_names1,
                             "kernel_names_trace2": "",
                         }
                     )
@@ -699,7 +704,7 @@ class TraceDiff:
                     concrete_inputs2 = get_concrete_inputs(event2)
                     input_strides2 = get_input_strides(event2)
                     input_type2 = get_input_type(event2)
-                    kernel_names2, total_time2 = get_kernel_info_subtree(
+                    kernel_names2, kernel_time2 = get_kernel_info_subtree(
                         node["uid2"], variant_uid2node
                     )
                     rows.append(
@@ -713,10 +718,10 @@ class TraceDiff:
                             "input_strides_trace2": input_strides2,
                             "input_type_trace1": "",
                             "input_type_trace2": input_type2,
-                            "total_kernel_time_trace1": "",
-                            "total_kernel_time_trace2": total_time2,
+                            "kernel_time_trace1": 0,
+                            "kernel_time_trace2": kernel_time2,
                             "kernel_names_trace1": "",
-                            "kernel_names_trace2": ";".join(kernel_names2),
+                            "kernel_names_trace2": kernel_names2,
                         }
                     )
                     visited_stats_nodes.add(merged_id)
@@ -731,95 +736,152 @@ class TraceDiff:
         self.diff_stats_df = df
         return df
 
-    def diff_stats_summary(self, diff_stats_df=None):
+    def get_df_diff_stats_unique_args(self, op_name: str | None = None,
+                                    agg_metrics: list[str] = ['mean']) -> pd.DataFrame:
         """
-        Create a summary DataFrame from the diff_stats_df, grouping by name and input_shape, aggregating kernel times and names.
-        For non-combined nodes (i.e., where only trace1 or trace2 fields are filled), ensure the other trace's fields are blank in the summary as well.
-        Stores the summary DataFrame in self.diff_stats_summary_df and returns it.
+        Summarise diff stats across two traces by grouping on all argument columns and
+        aggregating timing differences.
+
+        Args:
+            df_diff_stats (pd.DataFrame): DataFrame containing diff stats with trace1 and trace2 metrics.
+            op_name (str, optional): If provided, only include rows where `name == op_name`.
+            agg_metrics (list[str]): List of aggregation functions (e.g. ['mean', 'median']).
+                                    'sum' will automatically be included if not in agg_metrics.
+
+        Returns:
+            pd.DataFrame: Summarised DataFrame sorted by the total difference column.
         """
-        if diff_stats_df is None:
-            diff_stats_df = self.diff_stats_df
-        df = diff_stats_df.copy()
-        # Ensure all relevant columns exist
-        for col in [
-            "name",
-            "input_shape_trace1",
-            "input_shape_trace2",
-            "concrete_inputs_trace1",
-            "concrete_inputs_trace2",
-            "input_strides_trace1",
-            "input_strides_trace2",
-            "input_type_trace1",
-            "input_type_trace2",
-            "total_kernel_time_trace1",
-            "total_kernel_time_trace2",
-            "kernel_names_trace1",
-            "kernel_names_trace2",
-        ]:
-            if col not in df.columns:
-                df[col] = ""
+        if self.diff_stats_df is None or self.diff_stats_df.empty:
+            print(
+                "[TraceDiff] diff_stats_df is empty. Please run generate_diff_stats() first."
+            )
+            return None
+        df_diff_stats = self.diff_stats_df.copy()
+        # 1. Optional filter by operation name
+        df_filtered = df_diff_stats[df_diff_stats['name'] == op_name].copy() if op_name else df_diff_stats.copy()
 
-        # Convert kernel time columns to numeric, coercing errors to NaN, then fillna(0) and ensure float dtype
-        for col in ["total_kernel_time_trace1", "total_kernel_time_trace2"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(float)
+        # 2. Compute difference and absolute difference between traces
+        df_filtered['diff'] = df_filtered['kernel_time_trace2'] - df_filtered['kernel_time_trace1']
+        df_filtered['abs_diff'] = df_filtered['diff'].abs()
 
-        def join_or_blank(x):
-            vals = x.dropna().astype(str)
-            vals = vals[vals != ""]
-            return ";".join(vals) if len(vals) > 0 else ""
+        # 3. Identify “argument” columns (everything that isn’t a metric)
+        metric_columns = ['kernel_time_trace1', 'kernel_time_trace2', 'diff', 'abs_diff']
+        grouping_cols_original = [c for c in df_filtered.columns if c not in metric_columns]
 
-        grouped = df.groupby(
-            ["name", "input_shape_trace1", "input_shape_trace2"], dropna=False
+        # 4. Build string representations for unhashable columns (lists/dicts)
+        str_cols = []
+        for col in grouping_cols_original:
+            str_col = f"{col}_str_repr"
+            df_filtered[str_col] = df_filtered[col].apply(str)
+            str_cols.append(str_col)
+
+        # 5. Build aggregation dictionary
+        agg_dict = {}
+        for mcol in metric_columns:
+            agg_dict[mcol] = agg_metrics + ([] if 'sum' in agg_metrics else ['sum'])
+        for col in grouping_cols_original:
+            agg_dict[col] = 'first'  # keep first occurrence of each argument column
+
+        # 6. Group by string representations and aggregate
+        df_agg = df_filtered.groupby(str_cols, dropna=False).agg(agg_dict)
+
+        # 7. Flatten the multi‑index column labels
+        df_agg.columns = ['_'.join(col).strip() for col in df_agg.columns.values]
+        df_agg = df_agg.reset_index(drop=True)
+
+        # 8. Rename “_first” columns back to the original column names for clarity
+        rename_map = {}
+        for col in grouping_cols_original:
+            col_first = f'{col}_first'
+            if col_first in df_agg.columns:
+                rename_map[col_first] = col
+        df_agg = df_agg.rename(columns=rename_map)
+
+        # 9. Reorder columns: original argument columns first, then aggregated metric columns
+        primary_cols = grouping_cols_original
+        metric_cols = []
+        for metric in metric_columns:
+            for agg in agg_metrics + ([] if 'sum' in agg_metrics else ['sum']):
+                col_name = f'{metric}_{agg}'
+                if col_name in df_agg.columns:
+                    metric_cols.append(col_name)
+        metric_cols = list(dict.fromkeys(metric_cols))  # remove duplicates
+        other_cols = [col for col in df_agg.columns
+                    if col not in primary_cols + metric_cols]
+        df_agg = df_agg[primary_cols + metric_cols + other_cols]
+
+        # 10. Sort by the trace1 kernel time sum
+        sort_col = 'kernel_time_trace1_sum'
+        if sort_col in df_agg.columns:
+            df_agg = df_agg.sort_values(by=sort_col, ascending=False, ignore_index=True)
+
+        self.diff_stats_unique_args_summary_df = df_agg
+        return df_agg
+    
+    def get_df_diff_stats_by_name(self, sort_desc: bool = True) -> pd.DataFrame:
+        """
+        Summarize diff stats by op name only, using sum for aggregation.
+
+        Expects columns:
+        - 'name'
+        - 'kernel_time_trace1'
+        - 'kernel_time_trace2'
+        Computes:
+        - diff = trace2 - trace1
+        - abs_diff = |diff|
+        Aggregates per name and sorts by kernel_time_trace1_sum_ms.
+        """
+        if self.diff_stats_df is None or self.diff_stats_df.empty:
+            print(
+                "[TraceDiff] diff_stats_df is empty. Please run generate_diff_stats() first."
+            )
+            return pd.DataFrame()
+        df = self.diff_stats_df.copy()
+        required = {'name', 'kernel_time_trace1', 'kernel_time_trace2'}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing columns: {sorted(missing)}")
+
+        d = df.copy()
+        d['kernel_time_trace1'] = pd.to_numeric(d['kernel_time_trace1'], errors='coerce').fillna(0)
+        d['kernel_time_trace2'] = pd.to_numeric(d['kernel_time_trace2'], errors='coerce').fillna(0)
+        d['diff'] = d['kernel_time_trace2'] - d['kernel_time_trace1']
+        d['abs_diff'] = d['diff'].abs()
+        
+        agg_fns = ['sum']
+
+        grouped = (
+            d.groupby('name', dropna=False)
+            .agg({
+                'kernel_time_trace1': agg_fns,
+                'kernel_time_trace2': agg_fns,
+                'diff': agg_fns,
+                'abs_diff': agg_fns,
+            })
         )
-        summary = grouped.agg(
-            {
-                "total_kernel_time_trace1": "sum",
-                "total_kernel_time_trace2": "sum",
-                "kernel_names_trace1": join_or_blank,
-                "kernel_names_trace2": join_or_blank,
-                "concrete_inputs_trace1": join_or_blank,
-                "concrete_inputs_trace2": join_or_blank,
-                "input_strides_trace1": join_or_blank,
-                "input_strides_trace2": join_or_blank,
-                "input_type_trace1": join_or_blank,
-                "input_type_trace2": join_or_blank,
-            }
-        ).reset_index()
 
-        def avg_or_blank(series):
-            vals = series.dropna()
-            if len(vals) == 0:
-                return ""
-            return vals.mean()
+        # flatten columns
+        grouped.columns = ['_'.join(col).strip() for col in grouped.columns.to_flat_index()]
+        grouped = grouped.reset_index()
 
-        summary["avg_kernel_time_trace1"] = (
-            grouped["total_kernel_time_trace1"].apply(avg_or_blank).values
-        )
-        summary["avg_kernel_time_trace2"] = (
-            grouped["total_kernel_time_trace2"].apply(avg_or_blank).values
-        )
-        # Reorder columns
-        summary = summary[
-            [
-                "name",
-                "input_shape_trace1",
-                "input_shape_trace2",
-                "concrete_inputs_trace1",
-                "concrete_inputs_trace2",
-                "input_strides_trace1",
-                "input_strides_trace2",
-                "input_type_trace1",
-                "input_type_trace2",
-                "total_kernel_time_trace1",
-                "avg_kernel_time_trace1",
-                "total_kernel_time_trace2",
-                "avg_kernel_time_trace2",
-                "kernel_names_trace1",
-                "kernel_names_trace2",
-            ]
-        ]
-        self.diff_stats_summary_df = summary
-        return summary
+        # add count of rows per name
+        counts = d.groupby('name', dropna=False).size().reset_index(name='row_count')
+        out = counts.merge(grouped, on='name', how='left')
+
+        # convert sum columns to ms and rename them by replacing the old columns
+        for col in ['kernel_time_trace1_sum', 'kernel_time_trace2_sum', 'diff_sum', 'abs_diff_sum']:
+            if col in out.columns:
+                out[col + '_ms'] = out[col] / 1000.0
+                out.drop(columns=[col], inplace=True)
+
+
+        # sort by kernel_time_trace1_sum_ms
+        sort_col = 'kernel_time_trace1_sum_ms'
+        if sort_col in out.columns:
+            out = out.sort_values(by=sort_col, ascending=not sort_desc, ignore_index=True)
+
+        self.diff_stats_names_summary_df = out
+        return out
 
     def generate_tracediff_report(self):
         """
@@ -827,7 +889,8 @@ class TraceDiff:
         This does NOT write any files. Use print_tracediff_report_files to save outputs.
         """
         self.generate_diff_stats()
-        self.diff_stats_summary(self.diff_stats_df)
+        self.get_df_diff_stats_unique_args()
+        self.get_df_diff_stats_by_name()
 
     def print_tracediff_report_files(self, output_folder="rprt_diff"):
         """
@@ -842,13 +905,19 @@ class TraceDiff:
             os.makedirs(output_folder)
         merged_tree_file = os.path.join(output_folder, "merged_tree_output.txt")
         diff_stats_file = os.path.join(output_folder, "diff_stats.csv")
-        diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
+        # diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
+        diff_stats_unique_args_summary_file = os.path.join(output_folder, "diff_stats_unique_args_summary.csv")
+        diff_stats_names_summary_file = os.path.join(output_folder, "diff_stats_names_summary.csv")
         self.print_merged_tree(output_file=merged_tree_file)
         if self.diff_stats_df is not None and not self.diff_stats_df.empty:
             self.diff_stats_df.to_csv(diff_stats_file, index=False)
         else:
             print(f"[TraceDiff] diff_stats_df is empty. Run generate_tracediff_report() first.")
-        if self.diff_stats_summary_df is not None and not self.diff_stats_summary_df.empty:
-            self.diff_stats_summary_df.to_csv(diff_stats_summary_file, index=False)
+        if self.diff_stats_unique_args_summary_df is not None and not self.diff_stats_unique_args_summary_df.empty:
+            self.diff_stats_unique_args_summary_df.to_csv(diff_stats_unique_args_summary_file, index=False)
         else:
-            print(f"[TraceDiff] diff_stats_summary_df is empty. Run generate_tracediff_report() first.")
+            print(f"[TraceDiff] diff_stats_unique_args_summary_df is empty. Run generate_tracediff_report() first.")
+        if self.diff_stats_names_summary_df is not None and not self.diff_stats_names_summary_df.empty:
+            self.diff_stats_names_summary_df.to_csv(diff_stats_names_summary_file, index=False)
+        else:
+            print(f"[TraceDiff] diff_stats_names_summary_df is empty. Run generate_tracediff_report() first.")
