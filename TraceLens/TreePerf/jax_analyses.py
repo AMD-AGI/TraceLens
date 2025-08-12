@@ -41,6 +41,7 @@ class JaxAnalyses:
         FrameworkOps       = "Framework Ops"
         XlaModules         = "XLA Modules"
         XlaOps             = "XLA Ops"
+        pyXla             = 'py_xla_execute'
         SourceCode         = "Source Code"
         Steps              = "Steps"
         StreamPrefix       = "Stream #"
@@ -438,6 +439,8 @@ class JaxAnalyses:
             ThreadName = metadata[pid][tid][TraceEventUtils.MetadataFields.ThreadName]
             if ThreadName == JaxAnalyses.JaxSpecialThreads.FrameworkCallStack:
                 return "cpu_op"
+            elif JaxAnalyses.JaxSpecialThreads.pyXla in ThreadName:
+                return "cpu_op"
             elif ThreadName == JaxAnalyses.JaxSpecialThreads.XlaOps:
                 return "python function"
             elif ThreadName.startswith("Stream"):
@@ -495,6 +498,7 @@ class JaxProfileProcessor:
                 [dir_name], "graph_viewer^", params)
         data = data.decode("utf-8").split('\n')
         for line in data:
+            print(line)
             JaxProfileProcessor.process_line(hlo_ops, line)
         return hlo_ops
 
