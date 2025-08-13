@@ -1,4 +1,4 @@
-/tutorials/
+/tutorials/*
 **/__pycache__/
 **.ipynb_checkpoints/
 **/build/
