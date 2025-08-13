@@ -498,7 +498,6 @@ class JaxProfileProcessor:
                 [dir_name], "graph_viewer^", params)
         data = data.decode("utf-8").split('\n')
         for line in data:
-            print(line)
             JaxProfileProcessor.process_line(hlo_ops, line)
         return hlo_ops
 

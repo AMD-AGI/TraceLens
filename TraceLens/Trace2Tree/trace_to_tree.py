@@ -285,10 +285,10 @@ class JaxTraceToTree(BaseTraceToTree):
                                         #print(hlo_op)  
                                         GPU_event['metadata'] = self.metadata[hlo_op]
 
-                                    else:
-
-                                        print(hlo_op)
-                                        print(GPU_event['args']['hlo_module'])
+                                    #else:
+                                    #    print('hlo_op not in metadata keys.')
+                                    #    print(hlo_op)
+                                    #    print(GPU_event['args']['hlo_module'])
 
 
 
