@@ -26,6 +26,7 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
     # Generate base DataFrames 
     perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
+    dict_dfs = {}
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
@@ -35,7 +36,6 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
                                                                                     include_pct=True)
 
     # Store base DataFrames
-    dict_dfs = {}
     dict_dfs['gpu_timeline']= df_gpu_timeline
     dict_dfs['kernel_launchers']= df_kernel_launchers
     dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
@@ -92,14 +92,14 @@ def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) ->
     # Generate base DataFrames
     perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
+    dict_dfs = {}
     if 0:
         # gpu stats
         df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() # returan all gpus. TODO: gpu_pid=1 Default for Jax. gpu_pid=[1,...8]
-        print(df_gpu_timeline)
         df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
+        print(df_gpu_timeline)
         print(df_gpu_events_averages)
-        sys.exit(0)
-    if 0:
+    if 1:
         # kernel lauchers
         df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
         df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
@@ -108,27 +108,32 @@ def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) ->
                                                                                         agg_metrics=agg_metrics, 
                                                                                         include_pct=True)
         sys.exit(0)
-
         # Store base DataFrames
-        dict_dfs = {}
         dict_dfs['gpu_timeline']= df_gpu_timeline
+        dict_dfs['gpu_events_averages']= df_gpu_events_averages
         dict_dfs['kernel_launchers']= df_kernel_launchers
         dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
         dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
         dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
-    if 1:
+    if 0:
         # Generate & store op-specific DataFrames
+        # xla_events
+        op_cat = 'XLA'
+        # categorized
+        op_cat = 'CONV' #TODO How many? what? 
+        op_cat = 'HLO'
+        op_cat = 'TE'
+        op_cat = 'FA'
+        categorized_events_time, xla_time = perf_analyzer.get_categorized_gpu_events()
+        print(categorized_events_time, xla_time)
+        sys.exit(0)
+        # GEMMs
         op_cat = 'GEMM'
         op_events = [event for event in perf_analyzer.tree.events if any(f in event['name'] for f in JaxAnalyses.GemmKeys)]
         df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
         dict_dfs[f"op_{op_cat}"] = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
         print(len(op_events))
         sys.exit(0)  
-        op_cat = 'CONV'
-        op_cat = 'HLO'
-        op_cat = 'XLA'
-        op_cat = 'TE'
-        op_cat = 'FA'
 
     # Gabe: GPU events stats (legacy from jax_analyses.py)
     averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_path)
