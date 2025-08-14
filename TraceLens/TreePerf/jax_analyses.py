@@ -41,7 +41,8 @@ class JaxAnalyses:
         FrameworkOps       = "Framework Ops"
         XlaModules         = "XLA Modules"
         XlaOps             = "XLA Ops"
-        pyXla             = 'py_xla_execute'
+        #pyXla             = 'py_xla_execute'
+        pyXla             = 'py_xla'
         SourceCode         = "Source Code"
         Steps              = "Steps"
         StreamPrefix       = "Stream #"
@@ -479,7 +480,10 @@ class JaxProfileProcessor:
         if len(hlo_filename) != 1:
             convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
-        assert len(hlo_filename) == 1
+        #assert len(hlo_filename) == 1
+        if len(hlo_filename) > 1:
+            print('Multiple matching hlo_filenames:')
+            print(hlo_filename)
         # need to make sure that the pb exists and get the numerical suffix into the module name
         # and remove '.hlo_proto.pb'
         module_name = os.path.splitext(os.path.splitext(os.path.basename(hlo_filename[0]))[0])[0]
