@@ -1474,3 +1474,94 @@ class aten_binary_elementwise(BinaryElementwise):
                 "dtype_in1_in2_out" : (dtype_in1, dtype_in2, dtype_out),
                 "stride_input1": stride_input1, "stride_input2": stride_input2, "stride_output": stride_output}
 
+class GroupedGemm:
+    """
+    Grouped General Matrix Multiplication (GEMM).
+
+    This operation applies group-specific weight matrices to partitions of the
+    input tensor `X`. The rows of `X` are already arranged in group order along
+    the first dimension; the tensor `b_g` encodes how many rows belong to each
+    group so that group boundaries can be identified.
+
+    Inputs:
+        X : tensor, shape (M, K)
+            Input tensor, arranged in group order along the first dimension.
+        W : tensor, shape (G, K, N)
+            Weight tensors, one (K, N) tensor per group.
+        b_g : tensor, shape (G,)
+            Integer tensor specifying the number of rows from `X` assigned
+            to each group. Must satisfy sum(b_g) = M.
+    Outputs:
+        Y : tensor, shape (M, N)
+            The concatenated result of the groupwise multiplications.
+            
+    Computation is functionally equivalent to  (implementation detail will ofcourse be efficient):
+        start = 0
+        Y_parts = []
+        for i in range(G):
+            rows = b_g[i]
+            X_g = X[start:start+rows]     # (rows, K)
+            Y_g = X_g @ W[i]              # (rows, N)
+            Y_parts.append(Y_g)
+            start += rows
+        Y = concat(Y_parts, dim=0)        # (M, N)
+
+    Performance Model:
+        Forward FLOPs:
+            - Per group: 2 * b_g[i] * K * N
+            - Total:     2 * M * K * N
+
+        Backward FLOPs:
+            - Per group: dX = dY @ W^T  (2 * b_g[i] * N * K)
+                         dW = X^T @ dY  (2 * K * b_g[i] * N)
+            - Total:     4 * M * K * N
+
+        Forward bytes (assuming weights use same dtype as inputs):
+            - Reads:  X (M*K), W (G*K*N)
+            - Writes: Y (M*N)
+            - Total bytes: (M*K + G*K*N) * bpe_in + (M*N) * bpe_out
+
+        Backward bytes (streaming estimate, dY read twice):
+            - Reads:  dY twice (2*M*N) * bpe_out
+                      W once   (G*K*N) * bpe_in
+                      X once   (M*K)   * bpe_in
+            - Writes: dX       (M*K)   * bpe_in
+                      dW       (G*K*N) * bpe_in
+            - Total bytes: (2*M*N) * bpe_out + (2*M*K) * bpe_in + (2*G*K*N) * bpe_in
+    """
+
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.param_details = self.get_param_details(event)
+        self.arch = arch
+        self.python_path = python_path
+        self.M, self.K, self.G, self.N = (self.param_details[key] for key in ['M', 'K', 'G', 'N'])
+        self.bpe_in = self.param_details['bpe_in']
+        self.bpe_out = self.param_details['bpe_out']
+
+    @staticmethod
+    def flops_func(M, K, N):
+        return 2 * M * K * N
+    def flops(self):
+        return self.flops_func(self.M, self.K, self.N)
+    
+    @staticmethod
+    def bytes_func(M, K, N, G, bpe_in, bpe_out):
+        return (M * K + G * K * N) * bpe_in + M * N * bpe_out
+    def bytes(self):
+        return self.bytes_func(self.M, self.K, self.N, self.G, 
+                               self.bpe_in, self.bpe_out)
+
+    @staticmethod
+    def flops_bwd_func(M, K, N):
+        return 4 * M * K * N
+    def flops_bwd(self):
+        return self.flops_bwd_func(self.M, self.K, self.N)
+    
+    @staticmethod
+    def bytes_bwd_func(M, K, N, G, bpe_in, bpe_out):
+        return (2 * M * N) * bpe_out + (2 * M * K) * bpe_in + (2 * G * K * N) * bpe_in
+    def bytes_bwd(self):
+        return self.bytes_bwd_func(self.M, self.K, self.N, self.G, 
+                                 self.bpe_in, self.bpe_out)

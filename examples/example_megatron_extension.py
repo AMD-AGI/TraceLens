@@ -272,7 +272,7 @@ class tev2_pseudo_gemm(GEMM):
     def bytes_bwd(self):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
-from TraceLens.PerfModel import SDPA
+from TraceLens.PerfModel import SDPA, GroupedGemm
 class transformer_engine_attention(SDPA):
     """
     Context: The FusedAttnFunc is a pytorch extention for the attention kernel.
@@ -310,6 +310,34 @@ class transformer_engine_attention(SDPA):
                 "q_strides": q_strides, "k_strides": k_strides, "v_strides": v_strides,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": flash_impl}
 
+import ast
+class custom_grouped_gemm(GroupedGemm):
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        X_dims = input_dims[0]
+        W_dims = input_dims[1]
+        transpose = ast.literal_eval(event['args']['Concrete Inputs'][3])
+        M, K = X_dims
+        if transpose:
+            assert K == W_dims[-1], f"Expected K dimension to match W_dims[-1] for transposed GEMM, got {K} and {W_dims[-1]}"
+            G, N, K = W_dims
+        else:
+            assert K == W_dims[1], f"Expected K dimension to match W_dims[1] for non-transposed GEMM, got {K} and {W_dims[1]}"
+            G, K, N = W_dims
+        input_types = event['args']['Input type']
+        dtype_X = input_types[0]
+        dtype_W = input_types[1]
+        assert dtype_X == dtype_W, f"Expected input types to match, got {dtype_X} and {dtype_W}"
+        bpe_in = name2bpe(dtype_X)
+        if bpe_in == 1 or bpe_in == 2:
+            bpe_out = 2
+        else:
+            raise ValueError(f"Expected bpe_in to be 1 or 2, got {bpe_in}")
+        return {"M": M, "K": K, "N": N, "G": G,
+                "bpe_in": bpe_in, "bpe_out": bpe_out}
+
 # Step 2: Register the new Perf Model class in the mapping
 perf_model_extension = {
     '_Linear_yfwd_mm': tev2_pseudo_gemm,
@@ -320,12 +348,14 @@ perf_model_extension = {
     '_LayerNormLinearBackward_wgrad_mm': tev2_pseudo_gemm,
 
     'FusedAttnFunc': transformer_engine_attention,
+    'GroupedGemm': custom_grouped_gemm,
 }
 
 dict_cat2names_extension = {
     'GEMM': ['_Linear_yfwd_mm', '_LinearBackward_xgrad_mm', '_LinearBackward_wgrad_mm',
              '_LayerNormLinear_yfwd_mm', '_LayerNormLinearBackward_xgrad_mm', '_LayerNormLinearBackward_wgrad_mm'],
     'SDPA': ['FusedAttnFunc'],
+    'GroupedGEMM': ['GroupedGemm'],
 }
 
 
