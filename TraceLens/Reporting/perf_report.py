@@ -88,80 +88,63 @@ def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) ->
         python3 TraceLens/Reporting/perf_report.py --profile_path $trace_dir/$trace_jax.xplane.pb --output_path $log_dir/tracelens/jax 2>&1 | tee $log_dir/tracelens_jax.log
 
     """
-    
     # Generate base DataFrames
     perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
     dict_dfs = {}
-    if 0:
+    if 1:
         # gpu stats
-        df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() # returan all gpus. TODO: gpu_pid=1 Default for Jax. gpu_pid=[1,...8]
+        df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() # returan all gpus.
         df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
-        print(df_gpu_timeline)
-        print(df_gpu_events_averages)
+        # Store base DataFrames
+        dict_dfs['gpu_timeline']= df_gpu_timeline
+        dict_dfs['gpu_events_averages']= df_gpu_events_averages
+
     if 1:
         # kernel lauchers
-        df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
+        df_kernel_launchers = perf_analyzer.get_df_kernel_launchers_multigpu(id_cols=False, include_kernel_names=True)
+        sys.exit(0)
         df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
         df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
         df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
                                                                                         agg_metrics=agg_metrics, 
                                                                                         include_pct=True)
-        sys.exit(0)
-        # Store base DataFrames
-        dict_dfs['gpu_timeline']= df_gpu_timeline
-        dict_dfs['gpu_events_averages']= df_gpu_events_averages
         dict_dfs['kernel_launchers']= df_kernel_launchers
         dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
         dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
         dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
+    
     if 0:
         # Generate & store op-specific DataFrames
-        # xla_events
-        op_cat = 'XLA'
-        # categorized
-        op_cat = 'CONV' #TODO How many? what? 
-        op_cat = 'HLO'
-        op_cat = 'TE'
-        op_cat = 'FA'
-        categorized_events_time, xla_time = perf_analyzer.get_categorized_gpu_events()
-        print(categorized_events_time, xla_time)
-        sys.exit(0)
+        pass
+
+    if 0:
+        # Gabe: GPU events stats (legacy from jax_analyses.py)
+        averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_path)
+        overlapped_comm = averages[averages['type']=='total_comm_time']['time ms'].iloc[0] - averages[averages['type']=='exposed_comm_time']['time ms'].iloc[0]
+        averages.loc[len(averages)] = ['overlapped_comm', overlapped_comm, overlapped_comm/averages[averages['type']=='total_time']['time ms'].iloc[0]*100]
+        new_order = [0, 1, 2, 3, 4, 5, 8, 6, 7]
+        df_gpu_events_averages = averages.reindex(new_order)
+        df_gpu_events_categorized_mean = categorized.copy()
+        df_gpu_events_categorized_mean = df_gpu_events_categorized_mean.reset_index().rename(columns={'index': 'name'})
+
+        # XLA events by stripping digits and underscores
+        xla_grouped = xla_events.groupby(xla_events.index.str.replace(r'\d+|_+$', '', regex=True)).sum(numeric_only=True)
+        xla_grouped = xla_grouped.reset_index().rename(columns={'index': 'short_name_grouped'})
+        df_xla_grouped = xla_grouped.sort_values(by='percent', ascending=False)
+
         # GEMMs
-        op_cat = 'GEMM'
-        op_events = [event for event in perf_analyzer.tree.events if any(f in event['name'] for f in JaxAnalyses.GemmKeys)]
-        df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
-        dict_dfs[f"op_{op_cat}"] = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
-        print(len(op_events))
-        sys.exit(0)  
+        num_cus = {"num_cus": num_cus}
+        df_gemms = JaxAnalyses.summarize_gpu_gemm_events_from_pb(profile_path)
+        df_gemms = df_gemms.reset_index().rename(columns={'index': 'name'})
+        df_gemms_detailed = JaxAnalyses.gemm_performance_from_pb(profile_path, arch = num_cus)
 
-    # Gabe: GPU events stats (legacy from jax_analyses.py)
-    averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_path)
-    overlapped_comm = averages[averages['type']=='total_comm_time']['time ms'].iloc[0] - averages[averages['type']=='exposed_comm_time']['time ms'].iloc[0]
-    averages.loc[len(averages)] = ['overlapped_comm', overlapped_comm, overlapped_comm/averages[averages['type']=='total_time']['time ms'].iloc[0]*100]
-    new_order = [0, 1, 2, 3, 4, 5, 8, 6, 7]
-    df_gpu_events_averages = averages.reindex(new_order)
-    df_gpu_events_categorized_mean = categorized.copy()
-    df_gpu_events_categorized_mean = df_gpu_events_categorized_mean.reset_index().rename(columns={'index': 'name'})
-
-    # XLA events by stripping digits and underscores
-    xla_grouped = xla_events.groupby(xla_events.index.str.replace(r'\d+|_+$', '', regex=True)).sum(numeric_only=True)
-    xla_grouped = xla_grouped.reset_index().rename(columns={'index': 'short_name_grouped'})
-    df_xla_grouped = xla_grouped.sort_values(by='percent', ascending=False)
-
-    # GEMMs
-    num_cus = {"num_cus": num_cus}
-    df_gemms = JaxAnalyses.summarize_gpu_gemm_events_from_pb(profile_path)
-    df_gemms = df_gemms.reset_index().rename(columns={'index': 'name'})
-    df_gemms_detailed = JaxAnalyses.gemm_performance_from_pb(profile_path, arch = num_cus)
-
-    # Store DataFrames
-    dict_dfs = {}
-    dict_dfs['gpu_timeline']= df_gpu_timeline
-    dict_dfs['gpu_events_averages']= df_gpu_events_averages
-    dict_dfs['gpu_events_categorized_mean']= df_gpu_events_categorized_mean
-    dict_dfs['xla_grouped']= df_xla_grouped
-    dict_dfs['gemms_detailed'] = df_gemms_detailed
+        # Store DataFrames
+        dict_dfs['gpu_events_averages_Gabe']= df_gpu_events_averages
+        dict_dfs['gpu_events_categorized_mean']= df_gpu_events_categorized_mean
+        dict_dfs['xla_grouped']= df_xla_grouped
+        dict_dfs['gemms']= df_gemms
+        dict_dfs['gemms_detailed'] = df_gemms_detailed
     return dict_dfs
 
 def main():

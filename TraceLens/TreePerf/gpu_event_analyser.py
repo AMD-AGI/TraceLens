@@ -263,7 +263,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                         event['t_end'] = event['ts'] + event['dur']
                     cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
                     name = event.get('name')
-                    if (any(name.lower().startswith(x) for x in ['copy', 'memcpy', 'memset'])):
+                    if (any(name.lower().startswith(x) for x in ['copy', 'memcpy', 'memset'])): 
                         cur_dict[GPUEventAnalyser.memcpy_key].append(event)
                     elif name.startswith('nccl'):
                         cur_dict[GPUEventAnalyser.communication_key].append(event)
@@ -276,13 +276,13 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                         return_dict[pid] = cur_dict
                     cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
         if gpu_pid is None:
-            print(f'Return events dictionary on all gpus.')
+            #print(f'Return events dictionary on all gpus.')
             return return_dict
         else:
-            print(f'Return events dictionary on one gpu {gpu_pid}.')
+            #print(f'Return events dictionary on one gpu {gpu_pid}.')
             return return_dict.get(gpu_pid, {}) # {gpu_pid : return_dict.get(gpu_pid, {})}
     
-    def compute_metrics(self):
+    def compute_metrics(self, gpu_pid = 1, event_filter = None):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -294,41 +294,44 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
         # Categorize events.
         # get GPU 0 (PID 1) for Jax
-        dict_gpu_event_lists = self.get_gpu_event_lists(1)
+        dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid=gpu_pid, event_filter=event_filter)
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
-        return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
+        return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists) 
     
-    def compute_metrics_multigpu(self, gpu_pid=None):
-        """
-        Compute various metrics from the GPU event data.
-        Computation is defined as the time spent in computation kernels.
-        Communication is defined as the time spent in communication kernels.
-        Memcpy is defined as the time spent in memcpy kernels.
-        Exposed communication time is the time spent in communication kernels that is not overlapped by computation.
-        Exposed memcpy time is the time spent in memcpy kernels that is not overlapped by computation or communication.
-        """
-
-        # Categorize events.
-        dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid=gpu_pid)
-        num_gpus = len(dict_gpu_event_lists)
-        average_gpu_metrics = None
-        print("Average metrics across GPUs")
-        #TODO return gpu-wise kernel event metrics
+    def get_breakdown_df_multigpu(self, gpu_pid = None, event_filter = None):
+        dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid=gpu_pid, event_filter=event_filter) 
+        gpu_frames = {}
+        # print("Processing events by GPU")
         for _pid, cur_events in tqdm.tqdm(filter(lambda x: x[0] < 100, dict_gpu_event_lists.items())):
             GPUEventAnalyser.verify_dict_gpu_event_lists(cur_events)
-            current_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
+            cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
+            gpu_frames[_pid - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
+        return gpu_frames
 
-        return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
+    def get_breakdown_df(self, gpu_pid = None, event_filter = None):
+        """
+        Return performance breakdown across GPUs or one gpu, if gpu_pid is provided.
+
+        Similar to get_breakdown_df_multigpu but returns a dataframe for output.
+        """
+        # print("Processing events by GPU")
+        list_pids = [gpu_pid] if gpu_pid else range(1,9) # TODO get this infor from events
+        list_dfs = []
+        for _pid in list_pids:
+            current_metrics = self.compute_metrics(gpu_pid=_pid, event_filter=event_filter)
+            df = GPUEventAnalyser.get_breakdown_df_from_dict(current_metrics)
+            df['gpu_pid'] = _pid
+            list_dfs.append(df)
+        return pd.concat(list_dfs, ignore_index=True)
     
-    def get_average_df_multigpu(self, gpu_pid = None, event_filter = None):
-        dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid = gpu_pid, event_filter = event_filter) 
-        num_gpus = len(dict_gpu_event_lists)
+    def get_average_df(self, gpu_pid = None, event_filter = None):
+        # print("Average events across GPUs")
+        list_pids = [gpu_pid] if gpu_pid else range(1,9) # TODO get this infor from events
+        num_gpus = len(list_pids)
         average_gpu_metrics = None
-        print("Average events across GPUs")
-        for _pid, cur_events in tqdm.tqdm(filter(lambda x: x[0] < 100, dict_gpu_event_lists.items())):
-            GPUEventAnalyser.verify_dict_gpu_event_lists(cur_events)
-            current_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
+        for _pid in list_pids:
+            current_metrics = self.compute_metrics(gpu_pid=_pid, event_filter=event_filter)
             if average_gpu_metrics is None:
                 average_gpu_metrics = current_metrics
             else:
@@ -336,15 +339,25 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                     average_gpu_metrics[k] += v
         for k in average_gpu_metrics.keys():
             average_gpu_metrics[k] /= num_gpus
-        return GPUEventAnalyser.get_breakdown_df_from_dict(average_gpu_metrics)  
+        return GPUEventAnalyser.get_breakdown_df_from_dict(average_gpu_metrics) 
     
-    def get_breakdown_df_multigpu(self, gpu_pid = None, event_filter = None):
-        dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid = gpu_pid, event_filter = event_filter) 
-        gpu_frames = {}
-        print("Processing events by GPU")
-        for _pid, cur_events in tqdm.tqdm(filter(lambda x: x[0] < 100, dict_gpu_event_lists.items())):
-            GPUEventAnalyser.verify_dict_gpu_event_lists(cur_events)
-            cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
-            gpu_frames[_pid - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metrics)
-        return gpu_frames
+    def get_average_df_gabe(self, gpu_pid = None, event_filter = None):
+        all_events = self.get_gpu_event_lists(gpu_pid=None, event_filter=event_filter)
+        # create an average across GPUs
+        average_gpu_metrics = None
+        num_gpus = 0
+        for pid, cur_events in all_events.items():
+            if pid <= 100:
+                num_gpus += 1
+                GPUEventAnalyser.verify_dict_gpu_event_lists(cur_events)
+                current_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
+                if average_gpu_metrics is None:
+                    average_gpu_metrics = current_metrics
+                else:
+                    for k, v in current_metrics.items():
+                        average_gpu_metrics[k] += v
+        for k in average_gpu_metrics.keys():
+            average_gpu_metrics[k] /= num_gpus
+        return GPUEventAnalyser.get_breakdown_df_from_dict(average_gpu_metrics)
+    
 

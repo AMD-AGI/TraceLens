@@ -117,7 +117,7 @@ class JaxTraceToTree(BaseTraceToTree):
         
 
         self._preprocess_and_index_events()
-        self._annotate_gpu_events_with_stream_index()
+        #self._annotate_gpu_events_with_stream_index()
 
         self.linking_key_to_uid_map = defaultdict(list)
         self.hlo_ops = defaultdict(list)

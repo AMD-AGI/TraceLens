@@ -1,11 +1,10 @@
-
 # keywords for splitting jax events
 GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
-FABwdKeys = ["FmhaBwd"]
-FAFwdKeys = ["FmhaFwd"]
-FAV3Keys = ["kernel_func"] # find a more precise way to do this
-ConvKeys = ["FillBuffer"]
-TEKeys = ["transformer_engine"]
+FABwdKeys = ["FmhaBwd", ]
+FAFwdKeys = ["FmhaFwd", ]
+FAV3Keys = ["kernel_func", ] # find a more precise way to do this
+ConvKeys = ["FillBuffer", ]
+TEKeys = ["transformer_engine", ]
 ClassCategories = {
     "GEMM": GemmKeys,
     "FA BWD": FABwdKeys,
@@ -26,6 +25,7 @@ def categorize_jax_op(row):
     """
 
     debug = False
-    if any(f in row['name'] for f in GemmKeys):
-        return 'GEMM'
-    return 'other'
+    for category, filters in ClassCategories.items():
+        if any(f in row['name'] for f in filters):
+            return category
+        return 'other'

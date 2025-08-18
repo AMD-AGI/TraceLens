@@ -116,7 +116,7 @@ class JaxAnalyses:
         return dict(filter(lambda v: len(v[1].get(GPUEventAnalyser.computation_key, {})) > 0, events.items()))
 
 
-    def create_gpu_summary(analyzer: JaxGPUEventAnalyser, group_kernels_by_name: bool = False):
+    def create_gpu_summary(analyzer: JaxGPUEventAnalyser, group_by_gpu: bool = False, group_kernels_by_name: bool = False):
         all_events = analyzer.get_gpu_event_lists(event_filter = JaxAnalyses.default_gpu_event_filter)
 
         # create an average across GPUs
@@ -139,7 +139,7 @@ class JaxAnalyses:
         just_gpu_events = JaxAnalyses.get_just_gpu_events(all_events)
         all_gpu_compute_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.computation_key]]
         categorized_times, uncategorized_times = JaxAnalyses.breakdown_compute_events(all_gpu_compute_events,
-                                                                           group_by_gpu = False,
+                                                                           group_by_gpu = group_by_gpu,
                                                                            group_by_name = group_kernels_by_name)
 
         categorized_df = JaxAnalyses.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"] * num_gpus, num_gpus)
