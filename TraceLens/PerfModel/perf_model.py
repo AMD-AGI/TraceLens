@@ -1145,6 +1145,27 @@ class SDPA:
                 pass
         return simulated_time
 
+def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
+    B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
+    B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
+    B_v, H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
+    if B_q != B_k or B_q != B_v:
+        raise ValueError(f"Batch sizes do not match: {B_q} != {B_k} != {B_v}")
+    if H_K != H_V:
+        raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
+    if N_K != N_V:
+        raise ValueError(f"Length sizes do not match for K and V: {N_K} != {N_V}")
+    if d_h_Q != d_h_K:
+        raise ValueError(f"Head dimensions do not match for Q and K: {d_h_Q} != {d_h_K}")
+    return {
+        "B": B_q,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_K,
+        "H_KV": H_K,
+        "d_h_qk": d_h_Q,
+        "d_h_v": d_h_V,
+    }
 
 class flash_attention(SDPA):
 
@@ -1153,12 +1174,13 @@ class flash_attention(SDPA):
         input_dims = event['args']['Input Dims']
         q_idx, k_idx, v_idx = 0, 1, 2
         q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
         dtype_A_B = tuple(event['args']['Input type'][:2])
         strides = event['args']['Input Strides']
-        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])
-        B, N_Q, H_Q, d_h_qk = q_shape
-        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, N_KV, H_KV, d_h_v = input_dims[1]
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
         dropout = float(event['args']['Concrete Inputs'][3])
         causal = eval(event['args']['Concrete Inputs'][5])
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
@@ -1194,9 +1216,9 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
-        B, H_Q, N_Q, d_h_qk = q_shape
-        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, H_KV, N_KV, d_h_v = input_dims[1]
+        bhnd_idx = 0, 1, 2, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
 
         dropout_p = 0.0
         if concrete_inputs[5] not in ('', 'None'):
@@ -1227,9 +1249,9 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
-        B, H_Q, N_Q, d_h_qk = q_shape
-        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, H_KV, N_KV, d_h_v = input_dims[1]
+        bhnd_idx = 0, 1, 2, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
 
         dropout_p = 0.0
         if concrete_inputs[5] not in ('', 'None'):
@@ -1260,9 +1282,9 @@ class aten__scaled_dot_product_flash_attention(SDPA):
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
-        B, H_Q, N_Q, d_h_qk = q_shape
-        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, H_KV, N_KV, d_h_v = input_dims[1]
+        bhnd_idx = 0, 1, 2, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
         dropout_p = 0.0
         if concrete_inputs[3] not in ('', 'None'):
             try:
@@ -1295,9 +1317,9 @@ class aiter__flash_attn_forward(SDPA):
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
-        B, N_Q, H_Q, d_h_qk = q_shape
-        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, N_KV, H_KV, d_h_v = input_dims[1]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
         dropout_p = 0.0
         if concrete_inputs[3] not in ('', 'None'):
             try:
@@ -1329,9 +1351,9 @@ class aiter__flash_attn_backward(SDPA):
         input_dims = event['args']['Input Dims']
         concrete_inputs = event['args']['Concrete Inputs']
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
-        B, N_Q, H_Q, d_h_qk = q_shape
-        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
-        _, N_KV, H_KV, d_h_v = input_dims[1]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
         dropout_p = 0.0
         if concrete_inputs[10] not in ('', 'None'):
             try:
