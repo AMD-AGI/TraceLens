@@ -41,7 +41,6 @@ class JaxAnalyses:
         FrameworkOps       = "Framework Ops"
         XlaModules         = "XLA Modules"
         XlaOps             = "XLA Ops"
-        #pyXla             = 'py_xla_execute'
         pyXla             = 'py_xla'
         SourceCode         = "Source Code"
         Steps              = "Steps"
