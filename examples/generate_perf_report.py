@@ -6,6 +6,7 @@ import numpy as np
 from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
 import importlib.util
+import warnings
 import subprocess
 import sys
 
@@ -111,6 +112,65 @@ def apply_extension(perf_analyzer, extension_path):
                 raise ValueError(f"Expected names to be a list, got {type(names)}")
             perf_analyzer.dict_cat2names[cat].extend(names)
 
+def trunc_kernel_details(row, kernel_detail_col, trunc_length=64):
+    """
+    Truncates the kernel details in a row to a specified length for readability.
+    """
+    if kernel_detail_col not in row or not row[kernel_detail_col]:
+        return None  # No kernel details available
+
+    truncated_details = []
+    for detail in row[kernel_detail_col]:
+        truncated_name = detail['name'][:trunc_length] + '...' if len(detail['name']) > trunc_length else detail['name']
+        truncated_details.append({
+            'name': truncated_name,
+            'stream': detail.get('stream', None),
+            'mean_duration_us': round(detail.get('mean_duration_us', 0), 2)
+        })
+    
+    return truncated_details if truncated_details else None
+
+def add_truncated_kernel_details(df: pd.DataFrame, 
+                                 source_col: str = 'kernel_details', 
+                                 new_col_name: str = None,
+                                 trunc_length: int = 64) -> pd.DataFrame:
+    """
+    Applies the truncation logic to a DataFrame column and inserts the new
+    truncated column immediately after the source column for easy comparison.
+
+    Args:
+        df (pd.DataFrame): The DataFrame to process.
+        source_col (str): The name of the column containing the full kernel details.
+        new_col_name (str): The name for the new truncated column.
+        trunc_length (int): The character length to truncate kernel names to.
+
+    Returns:
+        pd.DataFrame: A new DataFrame with the added truncated column.
+    """
+    # First, ensure the source column exists. If not, do nothing.
+    if source_col not in df.columns:
+        warnings.warn(f"Source column '{source_col}' not found in DataFrame. Skipping truncation.", UserWarning)
+        return df
+    if new_col_name is None:
+        new_col_name = f"trunc_{source_col}"
+    # 1. Create the new column's data. It will be added to the end for now.
+    df[new_col_name] = df.apply(
+        lambda row: trunc_kernel_details(row, source_col, trunc_length=trunc_length),
+        axis=1
+    )
+
+    # 2. Reorder the columns to place the new column next to its source.
+    cols = df.columns.tolist()
+    # Pop the new column from the end of the list
+    new_col = cols.pop(cols.index(new_col_name))
+    # Find the position of our source column and insert the new one after it
+    source_col_idx = cols.index(source_col)
+    cols.insert(source_col_idx + 1, new_col)
+    
+    # Return a new DataFrame with the desired column order
+    return df[cols]
+
+
 def main():
 
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
@@ -164,13 +224,14 @@ def main():
     total_time_ms = total_time_row['time ms'].values[0]
     perf_analyzer.total_time_ms = total_time_ms
 
-    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
+    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True)
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
     df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
     df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
                                                                                         agg_metrics=agg_metrics, 
                                                                                         include_pct=True)
-
+    df_kernel_launchers_unique_args = add_truncated_kernel_details(df_kernel_launchers_unique_args,
+                                                                   source_col='kernel_details_summary', new_col_name='trunc_kernel_details')
     # Dictionary to hold the op-specific DataFrames
     perf_metrics_dfs = {}
 
@@ -181,15 +242,18 @@ def main():
 
         if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']:
             # For GEMM: create a single table that covers both fwd and bwd.
-            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
+            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
             df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+            df_ops = add_truncated_kernel_details(df_ops, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
             perf_metrics_dfs[op_cat] = df_ops
         else:
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
-            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
+            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
             df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(df_ops_fwd, agg_metrics)
-            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_names=True, include_args=True)
+            df_ops_fwd = add_truncated_kernel_details(df_ops_fwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
+            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_details=True, include_args=True)
             df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(df_ops_bwd, agg_metrics)
+            df_ops_bwd = add_truncated_kernel_details(df_ops_bwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
             perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
             perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
