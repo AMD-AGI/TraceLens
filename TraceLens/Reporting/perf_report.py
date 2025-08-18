@@ -103,7 +103,7 @@ def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) ->
     
     if 1:
         # Generate & store op-specific DataFrames
-        # gp is here, what is dict_cat2names (pytorch)? how is it made? how to make one for jax trace?
+        # TODO gp is here, what is dict_cat2names (pytorch)? how is it made? how to make one for jax trace?
         dict_cat2names_jax = {'GEMM': 'kernel'}
         for op_cat, op_names in dict_cat2names_jax.items():
             # Filter events belonging to the current category
