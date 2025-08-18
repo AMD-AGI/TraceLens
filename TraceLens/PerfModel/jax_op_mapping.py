@@ -2,7 +2,7 @@
 GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
 FABwdKeys = ["FmhaBwd", ]
 FAFwdKeys = ["FmhaFwd", ]
-FAV3Keys = ["kernel_func", ] # find a more precise way to do this
+FAV3Keys = ["kernel_func", ] 
 ConvKeys = ["FillBuffer", ]
 TEKeys = ["transformer_engine", ]
 ClassCategories = {
@@ -14,6 +14,8 @@ ClassCategories = {
     "TE": TEKeys,
 }
 UncategorizedEventKey = "Uncategorized Events"
+
+dict_cat2names_jax = None
 
 def categorize_jax_op(row):
     """
@@ -29,3 +31,5 @@ def categorize_jax_op(row):
         if any(f in row['name'] for f in filters):
             return category
         return 'other'
+    
+# kernel event: Input Dims Input type Input Strides Concrete Inputs

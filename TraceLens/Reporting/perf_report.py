@@ -24,7 +24,12 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
     """
 
     # Generate base DataFrames 
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
+    if profile_path.endswith('.pt.trace.json'):
+        perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
+        dic_op = dict_cat2names
+    elif profile_path.endswith('.xplane.pb'):
+        perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
+        dict_op = None 
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
     dict_dfs = {}
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
@@ -43,7 +48,7 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
     dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
 
     # Generate & store op-specific DataFrames
-    for op_cat, op_names in dict_cat2names.items():
+    for op_cat, op_names in dict_op.items():
         # Filter events belonging to the current category
         op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
         if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']: 
@@ -92,34 +97,25 @@ def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) ->
     perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
     dict_dfs = {}
-    if 1:
-        # gpu stats
-        df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() # returan all gpus.
+    if 0:
         df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
-        # Store base DataFrames
-        dict_dfs['gpu_timeline']= df_gpu_timeline
         dict_dfs['gpu_events_averages']= df_gpu_events_averages
-
-    if 1:
-        # kernel lauchers
-        df_kernel_launchers = perf_analyzer.get_df_kernel_launchers_multigpu(id_cols=False, include_kernel_names=True)
-        sys.exit(0)
-        df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
-        df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
-        df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
-                                                                                        agg_metrics=agg_metrics, 
-                                                                                        include_pct=True)
-        dict_dfs['kernel_launchers']= df_kernel_launchers
-        dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
-        dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
-        dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
     
-    if 0:
+    if 1:
         # Generate & store op-specific DataFrames
-        pass
+        # gp is here, what is dict_cat2names (pytorch)? how is it made? how to make one for jax trace?
+        dict_cat2names_jax = {'GEMM': 'kernel'}
+        for op_cat, op_names in dict_cat2names_jax.items():
+            # Filter events belonging to the current category
+            op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
+            if op_cat in ['GEMM', 'xla_events']: 
+                # For GEMM: create a single table that covers both fwd and bwd.
+                df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
+                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+                dict_dfs[f"op_{op_cat}"] = df_ops
 
     if 0:
-        # Gabe: GPU events stats (legacy from jax_analyses.py)
+        # Gabe: GPU events stats (legacy from jax_analyses.py) To be replaced by JaxPerAnalyzer.
         averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_path)
         overlapped_comm = averages[averages['type']=='total_comm_time']['time ms'].iloc[0] - averages[averages['type']=='exposed_comm_time']['time ms'].iloc[0]
         averages.loc[len(averages)] = ['overlapped_comm', overlapped_comm, overlapped_comm/averages[averages['type']=='total_time']['time ms'].iloc[0]*100]
@@ -171,12 +167,12 @@ def main():
             gpu_arch_json = json.load(f)
 
     # Analyze trace profile
-    if args.profile_path.endswith('.pt.trace.json'):
-        dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json)
+    assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
+    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json)
     # Additional analysis on Jax xplane.pb trace (legacy)
     if args.profile_path.endswith('.xplane.pb'):
-        dict_dfs = jax_perf_analysis(args.profile_path, num_cus=args.num_cus) 
-        # dict_dfs.update(_dfs)
+        jax_dfs = jax_perf_analysis(args.profile_path, num_cus=args.num_cus) 
+        dict_dfs.update(jax_dfs)
 
     # Save the output
     output_folder = Path(args.output_path)
