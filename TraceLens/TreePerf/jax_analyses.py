@@ -480,7 +480,7 @@ class JaxProfileProcessor:
         if len(hlo_filename) != 1:
             convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
-        #assert len(hlo_filename) == 1
+        assert len(hlo_filename) == 0
         if len(hlo_filename) > 1:
             print('Multiple matching hlo_filenames:')
             print(hlo_filename)
