@@ -3,14 +3,16 @@ import json
 import jax
 import pandas as pd
 from pathlib import Path
+from collections import defaultdict
 
 from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxPerfAnalyser, JaxAnalyses
 from TraceLens.Reporting.reporting_utils import export_data_df
+from TraceLens.PerfModel.jax_op_mapping import categorize_jax_op
 
-def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
+def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
     """
     Generates a performance report for Pytorch analysis from a given profile trace.json file.
     This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
@@ -22,15 +24,17 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
         Writes multiple DataFrames containing GPU event statistics and GEMM performance data
         to a dictionary of Dataframes with appropriate suffixes.
     """
-
-    # Generate base DataFrames 
+    # Get input trace type
     if profile_path.endswith('.pt.trace.json'):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
-        dic_op = dict_cat2names
     elif profile_path.endswith('.xplane.pb'):
         perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
-        dict_op = None 
-    agg_metrics = ['mean', 'median', 'std', 'min', 'max']
+        dict_cat2names = defaultdict(list)
+    else:
+        print('Unsupported trace file format.')
+        pass
+
+    # Generate base DataFrames 
     dict_dfs = {}
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
@@ -46,9 +50,14 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
     dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
     dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
     dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
+    return dict_dfs 
 
+def perf_pytorch(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
+    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
+    
     # Generate & store op-specific DataFrames
-    for op_cat, op_names in dict_op.items():
+    dict_dfs = {}
+    for op_cat, op_names in dict_cat2names.items():
         # Filter events belonging to the current category
         op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
         if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']: 
@@ -67,7 +76,7 @@ def perf_analysis(profile_path: str, arch=None, *args, **kwargs) -> dict:
 
     return dict_dfs
 
-def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) -> dict:
+def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
     """
     Generates a performance report for JAX analysis from a given XPlane profile protobuf file.
     This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
@@ -93,26 +102,29 @@ def jax_perf_analysis(profile_path: str, num_cus: int = 304, *args, **kwargs) ->
         python3 TraceLens/Reporting/perf_report.py --profile_path $trace_dir/$trace_jax.xplane.pb --output_path $log_dir/tracelens/jax 2>&1 | tee $log_dir/tracelens_jax.log
 
     """
-    # Generate base DataFrames
     perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
-    agg_metrics = ['mean', 'median', 'std', 'min', 'max']
+
+    # Generate base DataFrames
     dict_dfs = {}
-    if 0:
-        df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
-        dict_dfs['gpu_events_averages']= df_gpu_events_averages
+    df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
+    dict_dfs['gpu_events_averages']= df_gpu_events_averages
     
-    if 1:
+    if 0:
         # Generate & store op-specific DataFrames
-        # TODO gp is here, what is dict_cat2names (pytorch)? how is it made? how to make one for jax trace?
-        dict_cat2names_jax = {'GEMM': 'kernel'}
-        for op_cat, op_names in dict_cat2names_jax.items():
+        from TraceLens.PerfModel.jax_op_mapping import ClassCategories
+        # TODO: what is dict_cat2names (pytorch)? how is it made? how to make one for jax trace?
+        for op_cat, op_names in ClassCategories.items():
             # Filter events belonging to the current category
-            op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
-            if op_cat in ['GEMM', 'xla_events']: 
+            op_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event) == op_cat]
+            print(op_cat, "events", len(op_events))
+            if op_cat in ['GEMM', 'CONV', 'TE', 'FA V3']: 
                 # For GEMM: create a single table that covers both fwd and bwd.
-                df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
+                df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=False)
                 df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
                 dict_dfs[f"op_{op_cat}"] = df_ops
+            else:
+                # For FA: bwd and fwd 
+                pass
 
     if 0:
         # Gabe: GPU events stats (legacy from jax_analyses.py) To be replaced by JaxPerAnalyzer.
@@ -168,11 +180,14 @@ def main():
 
     # Analyze trace profile
     assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
-    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json)
-    # Additional analysis on Jax xplane.pb trace (legacy)
+    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
+    if args.profile_path.endswith('.pt.trace.json'):
+        _dfs = perf_pytorch(args.profile_path)
+        dict_dfs.update(_dfs)
+    # Additional analysis on Jax xplane.pb trace
     if args.profile_path.endswith('.xplane.pb'):
-        jax_dfs = jax_perf_analysis(args.profile_path, num_cus=args.num_cus) 
-        dict_dfs.update(jax_dfs)
+        _dfs = perf_jax(args.profile_path) 
+        dict_dfs.update(_dfs)
 
     # Save the output
     output_folder = Path(args.output_path)

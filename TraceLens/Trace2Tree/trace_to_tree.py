@@ -414,7 +414,7 @@ class TraceToTree:
         self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
-        self.name2event_uids = dict(list)
+        self.name2event_uids = defaultdict(list)
 
     @staticmethod
     def default_categorizer(event: dict) -> str:

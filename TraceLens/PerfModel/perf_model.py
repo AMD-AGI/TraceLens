@@ -261,7 +261,6 @@ class GEMM:
                 pass
         return simulation_time
 
-
 class aten_mm(GEMM):
     """
     aten::mm the matrix multiplication primitive in PyTorch
@@ -299,7 +298,6 @@ class aten_mm(GEMM):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
-
 
 class aten_addmm(GEMM):
     """
@@ -508,7 +506,6 @@ class aten_baddbmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
-
 class tex_ts_te_gemm_ts(GEMM):
     """
     tex_ts::te_gemm_ts is a matmul op in TransformerEngine
@@ -617,7 +614,6 @@ class tev2_pseudo_gemm(GEMM):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
-
 
 # 2. Convolution
 class CONV:
@@ -797,7 +793,6 @@ class aten_conv(CONV):
             raise ValueError(f"Data types of input and weight are different: {dtype_input_weight}")
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(self.bpe)
-
 
 class aten_conv_bwd(aten_conv):
     def __init__(self, event):
@@ -1141,7 +1136,6 @@ class SDPA:
                 pass
         return simulated_time
 
-
 class flash_attention(SDPA):
 
     @staticmethod
@@ -1345,7 +1339,6 @@ class aiter__flash_attn_backward(SDPA):
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
-
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
@@ -1393,6 +1386,7 @@ class aten_unary_elementwise(UnaryElementwise):
             stride_output = None
         return {"op_shape": op_shape, "dtype_in_out" : (dtype_in, dtype_out),
                 "stride_input": stride_input, "stride_output": stride_output}
+
 class BinaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):

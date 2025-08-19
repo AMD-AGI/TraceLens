@@ -31,168 +31,12 @@ import warnings
 import pprint
 import pandas as pd
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op, dict_cat2names
-from ..PerfModel.jax_op_mapping import categorize_jax_op
+from ..PerfModel.jax_op_mapping import categorize_jax_op, dict_cat_to_perf_model
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
-from .jax_analyses import JaxAnalyses, JaxProfileProcessor
+from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.trace_to_tree import TraceToTree, JaxTraceToTree
 from ..util import DataLoader, TraceEventUtils
 
-class BaseAnalyzer:
-    def __init__(self, tree: TraceToTree, 
-                 add_python_func=False, 
-                 arch=None, 
-                 jax = False, 
-                 python_path=None, 
-                 event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
-        self.jax = jax
-        self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
-        self.tree = tree
-        self.add_python_func = add_python_func
-        self.arch = arch
-        self.python_path = python_path
-        self.event_to_category = event_to_category
-        self.tree.build_tree(add_python_func=add_python_func)
-
-    def get_df_gpu_timeline(self):
-        pass
-
-    def get_kernel_launchers(self):
-        pass
-
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):
-
-        def list_to_tuple(obj):
-            if isinstance(obj, list):
-                return tuple(list_to_tuple(item) for item in obj)
-            return obj
-        
-        kernel_launchers = self.get_kernel_launchers()
-        rows = []
-        for event in kernel_launchers:
-            metrics_event = {'name': event['name'],
-                             'op category': event['op category'],
-                             'UID': event['UID'],
-                            'total_direct_kernel_time': event['total_direct_kernel_time'],
-                            'direct_kernel_count': event['direct_kernel_count']}
-            for arg in ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
-                # TODO: specify jax event 'args'
-                if arg in event['args']:
-                    metrics_event[arg] = list_to_tuple(event['args'][arg])
-                else:
-                    metrics_event[arg] = None
-
-            if id_cols:
-                metrics_event['pid'] = event['pid']
-                metrics_event['tid'] = event['tid']
-                metrics_event['external_id'] = event['args'].get('External id')
-            if include_kernel_names:
-                metrics_event['kernel_names'] = event['kernel_names']
-            rows.append(metrics_event)
-        df = pd.DataFrame(rows)
-        return df
-
-    @staticmethod
-    def get_df_kernel_launchers_summary(df_kernel_launchers):
-        return TreePerfAnalyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
-
-    @staticmethod
-    def get_df_kernel_launchers_unique_args(df_kernel_launchers: pd.DataFrame, event_name=None, agg_metrics=['mean'], include_pct=False) -> pd.DataFrame:
-        return TreePerfAnalyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, event_name=event_name, agg_metrics=agg_metrics, include_pct=include_pct)
-
-    @staticmethod
-    def get_df_kernel_launchers_summary_by_category(df_kernel_launchers: pd.DataFrame) -> pd.DataFrame:
-        return TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
-  
-# Jax tree perf analyser 
-class JaxPerfAnalyser(BaseAnalyzer):
-    """
-    JaxPerfAnalyser is a specialized performance analyser for JAX traces.
-    It extends the TreePerfAnalyzer to provide JAX-specific performance analysis features.
-    This class is designed to work with JAX traces and provides methods to analyze
-    GPU events, categorize events, and compute performance metrics.
-
-    Jax GPU event analyser supports multiple GPUs. Legacy of TreePerf/jax_analyses.py 
-    """
-    
-    @staticmethod
-    def from_file(profile_filepath, *args, **kwargs) -> "JaxPerfAnalyser":
-        data = DataLoader.load_data(profile_filepath)
-        data_pb = data['traceEvents']
-        categorizer = JaxAnalyses.prepare_event_categorizer(data_pb)
-        events = TraceEventUtils.non_metadata_events(data_pb)
-
-        print('Number of trace events, data_pb:', len(data_pb), '\nNumber of events, non_metadata:', len(events))
-
-        linking_key = 'correlation_id'
-        metadata = TraceEventUtils.get_metadata(data_pb)
-        tree = JaxTraceToTree(events, 
-                              linking_key=linking_key, 
-                              event_to_category=categorizer)
-        return JaxPerfAnalyser(tree,
-                               event_to_category=categorizer, 
-                               metadata=metadata,
-                               pb_file_name=profile_filepath,
-                               *args, **kwargs)
-
-    def __init__(self, 
-                 tree: JaxTraceToTree, 
-                 event_to_category: Callable[[dict], str]=TraceEventUtils.default_categorizer,
-                 metadata = None,
-                 pb_file_name = None,
-                 ):
-        #super.__init__(*args, **kwargs)
-        self.GPUEventAnalyser = JaxGPUEventAnalyser
-        self.tree = tree
-        self.event_to_category = event_to_category
-        self.metadata = metadata
-        self.pb_file_name = pb_file_name
-        self.tree.build_tree(metadata=metadata, pb_file_name=pb_file_name)
-        self.op_categorizer = categorize_jax_op
-        self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
-        self.gpu_event_filter=JaxAnalyses.default_gpu_event_filter
-    
-    def get_df_gpu_timeline(self, gpu_pid = None):
-        df = self.gpu_event_analyser.get_breakdown_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
-        return df
-    
-    def get_df_gpu_events_averages(self, gpu_pid = None): 
-        df = self.gpu_event_analyser.get_average_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
-        return df
-    
-    def get_kernel_launchers(self, gpu_pid = None):
-        # self.tree.get_parent_event(event) == 'cpu_op'
-        print('Len tree events:', len(self.tree.events))
-        # print(self.tree.events[100])
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) == 'kernel' ]
-        print('Len filtered kernel events:', len(kernel_events))
-        # print(kernel_events[100])
-        kernel_launchers = []
-        for event in kernel_events:
-            event['total_direct_kernel_time'] = event['dur'] # GPUEventAnalyser([event]).compute_metrics()['busy_time']
-            event['direct_kernel_count'] = int(1)
-            event['kernel_names'] = [event['name']]
-            event['op category'] = self.op_categorizer(event)
-            kernel_launchers.append(event)
-
-        if gpu_pid:
-            return [event for event in kernel_launchers if event['pid'] == int(gpu_pid)]
-        else:
-            return kernel_launchers
-        
-
-    def X_get_categorized_gpu_events_gabe_version(self, group_by_gpu: bool = False,  group_kernels_by_name: bool = False):
-        all_events = self.gpu_event_analyser.get_gpu_event_lists(event_filter = JaxAnalyses.default_gpu_event_filter)
-        just_gpu_events = JaxAnalyses.get_just_gpu_events(all_events)
-        all_gpu_compute_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.computation_key]]
-        categorized_times, xla_events_times = JaxAnalyses.breakdown_compute_events(all_gpu_compute_events,
-                                                                           group_by_gpu = False,
-                                                                           group_by_name = group_kernels_by_name)
-
-        #categorized_df = JaxAnalyses.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"] * num_gpus, num_gpus)
-        #uncategorized_df = JaxAnalyses.create_breakdown_df(xla_events_times, categorized_times[JaxAnalyses.UncategorizedEventKey][1], num_gpus)
-        return categorized_times, xla_events_times 
-
-    
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(profile_filepath, jax: bool = False, *args, **kwargs) -> "TreePerfAnalyzer":
@@ -269,12 +113,12 @@ class TreePerfAnalyzer:
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
         if len(list_kernels) > 0:
-            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
+            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(cpu_op_list, filter_func=self.non_data_mov_filter)
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
+            busy_non_data_mov_time = self.GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_names'] = [kernel['name'] for kernel in list_kernels]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -874,3 +718,215 @@ class TreePerfAnalyzer:
             gpu_time_remaining = GPUEventAnalyser(gpu_events_remaining).compute_metrics()['busy_time']
             node['Non-nn.Module GPU Time'] = gpu_time_remaining
         return
+
+class BaseAnalyzer:
+    def __init__(self, tree: TraceToTree, 
+                 add_python_func=False, 
+                 arch=None, 
+                 jax = False, 
+                 python_path=None, 
+                 event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
+        self.jax = jax
+        self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
+        self.tree = tree
+        self.add_python_func = add_python_func
+        self.arch = arch
+        self.python_path = python_path
+        self.event_to_category = event_to_category
+        self.tree.build_tree(add_python_func=add_python_func)
+
+    def get_kernel_launchers(self):
+        pass
+
+    @staticmethod
+    def get_df_kernel_launchers(kernel_launchers, id_cols=False, include_kernel_names=False):
+        def list_to_tuple(obj):
+            if isinstance(obj, list):
+                return tuple(list_to_tuple(item) for item in obj)
+            return obj
+        
+        rows = []
+        for event in kernel_launchers:
+            metrics_event = {'name': event['name'],
+                             'op category': event['op category'],
+                             'UID': event['UID'],
+                             'total_direct_kernel_time': event['total_direct_kernel_time'],
+                             'direct_kernel_count': event['direct_kernel_count']}
+            for arg in ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
+                if arg in event['args']:
+                    metrics_event[arg] = list_to_tuple(event['args'][arg])
+                else:
+                    metrics_event[arg] = None
+
+            if id_cols:
+                metrics_event['pid'] = event['pid']
+                metrics_event['tid'] = event['tid']
+                metrics_event['external_id'] = event['args'].get('External id')
+            if include_kernel_names:
+                metrics_event['kernel_names'] = event['kernel_names']
+            rows.append(metrics_event)
+        df = pd.DataFrame(rows)
+        return df
+    
+    @staticmethod
+    def compute_perf_metrics(self, event, bwd=False,
+                             non_data_mov=False, perf_model_class=None):
+        pass 
+
+    @staticmethod
+    def build_df_perf_metrics(events, bwd=False,
+                              non_data_mov=False, include_kernel_names=False, include_args=False,
+                              dict_name_to_perf_model=None, dict_cat_to_perf_model=None,
+                              event_to_category=None, op_categorizer=None):
+        if len(events) == 0:
+            warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
+            return pd.DataFrame()
+        rows = []
+        list_warn_non_zero_flops_and_zero_time = []
+        list_warn_perf_metrics_failed = []
+        list_no_bwd_events = []
+        for event in events:
+            metrics_event = {'cat': event_to_category(event), 
+                             'name': event['name'],
+                             'UID': event['UID'],
+                        'pid': event['pid'], 'tid': event['tid'],
+                        'external_id': event['args'].get('External id')}
+            if include_args:
+                args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
+                metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
+            if dict_name_to_perf_model:
+                perf_model_class = dict_name_to_perf_model.get(event['name'], None)
+            elif dict_cat_to_perf_model: # if event is jax
+                perf_model_class = dict_cat_to_perf_model.get(op_categorizer(event), None)
+            else:
+                perf_model_class = None
+                
+            try:
+                dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, 
+                                                              perf_model_class=perf_model_class)
+                
+            except Exception as e:
+
+                list_warn_perf_metrics_failed.append(event)
+                continue
+            # handle warnings
+            if bwd and not event.get('bwd_events'):
+                list_no_bwd_events.append(event)
+                continue
+            if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
+                list_warn_non_zero_flops_and_zero_time.append(event)
+
+            if dict_perf_metrics is not None:
+                metrics_event.update(dict_perf_metrics)
+            if include_kernel_names:
+                metrics_event['kernel_names'] = event['kernel_names']
+            rows.append(metrics_event)
+
+        df_perf_metrics = pd.DataFrame(rows)
+        return df_perf_metrics
+    
+class JaxPerfAnalyser(BaseAnalyzer):
+    """
+    JaxPerfAnalyser is a specialized performance analyser for JAX traces.
+    It extends the TreePerfAnalyzer to provide JAX-specific performance analysis features.
+    This class is designed to work with JAX traces and provides methods to analyze
+    GPU events, categorize events, and compute performance metrics.
+
+    Jax GPU event analyser supports multiple GPUs. Legacy of TreePerf/jax_analyses.py 
+    """
+    
+    @staticmethod
+    def from_file(profile_filepath, *args, **kwargs) -> "JaxPerfAnalyser":
+        data = DataLoader.load_data(profile_filepath)
+        data_pb = data['traceEvents']
+        categorizer = JaxAnalyses.prepare_event_categorizer(data_pb)
+        events = TraceEventUtils.non_metadata_events(data_pb)
+        linking_key = 'correlation_id'
+        metadata = TraceEventUtils.get_metadata(data_pb)
+        tree = JaxTraceToTree(events, 
+                              linking_key=linking_key, 
+                              event_to_category=categorizer)
+        return JaxPerfAnalyser(tree,
+                               event_to_category=categorizer, 
+                               metadata=metadata,
+                               pb_file_name=profile_filepath,
+                               *args, **kwargs)
+
+    def __init__(self, 
+                 tree: JaxTraceToTree, 
+                 event_to_category: Callable[[dict], str]=TraceEventUtils.default_categorizer,
+                 metadata = None,
+                 pb_file_name = None):
+        #super.__init__(*args, **kwargs)
+        self.tree = tree
+        self.event_to_category = event_to_category 
+        self.metadata = metadata
+        self.pb_file_name = pb_file_name
+        self.tree.build_tree(metadata=metadata, pb_file_name=pb_file_name)
+        self.op_categorizer = categorize_jax_op
+        self.gpu_event_filter = JaxAnalyses.default_gpu_event_filter
+        self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
+        self.dict_cat_to_perf_model = dict_cat_to_perf_model
+        # TODO: better naming for event_to_category, op_categorizer,  dict_cat_to_perf_model
+    
+    def get_df_gpu_timeline(self, gpu_pid = None):
+        return self.gpu_event_analyser.get_breakdown_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
+    
+    def get_df_gpu_events_averages(self, gpu_pid = None): 
+        return self.gpu_event_analyser.get_average_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
+    
+    def parse_event_args(self, event):
+        # for _key in  ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
+        # _value = None
+        # event['args'][_key] = _value
+        pass
+    
+    def get_kernel_launchers(self, gpu_pid = None):
+        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) == 'kernel' ]
+        kernel_launchers = []
+        for event in kernel_events:
+            event['total_direct_kernel_time'] = event['dur']
+            event['direct_kernel_count'] = int(1)
+            event['kernel_names'] = [event['name']]
+            event['op category'] = self.op_categorizer(event)
+            event['args'] = self.parse_event_args(event)
+            kernel_launchers.append(event)
+
+        if gpu_pid:
+            return [event for event in kernel_launchers if event['pid'] == int(gpu_pid)]
+        else:
+            return kernel_launchers
+        
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):   
+        kernel_launchers = self.get_kernel_launchers()
+        return BaseAnalyzer.get_df_kernel_launchers(kernel_launchers,
+                                                    id_cols=id_cols, 
+                                                    include_kernel_names=include_kernel_names)
+    
+    def build_df_perf_metrics(self, events, bwd=False,
+                              non_data_mov=False, 
+                              include_kernel_names=False, 
+                              include_args=False):
+        """
+        Build a DataFrame with performance metrics for the given events.
+        """
+        return BaseAnalyzer.build_df_perf_metrics(events, bwd=bwd,
+                              non_data_mov=non_data_mov, 
+                              include_kernel_names=include_kernel_names, 
+                              include_args=include_args,
+                              dict_cat_to_perf_model=self.dict_cat_to_perf_model,
+                              event_to_category=self.event_to_category,
+                              op_categorizer=self.op_categorizer)
+    
+    def get_categorized_gpu_events_gabe_verify(self, group_by_gpu: bool = False,  group_kernels_by_name: bool = False):
+        all_events = JaxGPUEventAnalyser.get_gpu_event_lists(event_filter = JaxAnalyses.default_gpu_event_filter)
+        just_gpu_events = JaxAnalyses.get_just_gpu_events(all_events)
+        all_gpu_compute_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.computation_key]]
+        categorized_times, xla_events_times = JaxAnalyses.breakdown_compute_events(all_gpu_compute_events,
+                                                                           group_by_gpu = False,
+                                                                           group_by_name = group_kernels_by_name)
+
+        #categorized_df = JaxAnalyses.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"] * num_gpus, num_gpus)
+        #uncategorized_df = JaxAnalyses.create_breakdown_df(xla_events_times, categorized_times[JaxAnalyses.UncategorizedEventKey][1], num_gpus)
+        return categorized_times, xla_events_times 
+ 
