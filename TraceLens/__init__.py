@@ -1,12 +1,17 @@
-from .TreePerf.tree_perf import TreePerfAnalyzer
-from .TreePerf.gpu_event_analyser import GPUEventAnalyser, PytorchGPUEventAnalyser, JaxGPUEventAnalyser
-from .TreePerf.jax_analyses import JaxAnalyses
-from .TraceFusion.trace_fuse import TraceFuse
-from .Trace2Tree.trace_to_tree import TraceToTree, JaxTraceToTree
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
-from .util import DataLoader,TraceEventUtils
+from .Trace2Tree.trace_to_tree import TraceToTree
+from .TraceFusion.trace_fuse import TraceFuse
+from .TreePerf.gpu_event_analyser import (
+    GPUEventAnalyser,
+    JaxGPUEventAnalyser,
+    PytorchGPUEventAnalyser,
+)
+from .TreePerf.jax_analyses import JaxAnalyses
+from .TreePerf.tree_perf import TreePerfAnalyzer
+from .util import DataLoader, TraceEventUtils, JaxProfileProcessor
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
+from .TraceDiff.trace_diff import TraceDiff
 from .Reporting import *
 
 __all__ = [
@@ -24,5 +29,7 @@ __all__ = [
     "EventReplayer",
     "DataLoader",
     "TraceEventUtils",
+    "JaxProfileProcessor",
+    "TraceDiff",
     "Reporting",
 ]
