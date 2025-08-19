@@ -1345,6 +1345,30 @@ class aiter__flash_attn_backward(SDPA):
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
+class flash_attention3(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])
+        if len(q_shape) == 3:
+            B = 1
+            N_Q, H_Q, d_h = q_shape
+            N_KV, H_KV, _ = input_dims[1]
+        else:
+            B, N_Q, H_Q, d_h = q_shape
+            _, N_KV, H_KV, _ = input_dims[1]
+        assert k_shape == v_shape, f"Key and value shapes are different: {k_shape} != {v_shape}"
+        
+        dropout = 0.0 # TODO: currently dropout is not implemented in flash_attn.cute.flash_attn_func, so set to zero
+        causal = eval(event['args']['Concrete Inputs'][24])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h": d_h,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B}
 
 class UnaryElementwise:
 
