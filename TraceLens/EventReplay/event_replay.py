@@ -252,7 +252,7 @@ class EventReplayer:
                         value = arg_str.lower() == 'true'
                     elif arg_type in ['int', 'SymInt']:
                         value = int(arg_str)
-                    elif arg_type in ['float', 'float?', 'Scalar']:
+                    elif arg_type in ['float', 'float?', 'Scalar', 'Scalar?']:
                         value = float(arg_str)
                     elif arg_type.startswith('int[') or arg_type.startswith('SymInt['):
                         value = [int(x.strip()) for x in arg_str.strip()[1:-1].split(',')]

@@ -16,7 +16,7 @@ def _get_torch_or_raise() -> Any: # Changed return type to Any for flexibility
             )
     return _torch_module
 
-list_profile_tensor_types = ['float', 'c10::Half', 'c10::BFloat16']
+list_profile_tensor_types = ['double', 'float', 'c10::Half', 'c10::BFloat16']
 
 from dataclasses import dataclass
 @dataclass
@@ -33,6 +33,7 @@ def build_tensor(cfg: TensorCfg, device: str='cuda') -> 'torch.Tensor':
 
     torch = _get_torch_or_raise()
     dict_profile2torchdtype = {
+        'double': torch.float64,
         'float': torch.float32,
         'c10::Half': torch.float16,
         'c10::BFloat16': torch.bfloat16,
