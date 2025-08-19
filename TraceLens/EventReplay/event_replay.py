@@ -222,6 +222,7 @@ class EventReplayer:
                 }
             }
         """
+        evt_name = event['name']
         op_name, pos_args_schema, kwargs_schema, return_type = EventReplayer.parse_schema_string(schema)
         full_args_schema = pos_args_schema + kwargs_schema
         list_pos_args = []
@@ -243,9 +244,20 @@ class EventReplayer:
                 value = []
             else:
                 if arg_type in ['Tensor', 'Tensor?', 'Tensor(a!)']:
+                    init = 'normal'
+                    if evt_name == 'aten::fill_':
+                        # special case for fill_ where we don't need to initialize the tensor
+                        # as it will be filled with a value later
+                        init = None
+                    elif evt_name == 'aten::copy_' and arg_name!= 'src':
+                        # special case for copy_ where we don't need to initialize the tensor
+                        # as it will be copied from another tensor
+                        init = None
                     value = TensorCfg(shape=event['args']['Input Dims'][idx],
                                                     dtype=event['args']['Input type'][idx],
-                                                    strides=event['args']['Input Strides'][idx])
+                                                    strides=event['args']['Input Strides'][idx],
+                                                    init=init
+                                                )
                 else:
                     arg_str = event['args']['Concrete Inputs'][idx]
                     if arg_type in ['bool', 'bool?']:
