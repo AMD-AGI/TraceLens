@@ -20,6 +20,7 @@ attn_ops = [
     "flash_attn::_flash_attn_forward",
     "aten::_scaled_dot_product_cudnn_attention",
     "aten::_scaled_dot_product_efficient_attention",
+    "flash_attn_3::fwd",
 ]
 
 group2ops = {
@@ -58,6 +59,7 @@ attn_ops_launchers = [
     "flash_attn::_flash_attn_varlen_forward",
     "FlashAttnFunc",
     "FlashAttnVarlenFunc",
+    "flash_attn_3::fwd",
 ]
 
 concat_ops_launchers = [
