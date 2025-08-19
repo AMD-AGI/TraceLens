@@ -25,11 +25,7 @@ from typing import Dict, Any, Callable
 import TraceLens.util
 from .util import tev2_create_pseudo_host_mm_ops
 
-from ..util import TraceEventUtils
-
-from TraceLens.TreePerf.jax_analyses import JaxAnalyses, JaxProfileProcessor
-
-import TraceLens 
+from ..util import TraceEventUtils, JaxProfileProcessor
 
 
 from abc import ABC, abstractmethod
@@ -250,7 +246,7 @@ class JaxTraceToTree(BaseTraceToTree):
                  prune_nongpu_paths=True,
                  compute_end_times=True,
                  linking_key: str = None,
-                 event_to_category: Callable[[dict], str] = JaxAnalyses.prepare_event_categorizer):
+                 event_to_category: Callable[[dict], str] = TraceEventUtils.prepare_event_categorizer):
 
         super().__init__(events_data,
                          prune_nongpu_paths=prune_nongpu_paths,
@@ -267,7 +263,7 @@ class JaxTraceToTree(BaseTraceToTree):
     @staticmethod
     def default_categorizer(event: dict) -> str:
         """
-        Returns the category of the given event dictionary using the JaxAnalyses.prepare_event_categorizer method.
+        Returns the category of the given event dictionary using the TraceEventUtils.prepare_event_categorizer method.
 
         Args:
             event (dict): The event data to categorize.
@@ -275,7 +271,7 @@ class JaxTraceToTree(BaseTraceToTree):
         Returns:
             str: The category assigned to the event.
         """
-        return JaxAnalyses.prepare_event_categorizer(event)
+        return TraceEventUtils.prepare_event_categorizer(event)
     
     def _set_linking_key(self) -> None:
         """
@@ -303,7 +299,7 @@ class JaxTraceToTree(BaseTraceToTree):
         """
         for event in self.events:
             # GPU
-            if event['pid']<= 100:
+            if event.get('pid')<= 100:
                 # set the parents['gpu_events'] to the corresponding gpu event
                 if 'parent' in event.keys():
                     corresponding_gpu_event = event
@@ -358,8 +354,8 @@ class JaxTraceToTree(BaseTraceToTree):
         """
         self.metadata = metadata
         for event in self.events:
-            pid = event['pid']
-            tid = event['tid']
+            pid = event.get('pid')
+            tid = event.get('tid')
             event['process'] = self.metadata[pid][None]
             event['thread'] = self.metadata[pid][tid]
 
@@ -379,8 +375,8 @@ class JaxTraceToTree(BaseTraceToTree):
         hlo_module_list = []
         for event in self.events:
             if 'args' in event.keys():
-                if 'hlo_module' in event['args'].keys():
-                    hlo_module = event['args']['hlo_module']
+                if 'hlo_module' in event.get('args').keys():
+                    hlo_module = event.get('args').get('hlo_module')
                     if hlo_module not in hlo_module_list:
                         hlo_module_list.append(hlo_module)
                         self.hlo_ops[hlo_module] = JaxProfileProcessor.process_protobuf_file(pb_file_name, hlo_module)
@@ -399,8 +395,8 @@ class JaxTraceToTree(BaseTraceToTree):
         """
         for uid, event in enumerate(self.events):
             if 'args' in event.keys():
-                if self.linking_key in event['args'].keys():
-                    key = event['args'][self.linking_key]
+                if self.linking_key in event.get('args').keys():
+                    key = event.get('args').get(self.linking_key)
                     self.linking_key_to_uid_map[key].append(uid)
 
     def _link_cpu_gpu(self) -> None:
@@ -425,9 +421,9 @@ class JaxTraceToTree(BaseTraceToTree):
         """
         for event in self.events:
             if 'args' in event.keys():
-                if self.linking_key in event['args'].keys():
+                if self.linking_key in event.get('args').keys():
                     if event[TraceEventUtils.TraceKeys.PID]==701:
-                        key = event['args'][self.linking_key]
+                        key = event.get('args').get(self.linking_key)
                         linking_uids = self.linking_key_to_uid_map[key]
                         uid = event[TraceEventUtils.TraceKeys.UID]
                         for linking_uid in linking_uids:
@@ -438,11 +434,11 @@ class JaxTraceToTree(BaseTraceToTree):
                                 GPU_event['parent'] = uid
                                 GPU_event['tree'] = True
                                 self.cpu_root_nodes.append(uid)
-                                if 'hlo_op' in GPU_event['args'].keys():
-                                    hlo_op = '%' + GPU_event['args']['hlo_op']
-                                    hlo_module = GPU_event['args']['hlo_module']
-                                    if (hlo_module in self.hlo_ops.keys()) and (hlo_op in self.hlo_ops[hlo_module].keys()):
-                                            GPU_event['metadata'] = self.hlo_ops[hlo_module][hlo_op]
+                                if 'hlo_op' in GPU_event.get('args').keys():
+                                    hlo_op = '%' + GPU_event.get('args').get('hlo_op')
+                                    hlo_module = GPU_event.get('args').get('hlo_module')
+                                    if (hlo_module in self.hlo_ops.keys()) and (hlo_op in self.hlo_ops.get(hlo_module).keys()):
+                                            GPU_event['metadata'] = self.hlo_ops.get(hlo_module).get(hlo_op)
                                     else:
                                         print('Missing hlo_op: ',hlo_op)
                                         print('in hlo_module: ',GPU_event['args']['hlo_module'])
