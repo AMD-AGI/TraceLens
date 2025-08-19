@@ -38,6 +38,8 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     dict_dfs = {}
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
+    print(df_kernel_launchers.shape, df_kernel_launchers.head(3))
+    sys.exit(0)
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
     df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
     df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 

@@ -921,7 +921,7 @@ class JaxPerfAnalyser(BaseAnalyzer):
     def from_file(profile_filepath, *args, **kwargs) -> "JaxPerfAnalyser":
         data = DataLoader.load_data(profile_filepath)
         data_pb = data['traceEvents']
-        categorizer = JaxAnalyses.prepare_event_categorizer(data_pb)
+        categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         events = TraceEventUtils.non_metadata_events(data_pb)
         linking_key = 'correlation_id'
         metadata = TraceEventUtils.get_metadata(data_pb)
