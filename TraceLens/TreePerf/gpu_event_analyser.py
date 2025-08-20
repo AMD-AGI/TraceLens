@@ -347,7 +347,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         average_gpu_metrics = self.get_average_metrics(gpu_pid=gpu_pid, event_filter=event_filter )
         return GPUEventAnalyser.get_breakdown_df_from_dict(average_gpu_metrics) 
     
-    def get_average_df_gabe_verify(self, gpu_pid = None, event_filter = None):
+    def get_average_df_verify_with_jax_analyses(self, gpu_pid = None, event_filter = None):
         all_events = self.get_gpu_event_lists(gpu_pid=None, event_filter=event_filter)
         # create an average across GPUs
         average_gpu_metrics = None

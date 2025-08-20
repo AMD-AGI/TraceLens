@@ -1003,19 +1003,19 @@ class JaxPerfAnalyser(BaseAnalyzer):
     
     def get_kernel_launchers(self, gpu_pid = None):
         kernel_events =  [event for event in self.tree.events if self.event_to_category(event) == 'kernel']
-        #hlo_ops = [event for event in self.tree.events if event.get('args', {}).get('hlo_op', None)]
-        #gemm_events = [event for event in kernel_events if self.op_categorizer(event).lower() == 'gemm']
+        #hlo_ops = [event for event in self.tree.events if event.get('args', {}).get('hlo_op', None)] # same as above
+        gemm_events = [event for event in kernel_events if self.op_categorizer(event).lower() == 'gemm'] # sub-category
         kernel_launchers = []
-        for event in kernel_events:
+        for event in gemm_events:
             event['op category'] = self.op_categorizer(event) 
             event['total_direct_kernel_time'] = event['dur']
             event['direct_kernel_count'] = int(1)
             event['kernel_details'] = [{'name': event['name'], 
                                         'dur': event['dur'],
                                         'stream': event.get('args', {}).get('stream', None)}]
-            # jax event specific
-            parent_event = self.tree.get_parent_event(event)
-            event['name'] = parent_event['name']
+            # TODO get jax event parent name or other metainfor for more informative col output
+            # parent_event = self.tree.get_parent_event(event) # ? same name in jax tree
+            # event['name'] = parent_event['name']
             input_dims, input_strides, input_type = self.parse_event_operands(event, op_cat = 'gemm')
             event['args']['Input Dims'] = input_dims
             event['args']['Input type'] = input_type
