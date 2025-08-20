@@ -1,11 +1,8 @@
 import argparse, os, sys
 import json
-import jax
-import pandas as pd
 from pathlib import Path
 from collections import defaultdict
 
-from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxPerfAnalyser, JaxAnalyses
