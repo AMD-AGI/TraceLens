@@ -977,8 +977,7 @@ class JaxPerfAnalyser(BaseAnalyzer):
         # Output: Dict
         # 'Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'
         # ((768, 14336), (14336, 768))	('c10::BFloat16', 'c10::BFloat16')	((1, 768), (768, 1))	('', '')
-        # TODO check xla script about how stride is generated for gemm.
-        # TODO: parse jax input infor in operands for other op_cat. 
+        # TODO: Parse jax input infor in operands for other op_cat. Verify xla script about how stride is generated.
         operands = event.get('metadata', {}).get('operands', {}) # ['metadata']['operands']
         if self.op_categorizer(event).lower() == op_cat: # operands and len(operands)>1:
             input_dims = ()
@@ -1051,7 +1050,7 @@ class JaxPerfAnalyser(BaseAnalyzer):
                               event_to_category=self.event_to_category,
                               op_categorizer=self.op_categorizer)
     
-    def get_categorized_gpu_events_gabe_verify(self, group_by_gpu: bool = False,  group_kernels_by_name: bool = False):
+    def get_categorized_gpu_events_verify(self, group_by_gpu: bool = False,  group_kernels_by_name: bool = False):
         all_events = JaxGPUEventAnalyser.get_gpu_event_lists(event_filter = JaxAnalyses.default_gpu_event_filter)
         just_gpu_events = JaxAnalyses.get_just_gpu_events(all_events)
         all_gpu_compute_events = [e for ge in just_gpu_events.values() for e in ge[GPUEventAnalyser.computation_key]]

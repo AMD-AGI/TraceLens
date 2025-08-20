@@ -280,7 +280,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             return return_dict
         else:
             #print(f'Return events dictionary on one gpu {gpu_pid}.')
-            return return_dict.get(gpu_pid, {}) # {gpu_pid : return_dict.get(gpu_pid, {})}
+            return return_dict.get(gpu_pid, {}) #consistency? {gpu_pid : return_dict.get(gpu_pid, {})}
     
     def compute_metrics(self, gpu_pid = 1, event_filter = None):
         """
@@ -310,6 +310,9 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         return gpu_frames
     
     def get_average_metrics(self, gpu_pid = None, event_filter = None):
+        """
+        Return average gpu metrics across GPUs or one gpu, if gpu_pid is provided.
+        """
         list_pids = [gpu_pid] if gpu_pid else range(1,9)  
         num_gpus = len(list_pids)
         average_gpu_metrics = None

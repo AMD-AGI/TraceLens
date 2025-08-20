@@ -175,11 +175,11 @@ def main():
     # Analyze trace profile
     assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
     dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
-    # Specific analysis on Pytorch trace.json file
+    # OP Specific analysis on Pytorch trace.json file
     if args.profile_path.endswith('.pt.trace.json'):
         _dfs = perf_pytorch(args.profile_path)
         dict_dfs.update(_dfs)
-    # Additional analysis on Jax xplane.pb file
+    # OP Specific analysis on Jax xplane.pb file
     if args.profile_path.endswith('.xplane.pb'):
         _dfs = perf_jax(args.profile_path) 
         dict_dfs.update(_dfs)
