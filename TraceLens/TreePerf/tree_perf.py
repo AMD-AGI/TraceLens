@@ -22,7 +22,7 @@
 
 import json
 import gzip
-import os
+import os, re, sys
 from functools import partial
 import copy
 from collections import defaultdict
@@ -122,7 +122,7 @@ class TreePerfAnalyzer:
         list_non_data_mov_kernels = [self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs]
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
+            busy_non_data_mov_time = self.GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
         event['kernel_details'] = [ {'name': kernel['name'],
                                      'dur': kernel['dur'],
                                      'stream': kernel.get('args', {}).get('stream', None)}
@@ -821,7 +821,7 @@ class BaseAnalyzer:
         pass
 
     @staticmethod
-    def get_df_kernel_launchers(kernel_launchers, id_cols=False, include_kernel_names=False):
+    def get_df_kernel_launchers(kernel_launchers, id_cols=False, include_kernel_details=False):
         def list_to_tuple(obj):
             if isinstance(obj, list):
                 return tuple(list_to_tuple(item) for item in obj)
@@ -834,30 +834,45 @@ class BaseAnalyzer:
                              'UID': event['UID'],
                              'total_direct_kernel_time': event['total_direct_kernel_time'],
                              'direct_kernel_count': event['direct_kernel_count']}
-            for arg in ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
-                if arg in event['args']:
-                    metrics_event[arg] = list_to_tuple(event['args'][arg])
-                else:
-                    metrics_event[arg] = None
+            if 'args' in event and event['args']:
+                for arg in ['Input Dims', 'Input type', 'Input Strides']:
+                    if arg in event['args']:
+                        metrics_event[arg] = list_to_tuple(event['args'][arg])
+                    else:
+                        metrics_event[arg] = None
 
             if id_cols:
                 metrics_event['pid'] = event['pid']
                 metrics_event['tid'] = event['tid']
                 metrics_event['external_id'] = event['args'].get('External id')
-            if include_kernel_names:
-                metrics_event['kernel_names'] = event['kernel_names']
+            if include_kernel_details:
+                metrics_event['kernel_details'] = event['kernel_details']
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
     
     @staticmethod
-    def compute_perf_metrics(self, event, bwd=False,
-                             non_data_mov=False, perf_model_class=None):
-        pass 
+    def get_df_kernel_launchers_summary(df_kernel_launchers):
+        return TreePerfAnalyzer.get_df_kernel_launchers_summary(df_kernel_launchers=df_kernel_launchers)
+        
+    @staticmethod
+    def get_df_kernel_launchers_unique_args(df_kernel_launchers, event_name=None, agg_metrics=['mean'], include_pct=False):
+        return TreePerfAnalyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers=df_kernel_launchers,
+                                                                    event_name=event_name,
+                                                                    agg_metrics=agg_metrics,
+                                                                    include_pct=include_pct)
+
+    @staticmethod
+    def get_df_kernel_launchers_summary_by_category(df_kernel_launchers):
+        return TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers=df_kernel_launchers)
+    
+    @staticmethod
+    def compute_perf_metrics(self, event, bwd=False, non_data_mov=False, perf_model_class=None):
+        return TreePerfAnalyzer.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, perf_model_class=perf_model_class) 
 
     @staticmethod
     def build_df_perf_metrics(events, bwd=False,
-                              non_data_mov=False, include_kernel_names=False, include_args=False,
+                              non_data_mov=False, include_kernel_details=False, include_args=False,
                               dict_name_to_perf_model=None, dict_cat_to_perf_model=None,
                               event_to_category=None, op_categorizer=None):
         if len(events) == 0:
@@ -884,7 +899,7 @@ class BaseAnalyzer:
                 perf_model_class = None
                 
             try:
-                dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, 
+                dict_perf_metrics = BaseAnalyzer.compute_perf_metrics(event, bwd=bwd, non_data_mov=non_data_mov, 
                                                               perf_model_class=perf_model_class)
                 
             except Exception as e:
@@ -900,8 +915,8 @@ class BaseAnalyzer:
 
             if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
-            if include_kernel_names:
-                metrics_event['kernel_names'] = event['kernel_names']
+            if include_kernel_details:
+                metrics_event['kernel_details'] = event['kernel_details']
             rows.append(metrics_event)
 
         df_perf_metrics = pd.DataFrame(rows)
@@ -957,21 +972,57 @@ class JaxPerfAnalyser(BaseAnalyzer):
     def get_df_gpu_events_averages(self, gpu_pid = None): 
         return self.gpu_event_analyser.get_average_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
     
-    def parse_event_args(self, event):
-        # for _key in  ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
-        # _value = None
-        # event['args'][_key] = _value
-        pass
+    def parse_event_operands(self, event, op_cat = 'gemm'):
+        # Input: operands=['bf16[1,3072]{1,0}', 'bf16[3072,6144]{1,0}'] # gemm['metadata']['operands'] # 
+        # Output: Dict
+        # 'Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'
+        # ((768, 14336), (14336, 768))	('c10::BFloat16', 'c10::BFloat16')	((1, 768), (768, 1))	('', '')
+        # TODO check xla script about how stride is generated for gemm.
+        # TODO: parse jax input infor in operands for other op_cat. 
+        operands = event.get('metadata', {}).get('operands', {}) # ['metadata']['operands']
+        if self.op_categorizer(event).lower() == op_cat: # operands and len(operands)>1:
+            input_dims = ()
+            input_strides = ()
+            input_type = ()
+            for _operand in operands:
+                _dim_pattern = r"\[([0-9,]+)\]"
+                _dims = re.findall(_dim_pattern, _operand)
+                _input_dim = tuple(int(_dim) for _dim in _dims[0].split(',') if _dim)
+                input_dims += (_input_dim,)
+
+                _stride_pattern = r"\{([0-9,]+)\}"
+                _strides = re.findall(_stride_pattern, _operand)
+                _input_stride = tuple(int(_dim) for _dim in _strides[0].split(',') if _dim)
+                input_strides += (_input_stride,)
+
+                _pattern = r"(^[A-Za-z,0-9]+)\[" # _pattern = r"(^[A-Za-z,]+[0-9]{2})\["
+                _type = re.findall(_pattern, _operand)
+                input_type += (_type[0],)
+            return input_dims, input_strides, input_type
+        else: 
+            return None, None, None
     
     def get_kernel_launchers(self, gpu_pid = None):
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) == 'kernel' ]
+        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) == 'kernel']
+        #hlo_ops = [event for event in self.tree.events if event.get('args', {}).get('hlo_op', None)]
+        #gemm_events = [event for event in kernel_events if self.op_categorizer(event).lower() == 'gemm']
         kernel_launchers = []
         for event in kernel_events:
+            event['op category'] = self.op_categorizer(event) 
             event['total_direct_kernel_time'] = event['dur']
             event['direct_kernel_count'] = int(1)
-            event['kernel_names'] = [event['name']]
-            event['op category'] = self.op_categorizer(event)
-            event['args'] = self.parse_event_args(event)
+            event['kernel_details'] = [{'name': event['name'], 
+                                        'dur': event['dur'],
+                                        'stream': event.get('args', {}).get('stream', None)}]
+            # jax event specific
+            parent_event = self.tree.get_parent_event(event)
+            event['name'] = parent_event['name']
+            input_dims, input_strides, input_type = self.parse_event_operands(event, op_cat = 'gemm')
+            event['args']['Input Dims'] = input_dims
+            event['args']['Input type'] = input_type
+            event['args']['Input Strides'] = input_strides
+            event['args']['hlo_op'] = event.get('args', {}).get('hlo_op', None)
+            event['args']['operands'] = event.get('metadata', {}).get('operands', {})
             kernel_launchers.append(event)
 
         if gpu_pid:
@@ -979,11 +1030,11 @@ class JaxPerfAnalyser(BaseAnalyzer):
         else:
             return kernel_launchers
         
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_names=False):   
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False):   
         kernel_launchers = self.get_kernel_launchers()
         return BaseAnalyzer.get_df_kernel_launchers(kernel_launchers,
                                                     id_cols=id_cols, 
-                                                    include_kernel_names=include_kernel_names)
+                                                    include_kernel_details=include_kernel_details)
     
     def build_df_perf_metrics(self, events, bwd=False,
                               non_data_mov=False, 

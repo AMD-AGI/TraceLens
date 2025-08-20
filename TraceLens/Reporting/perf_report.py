@@ -37,9 +37,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     # Generate base DataFrames 
     dict_dfs = {}
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
-    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_names=True)
-    print(df_kernel_launchers.shape, df_kernel_launchers.head(3))
-    sys.exit(0)
+    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True)
     df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
     df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
     df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
@@ -64,14 +62,14 @@ def perf_pytorch(profile_path: str, arch = None, agg_metrics = ['mean', 'median'
         op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
         if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']: 
             # For GEMM: create a single table that covers both fwd and bwd.
-            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
+            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
             df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
             dict_dfs[f"op_{op_cat}"] = df_ops
         else:
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
-            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=True)
+            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
             df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(df_ops_fwd, agg_metrics)
-            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_names=True, include_args=True)
+            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_details=True, include_args=True)
             df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(df_ops_bwd, agg_metrics)
             dict_dfs[f"op_{op_cat}_fwd"] = df_ops_fwd
             dict_dfs[f"op_{op_cat}_bwd"] = df_ops_bwd
@@ -114,14 +112,12 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     if 0:
         # Generate & store op-specific DataFrames
         from TraceLens.PerfModel.jax_op_mapping import ClassCategories
-        # TODO: what is dict_cat2names (pytorch)? how is it made? how to make one for jax trace?
         for op_cat, op_names in ClassCategories.items():
             # Filter events belonging to the current category
             op_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event) == op_cat]
-            print(op_cat, "events", len(op_events))
             if op_cat in ['GEMM', 'CONV', 'TE', 'FA V3']: 
                 # For GEMM: create a single table that covers both fwd and bwd.
-                df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_names=True, include_args=False)
+                df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
                 df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
                 dict_dfs[f"op_{op_cat}"] = df_ops
             else:
@@ -158,7 +154,6 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     return dict_dfs
 
 def main():
-
     # check openpyxl is installed
     try:
         import openpyxl
@@ -183,10 +178,11 @@ def main():
     # Analyze trace profile
     assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
     dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
+    # Specific analysis on Pytorch trace.json file
     if args.profile_path.endswith('.pt.trace.json'):
         _dfs = perf_pytorch(args.profile_path)
         dict_dfs.update(_dfs)
-    # Additional analysis on Jax xplane.pb trace
+    # Additional analysis on Jax xplane.pb file
     if args.profile_path.endswith('.xplane.pb'):
         _dfs = perf_jax(args.profile_path) 
         dict_dfs.update(_dfs)
@@ -204,11 +200,7 @@ def main():
         sys.exit(1)
 
     for name_df, df in dict_dfs.items():
-        export_data_df(df, 
-            output_folder, 
-            output_filename,
-            output_table_format=args.output_table_formats,
-            suffix=f'_{name_df}',)
+        export_data_df(df, output_folder, output_filename, output_table_format=args.output_table_formats, suffix=f'_{name_df}',)
 
     print(f"DataFrames successfully written to {args.output_path}")
 

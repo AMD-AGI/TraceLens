@@ -310,14 +310,14 @@ class JaxAnalyses:
             metadata[1],
             lambda x: x[0] is not None and x[1][TraceEventUtils.MetadataFields.ThreadName].startswith(TraceEventUtils.JaxSpecialThreads.StreamPrefix))
         main_thread_events = events[1][main_thread_id]
-        main_thread_gemms = filter(lambda x: TraceEventUtils.TraceKeys.Args in x and x[TraceEventUtils.TraceKeys.Args][JaxAnalyses.JaxKernelEventArgs.hlo_op] in gemm_ops, main_thread_events)
-        metrics = [JaxAnalyses.gemm_perf_metrics(event, gemm_ops[event[TraceEventUtils.TraceKeys.Args][JaxAnalyses.JaxKernelEventArgs.hlo_op]], False, arch) for event in main_thread_gemms]
+        main_thread_gemms = filter(lambda x: TraceEventUtils.TraceKeys.Args in x and x[TraceEventUtils.TraceKeys.Args][TraceEventUtils.JaxKernelEventArgs.hlo_op] in gemm_ops, main_thread_events)
+        metrics = [JaxAnalyses.gemm_perf_metrics(event, gemm_ops[event[TraceEventUtils.TraceKeys.Args][TraceEventUtils.JaxKernelEventArgs.hlo_op]], False, arch) for event in main_thread_gemms]
         return pd.DataFrame(metrics)
 
     class JaxGemm(perf_model.GEMM):
         @staticmethod
         def get_param_details(event):
-            hlo_args = event[JaxAnalyses.JaxKernelEventArgs.hlo_op]
+            hlo_args = event[TraceEventUtils.JaxKernelEventArgs.hlo_op]
             dict_dtype2gemmologist = {
                 'f32': 'fp32',
                 'f16': 'fp16',
@@ -374,7 +374,7 @@ class JaxAnalyses:
         # the class structure of the perf_model class doesn't make it easy to add additional parameters to the event,
         # so make a copy of the event with the hlo op info inside it
         event_copy = dict(event)
-        event_copy[JaxAnalyses.JaxKernelEventArgs.hlo_op] = op_params
+        event_copy[TraceEventUtils.JaxKernelEventArgs.hlo_op] = op_params
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
         perf_model = perf_model_class(event_copy, arch=arch)
