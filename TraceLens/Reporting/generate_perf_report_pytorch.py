@@ -188,9 +188,9 @@ def generate_perf_report_pytorch(profile_json_path: str,
 
                                 # for gemmologist
                                 python_path: Optional[str] = None,
-                                gpu_arch_json: Optional[dict] = None) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json:
-        with open(gpu_arch_json, 'r') as f:
+                                gpu_arch_json_path: Optional[str] = None) -> Dict[str, pd.DataFrame]:
+    if gpu_arch_json_path:
+        with open(gpu_arch_json_path, 'r') as f:
             gpu_arch_json = json.load(f)
 
     perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path)
@@ -280,6 +280,8 @@ def generate_perf_report_pytorch(profile_json_path: str,
             for sheet_name, df in dict_name2df.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"DataFrames successfully written to {output_xlsx_path}")
+    
+    return dict_name2df
 
 
 def main():
