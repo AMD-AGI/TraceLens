@@ -1,6 +1,7 @@
 import os
 import argparse
 import json
+from typing import Optional, Dict, Tuple
 import pandas as pd
 import numpy as np
 from TraceLens import TraceToTree
@@ -170,49 +171,34 @@ def add_truncated_kernel_details(df: pd.DataFrame,
     # Return a new DataFrame with the desired column order
     return df[cols]
 
+def generate_perf_report_pytorch(profile_json_path: str, 
+                                output_xlsx_path: Optional[str] = None,
+                                output_csvs_dir: Optional[str] = None,
 
-def main():
+                                # short kernel study options
+                                short_kernel_study: bool = False,
+                                short_kernel_threshold_us: int = 10,
+                                short_kernel_histogram_bins: int = 100,
+                                topk_short_kernels: Optional[int] = None, #include all below thresh by default
 
-    parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
-    parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json or .json.gz file')
-    parser.add_argument('--output_xlsx_path', type=str, default=None,
-                        help='Path to the output Excel file')
-    parser.add_argument('--output_csvs_dir', type=str, default=None,
-                        help='Directory to save output CSV files')
+                                topk_ops: Optional[int] = None,
+                                topk_roofline_ops: Optional[int] = None,
 
-    # Optional arguments
-    parser.add_argument('--short_kernel_study', action='store_true',
-                        help='Include short kernel study in the report.')
-    parser.add_argument('--short_kernel_threshold_us', type=int, default=10,
-                        help='Threshold in microseconds to classify a kernel as "short". Defaults to 10 us.')
-    parser.add_argument('--short_kernel_histogram_bins', type=int, default=100,
-                        help='Number of bins for the short-kernel histogram.')
-    parser.add_argument('--topk_short_kernels', type=int, default=None,
-                        help='Rows to keep in the short-kernel table.')
+                                extension_file: Optional[str] = None,
 
-    parser.add_argument('--topk_ops', type=int, default=None,
-                        help='Rows to keep in the unique-args launcher table.')
-    parser.add_argument('--topk_roofline_ops', type=int, default=None,
-                        help='Rows to keep in the roofline table.')
-
-    parser.add_argument('--extension_file', type=str, default=None,
-                        help='Path to the extension file containing custom extensions for TraceTree and PerfModel.')
-
-    parser.add_argument('--python_path', type=str, default=None, help='Path to the python executable for gemmologist')
-    parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
-
-    args = parser.parse_args()
-
-    # Load the arch json
-    gpu_arch_json = None
-    if args.gpu_arch_json_path:
-        with open(args.gpu_arch_json_path, 'r') as f:
+                                # for gemmologist
+                                python_path: Optional[str] = None,
+                                gpu_arch_json_path: Optional[str] = None) -> Dict[str, pd.DataFrame]:
+    if gpu_arch_json_path:
+        with open(gpu_arch_json_path, 'r') as f:
             gpu_arch_json = json.load(f)
+    else:
+        gpu_arch_json = None
 
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=args.profile_json_path, arch=gpu_arch_json, python_path=args.python_path)
+    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path)
 
-    if args.extension_file:
-        apply_extension(perf_analyzer, args.extension_file)
+    if extension_file:
+        apply_extension(perf_analyzer, extension_file)
 
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
 
@@ -258,9 +244,9 @@ def main():
             perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
     # Short kernel study
-    df_hist, df_short_kernels = get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=args.short_kernel_threshold_us,
-                                                    histogram_bins=args.short_kernel_histogram_bins,
-                                                    topk=args.topk_short_kernels)
+    df_hist, df_short_kernels = get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=short_kernel_threshold_us,
+                                                    histogram_bins=short_kernel_histogram_bins,
+                                                    topk=topk_short_kernels)
 
     dict_name2df = {
         'gpu_timeline': df_gpu_timeline,
@@ -270,32 +256,78 @@ def main():
     }
     # update this dict with the perf_metrics_dfs
     dict_name2df.update(perf_metrics_dfs)
-    if args.short_kernel_study:
+    if short_kernel_study:
         dict_name2df['short_kernel_histogram'] = df_hist
         dict_name2df['short_kernels_summary'] = df_short_kernels
     # Write all DataFrames to separate sheets in an Excel workbook
-    if args.output_csvs_dir:
+    if output_csvs_dir:
         # Ensure the output directory exists
-        os.makedirs(args.output_csvs_dir, exist_ok=True)
+        os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(args.output_csvs_dir, f"{sheet_name}.csv")
+            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
             df.to_csv(csv_path, index=False)
             print(f"DataFrame '{sheet_name}' written to {csv_path}")
     else:
-        if args.output_xlsx_path is None:
+        if output_xlsx_path is None:
             # split input path at 'json' and take the first part and append '.xlsx'
-            base_path = args.profile_json_path.rsplit('.json', 1)[0]
-            args.output_xlsx_path = base_path + '_perf_report.xlsx'
+            base_path = profile_json_path.rsplit('.json', 1)[0]
+            output_xlsx_path = base_path + '_perf_report.xlsx'
         try:
             import openpyxl
         except (ImportError, ModuleNotFoundError) as e:
             print(f"Error importing openpyxl: {e}")
             request_install('openpyxl')
 
-        with pd.ExcelWriter(args.output_xlsx_path, engine='openpyxl') as writer:
+        with pd.ExcelWriter(output_xlsx_path, engine='openpyxl') as writer:
             for sheet_name, df in dict_name2df.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {args.output_xlsx_path}")
+            print(f"DataFrames successfully written to {output_xlsx_path}")
+    
+    return dict_name2df
 
+
+def main():
+
+    parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
+    parser.add_argument('--profile_json_path', type=str, required=True, help='Path to the profile.json or .json.gz file')
+    parser.add_argument('--output_xlsx_path', type=str, default=None,
+                        help='Path to the output Excel file')
+    parser.add_argument('--output_csvs_dir', type=str, default=None,
+                        help='Directory to save output CSV files')
+
+    # Optional arguments
+    parser.add_argument('--short_kernel_study', action='store_true',
+                        help='Include short kernel study in the report.')
+    parser.add_argument('--short_kernel_threshold_us', type=int, default=10,
+                        help='Threshold in microseconds to classify a kernel as "short". Defaults to 10 us.')
+    parser.add_argument('--short_kernel_histogram_bins', type=int, default=100,
+                        help='Number of bins for the short-kernel histogram.')
+    parser.add_argument('--topk_short_kernels', type=int, default=None,
+                        help='Rows to keep in the short-kernel table.')
+
+    parser.add_argument('--topk_ops', type=int, default=None,
+                        help='Rows to keep in the unique-args launcher table.')
+    parser.add_argument('--topk_roofline_ops', type=int, default=None,
+                        help='Rows to keep in the roofline table.')
+
+    parser.add_argument('--extension_file', type=str, default=None,
+                        help='Path to the extension file containing custom extensions for TraceTree and PerfModel.')
+
+    parser.add_argument('--python_path', type=str, default=None, help='Path to the python executable for gemmologist')
+    parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
+
+    args = parser.parse_args()
+    generate_perf_report_pytorch(profile_json_path=args.profile_json_path,
+                                 output_xlsx_path=args.output_xlsx_path,
+                                 output_csvs_dir=args.output_csvs_dir,
+                                 short_kernel_study=args.short_kernel_study,
+                                 short_kernel_threshold_us=args.short_kernel_threshold_us,
+                                 short_kernel_histogram_bins=args.short_kernel_histogram_bins,
+                                 topk_short_kernels=args.topk_short_kernels,
+                                 topk_ops=args.topk_ops,
+                                 topk_roofline_ops=args.topk_roofline_ops,
+                                 extension_file=args.extension_file,
+                                 python_path=args.python_path,
+                                 gpu_arch_json_path=args.gpu_arch_json_path)
 if __name__ == "__main__":
     main()
