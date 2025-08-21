@@ -414,6 +414,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--sheets",
+        nargs="+",
         choices=(
             "gpu_timeline",
             "ops_summary",
@@ -421,8 +422,8 @@ def main() -> None:
             "roofline",
             "all",
         ),
-        default="all",
-        help="Which sheet groups to process",
+        default=["all"],
+        help="Which sheet groups to process. Can be one or more.",
     )
     args = parser.parse_args()
 
