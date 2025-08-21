@@ -109,10 +109,12 @@ class JaxProfileProcessor:
     @staticmethod
     def get_dict(hlo_ops: dict, line):
         dict_line={}
+        if 'gemm_fusion_dot.7978.0' in line:
+            print(line)
         line=re.sub(r"\),",")",line)
         line=re.sub(r", ",",",line)
         line=re.sub(r" %","%",line)
-        backend_config=re.search(r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*",line)
+        backend_config=re.search(r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{+-]*[\}]",line)
         metadata=re.search(r"metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*",line)
         custom_call_target=re.search(r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*",line)
         line=line.split(" ")

@@ -1583,3 +1583,52 @@ class GroupedGemm:
     def bytes_bwd(self):
         return self.bytes_bwd_func(self.M, self.K, self.N, self.G, 
                                  self.bpe_in, self.bpe_out)
+
+# JaxTree
+class JaxGemm(GEMM):
+    @staticmethod
+    def get_param_details(event):
+        hlo_args = event['hlo_op'] # TraceEventUtils.JaxKernelEventArgs.hlo_op
+        dict_dtype2gemmologist = {
+            'f32': 'fp32',
+            'f16': 'fp16',
+            'bf16': 'bf16',
+            'f8': 'fp8',
+            'fp8': 'fp8',
+        }
+        return {
+            "M": hlo_args["M"],
+            "N": hlo_args["N"],
+            "K": hlo_args["K"],
+            "bias": hlo_args["Beta"] != 0,
+            "stride_A": None,
+            "stride_B": None,
+            "dtype_A_B": (hlo_args["Type"], hlo_args["Type"]),
+            "Op B": hlo_args["Batch"],
+            "gemmologist_dtype": dict_dtype2gemmologist.get(hlo_args["Type"])
+        }
+
+    def flops(self):
+        """Total FLOPs for the entire batch."""
+        return self.param_details["Op B"] * super().flops()
+
+    def bytes(self):
+        size_map = {
+            "f32": 4,
+            "f16": 2,
+            "bf16": 2,
+            "f8": 1,
+            "fp8": 1,
+        }
+        dtype_A_B = self.param_details['dtype_A_B']
+        bpe = size_map[dtype_A_B[0]]
+        per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
+                                bpe_bias=bpe,   # not used, but keeps call signature
+                                bpe_output=bpe)
+        return None if per_batch is None else self.param_details['Op B'] * per_batch
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for JaxGemm is not defined.")
+    def bytes_bwd(self, _):
+        raise NotImplementedError("Backward pass for JaxGemm is not defined.")
+
+

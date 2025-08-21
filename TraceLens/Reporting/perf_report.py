@@ -26,10 +26,12 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
     elif profile_path.endswith('.xplane.pb'):
         perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
-        dict_cat2names = defaultdict(list)
     else:
         print('Unsupported trace file format.')
         pass
+
+    # debug tree.events
+    if 0: all_events = perf_analyzer.get_kernel_events()
 
     # Generate base DataFrames 
     dict_dfs = {}
@@ -105,21 +107,19 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     dict_dfs = {}
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
     dict_dfs['gpu_events_averages']= df_gpu_events_averages
-    
-    if 0:
-        # Generate & store op-specific DataFrames
-        from TraceLens.PerfModel.jax_op_mapping import ClassCategories
-        for op_cat, op_names in ClassCategories.items():
-            # Filter events belonging to the current category
-            op_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event) == op_cat]
-            if op_cat in ['GEMM', 'CONV', 'TE', 'FA V3']: 
-                # For GEMM: create a single table that covers both fwd and bwd.
-                df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
-                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
-                dict_dfs[f"op_{op_cat}"] = df_ops
-            else:
-                # For FA: bwd and fwd 
-                pass
+
+    # Generate & store op-specific DataFrames
+    for op_cat, op_names in JaxAnalyses.ClassCategories.items():
+        # Filter events belonging to the current category
+        op_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event) == op_cat]
+        if op_cat in ['GEMM', 'CONV', 'TE', 'FA V3']: 
+            # For GEMM: create a single table that covers both fwd and bwd.
+            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
+            df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+            dict_dfs[f"op_{op_cat}"] = df_ops
+        else:
+            # For FA: bwd and fwd 
+            pass
 
     if 0:
         # Gabe: GPU events stats (legacy from jax_analyses.py) To be replaced by JaxPerAnalyzer.
@@ -180,7 +180,7 @@ def main():
         _dfs = perf_pytorch(args.profile_path)
         dict_dfs.update(_dfs)
     # OP Specific analysis on Jax xplane.pb file
-    if args.profile_path.endswith('.xplane.pb'):
+    if 1 and args.profile_path.endswith('.xplane.pb'):
         _dfs = perf_jax(args.profile_path) 
         dict_dfs.update(_dfs)
 
