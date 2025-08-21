@@ -192,6 +192,8 @@ def generate_perf_report_pytorch(profile_json_path: str,
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, 'r') as f:
             gpu_arch_json = json.load(f)
+    else:
+        gpu_arch_json = None
 
     perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path)
 
@@ -326,6 +328,6 @@ def main():
                                  topk_roofline_ops=args.topk_roofline_ops,
                                  extension_file=args.extension_file,
                                  python_path=args.python_path,
-                                 gpu_arch_json=args.gpu_arch_json_path)
+                                 gpu_arch_json_path=args.gpu_arch_json_path)
 if __name__ == "__main__":
     main()
