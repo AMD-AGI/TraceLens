@@ -27,6 +27,7 @@ setup(
     entry_points={
         "console_scripts": [
             "TraceLens_jax_analysis_perf_reporting = TraceLens.Reporting.generate_perf_report_jax_analysis:main",
+            "TraceLens_generate_perf_report_pytorch = TraceLens.Reporting.generate_perf_report_pytorch:main"
         ],
     },
 )
