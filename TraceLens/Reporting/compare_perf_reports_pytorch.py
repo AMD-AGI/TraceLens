@@ -203,7 +203,7 @@ def generate_compare_perf_reports_pytorch(
         reports: List[str], # List of paths to TraceLens reports
         output: str = "comparison.xlsx",
         names: List[str] = None,
-        sheets: List[str] = ["gpu_timeline", "ops_summary", "ops_all", "roofline"]
+        sheets: List[str] = ["all"],
 ) -> Dict[str, pd.DataFrame]:
     
     tags = (
@@ -398,6 +398,8 @@ def generate_compare_perf_reports_pytorch(
                 worksheet = xls.sheets[sheet_name[:31]]
                 worksheet.column_dimensions[col_letter].hidden = True
             print(f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns")
+    
+    return results
 
 
 # ──────────────────────────────────────────────────────────────────────────────
