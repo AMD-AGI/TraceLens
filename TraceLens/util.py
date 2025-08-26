@@ -39,6 +39,13 @@ class DataLoader:
     
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]
+    gemm_keys = ["matmul", "cublas"]
+    conv_keys = ['cudnn$conv']
+    te_keys = ['te_fused_attn']
+    # fa_keys?
+    dict_custom_calls = {'gemm': gemm_keys,
+                         'te': te_keys,
+                         'conv': conv_keys,}
 
     @staticmethod
     def process_xla_file(xla_file_name):
@@ -109,12 +116,10 @@ class JaxProfileProcessor:
     @staticmethod
     def get_dict(hlo_ops: dict, line):
         dict_line={}
-        if 'gemm_fusion_dot.7978.0' in line:
-            print(line)
         line=re.sub(r"\),",")",line)
         line=re.sub(r", ",",",line)
         line=re.sub(r" %","%",line)
-        backend_config=re.search(r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{+-]*[\}]",line)
+        backend_config=re.search(r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}+-]*",line)
         metadata=re.search(r"metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*",line)
         custom_call_target=re.search(r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*",line)
         line=line.split(" ")
@@ -127,9 +132,9 @@ class JaxProfileProcessor:
             if backend_config is not None:
                 dict_line["backend_config"]=backend_config[0]
             if custom_call_target is not None:
-                gemm_keys = ["matmul", "cublas"]
                 dict_line["custom_call_target"]=custom_call_target[0]
-                if any(k in dict_line["custom_call_target"] for k in gemm_keys):
+                #for _key, _keys in JaxProfileProcessor.dict_custom_calls.items():
+                if any(k in dict_line["custom_call_target"] for k in JaxProfileProcessor.gemm_keys):
                     if "f8" in str(custom_call_target[0]):
                         dict_line["type"]="fp8"
                         dict_line["computation"]="gemm"
@@ -141,6 +146,7 @@ class JaxProfileProcessor:
                         dict_line["type"]=gemm_type
                         dict_line["computation"]="gemm"
         return (key,dict_line)
+    
     @staticmethod
     def get_operand_type(hlo_ops: dict, operand : str) -> str:
         dtypes = ["bf16", "f16", "f32", "f8", "fp8"]
@@ -173,7 +179,7 @@ class JaxProfileProcessor:
         for opname,op in hlo_ops.items():
             if "gemm" in op["computation"].lower():
                 if "backend_config" not in op:
-                    raise ValueError("Gemm backend config information mnissing!", op)
+                    raise ValueError("Gemm backend config information missing!", op)
                 backend_config=op["backend_config"]
                 beta=re.search(r"\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
                 lhs_dim=re.search(r"\"lhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
@@ -203,7 +209,7 @@ class JaxProfileProcessor:
                         if any(output.startswith(d) for d in dtypes + ["f8"]) and not output.endswith("[]"):
                             operand_list.append(hlo_ops[opid]["output"])
                 if int(beta)==1 and len(operand_list)<3:
-                    print("Bias is set, however on;y two operands found!",op)
+                    print("Bias is set, however only two operands found!",op)
                 if len(operand_list)>3 or len(operand_list) == 0:
                     raise ValueError("Invalid operand list",op,operand_list)
                 c_order=re.search(r"\{[012,]*",sizes_string[0])[0].split("{")[1]

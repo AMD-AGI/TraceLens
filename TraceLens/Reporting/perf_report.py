@@ -1,11 +1,11 @@
 import argparse, os, sys
 import json
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxPerfAnalyser, JaxAnalyses
+from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser, JaxAnalyses
 from TraceLens.Reporting.reporting_utils import export_data_df
 from TraceLens.PerfModel.jax_op_mapping import categorize_jax_op
 
@@ -25,13 +25,10 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     if profile_path.endswith('.pt.trace.json'):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
     elif profile_path.endswith('.xplane.pb'):
-        perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
+        perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
     else:
         print('Unsupported trace file format.')
         pass
-
-    # debug tree.events
-    if 0: all_events = perf_analyzer.get_kernel_events()
 
     # Generate base DataFrames 
     dict_dfs = {}
@@ -101,53 +98,93 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
         python3 TraceLens/Reporting/perf_report.py --profile_path $trace_dir/$trace_jax.xplane.pb --output_path $log_dir/tracelens/jax 2>&1 | tee $log_dir/tracelens_jax.log
 
     """
-    perf_analyzer = JaxPerfAnalyser.from_file(profile_filepath=profile_path)
+    perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
+
+    # debug tree.events
+    if 0: all_events = perf_analyzer.get_kernel_events(); sys.exit(0)
+    # example events
+    if 0: 
+        gemm_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == 'gemm']
+        conv_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == 'conv']
+        te_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == 'te']
+        print('conv_events', len(conv_events), conv_events[0])
+        print('te_events', len(te_events), te_events[0])
+        sys.exit(0)
+    # custom_calls
+    if 0:
+        custom_calls = [event.get('metadata', {}).get('custom_call_target', 'None') for event in perf_analyzer.tree.events]
+        print(len(custom_calls), 'custom_call_target:', Counter(custom_calls))
+        sys.exit(0)
+    # Filter events belonging to the current category
+    if 0:
+        tree_events = [event for event in perf_analyzer.tree.events]
+        print(len(tree_events), 'Eevent cats:', Counter([categorize_jax_op(event) for event in tree_events]))
+        kernel_events =  [event for event in tree_events if event['cat']=='kernel']
+        print(len(kernel_events), 'Kernel event cats:', Counter([categorize_jax_op(event) for event in kernel_events]))
+        meta_events = [event for event in tree_events if event.get('metadata', {})]
+        print(len(meta_events), 'Meta event cats:', Counter([categorize_jax_op(event) for event in meta_events]))
+        compute_events = [event for event in perf_analyzer.tree.events if event.get('metadata', {}).get('computation', None)]
+        print(len(compute_events), 'Computation type:', Counter([event['metadata']['computation'] for event in compute_events]))
+        print(len(compute_events), 'Compute event cats:', Counter([categorize_jax_op(event) for event in compute_events]))
+        gemm_events = [event for event in meta_events if categorize_jax_op(event).lower() == 'gemm']
+        print(len(gemm_events), 'Gemm computation type:', Counter([event['metadata']['computation'] for event in gemm_events]))
+        sys.exit(0)
 
     # Generate base DataFrames
     dict_dfs = {}
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
     dict_dfs['gpu_events_averages']= df_gpu_events_averages
 
+    # XLA events
+    if 0: 
+        df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, category_name=['xla'])
+        df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events)
+        dict_dfs['xla_summary']= df_xla_summary
+        df_xla_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_xla_events)
+    
     # Generate & store op-specific DataFrames
-    for op_cat, op_names in JaxAnalyses.ClassCategories.items():
-        # Filter events belonging to the current category
-        op_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event) == op_cat]
-        if op_cat in ['GEMM', 'CONV', 'TE', 'FA V3']: 
-            # For GEMM: create a single table that covers both fwd and bwd.
-            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
-            df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
-            dict_dfs[f"op_{op_cat}"] = df_ops
-        else:
-            # For FA: bwd and fwd 
-            pass
+    tree_events = [event for event in perf_analyzer.tree.events]
+    kernel_events =  [event for event in tree_events if event['cat']=='kernel']
+    meta_events = [event for event in tree_events if event.get('metadata', {})]
+    for op_cat in ['GEMM']: # JaxAnalyses.ClassCategories.keys():
+        op_events = [event for event in kernel_events if categorize_jax_op(event) == op_cat] 
+        df_ops_metrics = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
+        dict_dfs[f"op_{op_cat}_details"] = df_ops_metrics
+        print(df_ops_metrics.shape, df_ops_metrics.head(3))
+        df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops_metrics, agg_metrics)
+        dict_dfs[f"op_{op_cat}"] = df_ops
+        print(df_ops.shape, df_ops.head(3))
 
-    if 0:
-        # Gabe: GPU events stats (legacy from jax_analyses.py) To be replaced by JaxPerAnalyzer.
-        averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_path)
-        overlapped_comm = averages[averages['type']=='total_comm_time']['time ms'].iloc[0] - averages[averages['type']=='exposed_comm_time']['time ms'].iloc[0]
-        averages.loc[len(averages)] = ['overlapped_comm', overlapped_comm, overlapped_comm/averages[averages['type']=='total_time']['time ms'].iloc[0]*100]
-        new_order = [0, 1, 2, 3, 4, 5, 8, 6, 7]
-        df_gpu_events_averages = averages.reindex(new_order)
-        df_gpu_events_categorized_mean = categorized.copy()
-        df_gpu_events_categorized_mean = df_gpu_events_categorized_mean.reset_index().rename(columns={'index': 'name'})
+    return dict_dfs
 
-        # XLA events by stripping digits and underscores
-        xla_grouped = xla_events.groupby(xla_events.index.str.replace(r'\d+|_+$', '', regex=True)).sum(numeric_only=True)
-        xla_grouped = xla_grouped.reset_index().rename(columns={'index': 'short_name_grouped'})
-        df_xla_grouped = xla_grouped.sort_values(by='percent', ascending=False)
+def perf_jax_verify(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
+    # Gabe: GPU events stats (legacy from jax_analyses.py) To be replaced by JaxPerAnalyzer.
+    averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_path)
+    overlapped_comm = averages[averages['type']=='total_comm_time']['time ms'].iloc[0] - averages[averages['type']=='exposed_comm_time']['time ms'].iloc[0]
+    averages.loc[len(averages)] = ['overlapped_comm', overlapped_comm, overlapped_comm/averages[averages['type']=='total_time']['time ms'].iloc[0]*100]
+    new_order = [0, 1, 2, 3, 4, 5, 8, 6, 7]
+    df_gpu_events_averages = averages.reindex(new_order)
+    df_gpu_events_categorized_mean = categorized.copy()
+    df_gpu_events_categorized_mean = df_gpu_events_categorized_mean.reset_index().rename(columns={'index': 'name'})
 
-        # GEMMs
-        num_cus = {"num_cus": num_cus}
-        df_gemms = JaxAnalyses.summarize_gpu_gemm_events_from_pb(profile_path)
-        df_gemms = df_gemms.reset_index().rename(columns={'index': 'name'})
-        df_gemms_detailed = JaxAnalyses.gemm_performance_from_pb(profile_path, arch = num_cus)
+    # XLA events by stripping digits and underscores
+    xla_grouped = xla_events.groupby(xla_events.index.str.replace(r'\d+|_+$', '', regex=True)).sum(numeric_only=True)
+    xla_grouped = xla_grouped.reset_index().rename(columns={'index': 'short_name_grouped'})
+    df_xla_grouped = xla_grouped.sort_values(by='percent', ascending=False)
 
-        # Store DataFrames
-        dict_dfs['gpu_events_averages_Gabe']= df_gpu_events_averages
-        dict_dfs['gpu_events_categorized_mean']= df_gpu_events_categorized_mean
-        dict_dfs['xla_grouped']= df_xla_grouped
-        dict_dfs['gemms']= df_gemms
-        dict_dfs['gemms_detailed'] = df_gemms_detailed
+    # GEMMs
+    num_cus = {"num_cus": num_cus}
+    df_gemms = JaxAnalyses.summarize_gpu_gemm_events_from_pb(profile_path)
+    df_gemms = df_gemms.reset_index().rename(columns={'index': 'name'})
+    df_gemms_detailed = JaxAnalyses.gemm_performance_from_pb(profile_path, arch = num_cus)
+
+    # Store DataFrames
+    dict_dfs = {}
+    dict_dfs['gpu_events_averages_Gabe']= df_gpu_events_averages
+    dict_dfs['gpu_events_categorized_mean']= df_gpu_events_categorized_mean
+    dict_dfs['xla_grouped']= df_xla_grouped
+    dict_dfs['gemms']= df_gemms
+    dict_dfs['gemms_detailed'] = df_gemms_detailed
     return dict_dfs
 
 def main():
@@ -174,13 +211,14 @@ def main():
 
     # Analyze trace profile
     assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
-    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
+    dict_dfs = {}
+    if 0: dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
     # OP Specific analysis on Pytorch trace.json file
     if args.profile_path.endswith('.pt.trace.json'):
         _dfs = perf_pytorch(args.profile_path)
         dict_dfs.update(_dfs)
     # OP Specific analysis on Jax xplane.pb file
-    if 1 and args.profile_path.endswith('.xplane.pb'):
+    if args.profile_path.endswith('.xplane.pb'):
         _dfs = perf_jax(args.profile_path) 
         dict_dfs.update(_dfs)
 
@@ -197,7 +235,7 @@ def main():
         sys.exit(1)
 
     for name_df, df in dict_dfs.items():
-        export_data_df(df, output_folder, output_filename, output_table_format=args.output_table_formats, suffix=f'_{name_df}',)
+        export_data_df(df, output_folder, output_filename, output_table_format=args.output_table_formats, suffix=f'_{name_df.lower()}',)
 
     print(f"DataFrames successfully written to {args.output_path}")
 
