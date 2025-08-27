@@ -32,7 +32,6 @@ class TensorCfg:
 
 
 def build_tensor(cfg: TensorCfg, device: str='cuda') -> 'torch.Tensor':
-
     torch = _get_torch_or_raise()
     dict_profile2torchdtype = {
         'bool': torch.bool,
@@ -44,18 +43,50 @@ def build_tensor(cfg: TensorCfg, device: str='cuda') -> 'torch.Tensor':
         'c10::BFloat16': torch.bfloat16,
     }
     dtype  = dict_profile2torchdtype[cfg.dtype]
-    size   = cfg.shape
-    stride = cfg.strides
-    # allocate *exactly* the storage needed for that stride/shape
+    size   = tuple(cfg.shape)
+    stride = tuple(cfg.strides)
+    init   = cfg.init
+
+    def _is_zero_stride_broadcast(size, stride):
+        return any(s == 0 and n > 1 for n, s in zip(size, stride))
+
+    def _has_internal_overlap(size, stride):
+        try:
+            probe = torch.empty_strided(size, stride, dtype=torch.uint8, device='cpu')
+            return torch._debug_has_internal_overlap(probe)
+        except Exception:
+            return True
+
+    def _init_(t):
+        if init is None:
+            return t
+        if init == 'normal':
+            if not (t.is_floating_point() or t.is_complex()):
+                raise ValueError(f"Cannot initialize tensor of type {cfg.dtype} with 'normal' init.")
+            t.normal_()
+        elif init == 'zeros':
+            t.zero_()
+        elif init == 'ones':
+            t.fill_(1)
+        else:
+            raise ValueError(f"Unsupported tensor initialization: {init}")
+        return t
+
+    if _is_zero_stride_broadcast(size, stride):
+        base_size = tuple(1 if (s == 0 and n > 1) else n for n, s in zip(size, stride))
+        base = torch.empty(base_size, dtype=dtype, device=device)
+        _init_(base)
+        t = base.expand(size)
+        return t
+
+    if _has_internal_overlap(size, stride):
+        contig = torch.empty(size, dtype=dtype, device=device)
+        _init_(contig)
+        t = torch.as_strided(contig, size, stride)
+        return t
+
     t = torch.empty_strided(size, stride, dtype=dtype, device=device)
-    is_floating = t.is_floating_point() or t.is_complex()
-    init = cfg.init
-    if init == 'normal':
-        if not is_floating:
-            raise ValueError(f"Cannot initialize tensor of type {cfg.dtype} with 'normal' init.")
-        t.normal_()                     # or whatever init you like
-    elif init is not None:
-        raise ValueError(f"Unsupported tensor initialization: {init}")
+    _init_(t)
     return t
 
 def summarize_tensor(tensor: 'torch.Tensor') -> str:
