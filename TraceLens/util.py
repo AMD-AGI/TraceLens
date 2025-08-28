@@ -142,6 +142,8 @@ class JaxProfileProcessor:
     def get_operand_type(hlo_ops: dict, operand : str) -> str:
         if 'fusion,' in operand:
             operand = operand.strip("fusion,")
+        if 'fusion,' in operand:
+            operand = operand.strip("fusion,")
         dtypes = ["bf16", "f16", "f32", "f8", "fp8"]
         # if the operand is a slice of something else, then the type might be at the beginning of the operand name
         for t in dtypes:
@@ -248,7 +250,7 @@ class TraceEventUtils:
         FABwdKeys = ["FmhaBwd", "flash_bprop"]
         FAFwdKeys = ["FmhaFwd", "flash_fprop"]
         FAV3Keys = ["kernel_func"] # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv."] # check whether sub-cat exists
+        ConvKeys = ["FillBuffer", "conv_", "conv."]
         TEKeys = ["transformer_engine"]
         CommunicationKeys = ["rccl", "nccl"]
         ClassCategories = {
