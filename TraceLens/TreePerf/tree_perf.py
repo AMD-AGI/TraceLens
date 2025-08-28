@@ -854,25 +854,6 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
     # Utils
     ######
     @staticmethod
-    def parse_event_backend_config(event):
-        """
-        Input: JaxTree.event Example: event['metadata']['backend_config'] = "backend_config={..;}"
-        Output: fusion_backend_config
-        """
-        gemm_computation = event.get('metadata', {}).get('computation', None)
-        backend_config = event.get('metadata', {}).get('backend_config', None)
-        dict_backend_config = {}
-        if not "backend_config":
-            raise ValueError("Gemm backend config information missing!")
-        if "gemm" in gemm_computation.lower():
-            _config = '='.join(backend_config.split('=')[1:]) 
-            try:
-                dict_backend_config = json.loads(_config)
-            except Exception as e:
-                raise ValueError(f'Exception event:\n\n {event} \n\n invalid config string:\n\n {backend_config}')
-        return dict_backend_config.get('fusion_backend_config', {}).get('kind', None)
-
-    @staticmethod
     def parse_event_operands(event, metadata_key='operands'):
         """
         Input: JaxTree.event. Example: event['metadata']['operands']=['bf16[1,3072]{1,0}', 'bf16[3072,6144]{1,0}'] 
@@ -903,7 +884,7 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
                     _type = re.findall(_pattern, _operand)
                     operand_type += (_type[0],)
                 except Exception as e:
-                    print('Debug: operand string:', _operand) # pass # 
+                    print('Input dims not available in operand string:', _operand) # pass # 
         return operand_dims, operand_type, operand_unk
 
     ######
@@ -917,34 +898,10 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
     
     ######
     ## Kernel-wise metrics
-    ######
-    def get_kernel_events(self, gpu_pid = None, debug=False):
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) == 'kernel']
-        hlo_ops = [event for event in self.tree.events if event.get('args', {}).get('hlo_op', None)] # same as above
-        event_cats = [self.event_to_category(event) for event in self.tree.events]       
-        if 0:
-            # Gabe
-            from ..util import JaxProfileProcessor
-            hlo_ops = JaxProfileProcessor.process_protobuf_file(self.pb_file_name, 'jit_train_step')
-            print('\n\nhlo_ops:', len(hlo_ops), next(iter(hlo_ops.items())))
-            gemm_ops = JaxProfileProcessor.process_gemm_ops(hlo_ops)
-            print('\n\ngemm_ops:', len(gemm_ops), next(iter(gemm_ops.items())))
-            # the keys in gemm ops start with % while the keys in the events don't - strip out the %
-            gemm_ops = dict((x[0][1:], x[1]) for x in gemm_ops.items())
-            print('\n\ngemm_ops:', len(gemm_ops), next(iter(gemm_ops.items())))
-
-        if 0:
-            from collections import Counter
-            print('Counter event cats:', Counter(event_cats))
-            print('Number of kernel events:', len(kernel_events))
-        if gpu_pid:
-            return [event for event in kernel_events if event['pid'] == int(gpu_pid)]
-        else:
-            return kernel_events
-        
-    def get_kernel_launchers(self, gpu_pid = None, event_filter=['kernel']):
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in event_filter]
+    ######    
+    def get_kernel_launchers(self, gpu_pid = None, gpu_kernel_op_cats=None):
         kernel_launchers = []
+        kernel_events =  [event for event in self.tree.events if event['cat'] == 'kernel']
         for event in kernel_events:
             event['op category'] = self.op_categorizer(event)
             event['total_direct_kernel_time'] = event['dur']
@@ -969,8 +926,8 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
             return kernel_launchers
         
     def get_df_kernel_launchers(self, gpu_pid = None, id_cols=False, include_kernel_details=False, 
-                                args_cols=['Input Dims', 'Input type']):   
-        kernel_launchers = self.get_kernel_launchers(gpu_pid=gpu_pid)
+                                args_cols=['Input Dims', 'Input type'], gpu_kernel_op_cats=None):   
+        kernel_launchers = self.get_kernel_launchers(gpu_pid=gpu_pid, gpu_kernel_op_cats=gpu_kernel_op_cats)
         def list_to_tuple(obj):
             if isinstance(obj, list):
                 return tuple(list_to_tuple(item) for item in obj)
@@ -1024,7 +981,7 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
         list_no_bwd_events = []
         # TODO Jax bwd event & Handle kernel aggregation. Reused JaxAnalyses.gemm_perf_metrics
         # Select the appropriate dictionary for FLOPS and memory functions
-        perf_model_class = self.dict_jax_category2class.get(self.op_categorizer(event), None)
+        perf_model_class = self.dict_jax_category2class.get(event.get('gpu_kernel_op_cat', None), None)
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9

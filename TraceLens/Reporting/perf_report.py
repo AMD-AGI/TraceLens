@@ -8,6 +8,7 @@ from TraceLens.PerfModel import dict_cat2names
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser, JaxAnalyses
 from TraceLens.Reporting.reporting_utils import export_data_df
 from TraceLens.PerfModel.jax_op_mapping import categorize_jax_op
+from TraceLens.util import TraceEventUtils
 
 def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
     """
@@ -101,51 +102,28 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
 
     # debug tree.events
-    if 0: all_events = perf_analyzer.get_kernel_events(); sys.exit(0)
-    # example events
-    if 1:
-        gemm_keys = ["matmul", "cublas"]
-        conv_keys = ["conv",]
-        te_keys = ["te_fused_attn",]
-        dict_custom_calls = {'Uncategorized Events': [],
-                             'gemm': gemm_keys,
-                             'te': te_keys,
-                             'conv': conv_keys,
-                             'fa fwd': [],
-                             'fa bwd': [],
-                            }
-        
-        for _key, _val in dict_custom_calls.items():
-            _events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == _key]
-            _kernels = [event for event in _events if event['cat'] == 'kernel']
-            _custom_calls = [event for event in _events if event.get('metadata', {}).get('custom_call_target', None)]
-            #_computes = [event for event in _custom_calls if any(key in event['metadata']['custom_call_target'] for key in _val)]
-            #_example = _computes[0] if len(_computes)>0 else None
-            print('\n\n', _key, 'events:', len(_events),  '\n') # '\n Example:\n', _events[0],
-            print(_key, 'kernels', len(_kernels),  '\n') # '\n Example:\n', _kernels[0],
-            print(_key, 'custom_calls', Counter([event['metadata']['custom_call_target'] for  event in _custom_calls]))
-            print(_key, 'cats', Counter([event['cat'] for  event in _custom_calls]))
-            #print(_key, 'computes', len(_computes), '\n Example:\n', _example, '\n')
-
+    if 0:
+        _events = perf_analyzer.tree.events
+        _kernels = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
+        print('\nEvent cats:', Counter([event['cat'] for event in _events]))
+        print('\nKernel cats:', Counter([event['cat'] for event in _kernels]))
+        print('\nEvent gpu_op_cats:', Counter([event.get('gpu_kernel_op_cat', 'NA') for event in _events]))
+        print('\nKernel gput_op_cats:', Counter([event.get('gpu_kernel_op_cat', 'NA') for event in _kernels]))
+        sys.exit(0)
+    # kernel events with gpu_op_cats
+    if 0:
+        _kernels = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
+        for _key, _val in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+            _events = [event for event in _kernels if event['gpu_kernel_op_cat'] == _key]
+            if len(_events) > 0:
+                print('\n', _key, 'events:', len(_events) )  #
+                print('\n Kernel event gpu_op_cats:', Counter([event.get('gpu_kernel_op_cat', 'NA') for event in _events]))
+                print('\n Example:\n', _events[0],)
         sys.exit(0)
     # custom_calls
     if 0:
         custom_calls = [event.get('metadata', {}).get('custom_call_target', 'None') for event in perf_analyzer.tree.events]
         print(len(custom_calls), 'custom_call_target:', Counter(custom_calls))
-        sys.exit(0)
-    # Filter events belonging to the current category
-    if 0:
-        tree_events = [event for event in perf_analyzer.tree.events]
-        print(len(tree_events), 'Eevent cats:', Counter([categorize_jax_op(event) for event in tree_events]))
-        kernel_events =  [event for event in tree_events if event['cat']=='kernel']
-        print(len(kernel_events), 'Kernel event cats:', Counter([categorize_jax_op(event) for event in kernel_events]))
-        meta_events = [event for event in tree_events if event.get('metadata', {})]
-        print(len(meta_events), 'Meta event cats:', Counter([categorize_jax_op(event) for event in meta_events]))
-        compute_events = [event for event in perf_analyzer.tree.events if event.get('metadata', {}).get('computation', None)]
-        print(len(compute_events), 'Computation type:', Counter([event['metadata']['computation'] for event in compute_events]))
-        print(len(compute_events), 'Compute event cats:', Counter([categorize_jax_op(event) for event in compute_events]))
-        gemm_events = [event for event in meta_events if categorize_jax_op(event).lower() == 'gemm']
-        print(len(gemm_events), 'Gemm computation type:', Counter([event['metadata']['computation'] for event in gemm_events]))
         sys.exit(0)
 
     # Generate base DataFrames
@@ -153,25 +131,27 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
     dict_dfs['gpu_events_averages']= df_gpu_events_averages
 
-    # XLA events
-    if 0: 
-        df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, category_name=['xla'])
+    # Generate Dataframes on XLA kernels
+    if 1: 
+        df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['xla'])
         df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events)
+        print(df_xla_summary.shape, df_xla_summary.head(3))
         dict_dfs['xla_summary']= df_xla_summary
         df_xla_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_xla_events)
+        dict_dfs['xla_summary_by_category']= df_xla_summary_by_category
+        print(df_xla_summary_by_category.shape, df_xla_summary_by_category.head(3))
+        sys.exit(0)
+
+    # Generate Dataframes on Communication nccl/rccl kernels
     
     # Generate & store op-specific DataFrames
-    tree_events = [event for event in perf_analyzer.tree.events]
-    kernel_events =  [event for event in tree_events if event['cat']=='kernel']
-    meta_events = [event for event in tree_events if event.get('metadata', {})]
-    for op_cat in ['GEMM']: # JaxAnalyses.ClassCategories.keys():
-        op_events = [event for event in kernel_events if categorize_jax_op(event) == op_cat] 
+    kernel_events =  [event for event in perf_analyzer.tree.events if event['cat']=='kernel']
+    for op_cat in ['GEMM']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys():
+        op_events = [event for event in kernel_events if event['gpu_kernel_op_cat'] == op_cat] 
         df_ops_detailed = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
         dict_dfs[f"op_{op_cat}_detailed"] = df_ops_detailed
-        print(df_ops_detailed.shape, df_ops_detailed.head(3))
         df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops_detailed, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_ops
-        print(df_ops.shape, df_ops.head(3))
 
     return dict_dfs
 
@@ -230,7 +210,7 @@ def main():
     # Analyze trace profile
     assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
     dict_dfs = {}
-    if 0: dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
+    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
     # OP Specific analysis on Pytorch trace.json file
     if args.profile_path.endswith('.pt.trace.json'):
         _dfs = perf_pytorch(args.profile_path)
