@@ -125,7 +125,7 @@ class JaxProfileProcessor:
             if backend_config is not None:
                 dict_line["backend_config"]=backend_config[0]
             if custom_call_target is not None:
-                gemm_keys = ["matmul", "cublas", "te_fused_attn"]
+                gemm_keys = ["matmul", "cublas"]
                 dict_line["custom_call_target"]=custom_call_target[0]
                 if any(k in dict_line["custom_call_target"] for k in gemm_keys):
                     if "f8" in str(custom_call_target[0]):

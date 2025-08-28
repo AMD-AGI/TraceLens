@@ -884,7 +884,8 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
                     _type = re.findall(_pattern, _operand)
                     operand_type += (_type[0],)
                 except Exception as e:
-                    print('Input dims not available in operand string:', _operand) # pass # 
+                    continue
+                    # print('Input dims not available in operand string:', _operand) # pass # 
         return operand_dims, operand_type, operand_unk
 
     ######
@@ -902,6 +903,8 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
     def get_kernel_launchers(self, gpu_pid = None, gpu_kernel_op_cats=None):
         kernel_launchers = []
         kernel_events =  [event for event in self.tree.events if event['cat'] == 'kernel']
+        if gpu_kernel_op_cats:
+            kernel_events = [event for event in kernel_events if any(k.lower() in event.get('gpu_kernel_op_cat', 'None').lower() for k in gpu_kernel_op_cats)]
         for event in kernel_events:
             event['op category'] = self.op_categorizer(event)
             event['total_direct_kernel_time'] = event['dur']

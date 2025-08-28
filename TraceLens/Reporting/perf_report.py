@@ -137,9 +137,6 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
         df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events)
         print(df_xla_summary.shape, df_xla_summary.head(3))
         dict_dfs['xla_summary']= df_xla_summary
-        df_xla_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_xla_events)
-        dict_dfs['xla_summary_by_category']= df_xla_summary_by_category
-        print(df_xla_summary_by_category.shape, df_xla_summary_by_category.head(3))
         sys.exit(0)
 
     # Generate Dataframes on Communication nccl/rccl kernels
