@@ -245,7 +245,7 @@ class TraceEventUtils:
 
         # keywords for splitting jax events
         GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
-        FABwdKeys = ["FmhaBwd", "flash_bprop"]
+        FABwdKeys = ["FmhaBwd", "flash_bprop", "ck_fused_attn::dk_dv_reduce_thd"]
         FAFwdKeys = ["FmhaFwd", "flash_fprop"]
         FAV3Keys = ["kernel_func"] # find a more precise way to do this
         ConvKeys = ["FillBuffer", "conv_", "conv."]
