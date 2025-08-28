@@ -19,22 +19,7 @@ from ..PerfModel import perf_model
 from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
 
 class JaxAnalyses:
-    # keywords for splitting jax events
-    GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
-    FABwdKeys = ["FmhaBwd"]
-    FAFwdKeys = ["FmhaFwd"]
-    FAV3Keys = ["kernel_func"] # find a more precise way to do this
-    ConvKeys = ["FillBuffer"]
-    TEKeys = ["transformer_engine"]
-    ClassCategories = {
-        "GEMM": GemmKeys,
-        "FA BWD": FABwdKeys,
-        "FA FWD": FAFwdKeys,
-        "FA V3": FAV3Keys,
-        "Conv": ConvKeys,
-        "TE": TEKeys,
-    }
-    UncategorizedEventKey = "Uncategorized Events"
+    
 
     @staticmethod
     def breakdown_compute_events(event_list, group_by_gpu: bool = True, group_by_name = False):
@@ -65,7 +50,7 @@ class JaxAnalyses:
             name=compute_event[TraceEventUtils.TraceKeys.Name]
             duration=compute_event[TraceEventUtils.TraceKeys.Duration]
             found = False
-            for category, filters in JaxAnalyses.ClassCategories.items():
+            for category, filters in TraceEventUtils.JaxOpKeys.ClassCategories.items():
                 if any(f in name for f in filters):
                     add_event(cur_categorized_list, category, duration)
                     found = True
@@ -73,7 +58,7 @@ class JaxAnalyses:
             if not found:
                 if group_by_name:
                     name = name.rstrip(string.digits)
-                add_event(cur_categorized_list, JaxAnalyses.UncategorizedEventKey, duration)
+                add_event(cur_categorized_list, TraceEventUtils.JaxOpKeys.UncategorizedEventKey, duration)
                 add_event(cur_uncategorized_list, name, duration)
 
         return categorized_events, uncategorized_events
@@ -125,7 +110,7 @@ class JaxAnalyses:
                                                                            group_by_name = group_kernels_by_name)
 
         categorized_df = JaxAnalyses.create_breakdown_df(categorized_times, average_gpu_metrics["computation_time"] * num_gpus, num_gpus)
-        uncategorized_df = JaxAnalyses.create_breakdown_df(uncategorized_times, categorized_times[JaxAnalyses.UncategorizedEventKey][1], num_gpus)
+        uncategorized_df = JaxAnalyses.create_breakdown_df(uncategorized_times, categorized_times[TraceEventUtils.JaxOpKeys.UncategorizedEventKey][1], num_gpus)
         return analyzer.get_breakdown_df_from_dict(average_gpu_metrics), categorized_df, uncategorized_df
 
     @staticmethod
@@ -366,7 +351,7 @@ class JaxAnalyses:
     @staticmethod
     def get_perf_model(event: dict):
         name = event[TraceEventUtils.TraceKeys.Name]
-        if any(f in name for f in JaxAnalyses.GemmKeys):
+        if any(f in name for f in TraceEventUtils.JaxOpKeys.GemmKeys):
             return JaxAnalyses.JaxGemm
         if any(f in name for f in JaxAnalyses.ConvKeys):
             return JaxAnalyses.JaxConv
