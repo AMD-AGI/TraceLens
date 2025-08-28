@@ -103,12 +103,30 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     # debug tree.events
     if 0: all_events = perf_analyzer.get_kernel_events(); sys.exit(0)
     # example events
-    if 0: 
-        gemm_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == 'gemm']
-        conv_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == 'conv']
-        te_events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == 'te']
-        print('conv_events', len(conv_events), conv_events[0])
-        print('te_events', len(te_events), te_events[0])
+    if 1:
+        gemm_keys = ["matmul", "cublas"]
+        conv_keys = ["conv",]
+        te_keys = ["te_fused_attn",]
+        dict_custom_calls = {'Uncategorized Events': [],
+                             'gemm': gemm_keys,
+                             'te': te_keys,
+                             'conv': conv_keys,
+                             'fa fwd': [],
+                             'fa bwd': [],
+                            }
+        
+        for _key, _val in dict_custom_calls.items():
+            _events = [event for event in perf_analyzer.tree.events if categorize_jax_op(event).lower() == _key]
+            _kernels = [event for event in _events if event['cat'] == 'kernel']
+            _custom_calls = [event for event in _events if event.get('metadata', {}).get('custom_call_target', None)]
+            #_computes = [event for event in _custom_calls if any(key in event['metadata']['custom_call_target'] for key in _val)]
+            #_example = _computes[0] if len(_computes)>0 else None
+            print('\n\n', _key, 'events:', len(_events),  '\n') # '\n Example:\n', _events[0],
+            print(_key, 'kernels', len(_kernels),  '\n') # '\n Example:\n', _kernels[0],
+            print(_key, 'custom_calls', Counter([event['metadata']['custom_call_target'] for  event in _custom_calls]))
+            print(_key, 'cats', Counter([event['cat'] for  event in _custom_calls]))
+            #print(_key, 'computes', len(_computes), '\n Example:\n', _example, '\n')
+
         sys.exit(0)
     # custom_calls
     if 0:
@@ -148,10 +166,10 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     meta_events = [event for event in tree_events if event.get('metadata', {})]
     for op_cat in ['GEMM']: # JaxAnalyses.ClassCategories.keys():
         op_events = [event for event in kernel_events if categorize_jax_op(event) == op_cat] 
-        df_ops_metrics = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
-        dict_dfs[f"op_{op_cat}_details"] = df_ops_metrics
-        print(df_ops_metrics.shape, df_ops_metrics.head(3))
-        df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops_metrics, agg_metrics)
+        df_ops_detailed = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=False)
+        dict_dfs[f"op_{op_cat}_detailed"] = df_ops_detailed
+        print(df_ops_detailed.shape, df_ops_detailed.head(3))
+        df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops_detailed, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_ops
         print(df_ops.shape, df_ops.head(3))
 

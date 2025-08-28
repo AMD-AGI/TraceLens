@@ -40,12 +40,6 @@ class DataLoader:
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]
     gemm_keys = ["matmul", "cublas"]
-    conv_keys = ['cudnn$conv']
-    te_keys = ['te_fused_attn']
-    # fa_keys?
-    dict_custom_calls = {'gemm': gemm_keys,
-                         'te': te_keys,
-                         'conv': conv_keys,}
 
     @staticmethod
     def process_xla_file(xla_file_name):
