@@ -41,6 +41,8 @@ op_to_perf_model_class_map = {
     'aten::baddbmm': perf_model.aten_baddbmm,
     'FlashAttnFunc': perf_model.flash_attention,
     'flash_attn::_flash_attn_forward': perf_model.flash_attention,
+    'flash_attn::_flash_attn_varlen_forward': perf_model.flash_attention_varlen_forward,
+    'flash_attn::_flash_attn_varlen_backward': perf_model.flash_attention_varlen_backward,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
     'aten::_scaled_dot_product_efficient_attention': perf_model.aten__scaled_dot_product_efficient_attention,
     'aten::_scaled_dot_product_flash_attention': perf_model.aten__scaled_dot_product_flash_attention,
@@ -115,6 +117,7 @@ def categorize_torch_op(row):
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
         "flash_attn::_flash_attn_backward",
+        "flash_attn::_flash_attn_varlen_backward",
         "aten::_scaled_dot_product_cudnn_attention_backward",
         "aten::_scaled_dot_product_efficient_attention_backward",
         "aten::_scaled_dot_product_flash_attention_backward",

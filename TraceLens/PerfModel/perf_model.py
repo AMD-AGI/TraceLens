@@ -1145,12 +1145,16 @@ class SDPA:
                 pass
         return simulated_time
 
-def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
-    B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
-    B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
-    B_v, H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
-    if B_q != B_k or B_q != B_v:
-        raise ValueError(f"Batch sizes do not match: {B_q} != {B_k} != {B_v}")
+def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, varlen=False):
+    if varlen:
+        H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
+        H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
+        H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
+        B_q = 1
+    else:
+        B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
+        B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
+        B_v, H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
     if H_K != H_V:
         raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
     if N_K != N_V:
@@ -1191,6 +1195,56 @@ class flash_attention_backward(flash_attention):
 
     def __init__(self, event):
         super().__init__(event)
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element):
+        return self.bytes_bwd(bytes_per_element)
+
+class flash_attention_varlen_forward(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        bhnd_idx = 1, 0, 2 
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, True)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
+        max_seqlen_q = float(event['args']['Concrete Inputs'][5])
+        max_seqlen_k = float(event['args']['Concrete Inputs'][6])
+        dropout = float(event['args']['Concrete Inputs'][7])
+        causal = eval(event['args']['Concrete Inputs'][9])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B}
+
+class flash_attention_varlen_backward(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 1, 2, 3
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        bhnd_idx = 1, 0, 2 
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, True)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
+        max_seqlen_q = float(event['args']['Concrete Inputs'][11])
+        max_seqlen_k = float(event['args']['Concrete Inputs'][12])
+        dropout = float(event['args']['Concrete Inputs'][13])
+        causal = eval(event['args']['Concrete Inputs'][15])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B}
 
     def flops(self):
         return self.flops_bwd()

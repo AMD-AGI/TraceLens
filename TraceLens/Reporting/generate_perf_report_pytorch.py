@@ -233,13 +233,17 @@ def generate_perf_report_pytorch(profile_json_path: str,
             df_ops = add_truncated_kernel_details(df_ops, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
             perf_metrics_dfs[op_cat] = df_ops
         else:
+            print('Op Category=', op_cat)
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
             df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
             df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(df_ops_fwd, agg_metrics)
             df_ops_fwd = add_truncated_kernel_details(df_ops_fwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
+            print('df_ops_fwd=', df_ops_fwd)
             df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_details=True, include_args=True)
+            print('Buid: df_ops_bwd=', df_ops_bwd)
             df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(df_ops_bwd, agg_metrics)
             df_ops_bwd = add_truncated_kernel_details(df_ops_bwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
+            print('df_ops_bwd=', df_ops_bwd)
             perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
             perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
