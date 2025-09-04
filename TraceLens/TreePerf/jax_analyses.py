@@ -344,17 +344,12 @@ class JaxAnalyses:
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
         def bytes_bwd(self, _):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
-
-    class JaxConv(perf_model.CONV):
-        pass
     
     @staticmethod
     def get_perf_model(event: dict):
         name = event[TraceEventUtils.TraceKeys.Name]
         if any(f in name for f in TraceEventUtils.JaxOpKeys.GemmKeys):
             return JaxAnalyses.JaxGemm
-        if any(f in name for f in JaxAnalyses.ConvKeys):
-            return JaxAnalyses.JaxConv
         return None
 
     @staticmethod

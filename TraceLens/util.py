@@ -172,7 +172,7 @@ class JaxProfileProcessor:
         for opname,op in hlo_ops.items():
             if "gemm" in op["computation"].lower():
                 if "backend_config" not in op:
-                    raise ValueError("Gemm backend config information mnissing!", op)
+                    raise ValueError("Gemm backend config information missing!", op)
                 backend_config=op["backend_config"]
                 beta=re.search(r"\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
                 lhs_dim=re.search(r"\"lhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]

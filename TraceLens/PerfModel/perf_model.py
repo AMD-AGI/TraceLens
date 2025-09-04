@@ -22,6 +22,7 @@
 
 from math import prod
 import math
+import sys
 import os
 import re
 import subprocess
@@ -807,6 +808,7 @@ class aten_conv_bwd(aten_conv):
     def bytes(self, bytes_per_element):
         return self.bytes_bwd(bytes_per_element)
 
+# 3. Softmax
 class Softmax:
     """
     Softmax operation
@@ -865,6 +867,7 @@ class Softmax:
             memory_time = bytes_moved / (arch['mem_bw_gbps'] * 1000)
         return max(compute_time, memory_time)
 
+# 4. Scaled Dot Product Attention
 class SDPA:
 
     def __init__(self, event, arch=None, python_path=None):
@@ -1584,5 +1587,198 @@ class GroupedGemm:
         return self.bytes_bwd_func(self.M, self.K, self.N, self.G, 
                                  self.bpe_in, self.bpe_out)
 
+# Jax classes
+def jax_dtype2bpe(name):
+    """
+    This function maps a data type name to the number of bytes per element.
+    Args:
+        name (str): The name of the data type.
+    Returns:
+        int: The number of bytes per element.
+    """
+    dict_jax_dtype2bpe = {
+    "f32": 4,
+    "f16": 2,
+    "bf16": 2,
+    "f8": 1,
+    "fp8": 1,
+    }
+    return dict_jax_dtype2bpe.get(name.lower(), None)
 
+def jax_dtype_map(dtype):
+    """
+    This function maps a Jax data type to a gemmologist data type.
+    Args:
+        dtype (str): The name of the Jax data type.
+    Returns:
+        str: The name of the gemmologist data type.
+    """
+    dict_jax_dtype2gemmologist = {
+        'f32': 'fp32',
+        'f16': 'fp16',
+        'bf16': 'bf16',
+        'f8': 'fp8',
+        'fp8': 'fp8',
+    }
+    return dict_jax_dtype2gemmologist.get(dtype.lower(), None)
 
+def dtype_jax2torch(dtype):
+    """
+    This function maps a Jax data type to a PyTorch data type.
+    Args:
+        dtype (str): The name of the Jax data type.
+    Returns:
+        str: The name of the pytorch data type.
+    """
+    dict_dtype_jax2torch = {
+        'f32': 'float',
+        'f64': 'double',
+        'f16': 'c10::half',
+        'bf16': 'c10::bfloat16',
+        'f8': 'c10::float8_e4m3fnuz',
+        'fp8': 'fp8',
+    }
+    return dict_dtype_jax2torch.get(dtype.lower(), None)
+
+class jax_gemm(GEMM):
+    """
+    Jax GEMM — batch matrix multiplication with bias
+    (B, M, K) × (B, K, N) + (B, M, N) → (B, M, N)
+    Inherits FLOP/byte analytics from GEMM and scales them by the batch size.
+    """
+    @staticmethod
+    def get_param_details(event):
+        """Extract B, M, N, K and metadata from the profiler event."""
+        input_dims = event['args']['Input Dims']
+        if len(input_dims) == 2:
+            A_shape, B_shape = input_dims[0], input_dims[1]
+            dtype_A_B = tuple(event['args']['Input type'][0:2])
+        elif len(input_dims) == 3:
+            C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+            dtype_A_B = tuple(event['args']['Input type'][1:3])
+
+        assert len(A_shape) == len(B_shape)
+        
+        # Default batch size B_dim is 1
+        B_dim = 1
+        if len(A_shape) == 3:
+            B_dim, M, K = A_shape  # (B, M, K)
+            _,      _, N = B_shape # (B, K, N)
+        elif len(A_shape) == 2:
+            N, K = A_shape
+            _, M = B_shape
+        else:
+            print('\n Invalid gemm input dims:', input_dims)
+            sys.exit(0)
+
+        return {
+            "B": B_dim,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": event['args']['Beta'] != 0,
+            #"stride_A": None,
+            #"stride_B": None,
+            "dtype_A_B": dtype_A_B,
+            "gemmologist_dtype": jax_dtype_map(event['metadata']['type']),
+        }
+    # ---------------------- FLOPs / Bytes ----------------------
+    def flops(self):
+        """Total FLOPs for the entire batch."""
+        return self.param_details["B"] * super().flops()
+
+    def bytes(self):
+        """Total DRAM traffic for the entire batch (read+write)."""
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for aten_baddbmm. ")
+        bpe = jax_dtype2bpe(dtype_A_B[0]) # == name2bpe(dtype_jax2torch(dtype_A_B[0]))
+        per_batch = super().bytes(bpe_mat1=bpe, bpe_mat2=bpe,
+                                bpe_bias=bpe,   # not used, but keeps call signature
+                                bpe_output=bpe)
+        return None if per_batch is None else self.param_details['B'] * per_batch
+    
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for JaxGemm is not defined.")
+    def bytes_bwd(self, _):
+        raise NotImplementedError("Backward pass for JaxGemm is not defined.")
+
+class jax_te_fused_attn_forward(SDPA):
+    """
+    Jax TE fused attention:
+
+    TODO: Verify "causal": False, "flash_impl": True,  bytes_per_element= dict_jax_dtype2bpe # todo
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        bytes_per_element = jax_dtype2bpe(event['args']['Input type'][0])
+        dtype_A_B = tuple(dtype_jax2torch(_type) for _type in event['args']['Input type'][0:2])
+        bias = tuple(event['args']['Concrete Inputs'][0:1])   
+
+        
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                 "bias": bias, "dtype_A_B": dtype_A_B, "causal": False, "flash_impl": True, "fused": True, 
+                 "bytes_per_element": bytes_per_element}
+
+    # ---------------------- FLOPs / Bytes ----------------------
+    def flops(self):
+        """Total FLOPs for the entire batch."""
+        return super().flops()
+
+    def bytes(self):
+        return super().bytes(bytes_per_element=self.param_details["bytes_per_element"])
+
+class jax_te_fused_attn_backward(jax_te_fused_attn_forward):
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self):
+        return self.bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
+
+class jax_conv(CONV):
+
+    @staticmethod
+    def str_to_tuple(s):
+        return tuple(int(x) for x in s[1:-1].split(','))
+    @staticmethod
+    def get_param_details(event):
+        # TODO: conv in jax traces
+        input_dims = event['args']['Input Dims']
+
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2 #first two dimensions are batch and channel
+        filter_shape = tuple(input_dims[1])
+        bias = len(input_dims) == 3
+
+        bytes_per_element = jax_dtype2bpe(event['args']['Input type'][0])
+
+        if len(input_shape) == 3:
+            convNd = 'conv1d'
+        elif len(input_shape) == 4:
+            convNd = 'conv2d'
+        elif len(input_shape) == 5:
+            convNd = 'conv3d'
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {"convNd": convNd, "input_shape": input_shape, "filter_shape": filter_shape, "bytes_per_element": bytes_per_element}
+
+    def bytes(self):
+        return super().bytes(bytes_per_element=self.param_details["bytes_per_element"])
+
+class jax_conv_bwd(jax_conv):
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self):
+        return self.bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
