@@ -403,6 +403,97 @@ class TraceDiff:
         """
         return self.merged_uid_map.get((tree_num, uid), -1)
 
+    def print_merged_subtree(self, uid_tree1=None, uid_tree2=None):
+        if uid_tree1 is None and uid_tree2 is None:
+            raise ValueError("At least one of uid_tree1 or uid_tree2 must be provided.")
+        if self.merged_tree is None:
+            raise ValueError(
+                "merged_tree is not initialized. Call merge_trees() first."
+            )
+        merged_events, merged_root_ids = self.merged_tree
+        merged_id_to_event = {event["merged_id"]: event for event in merged_events}
+
+        # Find merged_id corresponding to the given uid
+        merged_id = None
+        if uid_tree1 is not None:
+            # Search for merged_id where uid1 matches
+            for event in merged_events:
+                if event["uid1"] == uid_tree1:
+                    merged_id = event["merged_id"]
+                    break
+        elif uid_tree2 is not None:
+            # Search for merged_id where uid2 matches
+            for event in merged_events:
+                if event["uid2"] == uid_tree2:
+                    merged_id = event["merged_id"]
+                    break
+        if merged_id is None:
+            raise ValueError("Could not find merged node for the given UID.")
+
+        # Helper to get op name
+        def get_op_name(uid, tree_uid2node):
+            node = tree_uid2node.get(uid)
+            if node is None:
+                return None
+            name = node.get("name") if "name" in node else node.get("Name")
+            if name is None:
+                try:
+                    name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+                except Exception:
+                    pass
+            return name if name else str(uid)
+
+        baseline_uid2node = {
+            event.get("UID"): event
+            for event in getattr(self.baseline, "events", [])
+            if isinstance(event, dict)
+        }
+        variant_uid2node = {
+            event.get("UID"): event
+            for event in getattr(self.variant, "events", [])
+            if isinstance(event, dict)
+        }
+
+        # Print merged subtree to console
+        def print_merged_tree_to_console(merged_id, prefix="", is_last=True):
+            node = merged_id_to_event[merged_id]
+            merge_type = node["merged_type"]
+            name1 = (
+                get_op_name(node["uid1"], baseline_uid2node)
+                if node["uid1"] is not None
+                else None
+            )
+            name2 = (
+                get_op_name(node["uid2"], variant_uid2node)
+                if node["uid2"] is not None
+                else None
+            )
+            connector = "└── " if is_last else "├── "
+            if merge_type == "combined":
+                if name1 == name2 and name1 is not None:
+                    line = f"{prefix}{connector}{name1}"
+                else:
+                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
+            elif merge_type == "trace1":
+                line = f"{prefix}{connector}>> {merge_type}: {name1}"
+            elif merge_type == "trace2":
+                line = f"{prefix}{connector}<< {merge_type}: {name2}"
+            else:
+                line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
+            print(line)
+            # Sort children by merge_type order: combined, trace1, trace2
+            children = [merged_id_to_event[cid] for cid in node["children"]]
+            combined = [c["merged_id"] for c in children if c["merged_type"] == "combined"]
+            trace1 = [c["merged_id"] for c in children if c["merged_type"] == "trace1"]
+            trace2 = [c["merged_id"] for c in children if c["merged_type"] == "trace2"]
+            sorted_children = combined + trace1 + trace2
+            child_count = len(sorted_children)
+            for i, cid in enumerate(sorted_children):
+                new_prefix = prefix + ("    " if is_last else "│   ")
+                print_merged_tree_to_console(cid, new_prefix, is_last=(i == child_count - 1))
+
+        print_merged_tree_to_console(merged_id, prefix="", is_last=True)
+
     def print_merged_tree(self, output_file, prune_non_gpu=False):
         if self.merged_tree is None:
             raise ValueError(
