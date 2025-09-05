@@ -1,13 +1,11 @@
 import argparse, os, sys
 import json
 from pathlib import Path
-from collections import defaultdict, Counter
 
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser, JaxAnalyses
+from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser
 from TraceLens.Reporting.reporting_utils import export_data_df
-from TraceLens.util import TraceEventUtils
 
 def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
     """
@@ -96,59 +94,25 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
     dict_dfs = {}
 
-    # Debug event filters
-    if 1:
-        kernel_events =  [event for event in perf_analyzer.tree.events if event['cat']=='kernel']
-        for op_cat in ['GEMM', 'Conv', 'TE', 'FA FWD', 'FA BWD']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys()
-            op_events = [event for event in kernel_events if event['gpu_kernel_op_cat'].lower() == op_cat.lower()]
-            print('\n op_cat:', op_cat)
-            print('\n custom_call_target:', Counter([event.get('metadata', {}).get('custom_call_target', 'NA') for event in op_events]))
-            print('operands:', Counter([str(event.get('metadata', {}).get('operands', '[]')) for event in op_events]))
-            print('outputs:', Counter([str(event.get('metadata', {}).get('outputs', '[]')) for event in op_events]))
-
-        # save output to csv
-        rows = []
-        kernel_events =  [event for event in perf_analyzer.tree.events if event['cat']=='kernel']
-        for event in kernel_events:
-            _custom_call = event.get('metadata', {}).get('custom_call_target', 'NA')
-            _operands = event.get('metadata', {}).get('operands', '[]')
-            _op_kernel = event.get('gpu_kernel_op_cat', 'NA')
-            _metadata = event.get('metadata', '{}')
-            metrics_event = {'name': event['name'],
-                                'pid': event['pid'],
-                                'UID': event['UID'],
-                                'custom_call_target': _custom_call,
-                                'operands': _operands,
-                                'gpu_kernel_op_cat': _op_kernel,
-                                'metadata': _metadata}
-            rows.append(metrics_event)
-        import pandas as pd
-        df = pd.DataFrame(rows)
-        df.to_csv('/home/guangphu/perf-profiling/logs/tracelens/jax/trace_analysis_results_kernel_event_metadata.csv')
-        #sys.exit(0)
-
     # Generate & store base DataFrames
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
     dict_dfs['gpu_events_averages']= df_gpu_events_averages
+
+    # Generate & store Dataframes on XLA kernels 
+    df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['Uncategorized Events/XLA',])
+    df_xla_events_agg_name_col = df_xla_events.copy()
+    df_xla_events_agg_name_col['name'] = df_xla_events.name.apply(lambda x: ''.join([i for i in x if not i.isdigit()])) # remove last part in name e.g. loop_slice_fusion_202 > loop_slice_fusion
+    df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events_agg_name_col)
+    dict_dfs['xla_summary']= df_xla_summary 
     
     # Generate & store op-specific DataFrames
-    kernel_events =  [event for event in perf_analyzer.tree.events if event['cat']=='kernel']
     for op_cat in ['GEMM', 'Conv', 'TE', 'FA FWD', 'FA BWD']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys()
-        op_events = [event for event in kernel_events if event['gpu_kernel_op_cat'].lower() == op_cat.lower()]
-        df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events, include_kernel_details=False, include_args=False)
+        df_op_detailed = perf_analyzer.build_df_perf_metrics(perf_analyzer.tree.events, gpu_kernel_op_cats=[op_cat, ])
         dict_dfs[f"op_{op_cat}_detailed"] = df_op_detailed
         df_op = perf_analyzer.summarize_df_perf_metrics(df_op_detailed, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_op
 
-    # Generate & store Dataframes on XLA kernels 
-    df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['xla'])
-    df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events)
-    dict_dfs['xla_summary']= df_xla_summary # TODO: aggregate according to naming
-
-    # Generate & store Dataframes on Communication nccl/rccl kernels
-    df_comm_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['nccl', 'rccl'])
-    df_comm_summary = perf_analyzer.get_df_kernel_launchers_summary(df_comm_events)
-    dict_dfs['comm_summary']= df_comm_summary
+    
 
     return dict_dfs
 

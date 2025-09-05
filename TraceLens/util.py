@@ -248,7 +248,7 @@ class TraceEventUtils:
         FABwdKeys = ["FmhaBwd", "flash_bprop"]
         FAFwdKeys = ["FmhaFwd", "flash_fprop"]
         FAV3Keys = ["kernel_func"] # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv."]
+        ConvKeys = ["FillBuffer", "conv_", "conv."] # check whether sub-cat exists
         TEKeys = ["transformer_engine"]
         CommunicationKeys = ["rccl", "nccl"]
         ClassCategories = {
