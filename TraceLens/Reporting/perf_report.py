@@ -98,7 +98,7 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
     dict_dfs['gpu_events_averages']= df_gpu_events_averages
 
-    # Generate & store Dataframes on XLA kernels 
+    # Generate & store Dataframes on selected e.g. XLA kernels 
     df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['Uncategorized Events/XLA',])
     df_xla_events_agg_name_col = df_xla_events.copy()
     df_xla_events_agg_name_col['name'] = df_xla_events.name.apply(lambda x: ''.join([i for i in x if not i.isdigit()])) # remove last part in name e.g. loop_slice_fusion_202 > loop_slice_fusion
@@ -111,8 +111,6 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
         dict_dfs[f"op_{op_cat}_detailed"] = df_op_detailed
         df_op = perf_analyzer.summarize_df_perf_metrics(df_op_detailed, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_op
-
-    
 
     return dict_dfs
 
