@@ -22,6 +22,7 @@
 
 from . import perf_model
 from collections import defaultdict
+from .kernel_name_parser import is_rocm_gemm
 
 op_to_perf_model_class_map = {
     'aten::mm': perf_model.aten_mm,
@@ -39,6 +40,7 @@ op_to_perf_model_class_map = {
     'aten::bmm': perf_model.aten_bmm,
     'tex_ts::te_gemm_ts': perf_model.tex_ts_te_gemm_ts,
     'aten::baddbmm': perf_model.aten_baddbmm,
+    #'vllm::gemm_with_dynamic_quant': perf_model.vllm_gemm_with_dynamic_quant,
     'FlashAttnFunc': perf_model.flash_attention,
     'flash_attn::_flash_attn_forward': perf_model.flash_attention,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
@@ -85,6 +87,15 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
     if cat is None:
         raise ValueError(f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_class: {base_classes}")
     dict_cat2names[cat].append(op_name)
+
+# Aliases/extensions for categorization
+# Map additional CPU op names into existing categories
+# - vLLM dynamic quantized GEMM
+dict_cat2names['GEMM'].append('vllm::gemm_with_dynamic_quant')
+
+# - SDPA
+dict_cat2names['SDPA'].append('aten::scaled_dot_product_attention')
+dict_cat2names['SDPA'].append('aten::scaled_dot_product_attention_backward')
 
 def categorize_torch_op(row):
     """
@@ -140,5 +151,15 @@ def categorize_torch_op(row):
             return 'reduce'
         elif 'multi_tensor_apply' in kernel_name:
             return 'multi_tensor_apply'
+
+    # ROCm fallback: if any GPU kernel under this op looks like a ROCm GEMM (Tensile), classify as GEMM
+    try:
+        for k in row.get('kernel_details', []):
+            kname = k.get('name', '')
+            if is_rocm_gemm(kname):
+                return 'GEMM'
+    except Exception:
+        pass
+
     # if none of the above cases match, return 'other'
     return 'other'
