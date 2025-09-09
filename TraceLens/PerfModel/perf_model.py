@@ -512,6 +512,75 @@ class aten_baddbmm(GEMM):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
 
+class vllm_gemm_with_dynamic_quant(GEMM):
+    @staticmethod
+    def get_param_details(event):
+        # Extract A and B by scanning for first two 2D tensors
+        input_dims = event['args'].get('Input Dims', [])
+        A_shape = None
+        B_shape = None
+        for shape in input_dims:
+            try:
+                if isinstance(shape, (list, tuple)) and len(shape) == 2:
+                    if A_shape is None:
+                        A_shape = tuple(shape)
+                    elif B_shape is None:
+                        B_shape = tuple(shape)
+                        break
+            except Exception:
+                continue
+        # Fallback: try first two entries if not caught above
+        if (A_shape is None or B_shape is None) and len(input_dims) >= 2:
+            try:
+                if A_shape is None and isinstance(input_dims[0], (list, tuple)):
+                    A_shape = tuple(input_dims[0])
+                if B_shape is None and isinstance(input_dims[1], (list, tuple)):
+                    B_shape = tuple(input_dims[1])
+            except Exception:
+                pass
+
+        if not A_shape or not B_shape or len(A_shape) != 2 or len(B_shape) != 2:
+            raise ValueError("vllm::gemm_with_dynamic_quant missing 2D A,B shapes in Input Dims")
+
+        M = A_shape[0]
+        K = A_shape[1]
+        N = B_shape[1]
+
+        # Dtypes
+        dtype_list = event['args'].get('Input type', [])
+        if not isinstance(dtype_list, (list, tuple)) or len(dtype_list) < 2:
+            raise ValueError("vllm::gemm_with_dynamic_quant missing A,B dtypes in 'Input type'")
+        dtype_A_B = tuple(dtype_list[:2])
+
+        # Strides (optional, match style of other models)
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][1])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for vllm_gemm_with_dynamic_quant. ")
+        self.bpe = name2bpe(dtype_A_B[0])
+        return super().bytes(
+            bpe_mat1=self.bpe,
+            bpe_mat2=self.bpe,
+            bpe_bias=self.bpe,   # bias not used; keep consistent call signature
+            bpe_output=self.bpe  # use input dtype unless explicit output dtype exists in traces
+        )
+
 class tex_ts_te_gemm_ts(GEMM):
     """
     tex_ts::te_gemm_ts is a matmul op in TransformerEngine

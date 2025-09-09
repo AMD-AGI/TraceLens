@@ -40,7 +40,7 @@ op_to_perf_model_class_map = {
     'aten::bmm': perf_model.aten_bmm,
     'tex_ts::te_gemm_ts': perf_model.tex_ts_te_gemm_ts,
     'aten::baddbmm': perf_model.aten_baddbmm,
-    #'vllm::gemm_with_dynamic_quant': perf_model.vllm_gemm_with_dynamic_quant,
+    'vllm::gemm_with_dynamic_quant': perf_model.vllm_gemm_with_dynamic_quant,
     'FlashAttnFunc': perf_model.flash_attention,
     'flash_attn::_flash_attn_forward': perf_model.flash_attention,
     'aten::_scaled_dot_product_cudnn_attention': perf_model.aten__scaled_dot_product_cudnn_attention,
