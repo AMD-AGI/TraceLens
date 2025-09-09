@@ -60,6 +60,9 @@ attn_ops_launchers = [
     "FlashAttnFunc",
     "FlashAttnVarlenFunc",
     "flash_attn_3::fwd",
+    "aiter::wrapper_mha_varlen_fwd",
+    "aiter::wrapper_fmha_v3_varlen_fwd",
+    "aiter::wrapper_fmha_v3_fwd",
 ]
 
 concat_ops_launchers = [
