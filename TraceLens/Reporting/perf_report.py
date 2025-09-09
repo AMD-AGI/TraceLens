@@ -4,7 +4,7 @@ from pathlib import Path
 
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
+from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser
 from TraceLens.Reporting.reporting_utils import export_data_df
 
 def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
@@ -23,7 +23,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     if profile_path.endswith('.pt.trace.json'):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
     elif profile_path.endswith('.xplane.pb'):
-        perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
+        perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
     else:
         print('Unsupported trace file format.')
         pass
@@ -91,7 +91,7 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
             - df_xla_grouped (pd.DataFrame): DataFrame of XLA events grouped by base name, sorted by percentage of total time.
             - df_gemms_detailed(pd.DataFrame): DataFrame of GEMMs
     """
-    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
+    perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
     dict_dfs = {}
 
     # Generate & store base DataFrames

@@ -1182,6 +1182,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                              'dur': event['dur'],
                              'cat': event['cat'],
                              'op category': event['op category'],
+                             'perf model': event['perf_model_name']
                              }
             dict_perf_metrics = None
             try:
