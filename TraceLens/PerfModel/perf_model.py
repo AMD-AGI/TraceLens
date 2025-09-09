@@ -1715,8 +1715,8 @@ class jax_te_fused_attn_forward(SDPA):
         input_dims = event['args']['Input Dims']
         q_idx, k_idx, v_idx = 0, 1, 2
         q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
-        bhnd_idx = 0, 2, 1, 3
-        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        bhnd_idx = 0, 2, 1, 3 # BSHD 
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx) 
         B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
         
         bytes_per_element = jax_dtype2bpe(event['args']['Input type'][0])

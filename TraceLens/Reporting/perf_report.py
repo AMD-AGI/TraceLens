@@ -4,7 +4,7 @@ from pathlib import Path
 
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser
+from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import export_data_df
 
 def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
@@ -23,7 +23,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     if profile_path.endswith('.pt.trace.json'):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
     elif profile_path.endswith('.xplane.pb'):
-        perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
+        perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
     else:
         print('Unsupported trace file format.')
         pass
@@ -91,7 +91,7 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
             - df_xla_grouped (pd.DataFrame): DataFrame of XLA events grouped by base name, sorted by percentage of total time.
             - df_gemms_detailed(pd.DataFrame): DataFrame of GEMMs
     """
-    perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
+    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
     dict_dfs = {}
 
     # Generate & store base DataFrames
@@ -132,7 +132,7 @@ def main():
     parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
     parser.add_argument("--num_cus", type=str, default=304, help="Number of compute units, MI300X - 304; MI210: 104")
     parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
-    parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".xlsx", ".csv"], choices=[".xlsx", ".csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
+    parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".csv", ], choices=[".xlsx", ".csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
     parser.add_argument("--output_filename", type=str, default="trace_analysis_results", help="Base name for output files")
     args = parser.parse_args()
 

@@ -7,7 +7,7 @@ from .TreePerf.gpu_event_analyser import (
     PytorchGPUEventAnalyser,
 )
 from .TreePerf.jax_analyses import JaxAnalyses
-from .TreePerf.tree_perf import TreePerfAnalyzer
+from .TreePerf.tree_perf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from .util import DataLoader, TraceEventUtils, JaxProfileProcessor
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
@@ -16,6 +16,7 @@ from .Reporting import *
 
 __all__ = [
     "TreePerfAnalyzer",
+    "JaxTreePerfAnalyzer",
     "GPUEventAnalyser",
     "PytorchGPUEventAnalyser",
     "JaxGPUEventAnalyser",

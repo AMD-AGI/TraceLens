@@ -801,7 +801,7 @@ class TreePerfAnalyzer:
             node['Non-nn.Module GPU Time'] = gpu_time_remaining
         return
 
-class JaxTreePerfAnalyser(TreePerfAnalyzer):
+class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     """
     JaxPerfAnalyser is a specialized performance analyser for JAX traces.
     It extends the TreePerfAnalyzer to provide JAX-specific performance analysis features.
@@ -812,7 +812,7 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
     """
     
     @staticmethod
-    def from_file(profile_filepath, *args, **kwargs) -> "JaxTreePerfAnalyser":
+    def from_file(profile_filepath, *args, **kwargs) -> "JaxTreePerfAnalyzer":
         data = DataLoader.load_data(profile_filepath)
         data_pb = data['traceEvents']
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
@@ -822,7 +822,7 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
         tree = JaxTraceToTree(events, 
                               linking_key=linking_key, 
                               event_to_category=categorizer)
-        return JaxTreePerfAnalyser(tree,
+        return JaxTreePerfAnalyzer(tree,
                                event_to_category=categorizer, 
                                metadata=metadata,
                                pb_file_name=profile_filepath,
@@ -897,12 +897,12 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
         perf_model_name = event['perf_model_name'] # i.e. JaxTreePerfAnalyser.parse_perf_class_name_in_metadata(event) #  
         # input dims, types for each gpu kernel op category
         if 'gemm' in perf_model_name:
-            _dict = JaxTreePerfAnalyser.parse_gemm_metadata(event)
+            _dict = JaxTreePerfAnalyzer.parse_gemm_metadata(event)
         elif 'te_fused_attn' in perf_model_name:
-            _dict = JaxTreePerfAnalyser.parse_te_fused_attn_metadata(event)
+            _dict = JaxTreePerfAnalyzer.parse_te_fused_attn_metadata(event)
         else:
             # print('Use default parser for event', perf_model_name, event['gpu_kernel_op_cat'])
-            _dict = JaxTreePerfAnalyser.parse_default_metadata(event)    
+            _dict = JaxTreePerfAnalyzer.parse_default_metadata(event)    
         if _dict: 
             dict_metadata.update(_dict)
         return dict_metadata
@@ -939,7 +939,7 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
     def parse_default_metadata(event):
         dict_metadata = {}
         if event.get('metadata', {}).get('operands', None):
-            operand_list, operand_type = JaxTreePerfAnalyser.parse_operands(event)
+            operand_list, operand_type = JaxTreePerfAnalyzer.parse_operands(event)
             dict_metadata['Input Dims'] = operand_list
             dict_metadata['Input type'] = operand_type
         return dict_metadata
@@ -947,24 +947,26 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
     @staticmethod
     def parse_te_fused_attn_metadata(event):
         """
-        Ref: https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/api/c/fused_attn.html#nvte_fused_attn_fwd
+        Ref:
+         - https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/api/c/fused_attn.html#nvte_fused_attn_fwd
+         - https://github.com/ROCm/TransformerEngine/blob/a1e66aae34e023070c04f9e46fe75bf947f207e1/transformer_engine/common/include/transformer_engine/fused_attn.h#L326
+         - https://github.com/ROCm/TransformerEngine/blob/a1e66aae34e023070c04f9e46fe75bf947f207e1/transformer_engine/common/fused_attn_rocm/fused_attn.cpp#L775
 
-        nvte_fused_attn_fwd, _bwd # TODO Verify how they map to operands
+
+        nvte_fused_attn_fwd, _bwd 
         qkv layout | bias | mask | dropout |  sequence length  | head_dim
 
         Example: 
         Hunyuan video
             - Attention  Heads 24
             - Head dim 128
-
             - fwd operands: ['bf16[1,67576,24,128]{3,2,1,0}', 'bf16[1,67576,24,128]{3,2,1,0}', 'bf16[1,67576,24,128]{3,2,1,0}', 'bf16[0]{0}', 's32[2]{0}', 's32[2]{0}', 'bf16[0]{0}', 'bf16[0]{0}']
-
             - bwd operands: ['bf16[1,67576,24,128]{3,2,1,0}', 'bf16[1,67576,24,128]{3,2,1,0}', 'bf16[1,67576,24,128]{3,2,1,0}', 'bf16[0]{0}', 'f32[1,24,67576,1]{3,2,1,0}', 'bf16[1,67576,24,128]{3,2,1,0}', 'bf16[1,67576,24,128]{3,2,1,0}', 's32[2]{0}', 's32[2]{0}', 'bf16[0]{0}', 'bf16[0]{0}']
         """
 
         dict_metadata = {}
         if event.get('metadata', {}).get('operands', None):
-            operand_list, operand_type = JaxTreePerfAnalyser.parse_operands(event)
+            operand_list, operand_type = JaxTreePerfAnalyzer.parse_operands(event)
             dict_metadata['Input Dims'] = operand_list[:3]
             dict_metadata['Input type'] = operand_type[:3]
             dict_metadata['Concrete Inputs'] = operand_list[3:4] # bias
@@ -980,7 +982,7 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
         else:
             dict_backend_config = json.loads(backend_config.split('=')[1]) # Note: missing '}' in some jax metadata
             beta = dict_backend_config.get('gemm_backend_config', {}).get('beta', 0)
-        operand_list, operand_type = JaxTreePerfAnalyser.parse_operands(event)
+        operand_list, operand_type = JaxTreePerfAnalyzer.parse_operands(event)
         if int(beta)==1 and len(operand_list)<3:
             print("Bias is set, however only two operands found!", event['metadata'])
         if len(operand_list)>3 or len(operand_list) == 0:
@@ -1053,8 +1055,8 @@ class JaxTreePerfAnalyser(TreePerfAnalyzer):
                                         'outputs': event.get('metadata', {}).get('outputs', 'NA'),
                                         'metadata': event.get('metadata', {}).get('metadata', 'NA')
                                         }] 
-            event['perf_model_name'] = JaxTreePerfAnalyser.parse_perf_class_name_in_metadata(event)
-            dict_jax_metadata = JaxTreePerfAnalyser.get_JaxTree_event_metadata(event) 
+            event['perf_model_name'] = JaxTreePerfAnalyzer.parse_perf_class_name_in_metadata(event)
+            dict_jax_metadata = JaxTreePerfAnalyzer.get_JaxTree_event_metadata(event) 
             for _key, _val in dict_jax_metadata.items():
                 event['args'][_key] = _val
             if perf_event_only:
