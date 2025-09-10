@@ -11,7 +11,6 @@ from perf_report_utils import (
     build_kernel_launchers_summary,
     collect_df_perf_metrics_per_group,
     parse_traces,
-    ram_stats_gb,
 )
 from perf_report_configs import group2ops
 from TraceLens import NcclAnalyser, TreePerfAnalyzer
@@ -77,7 +76,6 @@ def analyze_traces(
             rank = int(match.group(1))
 
             print(f"Starting TreePerfAnalyzer with {filename}")
-            print(ram_stats_gb())
             start_time = time.perf_counter()
             perf_analyzer = TreePerfAnalyzer.from_file(filepath)
 
@@ -100,7 +98,6 @@ def analyze_traces(
 
             elapsed_time = time.perf_counter() - start_time
             print(f"Elapsed time: {elapsed_time:.2f} seconds.")
-            print(ram_stats_gb())
 
             ## Collect and write all rank-specific kernels
             if save_all_kernels:
@@ -154,7 +151,6 @@ def analyze_traces(
 
         elapsed_time = time.perf_counter() - start_time
         print(f"Elapsed time: {elapsed_time:.2f} seconds.")
-        print(ram_stats_gb())
 
         if world_size > 1:
             print(f"Starting NcclAnalyser with world_size {world_size}")
@@ -174,7 +170,6 @@ def analyze_traces(
 
             elapsed_time = time.perf_counter() - start_time
             print(f"Elapsed time: {elapsed_time:.2f} seconds.")
-            print(ram_stats_gb())
 
             del nccl_analyser
 
