@@ -103,7 +103,6 @@ class TreePerfAnalyzer:
 
     def compute_perf_metrics(self, event, bwd=False,
                              non_data_mov=False, perf_model_class=None):
-        print('computing perf metric for ', event['name'])
 
         # Handle kernel aggregation
         if bwd:
@@ -115,7 +114,6 @@ class TreePerfAnalyzer:
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
-        print('list of kernels: ', list_kernels)
         busy_kernel_time = 0
         if len(list_kernels) > 0:
             busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
@@ -124,7 +122,6 @@ class TreePerfAnalyzer:
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
             busy_non_data_mov_time = GPUEventAnalyser(list_non_data_mov_kernels).compute_metrics()['busy_time']
-            print('busy_non_data_mov_time=', busy_non_data_mov_time)
         event['kernel_details'] = [ {'name': kernel['name'],
                                      'dur': kernel['dur'],
                                      'stream': kernel.get('args', {}).get('stream', None)}
@@ -133,12 +130,9 @@ class TreePerfAnalyzer:
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event['name'])
-        print('perf_model_class=', perf_model_class)
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
-        print('perf_model=', perf_model)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
-        print('gflops=', gflops)
 
         tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
