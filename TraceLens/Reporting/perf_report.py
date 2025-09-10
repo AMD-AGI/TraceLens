@@ -4,7 +4,7 @@ from pathlib import Path
 
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyser
+from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import export_data_df
 
 def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
@@ -23,7 +23,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     if profile_path.endswith('.pt.trace.json'):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
     elif profile_path.endswith('.xplane.pb'):
-        perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
+        perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
     else:
         print('Unsupported trace file format.')
         pass
@@ -91,7 +91,7 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
             - df_xla_grouped (pd.DataFrame): DataFrame of XLA events grouped by base name, sorted by percentage of total time.
             - df_gemms_detailed(pd.DataFrame): DataFrame of GEMMs
     """
-    perf_analyzer = JaxTreePerfAnalyser.from_file(profile_filepath=profile_path)
+    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
     dict_dfs = {}
 
     # Generate & store base DataFrames
@@ -107,7 +107,9 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     
     # Generate & store op-specific DataFrames
     for op_cat in ['GEMM', 'Conv', 'TE', 'FA FWD', 'FA BWD']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys()
-        df_op_detailed = perf_analyzer.build_df_perf_metrics(perf_analyzer.tree.events, gpu_kernel_op_cats=[op_cat, ])
+        # filter out op cats
+        op_events = [event for event in perf_analyzer.tree.events if event.get('gpu_kernel_op_cat', '') == op_cat]
+        df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events)
         dict_dfs[f"op_{op_cat}_detailed"] = df_op_detailed
         df_op = perf_analyzer.summarize_df_perf_metrics(df_op_detailed, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_op
