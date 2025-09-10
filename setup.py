@@ -10,7 +10,7 @@ setup(
         'tqdm',
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
-        # 'openpyxl',
+        'openpyxl',
         # 'tensorboard-plugin-profile==2.19.0',
         # 'tensorflow',
     ],
