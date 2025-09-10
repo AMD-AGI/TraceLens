@@ -336,8 +336,51 @@ class JaxTraceToTree(BaseTraceToTree):
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
 
+        self._categorize_gpu_kernel_ops()
 
-        
+
+    def _categorize_gpu_kernel_ops(self) -> None:
+        """
+        Categorizes GPU kernel operations in the event list based on their names and HLO operation types.
+
+        Iterates through each event in `self.events` with a process ID (pid) less than or equal to 100.
+        For events categorized as 'kernel', attempts to assign a GPU kernel operation category by matching
+        the event's name and, if available, its 'hlo_op' argument against predefined category filters in
+        `TraceEventUtils.JaxOpKeys.ClassCategories`. If no category is matched, assigns a default
+        'Uncategorized/XLA' category.
+
+        Modifies:
+            Each relevant event in `self.events` by adding or updating the 'gpu_kernel_op_cat' key.
+        """
+
+        for event in self.events:
+            if event.get('pid')<= 100:
+
+                if event.get('cat')=='kernel':
+                    name = event.get('name')
+
+                    gpu_kernel_op_cat_not_found = True
+
+                    for category, filters in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                        if any(f in name for f in filters):
+                             event['gpu_kernel_op_cat'] = category
+                             gpu_kernel_op_cat_not_found = False
+                             break
+
+                    if 'hlo_op' in event.get('args').keys():
+                        hlo_op = event.get('args').get('hlo_op')
+
+                        for category, filters in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                            if any(f in hlo_op for f in filters):
+                                event['gpu_kernel_op_cat'] = category
+                                gpu_kernel_op_cat_not_found = False
+                                break
+
+                    # if still not found, set to Uncategorized/XLA
+                    if gpu_kernel_op_cat_not_found:
+                        event['gpu_kernel_op_cat'] = TraceEventUtils.JaxOpKeys.UncategorizedEventKey + '/XLA'
+   
+    
     def _set_metadata(self, metadata: Dict) -> None:
         """
         Sets the metadata for the current object and updates each event in `self.events`
