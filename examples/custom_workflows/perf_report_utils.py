@@ -5,7 +5,6 @@ import os.path as osp
 from collections import defaultdict
 
 import pandas as pd
-import psutil
 import warnings
 from typing import Callable
 from perf_report_configs import all_ops_launchers, grouped_breakdown_mapping
@@ -13,22 +12,6 @@ from TraceLens import TreePerfAnalyzer
 
 # Static methods
 get_df_kernel_launchers_summary = TreePerfAnalyzer.get_df_kernel_launchers_summary
-
-
-def ram_used():
-    return round(psutil.virtual_memory().used * 1024e-9, 2)
-
-
-def ram_available():
-    return round(psutil.virtual_memory().available * 1024e-9, 2)
-
-
-def ram_utilization():
-    return psutil.virtual_memory().percent
-
-
-def ram_stats_gb():
-    return f"RAM used/available/utilization (GB): {ram_used()}/{ram_available()}/{ram_utilization()}"
 
 
 def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern="rank_"):
