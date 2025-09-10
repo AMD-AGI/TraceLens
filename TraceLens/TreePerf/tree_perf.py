@@ -214,7 +214,6 @@ class TreePerfAnalyzer:
                 continue
             # handle warnings
             if bwd and not event.get('bwd_events'):
-                print('event ', event['name'], ' does not have bwd')
                 list_no_bwd_events.append(event)
                 continue
             if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:

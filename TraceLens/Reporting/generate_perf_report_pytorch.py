@@ -248,7 +248,6 @@ def generate_perf_report_pytorch(profile_json_path: str,
             df_ops_bwd = add_truncated_kernel_details(df_ops_bwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
             if filtered_df_bwd_ops is not None:
                 df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
-            print('df_ops_bwd=', df_ops_bwd)
             perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
             perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
