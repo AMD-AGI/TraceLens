@@ -643,6 +643,7 @@ class TreePerfAnalyzer:
         kernel_details = {
             'UID': kernel_event['UID'],
             'Kernel name': kernel_event['name'],
+            'Kernel t start': kernel_event['ts'],
             'Kernel duration (µs)': kernel_event['dur'],
             'Kernel stream': kernel_event['args'].get('stream')
         }
