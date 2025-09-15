@@ -315,27 +315,6 @@ class TreePerfAnalyzer:
         # This is why, this method identifies such cases
         # by checking if grandchildren of CPU operations are kernel events.
         kernel_launchers = []
-        # Precompute first-kernel stream indices for each graph launch to delimit sequences on each stream
-        from ..util import TraceEventUtils as _TEU  # local alias
-        stream2graph_start_indices = defaultdict(list)
-        for ev in self.tree.events:
-            ev_cat = self.event_to_category(ev)
-            ev_name = ev.get('name', '')
-            is_graph_rt = ev_cat in {'cuda_runtime', 'cuda_driver'} and (
-                'cudaGraphLaunch' in ev_name or 'cuGraphLaunch' in ev_name or 'hipGraphLaunch' in ev_name
-            )
-            if not is_graph_rt:
-                continue
-            first_gpu_uids = ev.get('gpu_events', [])
-            if not first_gpu_uids:
-                continue
-            k0 = self.tree.get_UID2event(first_gpu_uids[0])
-            stream = k0.get('args', {}).get('stream')
-            sidx = k0.get('args', {}).get(_TEU.ArgNames.StreamIndex)
-            if stream is not None and sidx is not None:
-                stream2graph_start_indices[stream].append(sidx)
-        for s in stream2graph_start_indices:
-            stream2graph_start_indices[s].sort()
         for event in self.tree.events:
             cat = self.event_to_category(event)
             if cat != 'cpu_op':
@@ -347,8 +326,6 @@ class TreePerfAnalyzer:
                 if not is_graph_runtime:
                     continue
                 # Collect all kernel events with same correlation id
-                list_kernel_uids = event.get('gpu_events', [])
-                list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
                 corr = event.get('args', {}).get('correlation')
                 if corr is None:
                     raise ValueError(f"Graph runtime event missing correlation id: {event.get('name')}")

@@ -176,6 +176,133 @@ def add_truncated_kernel_details(df: pd.DataFrame,
     # Return a new DataFrame with the desired column order
     return df[cols]
 
+# Graph analysis helpers
+
+def _make_graph_signature_factory(perf_analyzer):
+    def _make_graph_signature(klist):
+        if not isinstance(klist, list):
+            return tuple()
+        sig = []
+        for kd in klist:
+            uid = kd.get('uid') if isinstance(kd, dict) else None
+            if uid is not None and uid in getattr(perf_analyzer.tree, 'events_by_uid', {}):
+                ev = perf_analyzer.tree.get_UID2event(uid)
+                args = ev.get('args', {}) if isinstance(ev, dict) else {}
+                name = ev.get('name')
+                grid = tuple(args.get('grid')) if isinstance(args.get('grid'), list) else args.get('grid')
+                block = tuple(args.get('block')) if isinstance(args.get('block'), list) else args.get('block')
+                smem = args.get('shared memory') if 'shared memory' in args else args.get('shared_memory')
+                regs = args.get('registers per thread') if 'registers per thread' in args else args.get('regs_per_thread')
+                stream = args.get('stream')
+                device = args.get('device')
+                context = args.get('context')
+                sig.append((name, grid, block, smem, regs, stream, device, context))
+            else:
+                name = kd.get('name') if isinstance(kd, dict) else str(kd)
+                stream = kd.get('stream') if isinstance(kd, dict) else None
+                sig.append((name, None, None, None, None, stream, None, None))
+        return tuple(sig)
+    return _make_graph_signature
+
+
+def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame, agg_metrics):
+    df = df_graph_launchers.copy()
+    make_sig = _make_graph_signature_factory(perf_analyzer)
+    df['graph_signature'] = df['kernel_details'].apply(make_sig)
+
+    grp = df.groupby('graph_signature', dropna=False).agg({
+        'total_direct_kernel_time': ['sum', 'mean', 'count'],
+        'direct_kernel_count': ['mean', 'max']
+    })
+    grp.columns = ['_'.join(col).strip() for col in grp.columns.values]
+    grp = grp.reset_index()
+    grp.rename(columns={
+        'total_direct_kernel_time_sum': 'group_total_kernel_time_us',
+        'total_direct_kernel_time_mean': 'avg_kernel_time_per_launch_us',
+        'total_direct_kernel_time_count': 'launch_count',
+        'direct_kernel_count_mean': 'avg_direct_kernel_count',
+        'direct_kernel_count_max': 'max_direct_kernel_count'
+    }, inplace=True)
+    grp['group_total_kernel_time_ms'] = grp['group_total_kernel_time_us'] / 1000.0
+    total_graph_ms = grp['group_total_kernel_time_ms'].sum()
+    grp['Percentage (%)'] = (grp['group_total_kernel_time_ms'] / total_graph_ms * 100.0) if total_graph_ms > 0 else np.nan
+    grp['Cumulative Percentage (%)'] = grp['Percentage (%)'].cumsum() if total_graph_ms > 0 else np.nan
+
+    def _sig_preview(sig, max_items=4):
+        first = list(sig)[:max_items]
+        names = [(t[0] if isinstance(t, tuple) else str(t)) for t in first]
+        return ' | '.join(names) + (' ...' if len(sig) > max_items else '')
+    grp['graph_signature_preview'] = grp['graph_signature'].apply(_sig_preview)
+
+    sig2total_us = {tuple(k): v for k, v in zip(grp['graph_signature'], grp['group_total_kernel_time_us'])}
+    rows_group_kerns = []
+    for sig, df_launches in df.groupby('graph_signature', dropna=False):
+        index2durations = defaultdict(list)
+        name_by_index = {}
+        for _, r in df_launches.iterrows():
+            klist = r.get('kernel_details') or []
+            for idx, kd in enumerate(klist):
+                index2durations[idx].append(kd.get('dur'))
+                if idx not in name_by_index:
+                    name_by_index[idx] = kd.get('name')
+        group_total_us = sig2total_us.get(sig, 0)
+        for idx in sorted(index2durations.keys()):
+            dur_arr = np.array(index2durations[idx])
+            total_us = float(np.sum(dur_arr))
+            rows_group_kerns.append({
+                'graph_signature': sig,
+                'kernel_index': idx,
+                'kernel_name': name_by_index.get(idx),
+                'count': int(len(dur_arr)),
+                'total_duration_us': total_us,
+                'mean_duration_us': float(np.mean(dur_arr)) if dur_arr.size > 0 else np.nan,
+                'median_duration_us': float(np.median(dur_arr)) if dur_arr.size > 0 else np.nan,
+                'std_dev_duration_us': float(np.std(dur_arr)) if dur_arr.size > 0 else np.nan,
+                'pct_of_graph_group_time': (total_us / group_total_us * 100.0) if group_total_us > 0 else np.nan
+            })
+    df_graph_group_kernels = pd.DataFrame(rows_group_kerns)
+
+    combined_rows = []
+    df_graph_group_summary = grp.sort_values(by='group_total_kernel_time_ms', ascending=False).reset_index(drop=True)
+    for _, g in df_graph_group_summary.iterrows():
+        sig = g['graph_signature']
+        combined_rows.append({
+            'level': 0,
+            'graph_signature_preview': g['graph_signature_preview'],
+            'launch_count': g['launch_count'],
+            'group_total_kernel_time_us': g['group_total_kernel_time_us'],
+            'group_total_kernel_time_ms': g['group_total_kernel_time_ms'],
+            'Percentage (%)': g['Percentage (%)'],
+            'Cumulative Percentage (%)': g['Cumulative Percentage (%)']
+        })
+        kdf = df_graph_group_kernels[df_graph_group_kernels['graph_signature'] == sig].sort_values('kernel_index')
+        for _, kr in kdf.iterrows():
+            combined_rows.append({
+                'level': 1,
+                'kernel_index': kr['kernel_index'],
+                'kernel_name': kr['kernel_name'],
+                'count': kr['count'],
+                'total_duration_us': kr['total_duration_us'],
+                'mean_duration_us': kr['mean_duration_us'],
+                'median_duration_us': kr['median_duration_us'],
+                'std_dev_duration_us': kr['std_dev_duration_us'],
+                'pct_of_graph_group_time': kr['pct_of_graph_group_time']
+            })
+    return pd.DataFrame(combined_rows)
+
+
+def build_graph_ops_unique_args(perf_analyzer, df_graph_launchers: pd.DataFrame, agg_metrics, include_pct=True):
+    df_graph_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(
+        df_graph_launchers,
+        agg_metrics=agg_metrics,
+        include_pct=include_pct
+    )
+    return add_truncated_kernel_details(
+        df_graph_unique_args,
+        source_col='kernel_details_summary',
+        new_col_name='trunc_kernel_details'
+    )
+
 def generate_perf_report_pytorch(profile_json_path: str, 
                                 output_xlsx_path: Optional[str] = None,
                                 output_csvs_dir: Optional[str] = None,
@@ -227,156 +354,14 @@ def generate_perf_report_pytorch(profile_json_path: str,
     df_kernel_launchers_unique_args = add_truncated_kernel_details(df_kernel_launchers_unique_args,
                                                                    source_col='kernel_details_summary', new_col_name='trunc_kernel_details')
 
-    # Graph-launch specific breakdowns (CUDA/ROCm) for TRT-LLM graphs
+    # Graph-launch specific breakdowns (CUDA/ROCm)
     df_graph_launchers = df_kernel_launchers[df_kernel_launchers['op category'] == 'GRAPH'].copy()
     if not df_graph_launchers.empty:
-        df_graph_summary = perf_analyzer.get_df_kernel_launchers_summary(df_graph_launchers)
-        df_graph_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(
-            df_graph_launchers,
-            agg_metrics=agg_metrics,
-            include_pct=True
-        )
-        df_graph_unique_args = add_truncated_kernel_details(
-            df_graph_unique_args,
-            source_col='kernel_details_summary',
-            new_col_name='trunc_kernel_details'
-        )
-    else:
-        # Empty sheets if no graph launches detected
-        df_graph_summary = pd.DataFrame()
-        df_graph_unique_args = pd.DataFrame()
-
-    # Build a single hierarchical grouped sheet for graph launches
-    if not df_graph_launchers.empty and 'kernel_details' in df_graph_launchers.columns:
-        # 0) Compute a stable graph_signature as ordered tuple of per-kernel descriptors.
-        # Include structural fields to distinguish different captures that share names.
-        def _make_graph_signature(klist):
-            if not isinstance(klist, list):
-                return tuple()
-            sig = []
-            for kd in klist:
-                # Prefer using kernel UID to fetch full event args
-                uid = kd.get('uid') if isinstance(kd, dict) else None
-                if uid is not None and uid in getattr(perf_analyzer.tree, 'events_by_uid', {}):
-                    ev = perf_analyzer.tree.get_UID2event(uid)
-                    args = ev.get('args', {}) if isinstance(ev, dict) else {}
-                    name = ev.get('name')
-                    # Normalize list->tuple for hashable signature components
-                    grid = tuple(args.get('grid')) if isinstance(args.get('grid'), list) else args.get('grid')
-                    block = tuple(args.get('block')) if isinstance(args.get('block'), list) else args.get('block')
-                    smem = args.get('shared memory') if 'shared memory' in args else args.get('shared_memory')
-                    regs = args.get('registers per thread') if 'registers per thread' in args else args.get('regs_per_thread')
-                    stream = args.get('stream')
-                    device = args.get('device')
-                    context = args.get('context')
-                    sig.append((name, grid, block, smem, regs, stream, device, context))
-                else:
-                    # Fallback to minimal info if uid is missing
-                    name = kd.get('name') if isinstance(kd, dict) else str(kd)
-                    stream = kd.get('stream') if isinstance(kd, dict) else None
-                    sig.append((name, None, None, None, None, stream, None, None))
-            return tuple(sig)
-        df_graph_launchers = df_graph_launchers.copy()
-        df_graph_launchers['graph_signature'] = df_graph_launchers['kernel_details'].apply(_make_graph_signature)
-
-        # 1) Grouped graph-level summary across replays of the same captured graph (by signature).
-        grp = df_graph_launchers.groupby('graph_signature', dropna=False).agg({
-            'total_direct_kernel_time': ['sum', 'mean', 'count'],
-            'direct_kernel_count': ['mean', 'max']
-        })
-        grp.columns = ['_'.join(col).strip() for col in grp.columns.values]
-        grp = grp.reset_index()
-        grp.rename(columns={
-            'total_direct_kernel_time_sum': 'group_total_kernel_time_us',
-            'total_direct_kernel_time_mean': 'avg_kernel_time_per_launch_us',
-            'total_direct_kernel_time_count': 'launch_count',
-            'direct_kernel_count_mean': 'avg_direct_kernel_count',
-            'direct_kernel_count_max': 'max_direct_kernel_count'
-        }, inplace=True)
-        grp['group_total_kernel_time_ms'] = grp['group_total_kernel_time_us'] / 1000.0
-        total_graph_ms = grp['group_total_kernel_time_ms'].sum()
-        grp['Percentage (%)'] = (grp['group_total_kernel_time_ms'] / total_graph_ms * 100.0) if total_graph_ms > 0 else np.nan
-        grp['Cumulative Percentage (%)'] = grp['Percentage (%)'].cumsum() if total_graph_ms > 0 else np.nan
-
-        def _sig_preview(sig, max_items=4):
-            # Show only kernel names for readability
-            first = list(sig)[:max_items]
-            names = [(t[0] if isinstance(t, tuple) else str(t)) for t in first]
-            return ' | '.join(names) + (' ...' if len(sig) > max_items else '')
-        grp['graph_signature_preview'] = grp['graph_signature'].apply(_sig_preview)
-        df_graph_group_summary = grp.sort_values(by='group_total_kernel_time_ms', ascending=False).reset_index(drop=True)
-
-        # 2) Grouped kernels per position within each signature (preserve order).
-        from collections import defaultdict as _dd
-        rows_group_kerns = []
-        sig2total_us = {tuple(k): v for k, v in zip(df_graph_group_summary['graph_signature'], df_graph_group_summary['group_total_kernel_time_us'])}
-        for sig, df_launches in df_graph_launchers.groupby('graph_signature', dropna=False):
-            index2durations = _dd(list)
-            name_by_index = {}
-            for _, r in df_launchers.iterrows() if False else df_launches.iterrows():
-                klist = r.get('kernel_details') or []
-                for idx, kd in enumerate(klist):
-                    index2durations[idx].append(kd.get('dur'))
-                    if idx not in name_by_index:
-                        name_by_index[idx] = kd.get('name')
-            group_total_us = sig2total_us.get(sig, 0)
-            for idx in sorted(index2durations.keys()):
-                dur_arr = np.array(index2durations[idx])
-                total_us = float(np.sum(dur_arr))
-                rows_group_kerns.append({
-                    'graph_signature': sig,
-                    'kernel_index': idx,
-                    'kernel_name': name_by_index.get(idx),
-                    'count': int(len(dur_arr)),
-                    'total_duration_us': total_us,
-                    'mean_duration_us': float(np.mean(dur_arr)) if dur_arr.size > 0 else np.nan,
-                    'median_duration_us': float(np.median(dur_arr)) if dur_arr.size > 0 else np.nan,
-                    'std_dev_duration_us': float(np.std(dur_arr)) if dur_arr.size > 0 else np.nan,
-                    'pct_of_graph_group_time': (total_us / group_total_us * 100.0) if group_total_us > 0 else np.nan
-                })
-        df_graph_group_kernels = pd.DataFrame(rows_group_kerns)
-
-        # 3) Build a single hierarchical DataFrame: group row followed by its kernel rows.
-        combined_rows = []
-        for _, g in df_graph_group_summary.iterrows():
-            sig = g['graph_signature']
-            combined_rows.append({
-                'level': 0,
-                'graph_signature_preview': g['graph_signature_preview'],
-                'launch_count': g['launch_count'],
-                'group_total_kernel_time_us': g['group_total_kernel_time_us'],
-                'group_total_kernel_time_ms': g['group_total_kernel_time_ms'],
-                'Percentage (%)': g['Percentage (%)'],
-                'Cumulative Percentage (%)': g['Cumulative Percentage (%)']
-            })
-            kdf = df_graph_group_kernels[df_graph_group_kernels['graph_signature'] == sig].sort_values('kernel_index')
-            for _, kr in kdf.iterrows():
-                combined_rows.append({
-                    'level': 1,
-                    'kernel_index': kr['kernel_index'],
-                    'kernel_name': kr['kernel_name'],
-                    'count': kr['count'],
-                    'total_duration_us': kr['total_duration_us'],
-                    'mean_duration_us': kr['mean_duration_us'],
-                    'median_duration_us': kr['median_duration_us'],
-                    'std_dev_duration_us': kr['std_dev_duration_us'],
-                    'pct_of_graph_group_time': kr['pct_of_graph_group_time']
-                })
-        df_graph_summary = pd.DataFrame(combined_rows)
-
-        # Clear other graph-related sheets; only graph_ops_summary will be emitted.
-        df_graph_unique_args = pd.DataFrame()
-        df_graph_kernels = pd.DataFrame()
-        df_graph_hierarchy = pd.DataFrame()
-        df_graph_group_summary = pd.DataFrame()
-        df_graph_group_kernels = pd.DataFrame()
+        df_graph_summary = build_graph_ops_summary(perf_analyzer, df_graph_launchers, agg_metrics)
+        df_graph_unique_args = build_graph_ops_unique_args(perf_analyzer, df_graph_launchers, agg_metrics, include_pct=True)
     else:
         df_graph_summary = pd.DataFrame()
         df_graph_unique_args = pd.DataFrame()
-        df_graph_kernels = pd.DataFrame()
-        df_graph_hierarchy = pd.DataFrame()
-        df_graph_group_summary = pd.DataFrame()
-        df_graph_group_kernels = pd.DataFrame()
 
     # Dictionary to hold the op-specific DataFrames
     perf_metrics_dfs = {}
