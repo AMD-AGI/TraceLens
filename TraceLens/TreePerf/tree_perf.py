@@ -945,6 +945,40 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         return dict_metadata
     
     @staticmethod
+    def parse_conv_metadata(event):
+        """
+        /home/guangphu/perf-profiling/tutorials/jax_conv_profiling.py
+        
+        Example:
+        # Parameters for the 3D convolution
+        # batch_size = 1 * jax.local_device_count()
+        time_dim = 32       # 5120 # 32
+        height = 60         # 32 # 60
+        width = 104         # 30 # 104
+        in_channels = 16    # 52 # 16
+        out_channels = 5120 # 104 # 5120
+        # dtype = jax.numpy.bfloat16
+
+        # Kernel parameters
+        kernel_t = 1
+        kernel_h = 2
+        kernel_w = 2
+        stride = (1, 2, 2)
+
+        conv_events[0]
+        # 'output': '(bf16[1,5120,34,31,53]{4,3,2,1,0},u8[7150336]{0})',
+        # 'operands': ['bf16[1,16,32,60,104]{4,3,2,1,0}', 'bf16[5120,16,1,2,2]{4,3,2,1,0}']
+
+        """
+        dict_metadata = {}
+        if event.get('metadata', {}).get('operands', None):
+            operand_list, operand_type = JaxTreePerfAnalyzer.parse_operands(event)
+            dict_metadata['Input Dims'] = operand_list[:3]
+            dict_metadata['Input type'] = operand_type[:3]
+            dict_metadata['Concrete Inputs'] = operand_list[3:4] #
+        return dict_metadata
+    
+    @staticmethod
     def parse_te_fused_attn_metadata(event):
         """
         Ref:

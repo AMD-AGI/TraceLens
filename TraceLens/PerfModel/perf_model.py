@@ -1744,18 +1744,39 @@ class jax_te_fused_attn_backward(jax_te_fused_attn_forward):
     def bytes(self):
         return self.bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
 
-class jax_conv(CONV):
+class jax_conv:
+    """
+    https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py 
+    
+    conv_flops_count
+    Args:
+        x_shape (list(int)): The input shape before convolution.
+        w_shape (list(int)): The filter shape.
+        out_shape (list(int)): The output shape after convolution.
+        transposed (bool): is the convolution transposed
+    Returns:
+        int: the number of flops
+    """
+    
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.param_details = self.get_param_details(event)
+        self.x_shape = self.param_details['input_shape']
+        self.filter_shape = self.param_details['filter_shape']
+        self.out_shape = self.param_details['out_shape']
+        self.bias = self.param_details['bias']
+        self.bytes_per_element = self.param_details['bytes_per_element']
+        self.transposed_conv = False
 
     @staticmethod
     def get_param_details(event):
-        # TODO: conv in jax traces
         input_dims = event['args']['Input Dims']
 
         input_shape = tuple(input_dims[0])
-        ndims = len(input_shape) - 2 #first two dimensions are batch and channel
+        ndims = len(input_shape) - 2 # first two dimensions are batch and channel
         filter_shape = tuple(input_dims[1])
         bias = len(input_dims) == 3
-
+        output_shape = tuple(input_dims[1])
         bytes_per_element = jax_dtype2bpe(event['args']['Input type'][0])
 
         if len(input_shape) == 3:
@@ -1767,15 +1788,26 @@ class jax_conv(CONV):
         else:
             raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
 
-        return {"convNd": convNd, "input_shape": input_shape, "filter_shape": filter_shape, "bytes_per_element": bytes_per_element}
+        if len(input_shape) == 3:
+            convNd = 'conv1d'
+        elif len(input_shape) == 4:
+            convNd = 'conv2d'
+        elif len(input_shape) == 5:
+            convNd = 'conv3d'
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
 
-    def bytes(self):
-        return super().bytes(bytes_per_element=self.param_details["bytes_per_element"])
-
-class jax_conv_bwd(jax_conv):
+        return {"convNd": convNd, 
+                "input_shape": input_shape, 
+                "filter_shape": filter_shape,
+                "output_shape": output_shape,
+                "bias": bias, 
+                "bytes_per_element": bytes_per_element,
+                }
 
     def flops(self):
-        return self.flops_bwd()
-
+        return CONV.flops_func(self.x_shape, self.filter_shape, self.out_shape, self.bias, self.transposed_conv)
+    
     def bytes(self):
-        return self.bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
+        return CONV.bytes_func(self.x_shape, self.filter_shape, self.out_shape, self.bias, bytes_per_element=self.bytes_per_element)
+
