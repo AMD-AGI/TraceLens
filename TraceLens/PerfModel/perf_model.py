@@ -1747,9 +1747,6 @@ class jax_te_fused_attn_backward(jax_te_fused_attn_forward):
 class jax_conv(CONV):
 
     @staticmethod
-    def str_to_tuple(s):
-        return tuple(int(x) for x in s[1:-1].split(','))
-    @staticmethod
     def get_param_details(event):
         # TODO: conv in jax traces
         input_dims = event['args']['Input Dims']
