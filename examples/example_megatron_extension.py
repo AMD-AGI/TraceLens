@@ -251,7 +251,7 @@ class tev2_pseudo_gemm(GEMM):
         N = B_shape[1]
         K = A_shape[1]
 
-        dtype_A_B = 'fp8', 'fp8'
+        dtype_A_B = tuple(event['args']['Input type'][:2])
         stride_A, stride_B = None, None
         return {"M": M, "N": N, "K": K, "bias": False,
                 "stride_A": stride_A, "stride_B": stride_B,
