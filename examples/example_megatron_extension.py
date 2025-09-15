@@ -261,8 +261,10 @@ class tev2_pseudo_gemm(GEMM):
         dtype_A_B = self.param_details['dtype_A_B']
         if dtype_A_B[0] != dtype_A_B[1]:
             raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
-        self.bpe_in = 1 #for fp8 gemm
-        # irrespective of the input dtype, the output dtype is always fp16/bf16
+        self.bpe_in = name2bpe(dtype_A_B[0])
+        # irrespective of the input dtype (fp8/fp16/bf16), the output dtype is always fp16/bf16
+        if self.bpe_in not in [1, 2]:
+            raise ValueError(f"Expected bpe_in to be 1 or 2, got {self.bpe_in}")
         self.bpe_out = 2 
         return super().bytes(bpe_mat1=self.bpe_in, bpe_mat2=self.bpe_in,
                              bpe_bias=self.bpe_in, # does not matter
