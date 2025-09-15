@@ -251,7 +251,11 @@ class tev2_pseudo_gemm(GEMM):
         N = B_shape[1]
         K = A_shape[1]
 
-        dtype_A_B = tuple(event['args']['Input type'][:2])
+        # Validate 'Input type' existence and length
+        input_type = event['args'].get('Input type')
+        if not isinstance(input_type, (list, tuple)) or len(input_type) < 2:
+            raise ValueError(f"Expected 'Input type' in event['args'] to be a list or tuple with at least 2 elements, got: {input_type}")
+        dtype_A_B = tuple(input_type[:2])
         stride_A, stride_B = None, None
         return {"M": M, "N": N, "K": K, "bias": False,
                 "stride_A": stride_A, "stride_B": stride_B,
