@@ -315,8 +315,68 @@ class TreePerfAnalyzer:
         # This is why, this method identifies such cases
         # by checking if grandchildren of CPU operations are kernel events.
         kernel_launchers = []
+        # Precompute first-kernel stream indices for each graph launch to delimit sequences on each stream
+        from ..util import TraceEventUtils as _TEU  # local alias
+        stream2graph_start_indices = defaultdict(list)
+        for ev in self.tree.events:
+            ev_cat = self.event_to_category(ev)
+            ev_name = ev.get('name', '')
+            is_graph_rt = ev_cat in {'cuda_runtime', 'cuda_driver'} and (
+                'cudaGraphLaunch' in ev_name or 'cuGraphLaunch' in ev_name or 'hipGraphLaunch' in ev_name
+            )
+            if not is_graph_rt:
+                continue
+            first_gpu_uids = ev.get('gpu_events', [])
+            if not first_gpu_uids:
+                continue
+            k0 = self.tree.get_UID2event(first_gpu_uids[0])
+            stream = k0.get('args', {}).get('stream')
+            sidx = k0.get('args', {}).get(_TEU.ArgNames.StreamIndex)
+            if stream is not None and sidx is not None:
+                stream2graph_start_indices[stream].append(sidx)
+        for s in stream2graph_start_indices:
+            stream2graph_start_indices[s].sort()
         for event in self.tree.events:
-            if self.event_to_category(event) != 'cpu_op':
+            cat = self.event_to_category(event)
+            if cat != 'cpu_op':
+                # Treat CUDA/HIP graph launches as kernel launchers too
+                name = event.get('name', '')
+                is_graph_runtime = cat in {'cuda_runtime', 'cuda_driver'} and (
+                    'cudaGraphLaunch' in name or 'cuGraphLaunch' in name or 'hipGraphLaunch' in name
+                )
+                if not is_graph_runtime:
+                    continue
+                # Collect all kernel events with same correlation id
+                list_kernel_uids = event.get('gpu_events', [])
+                list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
+                corr = event.get('args', {}).get('correlation')
+                if corr is None:
+                    raise ValueError(f"Graph runtime event missing correlation id: {event.get('name')}")
+                list_kernels = sorted(
+                    [ev for ev in self.tree.events
+                     if self.event_to_category(ev) == 'kernel'
+                     and ev.get('args', {}).get('correlation') == corr],
+                    key=lambda e: e.get('ts', 0)
+                )
+                if not list_kernels:
+                    raise ValueError(f"No kernels matched correlation id {corr} for graph launch {event.get('name')} (pid={event.get('pid')}, tid={event.get('tid')})")
+
+                if not include_nccl:
+                    list_kernels = [k for k in list_kernels if 'nccl' not in k.get('name', '')]
+                event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time'] if list_kernels else 0
+                event['direct_kernel_count'] = len(list_kernels)
+                # Include kernel UID to enable per-kernel reporting
+                event['kernel_details'] = [{'name': kernel['name'],
+                                             'dur': kernel['dur'],
+                                             'stream': kernel.get('args', {}).get('stream', None),
+                                             'uid': kernel['UID']}
+                                            for kernel in list_kernels]
+                # Explicit category to surface in summaries
+                event['op category'] = 'GRAPH'
+                # Additional metadata to distinguish graph op types
+                event['graph_op_type'] = cat
+                event['graph_runtime_name'] = event['name']
+                kernel_launchers.append(event)
                 continue
 
             if event['name'] == 'execute':
@@ -371,8 +431,13 @@ class TreePerfAnalyzer:
             metrics_event = {'name': event['name'],
                              'op category': event['op category'],
                              'UID': event['UID'],
-                            'total_direct_kernel_time': event['total_direct_kernel_time'],
-                            'direct_kernel_count': event['direct_kernel_count']}
+                             'total_direct_kernel_time': event['total_direct_kernel_time'],
+                             'direct_kernel_count': event['direct_kernel_count']}
+            # Include graph metadata if present
+            if 'graph_op_type' in event:
+                metrics_event['graph_op_type'] = event['graph_op_type']
+            if 'graph_runtime_name' in event:
+                metrics_event['graph_runtime_name'] = event['graph_runtime_name']
             for arg in ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']:
                 if arg in event['args']:
                     metrics_event[arg] = list_to_tuple(event['args'][arg])
