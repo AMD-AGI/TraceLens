@@ -106,13 +106,22 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     dict_dfs['xla_summary']= df_xla_summary 
     
     # Generate & store op-specific DataFrames
-    for op_cat in ['GEMM', 'Conv', 'TE', 'FA FWD', 'FA BWD']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys()
-        # filter out op cats
+    for op_cat in ['GEMM', 'Conv', 'TE']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys()
+        print(f'\n\n {op_cat}')
         op_events = [event for event in perf_analyzer.tree.events if event.get('gpu_kernel_op_cat', '') == op_cat]
-        df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events)
-        dict_dfs[f"op_{op_cat}_detailed"] = df_op_detailed
-        df_op = perf_analyzer.summarize_df_perf_metrics(df_op_detailed, agg_metrics)
-        dict_dfs[f"op_{op_cat}"] = df_op
+        if op_cat in ['GEMM', ]: 
+            df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events)
+            dict_dfs[f"op_{op_cat}_detailed"] = df_op_detailed
+            df_op = perf_analyzer.summarize_df_perf_metrics(df_op_detailed, agg_metrics)
+            dict_dfs[f"op_{op_cat}"] = df_op
+        else:
+            # For te_fused_attn and conv: create separate tables for forward and backward passes.
+            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
+            df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(df_ops_fwd, agg_metrics)
+            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_details=True, include_args=True)
+            df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(df_ops_bwd, agg_metrics)
+            dict_dfs[f"op_{op_cat}_fwd"] = df_ops_fwd
+            dict_dfs[f"op_{op_cat}_bwd"] = df_ops_bwd
 
     return dict_dfs
 

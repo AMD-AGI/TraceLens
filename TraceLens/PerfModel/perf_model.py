@@ -709,6 +709,7 @@ class CONV:
         # for bias we read the output gradient and write the bias gradient
         bytes_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
+    
     def bytes_bwd(self, bytes_per_element):
         return self.bytes_bwd_func(self.x_shape, self.w_shape, self.out_shape, self.bias, bytes_per_element)
 
@@ -1665,8 +1666,8 @@ class jax_gemm(GEMM):
             B_dim, M, K = A_shape  # (B, M, K)
             _,      _, N = B_shape # (B, K, N)
         elif len(A_shape) == 2:
-            N, K = A_shape
-            _, M = B_shape
+            M, K = A_shape
+            N, K = B_shape
         else:
             print('\n Invalid gemm input dims:', input_dims)
             sys.exit(0)
@@ -1703,7 +1704,7 @@ class jax_gemm(GEMM):
     def bytes_bwd(self, _):
         raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
-class jax_te_fused_attn_forward(SDPA):
+class jax_te_fused_attn(SDPA):
     """
     Jax TE fused attention:
 
@@ -1735,8 +1736,11 @@ class jax_te_fused_attn_forward(SDPA):
 
     def bytes(self):
         return super().bytes(bytes_per_element=self.param_details["bytes_per_element"])
+    
+    def bytes_bwd(self):
+        return super().bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
 
-class jax_te_fused_attn_backward(jax_te_fused_attn_forward):
+class _jax_te_fused_attn_bwd(jax_te_fused_attn):
 
     def flops(self):
         return self.flops_bwd()
@@ -1746,6 +1750,8 @@ class jax_te_fused_attn_backward(jax_te_fused_attn_forward):
 
 class jax_conv:
     """
+    Convolutions - FLOPs = 2x Number of Kernel x Kernel Shape x Output Shape
+    
     https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py 
     
     conv_flops_count
@@ -1763,30 +1769,23 @@ class jax_conv:
         self.param_details = self.get_param_details(event)
         self.x_shape = self.param_details['input_shape']
         self.filter_shape = self.param_details['filter_shape']
-        self.out_shape = self.param_details['out_shape']
+        self.out_shape = self.param_details['output_shape']
         self.bias = self.param_details['bias']
         self.bytes_per_element = self.param_details['bytes_per_element']
-        self.transposed_conv = False
+        self.transposed_conv = False # TODO
 
     @staticmethod
     def get_param_details(event):
         input_dims = event['args']['Input Dims']
+        output_dims = event['args']['Output Dims']
+        filter_shape = event['args']['Filter Shape']
 
-        input_shape = tuple(input_dims[0])
-        ndims = len(input_shape) - 2 # first two dimensions are batch and channel
-        filter_shape = tuple(input_dims[1])
+        input_shape = tuple(input_dims[0]) # TODO first two dimensions are batch and channel (? flop count differs)
+        filter_shape = tuple(filter_shape) # first two dimensions are output and input channel
         bias = len(input_dims) == 3
-        output_shape = tuple(input_dims[1])
+        output_shape = tuple(output_dims[0])
         bytes_per_element = jax_dtype2bpe(event['args']['Input type'][0])
-
-        if len(input_shape) == 3:
-            convNd = 'conv1d'
-        elif len(input_shape) == 4:
-            convNd = 'conv2d'
-        elif len(input_shape) == 5:
-            convNd = 'conv3d'
-        else:
-            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+        transposed_conv = False # TODO
 
         if len(input_shape) == 3:
             convNd = 'conv1d'
@@ -1803,11 +1802,27 @@ class jax_conv:
                 "output_shape": output_shape,
                 "bias": bias, 
                 "bytes_per_element": bytes_per_element,
+                "transposed_conv": transposed_conv,
                 }
 
     def flops(self):
         return CONV.flops_func(self.x_shape, self.filter_shape, self.out_shape, self.bias, self.transposed_conv)
-    
+
     def bytes(self):
         return CONV.bytes_func(self.x_shape, self.filter_shape, self.out_shape, self.bias, bytes_per_element=self.bytes_per_element)
+    
+    def flops_bwd(self):
+        return CONV.flops_bwd_func(self.out_shape, self.x_shape, self.filter_shape, self.bias, self.transposed_conv)
+
+    def bytes_bwd(self):
+        return CONV.bytes_bwd_func(self.x_shape, self.filter_shape, self.out_shape, self.bias, bytes_per_element=self.bytes_per_element)
+    
+class x_jax_conv_bwd(jax_conv):
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self):
+        return self.bytes_bwd()
+    
 
