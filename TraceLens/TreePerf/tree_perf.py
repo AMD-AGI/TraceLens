@@ -1236,16 +1236,16 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 metrics_event.update(dict_perf_metrics)
                 if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
                     list_warn_non_zero_flops_and_zero_time.append(event)
+                if bwd and not event.get('bwd_events'):
+                    list_no_bwd_events.append(event)
+                if include_args:
+                    metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
+                if include_kernel_details:
+                    metrics_event['kernel_details'] = event['kernel_details']
+                rows.append(metrics_event)
             else:
                 list_warn_perf_metrics_failed.append(event)
-            if bwd and not event.get('bwd_events'):
-                list_no_bwd_events.append(event)
-            if include_args:
-                metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
-            if include_kernel_details:
-                metrics_event['kernel_details'] = event['kernel_details']
-            rows.append(metrics_event)
-
+            
         self._show_warnings(list_warn_non_zero_flops_and_zero_time,
                             list_no_bwd_events,
                             list_warn_perf_metrics_failed,

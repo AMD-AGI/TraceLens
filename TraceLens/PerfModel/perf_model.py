@@ -1666,8 +1666,8 @@ class jax_gemm(GEMM):
             B_dim, M, K = A_shape  # (B, M, K)
             _,      _, N = B_shape # (B, K, N)
         elif len(A_shape) == 2:
-            M, K = A_shape
-            N, K = B_shape
+            N, K = A_shape
+            M, K = B_shape
         else:
             print('\n Invalid gemm input dims:', input_dims)
             sys.exit(0)
