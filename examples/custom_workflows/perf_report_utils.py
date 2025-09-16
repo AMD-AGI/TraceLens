@@ -50,7 +50,7 @@ def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
             print(f"Failed to build performance metrics from group {group}, ensure profiler has record_shapes=True")
             continue
 
-        df_ops = perf_analyzer.build_df_perf_metrics(events, bwd=False, non_data_mov=True, include_kernel_names=True, include_args=True)
+        df_ops = perf_analyzer.build_df_perf_metrics(events, bwd=False, non_data_mov=True, include_kernel_details=True, include_args=True)
         dfs_all[group] = pd.concat([dfs_all[group], df_ops]) if dfs_all[group] is not None else df_ops
 
     return dfs_all
