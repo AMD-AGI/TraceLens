@@ -239,7 +239,7 @@ def generate_perf_report_pytorch(profile_json_path: str,
             df_ops_fwd = add_truncated_kernel_details(df_ops_fwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
             # For now, flash_attention_varlen_backward is processed with bwd=True, so we need
             # to have a workaround to extract it from the fwd df and append it to the bwd df.
-            filtered_df = None
+            filtered_df_bwd_ops = None
             if not df_ops_fwd.empty:
                 filtered_df_bwd_ops = df_ops_fwd[df_ops_fwd['name']=='flash_attn::_flash_attn_varlen_backward']
                 df_ops_fwd = df_ops_fwd[df_ops_fwd['name']!='flash_attn::_flash_attn_varlen_backward']
