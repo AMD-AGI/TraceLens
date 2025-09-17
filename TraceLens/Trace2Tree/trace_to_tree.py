@@ -617,6 +617,33 @@ class TraceToTree:
         for event in self.events:
             if self.event_to_category(event) not in {'cuda_runtime', 'cuda_driver'}:
                 continue
+
+            # For graph runtime launches, attach all kernels sharing the launch correlation so GPU timeline includes them
+            name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, '')
+            if 'graphlaunch' in name.lower():
+                corr = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(self.linking_key)
+                if corr is not None:
+                    kernel_uids = []
+                    for kev in self.events:
+                        if (self.event_to_category(kev) == 'kernel' and
+                            kev.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get('correlation') == corr):
+                            event.setdefault('children', []).append(kev[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+                            kev['parent'] = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+                            kev['tree'] = True
+                            self.name2event_uids[kev[TraceLens.util.TraceEventUtils.TraceKeys.Name]].append(kev[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+                            kernel_uids.append(kev[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+
+                    if kernel_uids:
+                        event['gpu_events'] = kernel_uids
+                        # Propagate to ancestors so higher-level nodes reflect these GPU events
+                        cur = event
+                        while self.get_parent_event(cur):
+                            parent = self.get_parent_event(cur)
+                            parent.setdefault('gpu_events', []).extend(kernel_uids)
+                            cur = parent
+                        # Do not also run the non-graph single-event path.
+                        continue
+
             corresponding_gpu_event = self._find_corresponding_output_event(event)
             if not corresponding_gpu_event:
                 continue
