@@ -178,37 +178,44 @@ def add_truncated_kernel_details(df: pd.DataFrame,
 
 # Graph analysis helpers
 
-def _make_graph_signature_factory(perf_analyzer):
-    def _make_graph_signature(klist):
-        if not isinstance(klist, list):
-            return tuple()
-        sig = []
-        for kd in klist:
-            uid = kd.get('uid') if isinstance(kd, dict) else None
-            if uid is not None and uid in getattr(perf_analyzer.tree, 'events_by_uid', {}):
-                ev = perf_analyzer.tree.get_UID2event(uid)
-                args = ev.get('args', {}) if isinstance(ev, dict) else {}
-                name = ev.get('name')
-                grid = tuple(args.get('grid')) if isinstance(args.get('grid'), list) else args.get('grid')
-                block = tuple(args.get('block')) if isinstance(args.get('block'), list) else args.get('block')
-                smem = args.get('shared memory') if 'shared memory' in args else args.get('shared_memory')
-                regs = args.get('registers per thread') if 'registers per thread' in args else args.get('regs_per_thread')
-                stream = args.get('stream')
-                device = args.get('device')
-                context = args.get('context')
-                sig.append((name, grid, block, smem, regs, stream, device, context))
-            else:
-                name = kd.get('name') if isinstance(kd, dict) else str(kd)
-                stream = kd.get('stream') if isinstance(kd, dict) else None
-                sig.append((name, None, None, None, None, stream, None, None))
-        return tuple(sig)
-    return _make_graph_signature
+def _make_graph_signature(perf_analyzer, klist):
+    """
+    Build a stable signature for a graph replay.
+
+    The signature is an ordered tuple of per-kernel descriptors capturing:
+      (kernel_name, grid, block, stream)
+
+    This keeps replays of the same captured graph grouped together, while
+    distinguishing different captures even if kernel names overlap.
+    """
+    if not isinstance(klist, list):
+        return tuple()
+    sig = []
+    for kd in klist:
+        uid = kd.get('uid') if isinstance(kd, dict) else None
+        if uid is not None and uid in getattr(perf_analyzer.tree, 'events_by_uid', {}):
+            ev = perf_analyzer.tree.get_UID2event(uid)
+            args = ev.get('args', {}) if isinstance(ev, dict) else {}
+            name = ev.get('name')
+            grid = tuple(args.get('grid')) if isinstance(args.get('grid'), list) else args.get('grid')
+            block = tuple(args.get('block')) if isinstance(args.get('block'), list) else args.get('block')
+            stream = args.get('stream')
+            sig.append((name, grid, block, stream))
+        else:
+            name = kd.get('name') if isinstance(kd, dict) else str(kd)
+            stream = kd.get('stream') if isinstance(kd, dict) else None
+            sig.append((name, None, None, stream))
+    return tuple(sig)
 
 
-def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame, agg_metrics):
+def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame):
+    """
+    Produce a hierarchical summary for graph replays:
+      - Group rows: one per unique graph_signature with totals/launch_count
+      - Child rows: per-kernel position statistics across replays
+    """
     df = df_graph_launchers.copy()
-    make_sig = _make_graph_signature_factory(perf_analyzer)
-    df['graph_signature'] = df['kernel_details'].apply(make_sig)
+    df['graph_signature'] = df['kernel_details'].apply(lambda klist: _make_graph_signature(perf_analyzer, klist))
 
     grp = df.groupby('graph_signature', dropna=False).agg({
         'total_direct_kernel_time': ['sum', 'mean', 'count'],
@@ -291,17 +298,6 @@ def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame, agg
     return pd.DataFrame(combined_rows)
 
 
-def build_graph_ops_unique_args(perf_analyzer, df_graph_launchers: pd.DataFrame, agg_metrics, include_pct=True):
-    df_graph_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(
-        df_graph_launchers,
-        agg_metrics=agg_metrics,
-        include_pct=include_pct
-    )
-    return add_truncated_kernel_details(
-        df_graph_unique_args,
-        source_col='kernel_details_summary',
-        new_col_name='trunc_kernel_details'
-    )
 
 def generate_perf_report_pytorch(profile_json_path: str, 
                                 output_xlsx_path: Optional[str] = None,
@@ -357,8 +353,9 @@ def generate_perf_report_pytorch(profile_json_path: str,
     # Graph-launch specific breakdowns (CUDA/ROCm)
     df_graph_launchers = df_kernel_launchers[df_kernel_launchers['op category'] == 'GRAPH'].copy()
     if not df_graph_launchers.empty:
-        df_graph_summary = build_graph_ops_summary(perf_analyzer, df_graph_launchers, agg_metrics)
-        df_graph_unique_args = build_graph_ops_unique_args(perf_analyzer, df_graph_launchers, agg_metrics, include_pct=True)
+        df_graph_summary = build_graph_ops_summary(perf_analyzer, df_graph_launchers)
+        # Unique-args table for graph ops is not particularly actionable; omit content.
+        df_graph_unique_args = pd.DataFrame()
     else:
         df_graph_summary = pd.DataFrame()
         df_graph_unique_args = pd.DataFrame()
