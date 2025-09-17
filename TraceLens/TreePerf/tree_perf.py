@@ -308,91 +308,102 @@ class TreePerfAnalyzer:
         return df_perf_metrics_summary
 
     def get_kernel_launchers(self, include_nccl=False):
-        # This method traverses the event tree to identify CPU operations that serve as
-        # "kernel launchers." These are operations that result in GPU kernel
-        # execution without further cpu op calls.
-        # Note that kernels are called through runtime events.
-        # This is why, this method identifies such cases
-        # by checking if grandchildren of CPU operations are kernel events.
-        kernel_launchers = []
-        for event in self.tree.events:
-            cat = self.event_to_category(event)
-            if cat != 'cpu_op':
-                # Treat CUDA/HIP graph launches as kernel launchers too
-                name = event.get('name', '')
-                is_graph_runtime = cat in {'cuda_runtime', 'cuda_driver'} and (
-                    'cudaGraphLaunch' in name or 'cuGraphLaunch' in name or 'hipGraphLaunch' in name
-                )
-                if not is_graph_runtime:
-                    continue
-                # Collect all kernel events with same correlation id
-                corr = event.get('args', {}).get('correlation')
-                if corr is None:
-                    raise ValueError(f"Graph runtime event missing correlation id: {event.get('name')}")
-                list_kernels = sorted(
-                    [ev for ev in self.tree.events
-                     if self.event_to_category(ev) == 'kernel'
-                     and ev.get('args', {}).get('correlation') == corr],
-                    key=lambda e: e.get('ts', 0)
-                )
-                if not list_kernels:
-                    raise ValueError(f"No kernels matched correlation id {corr} for graph launch {event.get('name')} (pid={event.get('pid')}, tid={event.get('tid')})")
+        """
+        Identify and summarize 'kernel launchers' (ops that directly cause device kernels).
 
-                if not include_nccl:
-                    list_kernels = [k for k in list_kernels if 'nccl' not in k.get('name', '')]
-                event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time'] if list_kernels else 0
-                event['direct_kernel_count'] = len(list_kernels)
-                # Include kernel UID to enable per-kernel reporting
-                event['kernel_details'] = [{'name': kernel['name'],
-                                             'dur': kernel['dur'],
-                                             'stream': kernel.get('args', {}).get('stream', None),
-                                             'uid': kernel['UID']}
-                                            for kernel in list_kernels]
-                # Explicit category to surface in summaries
-                event['op category'] = 'GRAPH'
-                # Additional metadata to distinguish graph op types
-                event['graph_op_type'] = cat
-                event['graph_runtime_name'] = event['name']
-                kernel_launchers.append(event)
+        Modes:
+          - Graph mode: Treat CUDA/HIP graph runtime launches as launchers. Match device kernels strictly by
+            runtime args.correlation for the launch (no timing/stream heuristics).
+          - Regular mode: A CPU op is a launcher if it has device kernels as grandchildren via runtime events.
+
+        Returns a list of launcher events annotated with:
+          - total_direct_kernel_time
+          - direct_kernel_count
+          - kernel_details: [{name, dur, stream, uid}, ...]
+          - op category
+          - graph_op_type, graph_runtime_name (for graph mode only)
+        """
+
+        def _is_graph_runtime(ev):
+            if self.event_to_category(ev) not in {'cuda_runtime', 'cuda_driver'}:
+                return False
+            name = ev.get('name', '')
+            return ('cudaGraphLaunch' in name) or ('cuGraphLaunch' in name) or ('hipGraphLaunch' in name)
+
+        def _collect_graph_kernels(ev):
+            # Assumption: All device kernels spawned by a given graph launch share the same 'correlation' id.
+            corr = ev.get('args', {}).get('correlation')
+            if corr is None:
+                raise ValueError(f"Graph runtime event missing correlation id: {ev.get('name')}")
+            ks = [e for e in self.tree.events
+                  if self.event_to_category(e) == 'kernel'
+                  and e.get('args', {}).get('correlation') == corr]
+            if not ks:
+                raise ValueError(
+                    f"No kernels matched correlation id {corr} for graph launch {ev.get('name')} "
+                    f"(pid={ev.get('pid')}, tid={ev.get('tid')})"
+                )
+            ks.sort(key=lambda e: e.get('ts', 0))  # Preserve device execution order within this replay
+            return ks
+
+        def _summarize_launcher(ev, kernels, op_category):
+            # TODO: collect more details?
+            ev['total_direct_kernel_time'] = GPUEventAnalyser(kernels).compute_metrics()['busy_time'] if kernels else 0
+            ev['direct_kernel_count'] = len(kernels)
+            ev['kernel_details'] = [
+                {
+                    'name': k['name'],
+                    'dur': k['dur'],
+                    'stream': k.get('args', {}).get('stream'),
+                    'uid': k['UID'],
+                } for k in kernels
+            ]
+            ev['op category'] = op_category
+            return ev
+
+        kernel_launchers = []
+
+        for ev in self.tree.events:
+            cat = self.event_to_category(ev)
+
+            # Graph-mode launchers: runtime launches for graphs
+            if _is_graph_runtime(ev):
+                kernels = _collect_graph_kernels(ev)
+                ev['graph_op_type'] = cat  # runtime category for context
+                ev['graph_runtime_name'] = ev.get('name')
+                kernel_launchers.append(_summarize_launcher(ev, kernels, 'GRAPH'))
                 continue
 
-            if event['name'] == 'execute':
-                parent = self.tree.get_parent_event(event)
-                list_kernel_uids = parent.get('gpu_events', [])
-                list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
-                parent['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
-                parent['direct_kernel_count'] = len(list_kernels)
-                parent['kernel_details'] = [{'name': kernel['name'],
-                                             'dur': kernel['dur'],
-                                             'stream': kernel.get('args', {}).get('stream', None)}
-                                            for kernel in list_kernels]
+            # Only CPU ops can serve as regular kernel launchers
+            if cat != 'cpu_op':
+                continue
+
+            # Special case: 'execute' belongs to parent op; attribute its kernels to the parent
+            if ev.get('name') == 'execute':
+                parent = self.tree.get_parent_event(ev)
+                kernels = [self.tree.get_UID2event(uid) for uid in parent.get('gpu_events', [])]
+                parent = _summarize_launcher(parent, kernels, None)
                 parent['op category'] = self.op_categorizer(parent)
                 kernel_launchers.append(parent)
-                continue # no need to check children of this event
+                continue
 
-            kernel_launcher = False
-            # total_direct_kernel_time = 0
-            # direct_kernel_count = 0
-            list_kernels = []
-            for child_UID in event.get('children', []):
-                child = self.tree.events_by_uid[child_UID]
-                for grand_child_UID in child.get('children', []):
-                    grand_child = self.tree.events_by_uid[grand_child_UID]
-                    is_kernel = self.event_to_category(grand_child) == 'kernel'
-                    is_nccl = 'nccl' in grand_child['name']
-                    should_include = is_kernel and (include_nccl or not is_nccl)
-                    if should_include:
-                        kernel_launcher = True
-                        list_kernels.append(grand_child)
-            if kernel_launcher:
-                event['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
-                event['direct_kernel_count'] = len(list_kernels)
-                event['kernel_details'] = [{'name': kernel['name'],
-                                           'dur': kernel['dur'],
-                                           'stream': kernel.get('args', {}).get('stream', None)}
-                                          for kernel in list_kernels]
-                event['op category'] = self.op_categorizer(event)
-                kernel_launchers.append(event)
+            # Regular-mode launcher: a CPU op is a launcher if it has device kernels among grandchildren
+            direct_kernels = []
+            for child_uid in ev.get('children', []):
+                child = self.tree.events_by_uid[child_uid]
+                for grand_uid in child.get('children', []):
+                    grand = self.tree.events_by_uid[grand_uid]
+                    if self.event_to_category(grand) != 'kernel':
+                        continue
+                    if not include_nccl and 'nccl' in grand.get('name', ''):
+                        continue
+                    direct_kernels.append(grand)
+
+            if direct_kernels:
+                ev = _summarize_launcher(ev, direct_kernels, None)
+                ev['op category'] = self.op_categorizer(ev)
+                kernel_launchers.append(ev)
+
         return kernel_launchers
 
     def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False):
