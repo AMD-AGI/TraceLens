@@ -1768,14 +1768,6 @@ class jax_te_fused_attn(SDPA):
     def bytes_bwd(self):
         return super().bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
 
-class _jax_te_fused_attn_bwd(jax_te_fused_attn):
-
-    def flops(self):
-        return self.flops_bwd()
-
-    def bytes(self):
-        return self.bytes_bwd(bytes_per_element=self.param_details["bytes_per_element"])
-
 class jax_conv:
     """
     Convolutions - FLOPs = 2x Number of Kernel x Kernel Shape x Output Shape
@@ -1844,13 +1836,5 @@ class jax_conv:
 
     def bytes_bwd(self):
         return CONV.bytes_bwd_func(self.x_shape, self.filter_shape, self.out_shape, self.bias, bytes_per_element=self.bytes_per_element)
-    
-class x_jax_conv_bwd(jax_conv):
-
-    def flops(self):
-        return self.flops_bwd()
-
-    def bytes(self):
-        return self.bytes_bwd()
     
 
