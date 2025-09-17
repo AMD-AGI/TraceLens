@@ -214,9 +214,11 @@ def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame):
       - Group rows: one per unique graph_signature with totals/launch_count
       - Child rows: per-kernel position statistics across replays
     """
+    # Derive per-replay signature from ordered kernel_details
     df = df_graph_launchers.copy()
     df['graph_signature'] = df['kernel_details'].apply(lambda klist: _make_graph_signature(perf_analyzer, klist))
 
+    # Group launches by signature to compute totals/averages and replay counts
     grp = df.groupby('graph_signature', dropna=False).agg({
         'total_direct_kernel_time': ['sum', 'mean', 'count'],
         'direct_kernel_count': ['mean', 'max']
@@ -230,17 +232,20 @@ def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame):
         'direct_kernel_count_mean': 'avg_direct_kernel_count',
         'direct_kernel_count_max': 'max_direct_kernel_count'
     }, inplace=True)
+    # Compute group-level percentages relative to the sum of all graph groups
     grp['group_total_kernel_time_ms'] = grp['group_total_kernel_time_us'] / 1000.0
     total_graph_ms = grp['group_total_kernel_time_ms'].sum()
     grp['Percentage (%)'] = (grp['group_total_kernel_time_ms'] / total_graph_ms * 100.0) if total_graph_ms > 0 else np.nan
     grp['Cumulative Percentage (%)'] = grp['Percentage (%)'].cumsum() if total_graph_ms > 0 else np.nan
 
+    # Build a compact preview string from the first few kernel names in the signature
     def _sig_preview(sig, max_items=4):
         first = list(sig)[:max_items]
         names = [(t[0] if isinstance(t, tuple) else str(t)) for t in first]
         return ' | '.join(names) + (' ...' if len(sig) > max_items else '')
     grp['graph_signature_preview'] = grp['graph_signature'].apply(_sig_preview)
 
+    # Aggregate per-kernel-position stats across replays for each signature
     sig2total_us = {tuple(k): v for k, v in zip(grp['graph_signature'], grp['group_total_kernel_time_us'])}
     rows_group_kerns = []
     for sig, df_launches in df.groupby('graph_signature', dropna=False):
@@ -269,6 +274,7 @@ def build_graph_ops_summary(perf_analyzer, df_graph_launchers: pd.DataFrame):
             })
     df_graph_group_kernels = pd.DataFrame(rows_group_kerns)
 
+    # Flatten into a single table: level 0 (group summary) followed by level 1 (per-index stats)
     combined_rows = []
     df_graph_group_summary = grp.sort_values(by='group_total_kernel_time_ms', ascending=False).reset_index(drop=True)
     for _, g in df_graph_group_summary.iterrows():
