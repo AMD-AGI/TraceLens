@@ -47,6 +47,8 @@ op_to_perf_model_class_map = {
     'aten::convolution': perf_model.aten_conv,
     "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
+    "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
+    "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
 }
 
 unary_elemwise_ops = [
@@ -119,6 +121,7 @@ def categorize_torch_op(row):
         "aten::_scaled_dot_product_efficient_attention_backward",
         "aten::_scaled_dot_product_flash_attention_backward",
         "aiter::_flash_attn_backward",
+        "aiter::wrapper_fmha_v3_bwd",
     ]
     if row["name"] in dict_cat2names["SDPA"]:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:

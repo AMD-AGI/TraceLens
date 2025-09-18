@@ -1371,6 +1371,53 @@ class aiter__flash_attn_backward(SDPA):
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
+class aiter__fmha_v3_forward(SDPA):
+    
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        dropout_p = 0.0
+        if concrete_inputs[4] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[4])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
+
+class aiter__fmha_v3_backward(SDPA):
+    
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        dropout_p = 0.0
+        if concrete_inputs[7] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[7])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[9].lower() == 'true' if concrete_inputs[9] not in ('', 'None') else False
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
+
+    def flops(self):
+        return self.flops_bwd()
+    
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
 
 class UnaryElementwise:
 
