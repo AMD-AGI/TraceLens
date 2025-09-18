@@ -1,0 +1,2 @@
+Collective_operation,Replica_groups,node,Replica group involved,Replica_groups_size,Split_dimension,Output_tensors,Tensors_shard,data(bytes)/shard,data_excahanged_during_collective_op (Gb),Dur (secs),Algo BW (Gbps),Bus BW (Gbps)
+all-gather,"{{0,1,2,3,4,5,6,7},{8,9,10,11,12,13,14,15},{16,17,18,19,20,21,22,23},{24,25,26,27,28,29,30,31}}",0,"{0,1,2,3,4,5,6,7}",8,dimensions={1},"(bf16[1,768,48,128]{3,2,0,1}, bf16[1,768,8,128]{3,2,0,1}, bf16[1,768,8,128]{3,2,0,1})","(bf16[1,96,48,128], bf16[1,96,8,128], bf16[1,96,8,128])",1572864,0.02050,0.000412785,49.6815,43.471
