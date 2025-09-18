@@ -1056,9 +1056,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)  
         # input dims, types for each gpu kernel op category
         if 'gemm' in perf_model_name:
-            _dict_meta = JaxTreePerfAnalyzer.parse_gemm_metadata(event)
-            _dict_gemm = JaxTreePerfAnalyzer.parse_JaxGemm_metadata(event) 
-            _dict = _dict_meta | _dict_gemm
+            _dict_gemm_meta = JaxTreePerfAnalyzer.parse_gemm_metadata(event)
+            _dict_jax_gemm = JaxTreePerfAnalyzer.parse_JaxGemm_metadata(event) 
+            _dict = _dict_gemm_meta | _dict_jax_gemm
         elif 'te_fused_attn' in perf_model_name:
             _dict = JaxTreePerfAnalyzer.parse_te_fused_attn_metadata(event)
         elif 'conv' in perf_model_name:
@@ -1085,15 +1085,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         _operands = event.get('metadata', {}).get('operands', None)
         _event_custom_call = event.get('metadata', {}).get('custom_call_target', None) 
         if _operands and _event_custom_call:
-            if any (k in _event_custom_call for k in gemm_keys):
+            if  any (k in _event_custom_call for k in gemm_keys) and event['gpu_kernel_op_cat'].lower() == 'gemm':
                 return 'jax_gemm'
             elif any(k in _event_custom_call for k in te_fused_attn_keys):
                 return 'jax_te_fused_attn' 
             elif any(k in _event_custom_call for k in te_fused_attn_bwd_keys):
                 return 'jax_te_fused_attn_bwd' 
-            elif any(k in _event_custom_call for k in conv_keys):
+            elif any(k in _event_custom_call for k in conv_keys) and event['gpu_kernel_op_cat'].lower() == 'conv':
                 return 'jax_conv'
-            elif any(k in _event_custom_call for k in conv_bwd_keys):
+            elif any(k in _event_custom_call for k in conv_bwd_keys) and event['gpu_kernel_op_cat'].lower() == 'conv':
                 return 'jax_conv_bwd'
             else:
                 return 'rest' # TODO: PerfModel: 'jax_' + event['gpu_kernel_op_cat'] 
