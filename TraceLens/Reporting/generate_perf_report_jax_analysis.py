@@ -143,7 +143,6 @@ def main():
     Calls:
         generate_perf_report_jax_analysis with the parsed arguments.
     """
-    os.environ["GEMMOLOGIST_PATH"] = "/home/araina@amd.com/TraceLens/gemmologist" 
     parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
     parser.add_argument("--profile_xplane_pb_path", type=str, required=True, help="Path to the profile.xplane.pb file (e.g., '/path/to/profile.xplane.pb')")
     parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
