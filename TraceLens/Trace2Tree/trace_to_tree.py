@@ -521,7 +521,6 @@ class TraceToTree:
         self.linking_key = 'correlation' if launch_event is not None and 'correlation' in launch_event[TraceLens.util.TraceEventUtils.TraceKeys.Args] else 'External id'
 
     # TODO base class includes this, remove
-    # TODO base class includes this, remove
     def _preprocess_and_index_events(self) -> None:
         # 1. Create a dictionary to map the linkidefaultng id to the start and end ac2g events
         # 2. Create a dictionary to map the event key (by default (pid, tid)), and linking id to the actual event
@@ -559,7 +558,6 @@ class TraceToTree:
             if self.event_to_category(event) == 'python_function':
                 self.dict_pythonID2UID[event[TraceLens.util.TraceEventUtils.TraceKeys.Args]['Python id']] = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
-    # TODO base class includes this, remove
     # TODO base class includes this, remove
     def build_host_call_stack_tree(self, add_python_func=False):
     # 1. Filter and sort events based on their start timestamps.
@@ -635,7 +633,6 @@ class TraceToTree:
                 event = parent
 
     # TODO base class includes this, remove
-    # TODO base class includes this, remove
     def label_non_gpu_paths(self):
         # 1. Iterate through non GPU nodes and chck the gpu_events list
         # 2. If the gpu_events list is empty, mark the node as non_gpu_path
@@ -659,18 +656,15 @@ class TraceToTree:
             self.label_non_gpu_paths()
 
     # TODO base class includes this, remove
-    # TODO base class includes this, remove
     def get_UID2event(self, UID):
         return self.events_by_uid[UID]
 
-    # TODO base class includes this, remove
     # TODO base class includes this, remove
     def get_parent_event(self, event):
         if event.get('parent') is None:
             return None
         return self.get_UID2event(event['parent'])
 
-    # TODO base class includes this, remove
     # TODO base class includes this, remove
     def get_children_events(self, event):
         if 'children' not in event:

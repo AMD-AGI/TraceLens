@@ -31,6 +31,7 @@ __all__ = [
     "DataLoader",
     "TraceEventUtils",
     "JaxProfileProcessor",
+    "JaxProfileProcessor",
     "TraceDiff",
     "Reporting",
 ]

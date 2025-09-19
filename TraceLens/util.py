@@ -142,8 +142,6 @@ class JaxProfileProcessor:
     def get_operand_type(hlo_ops: dict, operand : str) -> str:
         if 'fusion,' in operand:
             operand = operand.strip("fusion,")
-        if 'fusion,' in operand:
-            operand = operand.strip("fusion,")
         dtypes = ["bf16", "f16", "f32", "f8", "fp8"]
         # if the operand is a slice of something else, then the type might be at the beginning of the operand name
         for t in dtypes:
@@ -174,7 +172,7 @@ class JaxProfileProcessor:
         for opname,op in hlo_ops.items():
             if "gemm" in op["computation"].lower():
                 if "backend_config" not in op:
-                    raise ValueError("Gemm backend config information missing!", op)
+                    raise ValueError("Gemm backend config information mnissing!", op)
                 backend_config=op["backend_config"]
                 beta=re.search(r"\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
                 lhs_dim=re.search(r"\"lhs_contracting_dimensions\":\[[\"012]*\]",backend_config)[0].split(":")[1].split("\"")[1]
@@ -247,10 +245,10 @@ class TraceEventUtils:
 
         # keywords for splitting jax events
         GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
-        FABwdKeys = ["FmhaBwd", "flash_bprop"]
+        FABwdKeys = ["FmhaBwd", "flash_bprop", "ck_fused_attn::dk_dv_reduce_thd"]
         FAFwdKeys = ["FmhaFwd", "flash_fprop"]
         FAV3Keys = ["kernel_func"] # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv."]
+        ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
         TEKeys = ["transformer_engine"]
         CommunicationKeys = ["rccl", "nccl"]
         ClassCategories = {
