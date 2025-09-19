@@ -1,5 +1,7 @@
 import pandas as pd
 from pathlib import Path
+import sys
+import subprocess
 
 def export_data_df(
     data_df: pd.DataFrame,
@@ -46,3 +48,15 @@ def export_data_df(
             if verbose:
                 print(f"Exporting summary statistics to {output_path}")
             data_df.to_csv(output_path, index=False)
+
+def request_install(package_name):
+    choice = input(f"Do you want to install '{package_name}' via pip? [y/N]: ").strip().lower()
+    if choice == 'y':
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+        except subprocess.CalledProcessError:
+            print(f"Failed to install '{package_name}'. Please install it manually. Exiting.")
+            sys.exit(1)
+    else:
+        print(f"Skipping installation of '{package_name}' and exiting.")
+        sys.exit(1)
