@@ -49,6 +49,7 @@ op_to_perf_model_class_map = {
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
+    "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
 }
 
 unary_elemwise_ops = [
