@@ -26,7 +26,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
         perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
     else:
         print('Unsupported trace file format.')
-        pass
+        sys.exit(0)
     dict_dfs = {}
 
     # Generate base DataFrames 
