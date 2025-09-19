@@ -141,7 +141,7 @@ def main():
                         help='Template path with a single * placeholder for rank. Example: /path/to/trace_rank_*_step_3.json')
 
     parser.add_argument('--world_size', type=int, default=None, 
-                        help='Number of ranks (inferred from trace files if not provided)')
+                        help='Number of ranks (required)')
     
     # Output arguments
     parser.add_argument('--output_xlsx_path', type=str, default=None,
