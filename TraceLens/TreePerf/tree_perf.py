@@ -910,7 +910,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         gemm_keys = ["matmul", "cublas"] # Used in JaxTrace2Tree
         te_fused_attn_keys = ['te_fused_attn_forward_ffi', ]
         te_fused_attn_bwd_keys = ['te_fused_attn_backward_ffi', ]
-        conv_keys = ['cudnn$convForward', ] 
+        conv_keys = ['cudnn$convForward', 'cudnn$convBiasActivationForward'] 
         conv_bwd_keys = ['cudnn$convBackward', ] 
         _operands = event.get('metadata', {}).get('operands', None)
         _event_custom_call = event.get('metadata', {}).get('custom_call_target', None) 
@@ -1248,8 +1248,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         
         return dict_metrics
     
-    def build_df_perf_metrics(self, events, bwd=False, 
-                            include_kernel_details=False, include_args=False, 
+    def build_df_perf_metrics(self, events, include_kernel_details=False, include_args=False, 
                               args_cols = ['Input Dims', 'Input type']):
         rows = []
         list_warn_non_zero_flops_and_zero_time = []
@@ -1263,7 +1262,17 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event) 
             for _key, _val in dict_jax_metadata.items():
                 event['args'][_key] = _val
-            metrics_event = {'name': event['name'],
+            dict_perf_metrics = None
+            try:
+                if not event['perf_model_name']  == 'rest':
+                    bwd = event['perf_model_name'].endswith('_bwd')
+                    dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd)
+            except Exception as e:
+                print(f"\nException occurred at compute perf metrics: {e}, \n\nEvent: {event}")
+                list_warn_perf_metrics_failed.append(event)
+                sys.exit(0)
+            if dict_perf_metrics is not None:
+                metrics_event = {'name': event['name'],
                              'UID': event['UID'],
                              'pid': event['pid'], 
                              'dur': event['dur'],
@@ -1271,20 +1280,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                              'op category': event['gpu_kernel_op_cat'], 
                              'perf model': event['perf_model_name']
                              }
-            dict_perf_metrics = None
-            try:
-                if not event['perf_model_name']  == 'rest':
-                    dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd)
-            except Exception as e:
-                print(f"\nException occurred at compute perf metrics: {e}, \n\nEvent: {event}")
-                list_warn_perf_metrics_failed.append(event)
-                sys.exit(0)
-            if dict_perf_metrics is not None:
                 metrics_event.update(dict_perf_metrics)
                 if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
                     list_warn_non_zero_flops_and_zero_time.append(event)
-                if bwd and not event.get('bwd_events'):
-                    list_no_bwd_events.append(event)
                 if include_args:
                     metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
                 if include_kernel_details:

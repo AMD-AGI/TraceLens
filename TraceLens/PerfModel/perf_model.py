@@ -1671,46 +1671,6 @@ class jax_gemm(GEMM):
             "gemmologist_dtype": jax_dtype_map(event['args']['Type']),
         }
         
-    @staticmethod
-    def x_get_param_details(event):
-        """Extract B, M, N, K and metadata from the profiler event.
-        
-        Note: work in progress. Input idx and output idx are not explict about M, N, K positions.
-        """
-        input_dims = event['args']['Input Dims']
-        output_dims = event['args']['Output Dims']
-        input_idx = event['args']['Input idx'][0]
-        if len(input_dims) == 2:
-            A_shape, B_shape = input_dims[input_idx[0]], input_dims[input_idx[1]]
-            dtype_A_B = tuple(event['args']['Input type'][0:2])
-        elif len(input_dims) == 3:
-            C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
-            dtype_A_B = tuple(event['args']['Input type'][1:3])
-
-        assert len(A_shape) == len(B_shape)
-        
-        # Default batch size B_dim is 1
-        B_dim = 1
-        if len(A_shape) == 3: # TODO: verify with output dims
-            B_dim, M, K = A_shape  # (B, M, K)
-            _, _, N = B_shape # (B, K, N)
-        elif len(A_shape) == 2:
-            M, K = A_shape
-            N, K = B_shape
-            assert M, N == output_dims
-        else:
-            print('\n Invalid gemm input dims:', input_dims)
-            sys.exit(0)
-
-        return {
-            "B": B_dim,
-            "M": M,
-            "N": N,
-            "K": K,
-            "bias": event['args']['Beta'] != 0,
-            "dtype_A_B": dtype_A_B,
-            "gemmologist_dtype": jax_dtype_map(event['metadata']['type']),
-        }
     # ---------------------- FLOPs / Bytes ----------------------
     def flops(self):
         """Total FLOPs for the entire batch."""
@@ -1800,7 +1760,7 @@ class jax_conv:
         output_dims = event['args']['Output Dims']
         filter_shape = event['args']['Filter Shape']
 
-        input_shape = tuple(input_dims[0]) # TODO first two dimensions are batch and channel (? flop count differs)
+        input_shape = tuple(input_dims[0]) # first two dimensions are batch and channel
         filter_shape = tuple(filter_shape) # first two dimensions are output and input channel
         bias = len(input_dims) == 3
         output_shape = tuple(output_dims[0])
