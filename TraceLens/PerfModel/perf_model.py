@@ -1145,10 +1145,12 @@ class SDPA:
                 pass
         return simulated_time
 
-def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, varlen=False):
+def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
     B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
     B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
     B_v, H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
+    if B_q != B_k or B_q != B_v:
+        raise ValueError(f"Batch sizes do not match: {B_q} != {B_k} != {B_v}")
     if H_K != H_V:
         raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
     if N_K != N_V:
