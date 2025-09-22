@@ -1222,6 +1222,7 @@ class flash_attention_varlen_forward(SDPA):
         # causal: bool
         # ...
         # ref: https://github.com/Dao-AILab/flash-attention/blob/dfb664994c1e5056961c90d5e4f70bf7acc8af10/flash_attn/flash_attn_interface.py#L143-L163
+        input_dims = event['args']['Input Dims']
         q_idx, k_idx, v_idx = 0, 1, 2
         q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
         bhnd_idx = 1, 0, 2 
