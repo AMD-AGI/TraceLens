@@ -1146,15 +1146,30 @@ class SDPA:
         return simulated_time
 
 def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, varlen=False):
-    if varlen:
-        H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
-        H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
-        H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
-        B_q = 1
-    else:
-        B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
-        B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
-        B_v, H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
+    B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
+    B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
+    B_v, H_V, N_V, d_h_V = tuple(v_shape[i] for i in bhnd_idx)
+    if H_K != H_V:
+        raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
+    if N_K != N_V:
+        raise ValueError(f"Length sizes do not match for K and V: {N_K} != {N_V}")
+    if d_h_Q != d_h_K:
+        raise ValueError(f"Head dimensions do not match for Q and K: {d_h_Q} != {d_h_K}")
+    return {
+        "B": B_q,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_K,
+        "H_KV": H_K,
+        "d_h_qk": d_h_Q,
+        "d_h_v": d_h_V,
+    }
+
+def extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx):
+    H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in hnd_idx)
+    H_K, N_K, d_h_K = tuple(k_shape[i] for i in hnd_idx)
+    H_V, N_V, d_h_V = tuple(v_shape[i] for i in hnd_idx)
+    B_q = 1
     if H_K != H_V:
         raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
     if N_K != N_V:
@@ -1225,8 +1240,8 @@ class flash_attention_varlen_forward(SDPA):
         input_dims = event['args']['Input Dims']
         q_idx, k_idx, v_idx = 0, 1, 2
         q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
-        bhnd_idx = 1, 0, 2 
-        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, True)
+        hnd_idx = 1, 0, 2
+        sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
         B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
         
         dtype_A_B = tuple(event['args']['Input type'][:2])
@@ -1286,8 +1301,8 @@ class flash_attention_varlen_backward(SDPA):
         input_dims = event['args']['Input Dims']
         q_idx, k_idx, v_idx = 1, 2, 3
         q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
-        bhnd_idx = 1, 0, 2 
-        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx, True)
+        hnd_idx = 1, 0, 2
+        sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
         B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
         
         dtype_A_B = tuple(event['args']['Input type'][:2])
