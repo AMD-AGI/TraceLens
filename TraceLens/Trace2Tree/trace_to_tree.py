@@ -522,7 +522,7 @@ class TraceToTree:
 
     # TODO base class includes this, remove
     def _preprocess_and_index_events(self) -> None:
-        # 1. Create a dictionary to map the linkidefaultng id to the start and end ac2g events
+        # 1. Create a dictionary to map the linking id to the start and end ac2g events
         # 2. Create a dictionary to map the event key (by default (pid, tid)), and linking id to the actual event
         # 3. Create a dictionary to map the sequence number to the list of event uids
         # 4. Create a dictionary to map the python id to the event uid
