@@ -849,9 +849,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map
     
-    ######
-    # Parsers for JaxTree Event Metadata
-    ######
+    #####################################
+    ## Parsers for JaxTree Event Metadata
+    #####################################
     
     @staticmethod
     def get_event_metadata(event, args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']):
@@ -1106,18 +1106,18 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         gemm_dict = JaxProfileProcessor.process_gemm_ops(_dict_hlo_op).get('op_name', None)
         return gemm_dict
 
-    ######
+    ##############
     ## GPU metrics
-    ######
+    ##############
     def get_df_gpu_timeline(self, gpu_pid = None):
         return self.gpu_event_analyser.get_breakdown_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
     
     def get_df_gpu_events_averages(self, gpu_pid = None): 
         return self.gpu_event_analyser.get_average_df(gpu_pid=gpu_pid, event_filter=self.gpu_event_filter)
     
-    ######
+    #################
     ## Kernel metrics
-    ######    
+    #################    
     def get_kernel_launchers(self, gpu_pid = None, gpu_kernel_op_cats = None):
         kernel_launchers = []
         # filter out event op cats
@@ -1187,9 +1187,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         df['time ms per gpu'] = df['total_direct_kernel_time_ms'] / num_gpus
         return df 
     
-    ######
+    #############
     ## OP metrics
-    ######
+    #############
     def compute_perf_metrics(self, event, bwd=False):
         list_warn_non_zero_flops_and_zero_time = []
         list_warn_perf_metrics_failed = []
