@@ -1167,6 +1167,27 @@ def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
         "d_h_v": d_h_V,
     }
 
+def extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx):
+    H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in hnd_idx)
+    H_K, N_K, d_h_K = tuple(k_shape[i] for i in hnd_idx)
+    H_V, N_V, d_h_V = tuple(v_shape[i] for i in hnd_idx)
+    B_q = 1
+    if H_K != H_V:
+        raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
+    if N_K != N_V:
+        raise ValueError(f"Length sizes do not match for K and V: {N_K} != {N_V}")
+    if d_h_Q != d_h_K:
+        raise ValueError(f"Head dimensions do not match for Q and K: {d_h_Q} != {d_h_K}")
+    return {
+        "B": B_q,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_K,
+        "H_KV": H_K,
+        "d_h_qk": d_h_Q,
+        "d_h_v": d_h_V,
+    }
+
 class flash_attention(SDPA):
 
     @staticmethod
@@ -1196,6 +1217,117 @@ class flash_attention_backward(flash_attention):
         return self.flops_bwd()
 
     def bytes(self, bytes_per_element):
+        return self.bytes_bwd(bytes_per_element)
+
+class flash_attention_varlen_forward(SDPA):
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (self.param_details[key] for key in ['num_seqs_q', 'num_seqs_kv', 'max_seqlen_q', 'max_seqlen_kv'])
+
+    @staticmethod
+    def get_param_details(event):
+        # The order of arguments for flash_attn::_flash_attn_varlen_forward is:
+        # q: torch.Tensor
+        # k: torch.Tensor
+        # v: torch.Tensor
+        # cu_seqlens_q: torch.Tensor
+        # cu_seqlens_k: torch.Tensor
+        # max_seqlen_q: int
+        # max_seqlen_k: int
+        # dropout_p: float
+        # softmax_scale: float
+        # causal: bool
+        # ...
+        # ref: https://github.com/Dao-AILab/flash-attention/blob/dfb664994c1e5056961c90d5e4f70bf7acc8af10/flash_attn/flash_attn_interface.py#L143-L163
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        hnd_idx = 1, 0, 2
+        sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
+        num_seqs_q = event['args']['Input Dims'][3][0] - 1
+        num_seqs_kv = event['args']['Input Dims'][4][0] - 1
+        max_seqlen_q = float(event['args']['Concrete Inputs'][5])
+        max_seqlen_kv = float(event['args']['Concrete Inputs'][6])
+        dropout = float(event['args']['Concrete Inputs'][7])
+        causal = eval(event['args']['Concrete Inputs'][9])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B, 
+                "num_seqs_q":num_seqs_q, "num_seqs_kv":num_seqs_kv, "max_seqlen_q":max_seqlen_q, "max_seqlen_kv": max_seqlen_kv}
+
+    def flops(self):
+        # The calculation of flops for varlen is different as B and S dimensions
+        # are collapsed into a single T dimension. In T dimension, there are 
+        # multiple sequences with variable sequence lengths. We don't know the 
+        # exact sequence lengths from the trace. We only know the number of 
+        # sequences and a max_seqlen (which is usually passed in based on the data).
+        # So we can only estimate the flops with a lower bound (assuming that all
+        # other sequences are of the same length except the longest sequence).
+        accum_flops = self.flops_func(self.B, self.max_seqlen_q, self.H_Q, self.max_seqlen_kv, self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'])
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q-1) * self.flops_func(self.B, (self.N_Q-self.max_seqlen_q)//(self.num_seqs_q-1), self.H_Q, (self.N_KV-self.max_seqlen_kv)//(self.num_seqs_kv-1), self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'])
+        return accum_flops
+        
+
+class flash_attention_varlen_backward(SDPA):
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (self.param_details[key] for key in ['num_seqs_q', 'num_seqs_kv', 'max_seqlen_q', 'max_seqlen_kv'])
+
+    @staticmethod
+    def get_param_details(event):
+        # The order of arguments for flash_attn::_flash_attn_varlen_forward is:
+        # dout: torch.Tensor
+        # q: torch.Tensor
+        # k: torch.Tensor
+        # v: torch.Tensor
+        # out: torch.Tensor
+        # softmax_lse: torch.Tensor
+        # dq: Optional[torch.Tensor]
+        # dk: Optional[torch.Tensor]
+        # dv: Optional[torch.Tensor]
+        # cu_seqlens_q: torch.Tensor
+        # cu_seqlens_k: torch.Tensor
+        # max_seqlen_q: int
+        # max_seqlen_k: int
+        # dropout_p: float
+        # softmax_scale: float
+        # causal: bool
+        # ...
+        # ref: https://github.com/Dao-AILab/flash-attention/blob/dfb664994c1e5056961c90d5e4f70bf7acc8af10/flash_attn/flash_attn_interface.py#L330-L354
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 1, 2, 3
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        hnd_idx = 1, 0, 2
+        sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
+        num_seqs_q = event['args']['Input Dims'][9][0] - 1
+        num_seqs_kv = event['args']['Input Dims'][10][0] - 1
+        max_seqlen_q = float(event['args']['Concrete Inputs'][11]) 
+        max_seqlen_kv = float(event['args']['Concrete Inputs'][12])
+        dropout = float(event['args']['Concrete Inputs'][13])
+        causal = eval(event['args']['Concrete Inputs'][15])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B,
+                "num_seqs_q":num_seqs_q, "num_seqs_kv":num_seqs_kv, "max_seqlen_q":max_seqlen_q, "max_seqlen_kv": max_seqlen_kv}
+
+    def flops(self):
+        accum_flops = self.flops_bwd_func(self.B, self.max_seqlen_q, self.H_Q, self.max_seqlen_kv, self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'], self.param_details['flash_impl'])
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q-1) * self.flops_bwd_func(self.B, (self.N_Q-self.max_seqlen_q)//(self.num_seqs_q-1), self.H_Q, (self.N_KV-self.max_seqlen_kv)//(self.num_seqs_kv-1), self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'], self.param_details['flash_impl'])
+        return accum_flops
+
+    def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
 class aten__scaled_dot_product_cudnn_attention(SDPA):
