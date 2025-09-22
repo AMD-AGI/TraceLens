@@ -1195,7 +1195,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         list_warn_perf_metrics_failed = []
         list_no_bwd_events = []
         # Select the appropriate dictionary for FLOPS and memory functions
-        perf_model_class = self.jax_op_to_perf_model_class_map.get(event['perf_model_name'] , None)
+        perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
+        perf_model_class = self.jax_op_to_perf_model_class_map.get(perf_model_name , None)
         if perf_model_class is None:
             print(f"\nPerf model does not exist. \n\nEvent: {event}")
         else:
@@ -1258,14 +1259,14 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             # update event metadata requried for perf model: perf_model_name, kernel names, args['Input Dims']
             event['kernel_details'] = [{'name': event['name'], 
                                         'dur': event['dur'], }] 
-            event['perf_model_name'] = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
+            perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event) 
             for _key, _val in dict_jax_metadata.items():
                 event['args'][_key] = _val
             dict_perf_metrics = None
             try:
-                if not event['perf_model_name']  == 'rest':
-                    bwd = event['perf_model_name'].endswith('_bwd')
+                if not perf_model_name  == 'rest':
+                    bwd = perf_model_name.endswith('_bwd')
                     dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd)
             except Exception as e:
                 print(f"\nException occurred at compute perf metrics: {e}, \n\nEvent: {event}")
@@ -1278,13 +1279,13 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                              'dur': event['dur'],
                              'cat': event['cat'],
                              'op category': event['gpu_kernel_op_cat'], 
-                             'perf model': event['perf_model_name']
+                             'perf model': perf_model_name
                              }
                 metrics_event.update(dict_perf_metrics)
                 if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
                     list_warn_non_zero_flops_and_zero_time.append(event)
                 if include_args:
-                    metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
+                    metrics_event.update((arg, event['args'].get(arg, None)) for arg in args_cols)
                 if include_kernel_details:
                     metrics_event['kernel_details'] = event['kernel_details']
                 rows.append(metrics_event)

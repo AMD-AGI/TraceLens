@@ -106,13 +106,11 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     dict_dfs['xla_summary']= df_xla_summary 
     
     # Generate & store perf-model-specific DataFrames
-    # for op_cat in ['GEMM', 'Conv', 'TE', 'FA FWD', 'FA BWD']: # TraceEventUtils.JaxOpKeys.ClassCategories.keys()
-    # op_events = [event for event in perf_analyzer.tree.events if event.get('gpu_kernel_op_cat', '') == op_cat] # note: cat is mixed
     op_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
     df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events, include_kernel_details=True, include_args=True)
-    # perf model classes: ['jax_gemm', 'jax_conv', 'jax_conv_bwd', 'jax_te_fused_attn', 'jax_te_fused_attn_bwd']: 
-    for op_cat in df_op_detailed['perf model'].unique(): # PerfModel.jax_op_mapping.jax_op_to_perf_model_class_map.keys()
-        df_op_perf_model = df_op_detailed[df_op_detailed['perf model'] == op_cat]
+    # PerfModel.jax_op_mapping.jax_op_to_perf_model_class_map.keys()
+    for op_cat in ['jax_gemm', 'jax_conv', 'jax_te' ]: 
+        df_op_perf_model = df_op_detailed[df_op_detailed['perf model'].str.contains(op_cat)]
         df_op = perf_analyzer.summarize_df_perf_metrics(df_op_perf_model, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_op
     return dict_dfs
