@@ -1588,7 +1588,7 @@ class GroupedGemm:
         return self.bytes_bwd_func(self.M, self.K, self.N, self.G, 
                                  self.bpe_in, self.bpe_out)
 
-# Jax Pef Models
+# Jax Perf Models
 def jax_dtype2bpe(name):
     """
     This function maps a data type name to the number of bytes per element.
