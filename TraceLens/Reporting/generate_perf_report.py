@@ -2,8 +2,7 @@ import argparse, os, sys
 import json
 from pathlib import Path
 
-from TraceLens import TreePerfAnalyzer
-from TraceLens.PerfModel import dict_cat2names
+from TraceLens.PerfModel import dict_cat2names, jax_op_mapping
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import export_data_df
 
@@ -108,8 +107,7 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
     # Generate & store perf-model-specific DataFrames
     op_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
     df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events, include_kernel_details=True, include_args=True)
-    # PerfModel.jax_op_mapping.jax_op_to_perf_model_class_map.keys()
-    for op_cat in ['jax_gemm', 'jax_conv', 'jax_te' ]: 
+    for op_cat in ['jax_gemm', 'jax_conv', 'jax_te' ]: # jax_op_mapping.jax_op_to_perf_model_class_map.keys():
         df_op_perf_model = df_op_detailed[df_op_detailed['perf model'].str.contains(op_cat)]
         df_op = perf_analyzer.summarize_df_perf_metrics(df_op_perf_model, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_op
