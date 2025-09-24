@@ -340,7 +340,7 @@ class TreePerfAnalyzer:
                 child = self.tree.events_by_uid[child_UID]
                 for grand_child_UID in child.get('children', []):
                     grand_child = self.tree.events_by_uid[grand_child_UID]
-                    is_kernel = self.event_to_category(grand_child) == 'kernel'
+                    is_kernel = self.event_to_category(grand_child) in {'kernel', 'gpu_memcpy', 'gpu_memset'}
                     is_nccl = 'nccl' in grand_child['name']
                     should_include = is_kernel and (include_nccl or not is_nccl)
                     if should_include:
@@ -368,6 +368,10 @@ class TreePerfAnalyzer:
             list_kernel_uids = runtime_evt.get('gpu_events', [])
             if len(list_kernel_uids) == 0:
                 continue # no kernels launched
+            elif len(list_kernel_uids) == 1:
+                is_nccl = 'nccl' in self.tree.get_UID2event(list_kernel_uids[0])['name']
+                if is_nccl and not include_nccl:
+                    continue # skip nccl kernels
             list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
             runtime_evt['total_direct_kernel_time'] = GPUEventAnalyser(list_kernels).compute_metrics()['busy_time']
             runtime_evt['direct_kernel_count'] = len(list_kernels)
