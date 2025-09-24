@@ -308,12 +308,20 @@ class TreePerfAnalyzer:
         return df_perf_metrics_summary
 
     def get_kernel_launchers(self, include_nccl=False):
-        # This method traverses the event tree to identify CPU operations that serve as
-        # "kernel launchers." These are operations that result in GPU kernel
-        # execution without further cpu op calls.
-        # Note that kernels are called through runtime events.
-        # This is why, this method identifies such cases
-        # by checking if grandchildren of CPU operations are kernel events.
+        # This method identifies kernel launchers, which are the events directly responsible for launching GPU kernels.
+        #
+        # In the ideal case, ops are routed through torch dispatcher to create a clear hierarchy
+        # where a "leaf" CPU operation is the caller for runtime events that launch kernels. These CPU ops are
+        # valuable for analysis as they contain rich argument information (e.g., input dimensions, strides, dtypes).
+        # The method identifies these as the primary kernel launchers.
+        #
+        # However, some edge cases exist where the calling CPU context is hidden, and a runtime event appears
+        # unlinked to a parent CPU op. While not ideal for a detailed breakdown (as argument info is missing),
+        # these unlinked events still launch kernels and must be captured for a complete analysis. This method
+        # processes them separately to ensure all kernel launchers are included in the output.
+        #
+        # Special handling for 'execute' operations for a special customer case
+
         kernel_launchers = []
         cpu_ops = [evt for evt in self.tree.events if self.event_to_category(evt) == 'cpu_op']
         for event in cpu_ops:
@@ -368,6 +376,7 @@ class TreePerfAnalyzer:
             list_kernel_uids = runtime_evt.get('gpu_events', [])
             if len(list_kernel_uids) == 0:
                 continue # no kernels launched
+            # for non graph runtime events, we skip nccl kernels unless include_nccl is True
             elif len(list_kernel_uids) == 1:
                 is_nccl = 'nccl' in self.tree.get_UID2event(list_kernel_uids[0])['name']
                 if is_nccl and not include_nccl:
