@@ -8,69 +8,6 @@ from TraceLens.Reporting.reporting_utils import export_data_df
 
 def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
     """
-    Generates a performance report for Pytorch analysis from a given profile trace.json file.
-    This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
-    from the specified profile file, and exports the results into a dictionary of Dataframes.
-    Args:
-        profile_path (str): Path to the input XPlane profile protobuf file.
-        # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-    Outputs:
-        Writes multiple DataFrames containing GPU event statistics and GEMM performance data
-        to a dictionary of Dataframes with appropriate suffixes.
-    """
-    # Get input trace type
-    if profile_path.endswith('.pt.trace.json'):
-        perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
-    elif profile_path.endswith('.xplane.pb'):
-        perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
-    else:
-        print('Unsupported trace file format.')
-        sys.exit(0)
-    dict_dfs = {}
-
-    # Generate base DataFrames 
-    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
-    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True)
-    df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
-    df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
-    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
-                                                                                    agg_metrics=agg_metrics, 
-                                                                                    include_pct=True)
-
-    # Store base DataFrames
-    dict_dfs['gpu_timeline']= df_gpu_timeline
-    dict_dfs['kernel_launchers']= df_kernel_launchers
-    dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
-    dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
-    dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
-    return dict_dfs 
-
-def perf_pytorch(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_path, arch=arch)
-    dict_dfs = {}
-
-    # Generate & store op-specific DataFrames
-    for op_cat, op_names in dict_cat2names.items():
-        # Filter events belonging to the current category
-        op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
-        if op_cat in ['GEMM', 'UnaryElementwise', 'BinaryElementwise']: 
-            # For GEMM: create a single table that covers both fwd and bwd.
-            df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
-            df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
-            dict_dfs[f"op_{op_cat}"] = df_ops
-        else:
-            # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
-            df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
-            df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(df_ops_fwd, agg_metrics)
-            df_ops_bwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=True, include_kernel_details=True, include_args=True)
-            df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(df_ops_bwd, agg_metrics)
-            dict_dfs[f"op_{op_cat}_fwd"] = df_ops_fwd
-            dict_dfs[f"op_{op_cat}_bwd"] = df_ops_bwd
-
-    return dict_dfs
-
-def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
-    """
     Generates a performance report for JAX analysis from a given XPlane profile protobuf file.
     This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
     from the specified profile file, and exports the results into a dictionary of Dataframes.
@@ -90,18 +27,35 @@ def perf_jax(profile_path: str, agg_metrics = ['mean', 'median', 'std', 'min', '
             - df_xla_grouped (pd.DataFrame): DataFrame of XLA events grouped by base name, sorted by percentage of total time.
             - df_gemms_detailed(pd.DataFrame): DataFrame of GEMMs
     """
+    # Get input trace type
+    assert profile_path.endswith('.xplane.pb')
     perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
+
     dict_dfs = {}
 
-    # Generate & store base DataFrames
+    # Generate base DataFrames 
+    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
-    dict_dfs['gpu_events_averages']= df_gpu_events_averages
-
+    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True)
+    df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
+    df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
+    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
+                                                                                    agg_metrics=agg_metrics, 
+                                                                                    include_pct=True)
+    
     # Generate & store Dataframes on selected e.g. XLA kernels 
     df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['Uncategorized Events/XLA',])
     df_xla_events_agg_name_col = df_xla_events.copy()
     df_xla_events_agg_name_col['name'] = df_xla_events.name.apply(lambda x: ''.join([i for i in x if not i.isdigit()])) # remove last part in name e.g. loop_slice_fusion_202 > loop_slice_fusion
     df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events_agg_name_col)
+    
+    # Store base DataFrames
+    dict_dfs['gpu_timeline']= df_gpu_timeline
+    dict_dfs['gpu_events_averages']= df_gpu_events_averages
+    dict_dfs['kernel_launchers']= df_kernel_launchers
+    dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
+    dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
+    dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
     dict_dfs['xla_summary']= df_xla_summary 
     
     # Generate & store perf-model-specific DataFrames
@@ -142,19 +96,9 @@ def main():
             gpu_arch_json = json.load(f)
 
     # Analyze trace profile
-    assert args.profile_path.endswith('.pt.trace.json') or args.profile_path.endswith('.xplane.pb')
+    assert args.profile_path.endswith('.xplane.pb')
     dict_dfs = {}
     dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
-
-    # OP Specific analysis on Pytorch trace.json file
-    if args.profile_path.endswith('.pt.trace.json'):
-        _dfs = perf_pytorch(args.profile_path)
-        dict_dfs.update(_dfs)
-
-    # OP Specific analysis on Jax xplane.pb file
-    if args.profile_path.endswith('.xplane.pb'):
-        _dfs = perf_jax(args.profile_path) 
-        dict_dfs.update(_dfs)
 
     # Save the output
     output_folder = Path(args.output_path)

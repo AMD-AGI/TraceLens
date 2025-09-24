@@ -76,7 +76,6 @@ class GPUEventAnalyser:
                 temp_idx += 1
             if current < b_end:
                 result.append((current, b_end))
-
         return result
 
     all_gpu_key = 'all_gpu'
@@ -169,8 +168,6 @@ class GPUEventAnalyser:
         total_comm_time = sum(end - start for start, end in comm_union)
         exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union)
         exposed_comm_time = sum(end - start for start, end in exposed_comm_intervals)
-        overlapped_comm = total_comm_time - exposed_comm_time
-
 
         total_memcpy_time = sum(end - start for start, end in memcpy_union)
         memcpy_minus_compute = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, memcpy_union)
@@ -182,7 +179,6 @@ class GPUEventAnalyser:
 
         # assert that compute + exposed comm + exposed memcpy + idle = total time
         assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + idle_time - total_time) < 1e-6
-
         return {
             "computation_time": comp_time,
             "exposed_comm_time": exposed_comm_time,
@@ -190,7 +186,6 @@ class GPUEventAnalyser:
             "busy_time": busy_time,
             "idle_time": idle_time,
             "total_time": total_time,
-            "overlapped_comm": overlapped_comm,
             "total_comm_time": total_comm_time,
             "total_memcpy_time": total_memcpy_time,
         }
@@ -284,17 +279,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             return return_dict.get(gpu_pid, {})
     
     def compute_metrics(self, gpu_pid = 1, event_filter = None):
-        """
-        Compute various metrics from the GPU event data.
-        Computation is defined as the time spent in computation kernels.
-        Communication is defined as the time spent in communication kernels.
-        Memcpy is defined as the time spent in memcpy kernels.
-        Exposed communication time is the time spent in communication kernels that is not overlapped by computation.
-        Exposed memcpy time is the time spent in memcpy kernels that is not overlapped by computation or communication.
-        """
-
-        # Categorize events.
-        # get GPU 0 (PID 1) for Jax
+        # Default: use GPU0 (PID 1) for Jax
         dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid=gpu_pid, event_filter=event_filter)
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
