@@ -58,7 +58,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
     dict_dfs['xla_summary']= df_xla_summary 
     
-    # Generate & store perf-model-specific DataFrames
+    # Generate & store perf-model specific DataFrames
     op_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
     df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events, include_kernel_details=True, include_args=True)
     for op_cat in ['jax_gemm', 'jax_conv', 'jax_te' ]: # jax_op_mapping.jax_op_to_perf_model_class_map.keys():
