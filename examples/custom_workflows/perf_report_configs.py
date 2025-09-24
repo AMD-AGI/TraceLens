@@ -16,7 +16,6 @@ conv_ops = [
 # "aten::_scaled_dot_product_flash_attention",
 # "flash_attn::_flash_attn_varlen_forward",
 attn_ops = [
-    "FlashAttnFunc",
     "flash_attn::_flash_attn_forward",
     "aten::_scaled_dot_product_cudnn_attention",
     "aten::_scaled_dot_product_efficient_attention",
@@ -57,6 +56,7 @@ attn_ops_launchers = [
     "aten::_efficient_attention_forward",
     "flash_attn::_flash_attn_forward",
     "flash_attn::_flash_attn_varlen_forward",
+    "xFuserRingFlashAttnFunc",
     "FlashAttnFunc",
     "FlashAttnVarlenFunc",
     "flash_attn_3::fwd",
