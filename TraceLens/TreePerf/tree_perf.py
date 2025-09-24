@@ -1256,7 +1256,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         list_warn_perf_metrics_failed = []
         list_no_bwd_events = []
         for event in events: 
-            # update event metadata requried for perf model: perf_model_name, kernel names, args['Input Dims']
+            # update event metadata, required for perf model: perf_model_name, kernel names, args['Input Dims']
             event['kernel_details'] = [{'name': event['name'], 
                                         'dur': event['dur'], }] 
             perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
@@ -1279,7 +1279,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                              'dur': event['dur'],
                              'cat': event['cat'],
                              'op category': event['gpu_kernel_op_cat'], 
-                             'perf model': perf_model_name
+                             'perf model': perf_model_name,
                              }
                 metrics_event.update(dict_perf_metrics)
                 if dict_perf_metrics['GFLOPS'] > 0 and dict_perf_metrics['Kernel Time (µs)'] == 0:
