@@ -27,6 +27,7 @@ op_to_perf_model_class_map = {
     'aten::mm': perf_model.aten_mm,
     'aten::addmm': perf_model.aten_addmm,
     'aten::_scaled_mm': perf_model.aten_scaled_mm,
+    'trtllm::cublas_scaled_mm': perf_model.trtllm_cublas_scaled_mm,
 
     # TEv2 pseudo ops
     '_Linear_yfwd_mm': perf_model.tev2_pseudo_gemm,
@@ -77,6 +78,7 @@ for op in binary_elemwise_ops:
 
 dict_base_class2category = {
     perf_model.GEMM: 'GEMM',
+    perf_model.ScaledMM: 'GEMM',
     perf_model.CONV: 'CONV',
     perf_model.SDPA: 'SDPA',
     perf_model.UnaryElementwise: 'UnaryElementwise',

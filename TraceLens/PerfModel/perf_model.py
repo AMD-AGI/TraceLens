@@ -345,9 +345,9 @@ class aten_addmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
-class aten_scaled_mm(GEMM):
+class ScaledMM(GEMM):
     """
-    aten::scaled_mm is the scale_result(scale_a*A.matmul(scale_b*B) + bias)
+    Common scaled_mm is the scale_result(scale_a*A.matmul(scale_b*B) + bias)
     """
     @staticmethod
     def get_param_details(event):
@@ -378,7 +378,7 @@ class aten_scaled_mm(GEMM):
             f"Data types of A and B are not supported: {dtype_A_B}"
         if bpeA != bpeB:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
-            warnings.warn(f"Data sizes of A and B are different: {dtype_A_B} for aten_scaled_mm. ")
+            warnings.warn(f"Data sizes of A and B are different: {dtype_A_B} for scaled_mm. ")
         self.bpe = bpeA  # or bpeB, they are the same
         # assumption:
         # for fp8 the output dtype is fp16
@@ -394,9 +394,21 @@ class aten_scaled_mm(GEMM):
                              bpe_output=out_bpe)
 
     def flops_bwd(self):
-        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+        raise NotImplementedError("Backward pass for scaled_mm is not defined.")
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Backward pass for aten::addmm is not defined.")
+        raise NotImplementedError("Backward pass for scaled_mm is not defined.")
+
+class aten_scaled_mm(ScaledMM):
+    """
+    aten::_scaled_mm — uses ScaledMM semantics.
+    """
+    pass
+
+class trtllm_cublas_scaled_mm(ScaledMM):
+    """
+    trtllm::cublas_scaled_mm — uses ScaledMM semantics.
+    """
+    pass
 
 class aten_bmm(GEMM):
     """
