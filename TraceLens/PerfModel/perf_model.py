@@ -510,6 +510,76 @@ class aten_baddbmm(GEMM):
     def bytes_bwd(self, bytes_per_element):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
+
+class vllm_gemm_with_dynamic_quant(GEMM):
+    @staticmethod
+    def get_param_details(event):
+        # Extract A and B by scanning for first two 2D tensors
+        input_dims = event['args'].get('Input Dims', [])
+        A_shape = None
+        B_shape = None
+        for shape in input_dims:
+            try:
+                if isinstance(shape, (list, tuple)) and len(shape) == 2:
+                    if A_shape is None:
+                        A_shape = tuple(shape)
+                    elif B_shape is None:
+                        B_shape = tuple(shape)
+                        break
+            except Exception:
+                continue
+        # Fallback: try first two entries if not caught above
+        if (A_shape is None or B_shape is None) and len(input_dims) >= 2:
+            try:
+                if A_shape is None and isinstance(input_dims[0], (list, tuple)):
+                    A_shape = tuple(input_dims[0])
+                if B_shape is None and isinstance(input_dims[1], (list, tuple)):
+                    B_shape = tuple(input_dims[1])
+            except Exception:
+                pass
+
+        if not A_shape or not B_shape or len(A_shape) != 2 or len(B_shape) != 2:
+            raise ValueError("vllm::gemm_with_dynamic_quant missing 2D A,B shapes in Input Dims")
+
+        M = A_shape[0]
+        K = A_shape[1]
+        N = B_shape[1]
+
+        # Dtypes
+        dtype_list = event['args'].get('Input type', [])
+        if not isinstance(dtype_list, (list, tuple)) or len(dtype_list) < 2:
+            raise ValueError("vllm::gemm_with_dynamic_quant missing A,B dtypes in 'Input type'")
+        dtype_A_B = tuple(dtype_list[:2])
+
+        # Strides (optional, match style of other models)
+        try:
+            stride_A = tuple(event['args']['Input Strides'][0])
+            stride_B = tuple(event['args']['Input Strides'][1])
+        except KeyError:
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details['dtype_A_B']
+        if dtype_A_B[0] != dtype_A_B[1]:
+            warnings.warn(f"Data types of A and B are different: {dtype_A_B} for vllm_gemm_with_dynamic_quant. ")
+        self.bpe = name2bpe(dtype_A_B[0])
+        return super().bytes(
+            bpe_mat1=self.bpe,
+            bpe_mat2=self.bpe,
+            bpe_bias=self.bpe,   # bias not used; keep consistent call signature
+            bpe_output=self.bpe  # use input dtype unless explicit output dtype exists in traces
+        )
+
 class tex_ts_te_gemm_ts(GEMM):
     """
     tex_ts::te_gemm_ts is a matmul op in TransformerEngine
@@ -1166,6 +1236,27 @@ def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
         "d_h_v": d_h_V,
     }
 
+def extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx):
+    H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in hnd_idx)
+    H_K, N_K, d_h_K = tuple(k_shape[i] for i in hnd_idx)
+    H_V, N_V, d_h_V = tuple(v_shape[i] for i in hnd_idx)
+    B_q = 1
+    if H_K != H_V:
+        raise ValueError(f"Head sizes do not match for K and V: {H_K} != {H_V}")
+    if N_K != N_V:
+        raise ValueError(f"Length sizes do not match for K and V: {N_K} != {N_V}")
+    if d_h_Q != d_h_K:
+        raise ValueError(f"Head dimensions do not match for Q and K: {d_h_Q} != {d_h_K}")
+    return {
+        "B": B_q,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_K,
+        "H_KV": H_K,
+        "d_h_qk": d_h_Q,
+        "d_h_v": d_h_V,
+    }
+
 class flash_attention(SDPA):
 
     @staticmethod
@@ -1195,6 +1286,117 @@ class flash_attention_backward(flash_attention):
         return self.flops_bwd()
 
     def bytes(self, bytes_per_element):
+        return self.bytes_bwd(bytes_per_element)
+
+class flash_attention_varlen_forward(SDPA):
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (self.param_details[key] for key in ['num_seqs_q', 'num_seqs_kv', 'max_seqlen_q', 'max_seqlen_kv'])
+
+    @staticmethod
+    def get_param_details(event):
+        # The order of arguments for flash_attn::_flash_attn_varlen_forward is:
+        # q: torch.Tensor
+        # k: torch.Tensor
+        # v: torch.Tensor
+        # cu_seqlens_q: torch.Tensor
+        # cu_seqlens_k: torch.Tensor
+        # max_seqlen_q: int
+        # max_seqlen_k: int
+        # dropout_p: float
+        # softmax_scale: float
+        # causal: bool
+        # ...
+        # ref: https://github.com/Dao-AILab/flash-attention/blob/dfb664994c1e5056961c90d5e4f70bf7acc8af10/flash_attn/flash_attn_interface.py#L143-L163
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        hnd_idx = 1, 0, 2
+        sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
+        num_seqs_q = event['args']['Input Dims'][3][0] - 1
+        num_seqs_kv = event['args']['Input Dims'][4][0] - 1
+        max_seqlen_q = float(event['args']['Concrete Inputs'][5])
+        max_seqlen_kv = float(event['args']['Concrete Inputs'][6])
+        dropout = float(event['args']['Concrete Inputs'][7])
+        causal = eval(event['args']['Concrete Inputs'][9])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B, 
+                "num_seqs_q":num_seqs_q, "num_seqs_kv":num_seqs_kv, "max_seqlen_q":max_seqlen_q, "max_seqlen_kv": max_seqlen_kv}
+
+    def flops(self):
+        # The calculation of flops for varlen is different as B and S dimensions
+        # are collapsed into a single T dimension. In T dimension, there are 
+        # multiple sequences with variable sequence lengths. We don't know the 
+        # exact sequence lengths from the trace. We only know the number of 
+        # sequences and a max_seqlen (which is usually passed in based on the data).
+        # So we can only estimate the flops with a lower bound (assuming that all
+        # other sequences are of the same length except the longest sequence).
+        accum_flops = self.flops_func(self.B, self.max_seqlen_q, self.H_Q, self.max_seqlen_kv, self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'])
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q-1) * self.flops_func(self.B, (self.N_Q-self.max_seqlen_q)//(self.num_seqs_q-1), self.H_Q, (self.N_KV-self.max_seqlen_kv)//(self.num_seqs_kv-1), self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'])
+        return accum_flops
+        
+
+class flash_attention_varlen_backward(SDPA):
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (self.param_details[key] for key in ['num_seqs_q', 'num_seqs_kv', 'max_seqlen_q', 'max_seqlen_kv'])
+
+    @staticmethod
+    def get_param_details(event):
+        # The order of arguments for flash_attn::_flash_attn_varlen_forward is:
+        # dout: torch.Tensor
+        # q: torch.Tensor
+        # k: torch.Tensor
+        # v: torch.Tensor
+        # out: torch.Tensor
+        # softmax_lse: torch.Tensor
+        # dq: Optional[torch.Tensor]
+        # dk: Optional[torch.Tensor]
+        # dv: Optional[torch.Tensor]
+        # cu_seqlens_q: torch.Tensor
+        # cu_seqlens_k: torch.Tensor
+        # max_seqlen_q: int
+        # max_seqlen_k: int
+        # dropout_p: float
+        # softmax_scale: float
+        # causal: bool
+        # ...
+        # ref: https://github.com/Dao-AILab/flash-attention/blob/dfb664994c1e5056961c90d5e4f70bf7acc8af10/flash_attn/flash_attn_interface.py#L330-L354
+        input_dims = event['args']['Input Dims']
+        q_idx, k_idx, v_idx = 1, 2, 3
+        q_shape, k_shape, v_shape = input_dims[q_idx], input_dims[k_idx], input_dims[v_idx]
+        hnd_idx = 1, 0, 2
+        sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        
+        dtype_A_B = tuple(event['args']['Input type'][:2])
+        strides = event['args']['Input Strides']
+        q_stride, k_stride, v_stride = tuple(strides[q_idx]), tuple(strides[k_idx]), tuple(strides[v_idx])        
+        num_seqs_q = event['args']['Input Dims'][9][0] - 1
+        num_seqs_kv = event['args']['Input Dims'][10][0] - 1
+        max_seqlen_q = float(event['args']['Concrete Inputs'][11]) 
+        max_seqlen_kv = float(event['args']['Concrete Inputs'][12])
+        dropout = float(event['args']['Concrete Inputs'][13])
+        causal = eval(event['args']['Concrete Inputs'][15])
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "q_stride": q_stride, "k_stride": k_stride, "v_stride": v_stride,
+                "dropout": dropout, "causal": causal, "flash_impl": True, "dtype_A_B": dtype_A_B,
+                "num_seqs_q":num_seqs_q, "num_seqs_kv":num_seqs_kv, "max_seqlen_q":max_seqlen_q, "max_seqlen_kv": max_seqlen_kv}
+
+    def flops(self):
+        accum_flops = self.flops_bwd_func(self.B, self.max_seqlen_q, self.H_Q, self.max_seqlen_kv, self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'], self.param_details['flash_impl'])
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q-1) * self.flops_bwd_func(self.B, (self.N_Q-self.max_seqlen_q)//(self.num_seqs_q-1), self.H_Q, (self.N_KV-self.max_seqlen_kv)//(self.num_seqs_kv-1), self.H_KV, self.d_h_qk, self.d_h_v, self.param_details['causal'], self.param_details['flash_impl'])
+        return accum_flops
+
+    def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
 class aten__scaled_dot_product_cudnn_attention(SDPA):
@@ -1360,6 +1562,70 @@ class aiter__flash_attn_backward(SDPA):
             except (ValueError, TypeError):
                 pass
         is_causal = concrete_inputs[12].lower() == 'true' if concrete_inputs[12] not in ('', 'None') else False
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
+
+    def flops(self):
+        return self.flops_bwd()
+    
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+class flash_attn_v3_forward(SDPA):
+    
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        dropout_p = 0.0 # dropout currently not implemented
+        is_causal = concrete_inputs[24].lower() == 'true' if concrete_inputs[24] not in ('', 'None') else False
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
+
+class aiter__fmha_v3_forward(SDPA):
+    
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        dropout_p = 0.0
+        if concrete_inputs[4] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[4])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[6].lower() == 'true' if concrete_inputs[6] not in ('', 'None') else False
+
+        return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
+                "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
+
+class aiter__fmha_v3_backward(SDPA):
+    
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event['args']['Input Dims']
+        concrete_inputs = event['args']['Concrete Inputs']
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (sdpa_cfg[key] for key in ['B', 'N_Q', 'H_Q', 'N_KV', 'H_KV', 'd_h_qk', 'd_h_v'])
+        dropout_p = 0.0
+        if concrete_inputs[7] not in ('', 'None'):
+            try:
+                dropout_p = float(concrete_inputs[7])
+            except (ValueError, TypeError):
+                pass
+        is_causal = concrete_inputs[9].lower() == 'true' if concrete_inputs[9] not in ('', 'None') else False
 
         return {"B": B, "N_Q": N_Q, "H_Q": H_Q, "N_KV": N_KV, "H_KV": H_KV, "d_h_qk": d_h_qk, "d_h_v": d_h_v,
                 "dropout": dropout_p, "causal": is_causal, "flash_impl": True}
