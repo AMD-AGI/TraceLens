@@ -1333,5 +1333,3 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         df_perf_metrics = pd.DataFrame(rows)
         
         return df_perf_metrics
-    
- 
