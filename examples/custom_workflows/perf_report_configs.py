@@ -20,6 +20,7 @@ attn_ops = [
     "aten::_scaled_dot_product_cudnn_attention",
     "aten::_scaled_dot_product_efficient_attention",
     "flash_attn_3::fwd",
+    "aiter::wrapper_fmha_v3_fwd",
 ]
 
 group2ops = {
