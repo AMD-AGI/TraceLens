@@ -385,10 +385,12 @@ class JaxAnalyses:
             dict_metrics['FLOPS/Byte'] = float('nan')
             dict_metrics['TB/s'] = float('nan')
 
-        if hasattr(perf_model, "gemmologist_time"):
-            dict_metrics['Gemmologist Time (µs)'] = perf_model.gemmologist_time
-            dict_metrics['Gemmologist TFLOPS/s'] = (gflops / 1e3) / (perf_model.gemmologist_time / 1e6) if perf_model.gemmologist_time > 0 else float('nan')
-            # dict_metrics['Gemmologist cmd'] = perf_model.gemmologist_cmd
+        if hasattr(perf_model, "get_simulation_time"):
+            simulated_time = perf_model.get_simulation_time()
+            if simulated_time:
+                dict_metrics['Simulated Time (µs)']= simulated_time
+                dict_metrics['Simulated TFLOPS/s'] = (gflops / 1e3) / (
+                            simulated_time / 1e6) if simulated_time > 0 else float('nan')
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
