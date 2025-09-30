@@ -921,7 +921,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)  
         if 'gemm' in perf_model_name:
             _dict_gemm_meta = JaxTreePerfAnalyzer.parse_gemm_metadata(event)
-            _dict_jax_gemm = JaxTreePerfAnalyzer.parse_JaxGemm_metadata(event) 
+            _dict_jax_gemm = JaxTreePerfAnalyzer.parse_JaxGemm_metadata(event)
             _dict = _dict_gemm_meta | _dict_jax_gemm
         elif 'te_fused_attn' in perf_model_name:
             _dict = JaxTreePerfAnalyzer.parse_te_fused_attn_metadata(event)
@@ -1133,7 +1133,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         Usage: gemm_dict = JaxTreePerfAnalyzer.parse_JaxGemm_metadata(event) # JaxAnalyses for JaxGemm
         """
         _dict_hlo_op = {'op_name' : event['metadata']}
-        gemm_dict = JaxProfileProcessor.process_gemm_ops(_dict_hlo_op).get('op_name', None)
+        gemm_dict = JaxProfileProcessor.process_gemm_ops(_dict_hlo_op).get('op_name', {})
         return gemm_dict
 
     ##############
