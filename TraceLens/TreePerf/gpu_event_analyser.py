@@ -130,12 +130,12 @@ class GPUEventAnalyser:
                 if category == 'gpu_memcpy':
                     memcpy_events.append(event)
                 elif category in {'kernel', 'gpu_memset'}:
-                    if 'nccl' in event.get('name'):
+                    if 'nccl' in event.get('name') or 'deep_ep' in event.get('name'):
                         comm_events.append(event)
                         args = event.get('args')
                         if args:
                             cname = args.get('Collective name')
-                        if cname and 'all_to_all' in cname:
+                        if (cname and 'all_to_all' in cname) or ('deep_ep' in event.get('name')):
                             comm_events_a2a.append(event)
                         elif cname and cname in ('recv', 'send'):
                             comm_events_send_recv.append(event)
