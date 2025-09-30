@@ -202,38 +202,39 @@ class JaxProfileProcessor:
                         if any(output.startswith(d) for d in dtypes + ["f8"]) and not output.endswith("[]"):
                             operand_list.append(hlo_ops[opid]["output"])
                 if int(beta)==1 and len(operand_list)<3:
-                    print("Bias is set, however on;y two operands found!",op)
-                if len(operand_list)>3 or len(operand_list) == 0:
-                    raise ValueError("Invalid operand list",op,operand_list)
-                c_order=re.search(r"\{[012,]*",sizes_string[0])[0].split("{")[1]
-                c=get_sizes(sizes_string[0])
-                a=get_sizes(operand_list[0])
-                b=get_sizes(operand_list[1])
-                batch=1
-                if a[int(lhs_dim)]!=b[int(rhs_dim)]:
-                    raise ValueError("contracting dimension not matching",backend_config)
-                k=a[int(lhs_dim)]
-                a.remove(k)
-                b.remove(k)
-                if len(c)>2:
-                    batch=c[0]
-                    a.remove(batch)
-                    b.remove(batch)
-                if "0,1" in c_order:
-                    n=b[0] if len(b) > 0 else 1
-                    m=a[0] if len(a) > 0 else 1
+                    print("Bias is set, however only two operands found!",op)
+                elif int(beta)==0 and (len(operand_list)>3 or len(operand_list) == 0):
+                    print("Invalid operand list",op,operand_list)
                 else:
-                    n=a[0] if len(a) > 0 else 1
-                    m=b[0] if len(b) > 0 else 1
-                gemm_dict[opname]={
-                    "Batch": int(batch),
-                    "M": int(m),
-                    "N": int(n),
-                    "K": int(k),
-                    "Beta": int(beta),
-                    "Type": op["type"],
-                    "Computation": "gemm",
-                }
+                    c_order=re.search(r"\{[012,]*",sizes_string[0])[0].split("{")[1]
+                    c=get_sizes(sizes_string[0])
+                    a=get_sizes(operand_list[0])
+                    b=get_sizes(operand_list[1])
+                    batch=1
+                    if a[int(lhs_dim)]!=b[int(rhs_dim)]:
+                        raise ValueError("contracting dimension not matching",backend_config)
+                    k=a[int(lhs_dim)]
+                    a.remove(k)
+                    b.remove(k)
+                    if len(c)>2:
+                        batch=c[0]
+                        a.remove(batch)
+                        b.remove(batch)
+                    if "0,1" in c_order:
+                        n=b[0] if len(b) > 0 else 1
+                        m=a[0] if len(a) > 0 else 1
+                    else:
+                        n=a[0] if len(a) > 0 else 1
+                        m=b[0] if len(b) > 0 else 1
+                    gemm_dict[opname]={
+                        "Batch": int(batch),
+                        "M": int(m),
+                        "N": int(n),
+                        "K": int(k),
+                        "Beta": int(beta),
+                        "Type": op["type"],
+                        "Computation": "gemm",
+                    }
         return gemm_dict
     
 # Trace event utilities to help with traces in the Google Trace Event format

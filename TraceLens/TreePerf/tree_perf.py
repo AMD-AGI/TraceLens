@@ -1087,7 +1087,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     @staticmethod
     def parse_gemm_metadata(event):
         """
-        Ideally it Whould output the same as parse_JaxGemm_metadata(event).
+        Ideally it would function the same as parse_JaxGemm_metadata(event).
         
         Example:
         beta=re.search(r"\"beta\":[01],",backend_config)[0].split(":")[1].split(",")[0]
@@ -1102,10 +1102,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_backend_config = json.loads(backend_config.split('=')[1]) # Note: missing '}' in some jax metadata
             beta = dict_backend_config.get('gemm_backend_config', {}).get('beta', 0)
         operand_list, operand_type, operand_idx = JaxTreePerfAnalyzer.parse_operands(event)
-        if int(beta)==1 and len(operand_list)<3:
-            print("Bias is set, however only two operands found!", event['metadata'])
-        if len(operand_list)>3 or len(operand_list) == 0:
-            raise ValueError("Invalid operand list",event['metadata'], operand_list)
         output_list, _, output_idx = JaxTreePerfAnalyzer.parse_operands(event, metadata_key='output')
         dict_metadata = {}
         dict_metadata['Input Dims'] = operand_list
