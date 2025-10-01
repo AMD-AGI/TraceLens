@@ -1,0 +1,7 @@
+# pyproject.toml at repo root
+[tool.black]
+line-length = 88
+target-version = ["py311", "py312"]
+
+[tool.usort]
+first_party = ["TraceLens", "examples", "tests"]
