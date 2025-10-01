@@ -295,7 +295,7 @@ class JaxAnalyses:
             metadata[1],
             lambda x: x[0] is not None and x[1][TraceEventUtils.MetadataFields.ThreadName].startswith(TraceEventUtils.JaxSpecialThreads.StreamPrefix))
         main_thread_events = events[1][main_thread_id]
-        main_thread_gemms = filter(lambda x: TraceEventUtils.TraceKeys.Args in x and x[TraceEventUtils.TraceKeys.Args][TraceEventUtils.JaxKernelEventArgs.hlo_op] in gemm_ops, main_thread_events)
+        main_thread_gemms = filter(lambda x: TraceEventUtils.TraceKeys.Args in x and TraceEventUtils.JaxKernelEventArgs.hlo_op in x[TraceEventUtils.TraceKeys.Args] and x[TraceEventUtils.TraceKeys.Args][TraceEventUtils.JaxKernelEventArgs.hlo_op] in gemm_ops, main_thread_events)
         metrics = [JaxAnalyses.gemm_perf_metrics(event, gemm_ops[event[TraceEventUtils.TraceKeys.Args][TraceEventUtils.JaxKernelEventArgs.hlo_op]], False, arch) for event in main_thread_gemms]
         return pd.DataFrame(metrics)
 
