@@ -2,6 +2,14 @@
 [tool.black]
 line-length = 88
 target-version = ["py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.pytest_cache
+  | build
+)/
+'''
 
 [tool.usort]
 first_party = ["TraceLens", "examples", "tests"]
