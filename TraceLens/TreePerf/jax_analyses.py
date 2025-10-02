@@ -1,4 +1,3 @@
-import glob
 import math
 import os
 import re
@@ -6,6 +5,7 @@ import string
 from typing import Callable
 
 import pandas as pd
+
 
 try:
     from enum import StrEnum
@@ -390,7 +390,8 @@ class JaxAnalyses:
         gemm_ops = JaxProfileProcessor.process_gemm_ops(hlo_ops)
         # the keys in gemm ops start with % while the keys in the events don't - strip out the %
         gemm_ops = dict((x[0][1:], x[1]) for x in gemm_ops.items())
-        main_thread_id = TraceEventUtils.find_thread_by_item_in_metadata(
+        # the first "Stream" thread is not always the thread with GEMMs - merge all of them
+        thread_ids = TraceEventUtils.find_threads_by_item_in_metadata(
             metadata[1],
             lambda x: x[0] is not None
             and x[1][TraceEventUtils.MetadataFields.ThreadName].startswith(
@@ -419,6 +420,7 @@ class JaxAnalyses:
             )
             for event in main_thread_gemms
         ]
+        
         return pd.DataFrame(metrics)
 
     class JaxGemm(perf_model.GEMM):

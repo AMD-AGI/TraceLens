@@ -12,6 +12,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
+
 from typing import Callable, Dict, List, Tuple
 
 
@@ -514,10 +515,12 @@ class TraceEventUtils:
         )
 
     @staticmethod
-    def find_thread_by_item_in_metadata(
-        metadata: dict[int, dict], select_item: Callable[[int], bool]
-    ) -> int:
-        return next(filter(select_item, metadata.items()))[0]
+    def find_thread_by_item_in_metadata(metadata: dict[int, dict], select_item: Callable[[int], bool]) -> int:
+        return next(TraceEventUtils.find_threads_by_item_in_metadata(metadata, select_item))
+
+    @staticmethod
+    def find_threads_by_item_in_metadata(metadata: dict[int, dict], select_item: Callable[[int], bool]) -> Iterable[int]:
+        return map(lambda x: x[0], filter(select_item, metadata.items()))
 
     @staticmethod
     def compute_event_end_times(events: List[dict]) -> None:
