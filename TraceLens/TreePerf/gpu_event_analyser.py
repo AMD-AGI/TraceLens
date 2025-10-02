@@ -168,6 +168,7 @@ class GPUEventAnalyser:
         total_comm_time = sum(end - start for start, end in comm_union)
         exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union)
         exposed_comm_time = sum(end - start for start, end in exposed_comm_intervals)
+        overlapped_comm_time = total_comm_time - exposed_comm_time
 
         total_memcpy_time = sum(end - start for start, end in memcpy_union)
         memcpy_minus_compute = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, memcpy_union)
@@ -186,6 +187,7 @@ class GPUEventAnalyser:
             "busy_time": busy_time,
             "idle_time": idle_time,
             "total_time": total_time,
+            "overlapped_comm_time": overlapped_comm_time,
             "total_comm_time": total_comm_time,
             "total_memcpy_time": total_memcpy_time,
         }
