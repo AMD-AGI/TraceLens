@@ -420,7 +420,7 @@ class JaxAnalyses:
             )
             for event in main_thread_gemms
         ]
-        
+
         return pd.DataFrame(metrics)
 
     class JaxGemm(perf_model.GEMM):

@@ -515,11 +515,17 @@ class TraceEventUtils:
         )
 
     @staticmethod
-    def find_thread_by_item_in_metadata(metadata: dict[int, dict], select_item: Callable[[int], bool]) -> int:
-        return next(TraceEventUtils.find_threads_by_item_in_metadata(metadata, select_item))
+    def find_thread_by_item_in_metadata(
+        metadata: dict[int, dict], select_item: Callable[[int], bool]
+    ) -> int:
+        return next(
+            TraceEventUtils.find_threads_by_item_in_metadata(metadata, select_item)
+        )
 
     @staticmethod
-    def find_threads_by_item_in_metadata(metadata: dict[int, dict], select_item: Callable[[int], bool]) -> Iterable[int]:
+    def find_threads_by_item_in_metadata(
+        metadata: dict[int, dict], select_item: Callable[[int], bool]
+    ) -> Iterable[int]:
         return map(lambda x: x[0], filter(select_item, metadata.items()))
 
     @staticmethod
