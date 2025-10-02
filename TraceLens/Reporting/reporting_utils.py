@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import subprocess
 
+
 def export_data_df(
     data_df: pd.DataFrame,
     output_folder_path: Path,
@@ -31,7 +32,7 @@ def export_data_df(
         print(f"Data: {data_df}")
 
     data_df = data_df.round(2)
-    
+
     for output_table_format in output_table_format:
         if output_table_format == ".xlsx":
             output_path = output_folder_path.joinpath(
@@ -49,6 +50,7 @@ def export_data_df(
                 print(f"Exporting summary statistics to {output_path}")
             data_df.to_csv(output_path, index=False)
 
+
 def request_install(package_name):
     """
     Prompts the user to install a Python package via pip. If the user agrees, attempts installation.
@@ -65,12 +67,20 @@ def request_install(package_name):
         - May install a package using pip.
         - Exits the program (calls sys.exit(1)) if the user declines or installation fails.
     """
-    choice = input(f"Do you want to install '{package_name}' via pip? [y/N]: ").strip().lower()
-    if choice == 'y':
+    choice = (
+        input(f"Do you want to install '{package_name}' via pip? [y/N]: ")
+        .strip()
+        .lower()
+    )
+    if choice == "y":
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", package_name]
+            )
         except subprocess.CalledProcessError:
-            print(f"Failed to install '{package_name}'. Please install it manually. Exiting.")
+            print(
+                f"Failed to install '{package_name}'. Please install it manually. Exiting."
+            )
             sys.exit(1)
     else:
         print(f"Skipping installation of '{package_name}' and exiting.")

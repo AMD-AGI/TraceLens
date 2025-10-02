@@ -19,6 +19,7 @@ from TraceLens.UI.utils.reporting import TraceLensColumns
 logging.basicConfig(level=logging.INFO)
 LOGS_DIR = f"{os.getcwd()}/logs"
 
+
 @dataclass
 class EventArgs:
     dimentions: list[int]
@@ -41,13 +42,25 @@ class HipBLASLtColumns:
 
 
 def _replay_kernel(event_args_example: EventArgs, op: callable = torch.mm) -> None:
-    device = torch.device('cuda')
+    device = torch.device("cuda")
 
-    a = torch.randn(event_args_example.dimentions[0], device=device, dtype=event_args_example.types[0])
-    b = torch.randn(event_args_example.dimentions[1], device=device, dtype=event_args_example.types[0])
+    a = torch.randn(
+        event_args_example.dimentions[0],
+        device=device,
+        dtype=event_args_example.types[0],
+    )
+    b = torch.randn(
+        event_args_example.dimentions[1],
+        device=device,
+        dtype=event_args_example.types[0],
+    )
 
-    a = torch.as_strided(a, size=event_args_example.dimentions[0], stride=event_args_example.strides[0])
-    b = torch.as_strided(b, size=event_args_example.dimentions[1], stride=event_args_example.strides[1])
+    a = torch.as_strided(
+        a, size=event_args_example.dimentions[0], stride=event_args_example.strides[0]
+    )
+    b = torch.as_strided(
+        b, size=event_args_example.dimentions[1], stride=event_args_example.strides[1]
+    )
 
     _ = op(a, b)
     torch.cuda.synchronize()
@@ -80,16 +93,22 @@ def _process_batch(tuning_batch: TuningBatch) -> tuple[str]:
     base_dir = os.path.dirname(tuning_batch.tuning_file)
     if not os.path.exists(base_dir):
         os.makedirs(base_dir, exist_ok=True)
-    
+
     new_env = os.environ.copy()
     new_env["HIPBLASLT_TUNING_FILE"] = tuning_batch.tuning_file
     with open(tuning_batch.log_file, "w") as f:
         for command in tuning_batch.commands:
             command += f" --device {tuning_batch.gpu_idx}"
-            subprocess.Popen(command.split(), shell=False, stdout=f, stderr=f, env=new_env).communicate()
+            subprocess.Popen(
+                command.split(), shell=False, stdout=f, stderr=f, env=new_env
+            ).communicate()
 
 
-def _get_tuning_file_path(base_dir: str, gpu_idx: int, file_name: Literal["tuning_log.txt", "tuning_file.txt"] = "tuning_log.txt") -> str:
+def _get_tuning_file_path(
+    base_dir: str,
+    gpu_idx: int,
+    file_name: Literal["tuning_log.txt", "tuning_file.txt"] = "tuning_log.txt",
+) -> str:
     return f"{base_dir}/tuning_process_logs/gpu_{gpu_idx}/{file_name}"
 
 
@@ -125,7 +144,7 @@ def run_tuning(log_file: str, output_tuning_file: str) -> tuple[str]:
             for pattern, replacement in replacements.items():
                 command = re.sub(pattern, replacement, command)
             log.write(f"{command}\n")
-            
+
             gpu_idx = command_idx % n_gpus
             tuning_batches[gpu_idx].commands.append(command)
             command_idx += 1
@@ -141,7 +160,7 @@ def run_tuning(log_file: str, output_tuning_file: str) -> tuple[str]:
     for tuning_batch in tuning_batches:
         if not os.path.exists(tuning_batch.tuning_file):
             continue
-        
+
         with open(tuning_batch.tuning_file, "r") as f:
             command_idx = 0
             for line in f:
@@ -151,7 +170,7 @@ def run_tuning(log_file: str, output_tuning_file: str) -> tuple[str]:
 
                 solutions[command_idx * n_gpus + tuning_batch.gpu_idx] = line
                 command_idx += 1
-    
+
     # writing solutions to the output file
     with open(output_tuning_file, "w") as out_f:
         out_f.write(header)
@@ -159,16 +178,18 @@ def run_tuning(log_file: str, output_tuning_file: str) -> tuple[str]:
             out_f.write(solution)
 
 
-def get_winner_solutions(tuning_results_file: str, tuning_process_log_file: str) -> pd.DataFrame:
+def get_winner_solutions(
+    tuning_results_file: str, tuning_process_log_file: str
+) -> pd.DataFrame:
     columns = None
     values = []
     columns_prefix = "[0]:"
     with open(tuning_process_log_file, "r") as f:
         for line in f:
             if line.startswith(columns_prefix):
-                columns = line[len(columns_prefix):].strip().split(",")
+                columns = line[len(columns_prefix) :].strip().split(",")
                 break
-    
+
     if columns is None:
         return pd.DataFrame()
 
@@ -177,12 +198,16 @@ def get_winner_solutions(tuning_results_file: str, tuning_process_log_file: str)
             if line.startswith("Git"):
                 continue
 
-            values.append(line.strip().split(",")[:len(columns)])
-    
+            values.append(line.strip().split(",")[: len(columns)])
+
     return pd.DataFrame(values, columns=columns).astype(float, errors="ignore")
 
 
-def perform_offline_tuning(kernes_to_tune: pd.DataFrame, only_collect_log: bool = True, base_dir: str = LOGS_DIR) -> tuple[str, str, pd.DataFrame]:
+def perform_offline_tuning(
+    kernes_to_tune: pd.DataFrame,
+    only_collect_log: bool = True,
+    base_dir: str = LOGS_DIR,
+) -> tuple[str, str, pd.DataFrame]:
     if os.path.exists(base_dir):
         shutil.rmtree(base_dir)
     os.makedirs(base_dir, exist_ok=True)
@@ -193,50 +218,62 @@ def perform_offline_tuning(kernes_to_tune: pd.DataFrame, only_collect_log: bool 
     output_tuning_file = f"{base_dir}/tuning.txt"
     result = subprocess.run(
         [
-            "python", os.path.abspath(__file__),
-            "--input-shapes-csv", input_shapes_csv,
-            "--output-log-file", output_log_file,
-        ] + (
-            []
-            if only_collect_log
-            else ["--output-tuning-file", output_tuning_file]
-        ),
+            "python",
+            os.path.abspath(__file__),
+            "--input-shapes-csv",
+            input_shapes_csv,
+            "--output-log-file",
+            output_log_file,
+        ]
+        + ([] if only_collect_log else ["--output-tuning-file", output_tuning_file]),
     )
-    
+
     if result.returncode != 0:
         logging.error("Failed to run offline tuning")
         return output_log_file, None, None
-    
+
     if only_collect_log:
         return output_log_file, None, None
 
-    return output_log_file, output_tuning_file, get_winner_solutions(output_tuning_file, _get_tuning_file_path(base_dir, 0, "tuning_log.txt"))
+    return (
+        output_log_file,
+        output_tuning_file,
+        get_winner_solutions(
+            output_tuning_file, _get_tuning_file_path(base_dir, 0, "tuning_log.txt")
+        ),
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay kernel and run tuning")
-    parser.add_argument("--input-shapes-csv",
-                        type=str,
-                        default=f"{LOGS_DIR}/shapes.csv",
-                        help="Path to the input shapes CSV file")
-    parser.add_argument("--output-log-file",
-                        type=str,
-                        default=f"{LOGS_DIR}/log.txt",
-                        help="Path to the output log file")
-    parser.add_argument("--output-tuning-file",
-                        type=str,
-                        required=False,
-                        help="Path to the output tuning results file")
+    parser.add_argument(
+        "--input-shapes-csv",
+        type=str,
+        default=f"{LOGS_DIR}/shapes.csv",
+        help="Path to the input shapes CSV file",
+    )
+    parser.add_argument(
+        "--output-log-file",
+        type=str,
+        default=f"{LOGS_DIR}/log.txt",
+        help="Path to the output log file",
+    )
+    parser.add_argument(
+        "--output-tuning-file",
+        type=str,
+        required=False,
+        help="Path to the output tuning results file",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.input_shapes_csv):
         logging.info(f"Shapes file {args.input_shapes_csv} does not exist")
         sys.exit(1)
-    
+
     kernes_to_tune = pd.read_csv(args.input_shapes_csv)
     record_bench_commands(kernes_to_tune, args.output_log_file)
     if not args.output_tuning_file:
         logging.info("Skipping tuning")
         exit()
-    
+
     run_tuning(args.output_log_file, args.output_tuning_file)
