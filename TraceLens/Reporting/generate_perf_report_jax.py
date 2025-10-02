@@ -3,10 +3,17 @@ import json
 from pathlib import Path
 
 from TraceLens.PerfModel import dict_cat2names, jax_op_mapping
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import export_data_df
+from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
 
-def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median', 'std', 'min', 'max'], *args, **kwargs) -> dict:
+
+def perf_analysis(
+    profile_path: str,
+    arch=None,
+    agg_metrics=["mean", "median", "std", "min", "max"],
+    *args,
+    **kwargs,
+) -> dict:
     """
     Generates a performance report for JAX analysis from a given XPlane profile protobuf file.
     This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
@@ -28,77 +35,142 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
             - df_gemms_detailed(pd.DataFrame): DataFrame of GEMMs
     """
     # Get input trace type
-    assert profile_path.endswith('.xplane.pb')
+    assert profile_path.endswith(".xplane.pb")
     perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
 
     dict_dfs = {}
 
-    # Generate base DataFrames 
-    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline() 
-    df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages() 
-    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True)
-    df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
-    df_kernel_launchers_summary_by_category = perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
-    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(df_kernel_launchers, 
-                                                                                    agg_metrics=agg_metrics, 
-                                                                                    include_pct=True)
-    
-    # Generate & store Dataframes on selected e.g. XLA kernels 
-    df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['Uncategorized Events/XLA',])
+    # Generate base DataFrames
+    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
+    df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages()
+    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
+        include_kernel_details=True
+    )
+    df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(
+        df_kernel_launchers
+    )
+    df_kernel_launchers_summary_by_category = (
+        perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
+    )
+    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(
+        df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
+    )
+
+    # Generate & store Dataframes on selected e.g. XLA kernels
+    df_xla_events = perf_analyzer.get_df_kernel_launchers(
+        include_kernel_details=True,
+        gpu_kernel_op_cats=[
+            "Uncategorized Events/XLA",
+        ],
+    )
     df_xla_events_agg_name_col = df_xla_events.copy()
-    df_xla_events_agg_name_col['name'] = df_xla_events.name.apply(lambda x: ''.join([i for i in x if not i.isdigit()])) # remove last part in name e.g. loop_slice_fusion_202 > loop_slice_fusion
-    df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events_agg_name_col)
-    
+    df_xla_events_agg_name_col["name"] = df_xla_events.name.apply(
+        lambda x: "".join([i for i in x if not i.isdigit()])
+    )  # remove last part in name e.g. loop_slice_fusion_202 > loop_slice_fusion
+    df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(
+        df_xla_events_agg_name_col
+    )
+
     # Store base DataFrames
-    dict_dfs['gpu_timeline']= df_gpu_timeline
-    dict_dfs['gpu_events_averages']= df_gpu_events_averages
-    dict_dfs['kernel_launchers']= df_kernel_launchers
-    dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
-    dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
-    dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
-    dict_dfs['xla_summary']= df_xla_summary 
-    
+    dict_dfs["gpu_timeline"] = df_gpu_timeline
+    dict_dfs["gpu_events_averages"] = df_gpu_events_averages
+    dict_dfs["kernel_launchers"] = df_kernel_launchers
+    dict_dfs["kernel_launchers_summary"] = df_kernel_launchers_summary
+    dict_dfs["kernel_launchers_summary_by_category"] = (
+        df_kernel_launchers_summary_by_category
+    )
+    dict_dfs["kernel_launchers_unique_args"] = df_kernel_launchers_unique_args
+    dict_dfs["xla_summary"] = df_xla_summary
+
     # Generate & store perf-model specific DataFrames
-    op_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
-    df_op_detailed = perf_analyzer.build_df_perf_metrics(op_events, include_kernel_details=True, include_args=True)
-    for op_cat in ['jax_gemm', 'jax_conv', 'jax_te' ]: # jax_op_mapping.jax_op_to_perf_model_class_map.keys():
-        df_op_perf_model = df_op_detailed[df_op_detailed['perf model'].str.contains(op_cat)]
+    op_events = [
+        event for event in perf_analyzer.tree.events if event["cat"] == "kernel"
+    ]
+    df_op_detailed = perf_analyzer.build_df_perf_metrics(
+        op_events, include_kernel_details=True, include_args=True
+    )
+    for op_cat in [
+        "jax_gemm",
+        "jax_conv",
+        "jax_te",
+    ]:  # jax_op_mapping.jax_op_to_perf_model_class_map.keys():
+        df_op_perf_model = df_op_detailed[
+            df_op_detailed["perf model"].str.contains(op_cat)
+        ]
         df_op = perf_analyzer.summarize_df_perf_metrics(df_op_perf_model, agg_metrics)
         dict_dfs[f"op_{op_cat}"] = df_op
     return dict_dfs
 
+
 def main():
     """
     Usage:
-        mkdir -p $log_dir/tracelens/pytorch $log_dir/tracelens/jax 
+        mkdir -p $log_dir/tracelens/pytorch $log_dir/tracelens/jax
         python3 TraceLens/Reporting/perf_report.py --profile_path $trace_dir/$trace_pytorch --output_path $log_dir/tracelens/pytorch
-        python3 TraceLens/Reporting/perf_report.py --profile_path $trace_dir/$trace_jax --output_path $log_dir/tracelens/jax 
+        python3 TraceLens/Reporting/perf_report.py --profile_path $trace_dir/$trace_jax --output_path $log_dir/tracelens/jax
     """
     # check openpyxl is installed
     try:
         import openpyxl
     except ImportError:
-        raise ImportError("openpyxl is required to write Excel files for perf report gen. Please install it using 'pip install openpyxl'.")
+        raise ImportError(
+            "openpyxl is required to write Excel files for perf report gen. Please install it using 'pip install openpyxl'."
+        )
 
-    parser = argparse.ArgumentParser(description='Process a pytroch JSON trace or JAX xplane.pb profile and generate performance report tables.')
-    parser.add_argument('--profile_path', type=str, required=True, help='Path to the trace file: pytorch trace.json or jax xplane.pb')
-    parser.add_argument('--gpu_arch_json_path', type=str, default=None, help='Path to the GPU architecture JSON file')
-    parser.add_argument("--num_cus", type=str, default=304, help="Number of compute units, MI300X - 304; MI210: 104")
-    parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
-    parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".csv", ], choices=[".xlsx", ".csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
-    parser.add_argument("--output_filename", type=str, default="trace_analysis_results", help="Base name for output files")
+    parser = argparse.ArgumentParser(
+        description="Process a pytroch JSON trace or JAX xplane.pb profile and generate performance report tables."
+    )
+    parser.add_argument(
+        "--profile_path",
+        type=str,
+        required=True,
+        help="Path to the trace file: pytorch trace.json or jax xplane.pb",
+    )
+    parser.add_argument(
+        "--gpu_arch_json_path",
+        type=str,
+        default=None,
+        help="Path to the GPU architecture JSON file",
+    )
+    parser.add_argument(
+        "--num_cus",
+        type=str,
+        default=304,
+        help="Number of compute units, MI300X - 304; MI210: 104",
+    )
+    parser.add_argument(
+        "--output_path", type=str, required=True, help="Path to the output folder"
+    )
+    parser.add_argument(
+        "--output_table_formats",
+        type=str,
+        nargs="+",
+        default=[
+            ".csv",
+        ],
+        choices=[".xlsx", ".csv"],
+        help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.",
+    )
+    parser.add_argument(
+        "--output_filename",
+        type=str,
+        default="trace_analysis_results",
+        help="Base name for output files",
+    )
     args = parser.parse_args()
 
     # Load the arch json
     gpu_arch_json = None
     if args.gpu_arch_json_path:
-        with open(args.gpu_arch_json_path, 'r') as f:
+        with open(args.gpu_arch_json_path, "r") as f:
             gpu_arch_json = json.load(f)
 
     # Analyze trace profile
-    assert args.profile_path.endswith('.xplane.pb')
+    assert args.profile_path.endswith(".xplane.pb")
     dict_dfs = {}
-    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
+    dict_dfs = perf_analysis(
+        args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus
+    )
 
     # Save the output
     output_folder = Path(args.output_path)
@@ -106,16 +178,28 @@ def main():
     try:
         output_folder.mkdir(parents=True, exist_ok=True)
     except PermissionError:
-        print(f"Error: Insufficient permissions to create the directory at {args.output_path}.", file=sys.stderr)
+        print(
+            f"Error: Insufficient permissions to create the directory at {args.output_path}.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except FileNotFoundError:
-        print(f"Error: The specified path {args.output_path} is invalid.", file=sys.stderr)
+        print(
+            f"Error: The specified path {args.output_path} is invalid.", file=sys.stderr
+        )
         sys.exit(1)
     for name_df, df in dict_dfs.items():
-        suffix = '_' + '_'.join(name_df.lower().split())
-        export_data_df(df, output_folder, output_filename, output_table_format=args.output_table_formats, suffix=suffix,)
+        suffix = "_" + "_".join(name_df.lower().split())
+        export_data_df(
+            df,
+            output_folder,
+            output_filename,
+            output_table_format=args.output_table_formats,
+            suffix=suffix,
+        )
 
     print(f"DataFrames successfully written to {args.output_path}")
+
 
 if __name__ == "__main__":
     main()

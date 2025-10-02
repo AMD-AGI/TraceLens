@@ -20,12 +20,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import json
 import gzip
-from collections import defaultdict
+import json
 import math
+from collections import defaultdict
 
 from ..util import DataLoader
+
 
 class TraceFuse:
     def __init__(self, profile_filepaths_list_or_dict):
@@ -39,25 +40,35 @@ class TraceFuse:
         """
         # we will map the list of filepaths to a dict
         if isinstance(profile_filepaths_list_or_dict, list):
-            self.rank2filepath = {i: filepath for i, filepath in enumerate(profile_filepaths_list_or_dict)}
+            self.rank2filepath = {
+                i: filepath for i, filepath in enumerate(profile_filepaths_list_or_dict)
+            }
         elif isinstance(profile_filepaths_list_or_dict, dict):
             self.rank2filepath = profile_filepaths_list_or_dict
 
         # get the first file to set the linking key and offset multiplier
         filename = next(iter(self.rank2filepath.values()))
         data = DataLoader.load_data(filename)
-        events = data['traceEvents']
+        events = data["traceEvents"]
         self._set_linking_key(events)
 
-        self.fields_to_adjust_offset = ['id', 'pid', self.linking_key]
+        self.fields_to_adjust_offset = ["id", "pid", self.linking_key]
         self._set_offset_multiplier(events)
 
     def _set_linking_key(self, events):
         # load the first file to get the linking key
         launch_event = next(
-            ( event for event in events if event.get('cat') in ['cuda_runtime', 'cuda_driver'] and 'launch' in event.get('name', '').lower() )
-            , None)
-        self.linking_key = 'correlation' if 'correlation' in launch_event['args'] else 'External id'
+            (
+                event
+                for event in events
+                if event.get("cat") in ["cuda_runtime", "cuda_driver"]
+                and "launch" in event.get("name", "").lower()
+            ),
+            None,
+        )
+        self.linking_key = (
+            "correlation" if "correlation" in launch_event["args"] else "External id"
+        )
 
     def _set_offset_multiplier(self, events):
         """Calculate offset multipliers for each field."""
@@ -65,27 +76,29 @@ class TraceFuse:
         for event in events:
             for field in self.fields_to_adjust_offset:
                 if field == self.linking_key:
-                    value = event.get('args', {}).get(field)
+                    value = event.get("args", {}).get(field)
                 else:
                     value = event.get(field)
                 if isinstance(value, int):
                     max_values[field] = max(max_values[field], value)
-        self.offset_multiplier = {field: 10 ** (math.ceil(math.log10(max_value)) + 1)
-                                    for field, max_value in max_values.items()}
+        self.offset_multiplier = {
+            field: 10 ** (math.ceil(math.log10(max_value)) + 1)
+            for field, max_value in max_values.items()
+        }
 
     @staticmethod
     def default_filter_fn(event):
-        return event.get('cat', None) != 'Trace'
+        return event.get("cat", None) != "Trace"
 
     def adjust_field(self, event, field, rank, offset_multiplier):
         is_arg = field == self.linking_key
-        if is_arg and field in event['args']:
-            value = event['args'][field]
-            event['args'][f'{field}_raw'] = value
-            event['args'][field] += rank * offset_multiplier
+        if is_arg and field in event["args"]:
+            value = event["args"][field]
+            event["args"][f"{field}_raw"] = value
+            event["args"][field] += rank * offset_multiplier
         elif not is_arg and field in event:
             value = event[field]
-            event['args'][f'{field}_raw'] = value
+            event["args"][f"{field}_raw"] = value
             if type(value) == int:
                 event[field] += rank * offset_multiplier
 
@@ -95,8 +108,8 @@ class TraceFuse:
 
         if filter_fn is None:
             filter_fn = lambda event: (
-                event.get('cat', None) != 'Trace'
-                and (include_pyfunc or event.get('cat') != 'python_function')
+                event.get("cat", None) != "Trace"
+                and (include_pyfunc or event.get("cat") != "python_function")
             )
 
         for rank, filepath in self.rank2filepath.items():
@@ -104,12 +117,12 @@ class TraceFuse:
             data = DataLoader.load_data(filepath)
 
             processed_events = []
-            for event in data['traceEvents']:
+            for event in data["traceEvents"]:
                 if not filter_fn(event):
                     continue
-                if 'args' not in event:
-                    event['args'] = {}
-                event['args']['rank'] = rank
+                if "args" not in event:
+                    event["args"] = {}
+                event["args"]["rank"] = rank
 
                 for field, offset_multiplier in self.offset_multiplier.items():
                     self.adjust_field(event, field, rank, offset_multiplier)
@@ -118,14 +131,15 @@ class TraceFuse:
 
         return merged_data
 
-    def merge_and_save(self, output_file='merged_trace.json',
-                        filter_fn=None, include_pyfunc=False):
+    def merge_and_save(
+        self, output_file="merged_trace.json", filter_fn=None, include_pyfunc=False
+    ):
         """Merge trace files and save the output."""
         merged_data = self.merge(filter_fn, include_pyfunc)
 
-        json_data_out = {'traceEvents': merged_data}
-        gz_output_file = output_file + '.gz'
-        with gzip.open(gz_output_file, 'wt', encoding='utf-8') as f:
+        json_data_out = {"traceEvents": merged_data}
+        gz_output_file = output_file + ".gz"
+        with gzip.open(gz_output_file, "wt", encoding="utf-8") as f:
             print(f"Writing to file: {gz_output_file}")
             json.dump(json_data_out, f, indent=4)
         print(f"Data successfully written to {gz_output_file}")

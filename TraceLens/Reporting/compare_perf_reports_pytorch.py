@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import os
-from typing import List, Sequence, Dict, Optional
 import re
+from typing import Dict, List, Optional, Sequence
+
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
@@ -39,7 +40,9 @@ def outer_merge(dfs: List[pd.DataFrame], keys: Sequence[str]) -> pd.DataFrame:
     return merged[ordered]
 
 
-def add_diff_cols(df: pd.DataFrame, tags: List[str], diff_cols: List[str] | str) -> pd.DataFrame:
+def add_diff_cols(
+    df: pd.DataFrame, tags: List[str], diff_cols: List[str] | str
+) -> pd.DataFrame:
     """
     Add *_diff and *_pct columns for:
       • given diff_col
@@ -64,10 +67,10 @@ def add_diff_cols(df: pd.DataFrame, tags: List[str], diff_cols: List[str] | str)
 
 
 def build_df_dff(
-        dfs: List[pd.DataFrame],
-        list_report_tags: List[str],
-        merge_keys: List[str],
-        diff_cols: List[str] | str,
+    dfs: List[pd.DataFrame],
+    list_report_tags: List[str],
+    merge_keys: List[str],
+    diff_cols: List[str] | str,
 ) -> pd.DataFrame:
     """
     Build a DataFrame with differences between multiple TraceLens reports.
@@ -85,21 +88,26 @@ def build_df_dff(
 
     # 1. Prefix columns in each DataFrame with the report tag
     dfs = [
-        prefix_columns(df, tag, merge_keys)
-        for df, tag in zip(dfs, list_report_tags)
+        prefix_columns(df, tag, merge_keys) for df, tag in zip(dfs, list_report_tags)
     ]
     # 2. Merge the DataFrames on the specified keys
     merged_df = outer_merge(dfs, merge_keys)
     # 3. Add diff and pct columns for the specified diff_col
     merged_df = add_diff_cols(merged_df, list_report_tags, diff_cols)
     # 4. Reorder columns: keys, diff cols, then all other metrics
-    diff_cols = [col for col in merged_df.columns if re.match(r".*__.*_diff|.*__.*_pct", col)]
+    diff_cols = [
+        col for col in merged_df.columns if re.match(r".*__.*_diff|.*__.*_pct", col)
+    ]
     ordered_cols = (
         merge_keys
         + diff_cols
-        + [col for col in merged_df.columns if col not in merge_keys and col not in diff_cols]
+        + [
+            col
+            for col in merged_df.columns
+            if col not in merge_keys and col not in diff_cols
+        ]
     )
-    
+
     return merged_df[ordered_cols]
 
 
@@ -166,50 +174,68 @@ def split_df_diff(
                     final_cols.append(col)
 
         return df[final_cols].dropna(axis=1, how="all")
-    
+
     # ------------------------------------------------------------------------
-    for tag in tags[1:]:               # each non-baseline report
-        intersect =  df_diff[f"{tag}::{diff_col}"].notna() & df_diff[f"{baseline_tag}::{diff_col}"].notna()
-        base_only =  df_diff[f"{baseline_tag}::{diff_col}"].notna() & df_diff[f"{tag}::{diff_col}"].isna()
-        var_only  =  df_diff[f"{tag}::{diff_col}"].notna() & df_diff[f"{baseline_tag}::{diff_col}"].isna()
+    for tag in tags[1:]:  # each non-baseline report
+        intersect = (
+            df_diff[f"{tag}::{diff_col}"].notna()
+            & df_diff[f"{baseline_tag}::{diff_col}"].notna()
+        )
+        base_only = (
+            df_diff[f"{baseline_tag}::{diff_col}"].notna()
+            & df_diff[f"{tag}::{diff_col}"].isna()
+        )
+        var_only = (
+            df_diff[f"{tag}::{diff_col}"].notna()
+            & df_diff[f"{baseline_tag}::{diff_col}"].isna()
+        )
 
         # 1) INTERSECT  – keep both tags
-        df_i = df_diff.loc[intersect].sort_values(
-            f"{baseline_tag}::{sort_col}", ascending=False, na_position="last"
-        ).reset_index(drop=True)
+        df_i = (
+            df_diff.loc[intersect]
+            .sort_values(
+                f"{baseline_tag}::{sort_col}", ascending=False, na_position="last"
+            )
+            .reset_index(drop=True)
+        )
         if drop_other_tag_cols:
             df_i = _strip_other_tags(df_i, {baseline_tag, tag})
         results[f"{name}_intersect_{tag}"] = df_i
 
         # 2) BASELINE-ONLY – drop variant’s tag columns
-        df_b = df_diff.loc[base_only].sort_values(
-            f"{baseline_tag}::{sort_col}", ascending=False, na_position="last"
-        ).reset_index(drop=True)
+        df_b = (
+            df_diff.loc[base_only]
+            .sort_values(
+                f"{baseline_tag}::{sort_col}", ascending=False, na_position="last"
+            )
+            .reset_index(drop=True)
+        )
         if drop_other_tag_cols:
             df_b = _strip_other_tags(df_b, {baseline_tag})
         results[f"{name}_only_baseline_{tag}"] = df_b
 
         # 3) VARIANT-ONLY – drop baseline’s tag columns
-        df_v = df_diff.loc[var_only].sort_values(
-            f"{tag}::{sort_col}", ascending=False, na_position="last"
-        ).reset_index(drop=True)
+        df_v = (
+            df_diff.loc[var_only]
+            .sort_values(f"{tag}::{sort_col}", ascending=False, na_position="last")
+            .reset_index(drop=True)
+        )
         if drop_other_tag_cols:
             df_v = _strip_other_tags(df_v, {tag})
         results[f"{name}_only_variant_{tag}"] = df_v
 
     return results
 
+
 def generate_compare_perf_reports_pytorch(
-        reports: List[str], # List of paths to TraceLens reports
-        output: str = "comparison.xlsx",
-        names: List[str] = None,
-        sheets: List[str] = ["all"],
+    reports: List[str],  # List of paths to TraceLens reports
+    output: str = "comparison.xlsx",
+    names: List[str] = None,
+    sheets: List[str] = ["all"],
 ) -> Dict[str, pd.DataFrame]:
-    
+
     tags = (
-        names
-        if names
-        else [os.path.splitext(os.path.basename(p))[0] for p in reports]
+        names if names else [os.path.splitext(os.path.basename(p))[0] for p in reports]
     )
     baseline_tag = tags[0]
     if len(set(tags)) != len(tags):
@@ -222,10 +248,7 @@ def generate_compare_perf_reports_pytorch(
         keys = ["type"]
         diff_col = "time ms"
         # Load the GPU timeline sheet from each report
-        dfs = [
-            load_sheet(path, sheet_name="gpu_timeline")
-            for path in reports
-        ]
+        dfs = [load_sheet(path, sheet_name="gpu_timeline") for path in reports]
         dtl = build_df_dff(
             dfs=dfs,
             list_report_tags=tags,
@@ -240,34 +263,31 @@ def generate_compare_perf_reports_pytorch(
         diff_cols = ["total_direct_kernel_time_ms", "Count"]
         cols_to_delete = ["total_direct_kernel_time_sum"]
         # Load the Ops summary sheet from each report
-        dfs = [
-            load_sheet(path, sheet_name="ops_summary")
-            for path in reports
-        ]
+        dfs = [load_sheet(path, sheet_name="ops_summary") for path in reports]
 
         # Delete columns that are not needed
         for i, df in enumerate(dfs):
             cols_to_delete = ["total_direct_kernel_time_sum"]
             if i > 0:
                 cols_to_delete.append("Cumulative Percentage (%)")
-            df.drop(columns=cols_to_delete, inplace=True, errors='ignore')
-        
+            df.drop(columns=cols_to_delete, inplace=True, errors="ignore")
+
         ops = build_df_dff(
-            dfs=dfs,
-            list_report_tags=tags,
-            merge_keys=keys,
-            diff_cols=diff_cols
+            dfs=dfs, list_report_tags=tags, merge_keys=keys, diff_cols=diff_cols
         )
-        
+
         # sort by baseline tag's total_direct_kernel_time_ms
         sort_key = f"{baseline_tag}::total_direct_kernel_time_ms"
-        
+
         ops = ops.sort_values(sort_key, ascending=False).reset_index(drop=True)
-        
+
         results["ops_summary"] = ops
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
-    alias = ["ops_all", "ops_unique_args"] # different names for different versions of perf reports
+    alias = [
+        "ops_all",
+        "ops_unique_args",
+    ]  # different names for different versions of perf reports
     if "ops_all" in sheets or "all" in sheets:
         for sheet_name in alias:
             if sheet_name in pd.ExcelFile(reports[0]).sheet_names:
@@ -280,12 +300,13 @@ def generate_compare_perf_reports_pytorch(
             "Input Strides",
             "Concrete Inputs",
         ]
-        diff_cols = ["total_direct_kernel_time_sum", "total_direct_kernel_time_mean", "operation_count"]
-
-        dfs = [
-            load_sheet(path, sheet_name=ops_all_sheet)
-            for path in reports
+        diff_cols = [
+            "total_direct_kernel_time_sum",
+            "total_direct_kernel_time_mean",
+            "operation_count",
         ]
+
+        dfs = [load_sheet(path, sheet_name=ops_all_sheet) for path in reports]
 
         opsA = build_df_dff(
             dfs=dfs,
@@ -305,9 +326,11 @@ def generate_compare_perf_reports_pytorch(
         results.update(this_results)
 
         for sheet_name in this_results.keys():
-            cols_to_hide = [c for c in this_results[sheet_name].columns if c.endswith(
-                ("kernel_names", "median", "std", "min", "max", "ex_UID")
-            )]
+            cols_to_hide = [
+                c
+                for c in this_results[sheet_name].columns
+                if c.endswith(("kernel_names", "median", "std", "min", "max", "ex_UID"))
+            ]
             cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Roofline sheets (per-op) ──────────────────────────────────────────────
@@ -332,31 +355,44 @@ def generate_compare_perf_reports_pytorch(
         }
 
         for sheet in roofline_sheets:
-            
-            dfs = [
-                load_sheet(path=path, sheet_name=sheet)
-                for path in reports
-            ]
+
+            dfs = [load_sheet(path=path, sheet_name=sheet) for path in reports]
 
             # delete columns that are not needed for non-baseline reports
             # like GFLOPS_first, Data Moved (MB)_first as these are same for all
             cols_to_del_non_baseline = [
-                "GFLOPS_first", "Data Moved (MB)_first", "FLOPS/Byte_first",
-                "Input type_first", "Input Dims_first", "Input Strides_first",
-                "Concrete Inputs_first"]
+                "GFLOPS_first",
+                "Data Moved (MB)_first",
+                "FLOPS/Byte_first",
+                "Input type_first",
+                "Input Dims_first",
+                "Input Strides_first",
+                "Concrete Inputs_first",
+            ]
             for i, df in enumerate(dfs):
                 if i > 0:
-                    df.drop(columns=cols_to_del_non_baseline, inplace=True, errors='ignore')
-                    
+                    df.drop(
+                        columns=cols_to_del_non_baseline, inplace=True, errors="ignore"
+                    )
+
             # load the baseline report to get the merge keys
             df_roofline_ref = dfs[0]
             cond = lambda col: col.startswith("param:")
-            merge_keys = ['name'] + [col for col in df_roofline_ref.columns if cond(col)]
-            diff_cols = ['Kernel Time (µs)_sum', 'Kernel Time (µs)_mean', "name_count",
-                         'TFLOPS/s_mean', 'TB/s_mean']
+            merge_keys = ["name"] + [
+                col for col in df_roofline_ref.columns if cond(col)
+            ]
+            diff_cols = [
+                "Kernel Time (µs)_sum",
+                "Kernel Time (µs)_mean",
+                "name_count",
+                "TFLOPS/s_mean",
+                "TB/s_mean",
+            ]
             # if any of dfs is empty, skip this sheet
             if any(df.empty for df in dfs):
-                print(f"Skipping roofline sheet '{sheet}' because one of the reports is empty.")
+                print(
+                    f"Skipping roofline sheet '{sheet}' because one of the reports is empty."
+                )
                 continue
 
             # Load the roofline sheet for each report
@@ -367,38 +403,55 @@ def generate_compare_perf_reports_pytorch(
                 diff_cols=diff_cols,
             )
             this_results = split_df_diff(
-                    name=roofline_short_names[sheet],
-                    df_diff=roofline_diff,
-                    tags=tags,
-                    diff_col=diff_cols[0],  # use the first diff_col for checking matches
-                    sort_col="Kernel Time (µs)_sum",
+                name=roofline_short_names[sheet],
+                df_diff=roofline_diff,
+                tags=tags,
+                diff_col=diff_cols[0],  # use the first diff_col for checking matches
+                sort_col="Kernel Time (µs)_sum",
             )
-            
+
             results.update(this_results)
 
             for sheet_name in this_results.keys():
-                cols_to_hide = [c for c in this_results[sheet_name].columns if c.endswith(
-                    ("kernel_names_first", "UID", "median", "std", "min", "max",
-                     "Input type_first", "Input Dims_first", "Input Strides_first",
-                     "Concrete Inputs_first")
-                )]
+                cols_to_hide = [
+                    c
+                    for c in this_results[sheet_name].columns
+                    if c.endswith(
+                        (
+                            "kernel_names_first",
+                            "UID",
+                            "median",
+                            "std",
+                            "min",
+                            "max",
+                            "Input type_first",
+                            "Input Dims_first",
+                            "Input Strides_first",
+                            "Concrete Inputs_first",
+                        )
+                    )
+                ]
                 cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Write workbook ────────────────────────────────────────────────────────
-    with pd.ExcelWriter(output, engine='openpyxl') as xls:
+    with pd.ExcelWriter(output, engine="openpyxl") as xls:
         for sheet_name, df in results.items():
             # if df is empty, skip writing it
             if df.empty:
                 print(f"Skipping empty sheet '{sheet_name}'")
                 continue
-            df.to_excel(xls, sheet_name=sheet_name[:31], index=False)  # Excel 31-char limit
+            df.to_excel(
+                xls, sheet_name=sheet_name[:31], index=False
+            )  # Excel 31-char limit
             for col in cols_to_hide_xl.get(sheet_name, []):
                 col_idx = df.columns.get_loc(col) + 1
                 col_letter = get_column_letter(col_idx)
                 worksheet = xls.sheets[sheet_name[:31]]
                 worksheet.column_dimensions[col_letter].hidden = True
-            print(f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns")
-    
+            print(
+                f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns"
+            )
+
     return results
 
 
@@ -440,6 +493,7 @@ def main() -> None:
         names=args.names,
         sheets=args.sheets,
     )
+
 
 if __name__ == "__main__":
     main()
