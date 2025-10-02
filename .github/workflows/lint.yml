@@ -30,12 +30,14 @@ jobs:
       - name: Install formatters
         run: |
           python -m pip install --upgrade pip
-          pip install black usort
+          pip install black usort==1.0.7
 
       - name: Check formatting with Black
+        # This step will fail if files need reformatting
         run: |
           black --check .
 
       - name: Check import order with usort
+        # This step will fail if imports need sorting
         run: |
           usort check .
