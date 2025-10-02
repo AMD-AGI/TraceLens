@@ -203,8 +203,8 @@ class JaxProfileProcessor:
                             operand_list.append(hlo_ops[opid]["output"])
                 if int(beta)==1 and len(operand_list)<3:
                     print("Bias is set, however only two operands found!",op)
-                elif int(beta)==0 and (len(operand_list)>3 or len(operand_list) == 0):
-                    print("Invalid operand list",op,operand_list)
+                if (len(operand_list)>3 or len(operand_list) == 0): # Temporary fix to skip bug. Issue 308 https://github.com/AMD-AGI/TraceLens/issues/308
+                    raise ValueError("Invalid operand list",op,operand_list)
                 else:
                     c_order=re.search(r"\{[012,]*",sizes_string[0])[0].split("{")[1]
                     c=get_sizes(sizes_string[0])
