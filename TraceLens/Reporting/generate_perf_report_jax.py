@@ -29,7 +29,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     """
     # Get input trace type
     assert profile_path.endswith('.xplane.pb')
-    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
+    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path, kernel_metadata_keyword_filters=kwargs.get('kernel_metadata_keyword_filters', None))
 
     dict_dfs = {}
 
@@ -87,6 +87,7 @@ def main():
     parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
     parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".csv", ], choices=[".xlsx", ".csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
     parser.add_argument("--output_filename", type=str, default="trace_analysis_results", help="Base name for output files")
+    parser.add_argument("--kernel_metadata_keyword_filters", type=str, nargs="+", default=None, help="Kernel metadata keyword filters")
     args = parser.parse_args()
 
     # Load the arch json
@@ -98,7 +99,7 @@ def main():
     # Analyze trace profile
     assert args.profile_path.endswith('.xplane.pb')
     dict_dfs = {}
-    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus)
+    dict_dfs = perf_analysis(args.profile_path, arch=gpu_arch_json, num_cus=args.num_cus, kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters)
 
     # Save the output
     output_folder = Path(args.output_path)
