@@ -87,7 +87,7 @@ def main():
     parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
     parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".csv", ], choices=[".xlsx", ".csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
     parser.add_argument("--output_filename", type=str, default="trace_analysis_results", help="Base name for output files")
-    parser.add_argument("--kernel_metadata_keyword_filters", type=str, nargs="+", default=None, help="Kernel metadata keyword filters")
+    parser.add_argument("--kernel_metadata_keyword_filters", type=str, nargs="+", default=None, help="Kernel metadata keyword filters, performance analysis is computed only for the events containing the kerword in the metadata e.g. in framework name scope, e.g. --kernel_metadata_keyword_filters remat checkpoint")
     args = parser.parse_args()
 
     # Load the arch json
