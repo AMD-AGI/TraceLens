@@ -169,6 +169,9 @@ class GPUEventAnalyser:
         exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union)
         exposed_comm_time = sum(end - start for start, end in exposed_comm_intervals)
 
+        exposed_comp_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comm_union, comp_union)
+        exposed_comp_time = sum(end - start for start, end in exposed_comp_intervals)
+
         total_memcpy_time = sum(end - start for start, end in memcpy_union)
         memcpy_minus_compute = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, memcpy_union)
         exposed_memcpy_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comm_union, memcpy_minus_compute)
@@ -182,6 +185,7 @@ class GPUEventAnalyser:
         return {
             "computation_time": comp_time,
             "exposed_comm_time": exposed_comm_time,
+            "exposed_comp_time": exposed_comp_time,
             "exposed_memcpy_time": exposed_memcpy_time,
             "busy_time": busy_time,
             "idle_time": idle_time,
