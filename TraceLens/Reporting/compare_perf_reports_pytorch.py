@@ -459,45 +459,152 @@ def generate_compare_perf_reports_pytorch(
 
     return results
 
+def trace_compare_function_A(trace1: str, trace2: str, output: str = None):
+    """
+    Trace-based comparison function A: generate perf reports for each trace, then compare the resulting Excel files.
+    """
+    print(f"[TRACE COMPARE A] Generating perf reports for: {trace1} and {trace2}")
+    # Import here to avoid circular import at module level
+    from .generate_perf_report_pytorch import generate_perf_report_pytorch
+    # Generate output xlsx paths
+    def get_xlsx_path(trace_path):
+        base = os.path.splitext(os.path.basename(trace_path))[0]
+        return os.path.abspath(base + '_perf_report.xlsx')
+
+    xlsx1 = get_xlsx_path(trace1)
+    xlsx2 = get_xlsx_path(trace2)
+
+    # Generate reports if not already present
+    if not os.path.exists(xlsx1):
+        print(f"[TRACE COMPARE A] Generating report: {xlsx1}")
+        generate_perf_report_pytorch(profile_json_path=trace1, output_xlsx_path=xlsx1)
+    else:
+        print(f"[TRACE COMPARE A] Report already exists: {xlsx1}")
+    if not os.path.exists(xlsx2):
+        print(f"[TRACE COMPARE A] Generating report: {xlsx2}")
+        generate_perf_report_pytorch(profile_json_path=trace2, output_xlsx_path=xlsx2)
+    else:
+        print(f"[TRACE COMPARE A] Report already exists: {xlsx2}")
+
+    # Use the existing report comparison code
+    print(f"[TRACE COMPARE A] Comparing reports: {xlsx1} vs {xlsx2}")
+    # Use the provided output path or default
+    compare_output = output or "comparison.xlsx"
+    generate_compare_perf_reports_pytorch(
+        reports=[xlsx1, xlsx2],
+        output=compare_output
+    )
+    print(f"[TRACE COMPARE A] Comparison complete. Output: {compare_output}")
+    return None
+
+def trace_compare_function_B(trace1: str, trace2: str, output: str = None):
+    """
+    Trace-based comparison function B (use_tracediff=True): uses TraceDiff to generate merged tree and diff reports.
+    """
+    print(f"[TRACE COMPARE B] Comparing traces with tracediff: {trace1} vs {trace2}")
+    if output:
+        print(f"[TRACE COMPARE B] Output will be written to: {output}")
+
+    import os
+    from TraceLens import TreePerfAnalyzer
+    from TraceLens.TraceDiff import TraceDiff
+
+    # 1. Load and build trees from the two traces
+    perf_analyzer1 = TreePerfAnalyzer.from_file(trace1)
+    perf_analyzer2 = TreePerfAnalyzer.from_file(trace2)
+    tree1 = perf_analyzer1.tree
+    tree2 = perf_analyzer2.tree
+    print("[TRACE COMPARE B] Trees built from traces.")
+
+    # 2. Run TraceDiff
+    td = TraceDiff(tree1, tree2)
+    td.generate_tracediff_report()
+    print("[TRACE COMPARE B] TraceDiff report generated.")
+
+    # 3. Write reports to output directory
+    output_dir = os.path.dirname(output) if output else os.getcwd()
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+    td.print_tracediff_report_files(output_dir)
+    print(f"[TRACE COMPARE B] Diff reports written to: {output_dir}")
+    return None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # main
 # ──────────────────────────────────────────────────────────────────────────────
 def main() -> None:
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("reports", nargs="+", help="TraceLens Excel reports (.xlsx)")
     parser.add_argument(
-        "-o", "--output", default="comparison.xlsx", help="Output file name"
+        '-m', '--mode',
+        choices=['trace', 't', 'report', 'r'],
+        required=True,
+        help="Comparison mode: 'trace' (or 't') for trace-based, 'report' (or 'r') for report-based."
     )
     parser.add_argument(
-        "--names", nargs="*", help="Optional tags for each report (must match count)"
+        'inputs',
+        nargs='+',
+        help='Input files: 2 JSON traces for trace mode, or 2 XLSX reports for report mode.'
     )
     parser.add_argument(
-        "--sheets",
-        nargs="+",
+        '-o', '--output', default='comparison.xlsx', help='Output file name'
+    )
+    parser.add_argument(
+        '--names', nargs='*', help='Optional tags for each report (must match count)'
+    )
+    parser.add_argument(
+        '--sheets',
+        nargs='+',
         choices=(
-            "gpu_timeline",
-            "ops_summary",
-            "ops_all",
-            "roofline",
-            "all",
+            'gpu_timeline',
+            'ops_summary',
+            'ops_all',
+            'roofline',
+            'all',
         ),
-        default=["all"],
-        help="Which sheet groups to process. Can be one or more.",
+        default=['all'],
+        help='Which sheet groups to process. Can be one or more.'
+    )
+    parser.add_argument(
+        '--use-tracediff',
+        action='store_true',
+        default=False,
+        help='If set (trace mode only), use tracediff-based comparison (function B). Default: False (function A).'
     )
     args = parser.parse_args()
 
-    if len(args.reports) < 2:
-        parser.error("Need at least two report files")
-    if args.names and len(args.names) != len(args.reports):
-        parser.error("--names count must equal number of reports")
+    mode = args.mode.lower()
+    is_trace = mode in ('trace', 't')
+    is_report = mode in ('report', 'r')
 
-    generate_compare_perf_reports_pytorch(
-        reports=args.reports,
-        output=args.output,
-        names=args.names,
-        sheets=args.sheets,
-    )
+    if is_trace:
+        if len(args.inputs) != 2:
+            parser.error('Trace mode requires exactly 2 JSON trace files.')
+        for f in args.inputs:
+            if not f.lower().endswith('.json'):
+                parser.error(f"Trace mode expects JSON files, got: {f}")
+        if args.use_tracediff:
+            trace_compare_function_B(args.inputs[0], args.inputs[1], output=args.output)
+        else:
+            trace_compare_function_A(args.inputs[0], args.inputs[1], output=args.output)
+        return
+    elif is_report:
+        if len(args.inputs) != 2:
+            parser.error('Report mode requires exactly 2 XLSX report files.')
+        for f in args.inputs:
+            if not f.lower().endswith('.xlsx'):
+                parser.error(f"Report mode expects XLSX files, got: {f}")
+        if args.names and len(args.names) != len(args.inputs):
+            parser.error('--names count must equal number of reports')
+
+        generate_compare_perf_reports_pytorch(
+            reports=args.inputs,
+            output=args.output,
+            names=args.names,
+            sheets=args.sheets,
+        )
+    else:
+        parser.error("Unknown mode. Use 'trace'/'t' or 'report'/'r'.")
 
 
 if __name__ == "__main__":
