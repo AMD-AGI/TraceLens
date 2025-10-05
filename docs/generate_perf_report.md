@@ -9,7 +9,7 @@ This Python script (`TraceLens/Reporting/generate_perf_report_pytorch.py`) proce
 Run the script with a profile JSON to generate an Excel report:
 
 ```bash
-python generate_perf_report.py --profile_json_path path/to/profile.json 
+python generate_perf_report_pytorch.py --profile_json_path path/to/profile.json 
 ```
 
 Alternatively you can directly call the entry point with the same command line args,
