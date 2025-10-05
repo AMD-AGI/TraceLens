@@ -2,8 +2,6 @@
 
 Thanks for your interest in improving **TraceLens** — a toolkit that parses PyTorch/JAX profiler traces and generates useful insights.
 
-This doc tells you how to set up a dev env, how we name branches and commits, how to test, and how to get your PRs merged fast.
-
 ---
 
 ## 📋 Before You Start
@@ -27,7 +25,7 @@ source .venv/bin/activate
 
 # install (editable) + dev extras
 pip install -U pip
-pip install -e .
+pip install -e .[dev]
 ```
 
 ## Project Structure (high level)
