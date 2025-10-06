@@ -4,7 +4,7 @@ import json
 from typing import Optional, Dict, Tuple
 import pandas as pd
 import numpy as np
-from TraceLens import TraceToTree
+from TraceLens import PyTorchTraceToTree
 from TraceLens import TreePerfAnalyzer
 from TraceLens import NcclAnalyser
 import importlib.util

@@ -3,12 +3,12 @@ from typing import Any, Callable, cast, Dict, Optional
 import pandas as pd
 
 import TraceLens.util
-from TraceLens import TraceToTree
+from TraceLens import PyTorchTraceToTree
 from ..TreePerf import GPUEventAnalyser
 
 
 class TraceDiff:
-    def __init__(self, tree1: TraceToTree, tree2: TraceToTree):
+    def __init__(self, tree1: PyTorchTraceToTree, tree2: PyTorchTraceToTree):
         self.baseline = tree1
         self.variant = tree2
         self.db1 = []
@@ -50,7 +50,7 @@ class TraceDiff:
         return self.diff_stats_summary_df
 
     def _add_subtree_to_pod_recursive(
-        self, node: Dict[str, Any], pod: set, tree: TraceToTree
+        self, node: Dict[str, Any], pod: set, tree: PyTorchTraceToTree
     ) -> None:
         name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
         cat = tree.event_to_category(node)
@@ -62,14 +62,14 @@ class TraceDiff:
         for i, child in enumerate(children):
             self._add_subtree_to_pod_recursive(child, pod, tree)
 
-    def add_to_pod(self, node: Dict[str, Any], pod: set, tree: TraceToTree) -> None:
+    def add_to_pod(self, node: Dict[str, Any], pod: set, tree: PyTorchTraceToTree) -> None:
         """
         Recursively adds the subtree rooted at the given node to the set of points of differences (PODs).
 
         Args:
             node (Dict[str, Any]): The current node in the trace tree.
             pod (set): The set to which PODs will be added.
-            tree (TraceToTree): The trace tree containing the events.
+            tree (PyTorchTraceToTree): The trace tree containing the events.
         """
         if not isinstance(node, dict):
             return
@@ -222,7 +222,7 @@ class TraceDiff:
     def merge_trees(self):
         """
         Merges the two trees using the PODs from get_diff_boundaries, inspired by merge_tree_from_pod, but returns a flat list of merged event dicts.
-        Each merged event has a unique merged_id, children as merged_id references, and root merged_ids. Compatible with TraceToTree format.
+        Each merged event has a unique merged_id, children as merged_id references, and root merged_ids. Compatible with PyTorchTraceToTree format.
         Returns: (merged_events, merged_root_ids)
         """
 

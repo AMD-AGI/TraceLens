@@ -15,7 +15,7 @@ TraceDiff is particularly useful for regression analysis, performance debugging,
 - **Tree Diff Visualization**: Produces a diff output file that highlights matched and unmatched operations between traces.
 - **Detailed and Summary Reports**: Generates CSV reports with kernel time statistics and aggregated summaries for each operation.
 - **UID Mapping**: Provides a mapping between event UIDs in the two traces, enabling cross-referencing and deeper analysis.
-- **Seamless Integration**: Designed to work with TraceLens's TraceToTree objects and PyTorch profiler JSON traces.
+- **Seamless Integration**: Designed to work with TraceLens's PyTorchTraceToTree objects and PyTorch profiler JSON traces.
 
 ---
 
@@ -132,7 +132,7 @@ else:
 
 ## Notes
 
-- TraceDiff is designed for PyTorch profiler JSON traces and requires TraceToTree objects as input.
+- TraceDiff is designed for PyTorch profiler JSON traces and requires PyTorchTraceToTree objects as input.
 - For more advanced usage, see the example notebook: `examples/trace_diff_example.ipynb`.
 - Output folder and file names can be customized via the API.
 - The API now separates report generation (`generate_tracediff_report`) from file output (`print_tracediff_report_files`).

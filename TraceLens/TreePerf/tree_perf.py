@@ -38,7 +38,7 @@ from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.trace_to_tree import TraceToTree, JaxTraceToTree
+from ..Trace2Tree.trace_to_tree import PyTorchTraceToTree, JaxTraceToTree
 from ..util import DataLoader, TraceEventUtils, JaxProfileProcessor
 
 class TreePerfAnalyzer:
@@ -50,12 +50,12 @@ class TreePerfAnalyzer:
         data = DataLoader.load_data(profile_filepath)
         data = data['traceEvents']
 
-        categorizer =  TraceToTree.default_categorizer if not jax else TraceEventUtils.prepare_event_categorizer(data)
+        categorizer =  PyTorchTraceToTree.default_categorizer if not jax else TraceEventUtils.prepare_event_categorizer(data)
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
-        tree = TraceToTree(data, event_to_category=categorizer)
+        tree = PyTorchTraceToTree(data, event_to_category=categorizer)
         return TreePerfAnalyzer(tree, jax=jax, event_to_category=categorizer, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax=False, python_path=None, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
+    def __init__(self, tree: PyTorchTraceToTree, add_python_func=False, arch=None, jax=False, python_path=None, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree

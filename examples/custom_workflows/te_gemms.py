@@ -2,7 +2,7 @@ import argparse
 import json
 import math
 import re
-from TraceLens import TreePerfAnalyzer, TraceToTree, PerfModel
+from TraceLens import TreePerfAnalyzer, PyTorchTraceToTree, PerfModel
 
 def get_bwd_ops_for_fwd_op(perf_analyzer: TreePerfAnalyzer, fwd_op_event: dict) -> list[dict]:
     """
@@ -15,7 +15,7 @@ def get_bwd_ops_for_fwd_op(perf_analyzer: TreePerfAnalyzer, fwd_op_event: dict) 
     bwd_events = [perf_analyzer.tree.get_UID2event(uid) for uid in bwd_eventUIDs]
     return bwd_events
 
-def add_event_to_tree(tree: TraceToTree, event: dict):
+def add_event_to_tree(tree: PyTorchTraceToTree, event: dict):
     UID = len(tree.events)
     event['UID'] = UID
     tree.events.append(event)

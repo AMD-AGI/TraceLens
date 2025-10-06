@@ -24,7 +24,7 @@ Trace2Tree is a Python SDK designed to parse these trace files and build a hiera
 
 import json
 from pprint import pprint
-from TraceLens import TraceToTree
+from TraceLens import PyTorchTraceToTree
 
 # Load trace data
 trace_file = '/path/to/trace.json'
@@ -32,7 +32,7 @@ with open(trace_file, 'r') as f:
     trace_data = json.load(f)
 
 events = data['traceEvents']
-tree = TraceToTree(events)
+tree = PyTorchTraceToTree(events)
 tree.build_tree()
 ```
 #### 2. Locate node from Perfetto UI  

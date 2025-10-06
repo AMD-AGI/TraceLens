@@ -6,7 +6,7 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.Trace2Tree.trace_to_tree import PyTorchTraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 @dataclass
@@ -57,7 +57,7 @@ def read_trace(file: BytesIO) -> TreePerfAnalyzer:
     elif file.name.endswith(".json"):
         data = json.load(file)
 
-    tree = TraceToTree(data['traceEvents'])
+    tree = PyTorchTraceToTree(data['traceEvents'])
     return TreePerfAnalyzer(tree)
 
 

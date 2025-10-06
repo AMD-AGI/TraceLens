@@ -1,7 +1,7 @@
 import argparse
 import json
 import pandas as pd
-from TraceLens import TraceToTree
+from TraceLens import PyTorchTraceToTree
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel import dict_cat2names
 
