@@ -228,6 +228,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         
     def __init__(self, events):
         super().__init__(events) # Call the parent's __init__
+        self.gpu_pids = list(set([event['pid'] for event in events if event['pid']<100]))
 
     def get_gpu_event_lists(self, gpu_pid = None, event_filter = None):
         """
@@ -296,7 +297,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         return gpu_frames
     
     def comput_metrics_multigpu(self, gpu_pid = None, event_filter = None):
-        list_pids = [gpu_pid] if gpu_pid else range(1,9)  
+        list_pids = [gpu_pid] if gpu_pid else self.gpu_pids 
         return_dict = {}
         for pid in list_pids:
             return_dict[pid] = self.compute_metrics(gpu_pid=pid, event_filter=event_filter)
@@ -327,7 +328,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         """
         # print("Processing events by GPU")
         gpu_metrics = self.comput_metrics_multigpu(gpu_pid=gpu_pid, event_filter=event_filter)
-        list_pids = [gpu_pid] if gpu_pid else range(1,9)  
         list_dfs = []
         for _pid, cur_metric in gpu_metrics.items():
             df = GPUEventAnalyser.get_breakdown_df_from_dict(cur_metric)
