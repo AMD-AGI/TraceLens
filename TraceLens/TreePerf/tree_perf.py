@@ -869,7 +869,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                  metadata = None,
                  pb_file_name = None,
                  arch=None,
-                 python_path=None):
+                 python_path=None,
+                 kernel_metadata_keyword_filters: list[str]=None):
         #super.__init__(*args, **kwargs)
         self.tree = tree
         self.arch = arch
@@ -882,6 +883,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.gpu_event_filter = JaxAnalyses.default_gpu_event_filter
         self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map
+        self.kernel_metadata_keyword_filters = kernel_metadata_keyword_filters
     
     #####################################
     ## Parsers for JaxTree Event Metadata
@@ -1203,7 +1205,17 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
             if include_kernel_details:
                 metrics_event['kernel_details'] = event['kernel_details']
-            rows.append(metrics_event)
+
+            metadata = event.get('metadata')
+            
+            if self.kernel_metadata_keyword_filters is not None:
+                if metadata:
+                    metadata = metadata.get('metadata', '')
+                    if any(kernel_metadata_keyword_filter in metadata for kernel_metadata_keyword_filter in self.kernel_metadata_keyword_filters):
+                        rows.append(metrics_event)
+            else:
+                rows.append(metrics_event)
+
         df = pd.DataFrame(rows)
         return df
 

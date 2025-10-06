@@ -30,7 +30,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     """
     # Get input trace type
     assert profile_path.endswith('.xplane.pb')
-    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path)
+    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path, kernel_metadata_keyword_filters=kwargs.get('kernel_metadata_keyword_filters', None))
 
     dict_dfs = {}
 
@@ -70,7 +70,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     return dict_dfs
 
 def generate_perf_report_jax(profile_path: str,  gpu_arch_json_path = None, num_cus = None, 
-                             output_path = './', output_table_formats = ['.csv'],  output_filename = 'trace_analysis_results'):
+                             output_path = './', output_table_formats = ['.csv'],  output_filename = 'trace_analysis_results', kernel_metadata_keyword_filters=None):
     # Load the arch json
     gpu_arch_json = None
     if gpu_arch_json_path:
@@ -80,7 +80,7 @@ def generate_perf_report_jax(profile_path: str,  gpu_arch_json_path = None, num_
     # Analyze trace profile
     assert profile_path.endswith('.xplane.pb')
     dict_dfs = {}
-    dict_dfs = perf_analysis(profile_path, arch=gpu_arch_json, num_cus=num_cus)
+    dict_dfs = perf_analysis(profile_path, arch=gpu_arch_json, num_cus=num_cus, kernel_metadata_keyword_filters=kernel_metadata_keyword_filters)
 
     # Save the output
     output_folder_path = Path(output_path)
@@ -136,14 +136,17 @@ def main():
     parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
     parser.add_argument("--output_table_formats", type=str, nargs="+", default=["csv", ], choices=["xlsx", "csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
     parser.add_argument("--output_filename", type=str, default="trace_analysis_results", help="Base name for output files")
-    
+    parser.add_argument("--kernel_metadata_keyword_filters", type=str, nargs="+", default=None, help="Kernel metadata keyword filters, performance analysis is computed only for the events containing the kerword in the metadata e.g. in framework name scope, e.g. --kernel_metadata_keyword_filters remat checkpoint")
     args = parser.parse_args()
+
     generate_perf_report_jax(profile_path=args.profile_path,
                             gpu_arch_json_path=args.gpu_arch_json_path,
                             num_cus=args.num_cus,
                             output_path=args.output_path,
                             output_table_formats=args.output_table_formats,
-                            output_filename=args.output_filename,)
+                            output_filename=args.output_filename,
+                            kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
+                            )
 
 if __name__ == "__main__":
     main()
