@@ -1243,7 +1243,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
         perf_model_class = self.jax_op_to_perf_model_class_map.get(perf_model_name , None)
         if perf_model_class is None:
-            logger.info(f"\nPerf model is not implemented. \n\nEvent: {event}")
+            logger.warning(f"\nPerf model is not implemented. \n\nEvent: {event}")
             return dict()
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
