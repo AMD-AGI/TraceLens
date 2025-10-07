@@ -1245,7 +1245,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         if perf_model_class is None:
             logger.info(f"\nPerf model is not implemented. \n\nEvent: {event}")
             return dict()
-
         perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
