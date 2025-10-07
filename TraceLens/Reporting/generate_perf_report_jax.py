@@ -2,6 +2,13 @@ import argparse, os, sys
 import json
 from pathlib import Path
 import pandas as pd
+import logging
+
+# Configure basic logging to stdout with DEBUG level
+logging.basicConfig(stream=sys.stdout, # Output to console
+                    level=logging.DEBUG, # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+                    format='[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 from TraceLens.PerfModel import jax_op_mapping
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer

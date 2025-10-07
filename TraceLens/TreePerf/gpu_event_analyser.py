@@ -282,7 +282,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         # Default: use GPU0 (PID 1) for Jax
         dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid=gpu_pid, event_filter=event_filter)
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
-
         return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists) 
     
     def get_breakdown_df_multigpu(self, event_filter = None):
@@ -325,7 +324,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
         Similar to get_breakdown_df_multigpu but returns a dataframe for output.
         """
-        # print("Processing events by GPU")
         gpu_metrics = self.comput_metrics_multigpu(gpu_pid=gpu_pid, event_filter=event_filter)
         list_pids = [gpu_pid] if gpu_pid else range(1,9)  
         list_dfs = []
