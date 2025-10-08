@@ -318,8 +318,9 @@ def main():
                         help='Directory to save output CSV files')
 
     # Optional arguments
-    parser.add_argument('--collective_analysis', type=bool, default=True,
-                        help='Include collective analysis in the report. Default is True.')
+    parser.add_argument('--disable_coll_analysis', action='store_false', dest='collective_analysis',
+                        default=True,
+                        help='Disable collective analysis section in the report. Enabled by default.')
     parser.add_argument('--short_kernel_study', action='store_true',
                         help='Include short kernel study in the report.')
     parser.add_argument('--short_kernel_threshold_us', type=int, default=10,
