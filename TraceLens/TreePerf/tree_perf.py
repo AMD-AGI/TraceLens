@@ -55,7 +55,8 @@ class TreePerfAnalyzer:
         tree = TraceToTree(data, event_to_category=categorizer)
         return TreePerfAnalyzer(tree, jax=jax, event_to_category=categorizer, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax=False, python_path=None, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
+    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax=False, python_path=None, 
+                 event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer, include_unlinked_kernels=False):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
@@ -63,6 +64,8 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.event_to_category = event_to_category
+        # include unlinked kernels in gpu timeline
+        self.include_unlinked_kernels = include_unlinked_kernels
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
@@ -642,7 +645,9 @@ class TreePerfAnalyzer:
         return df_agg
 
     def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
+        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
+        if not self.include_unlinked_kernels:
+            kernel_events = [event for event in kernel_events if event.get('tree')]
         gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
         df = gpu_event_analyser.get_breakdown_df()
         return df
