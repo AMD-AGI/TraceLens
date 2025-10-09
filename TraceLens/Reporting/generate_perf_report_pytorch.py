@@ -176,6 +176,9 @@ def generate_perf_report_pytorch(profile_json_path: str,
                                 output_xlsx_path: Optional[str] = None,
                                 output_csvs_dir: Optional[str] = None,
 
+                                # include unlinked kernels in gpu timeline
+                                include_unlinked_kernels: bool = False,
+
                                 # collective analysis
                                 collective_analysis: bool = True,
 
@@ -199,7 +202,8 @@ def generate_perf_report_pytorch(profile_json_path: str,
     else:
         gpu_arch_json = None
 
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path)
+    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path,
+                                                include_unlinked_kernels=include_unlinked_kernels)
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -318,6 +322,8 @@ def main():
                         help='Directory to save output CSV files')
 
     # Optional arguments
+    parser.add_argument('--include_unlinked_kernels', action='store_true',
+                        help='Include unlinked kernels in the GPU timeline analysis.')
     parser.add_argument('--disable_coll_analysis', action='store_false', dest='collective_analysis',
                         default=True,
                         help='Disable collective analysis section in the report. Enabled by default.')
@@ -345,6 +351,7 @@ def main():
     generate_perf_report_pytorch(profile_json_path=args.profile_json_path,
                                  output_xlsx_path=args.output_xlsx_path,
                                  output_csvs_dir=args.output_csvs_dir,
+                                 include_unlinked_kernels=args.include_unlinked_kernels,
                                  collective_analysis=args.collective_analysis,
                                  short_kernel_study=args.short_kernel_study,
                                  short_kernel_threshold_us=args.short_kernel_threshold_us,
