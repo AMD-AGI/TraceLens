@@ -6,6 +6,12 @@ Thanks for your interest in improving **TraceLens** — a toolkit that parses Py
 
 ## 📋 Before You Start
 
+> **⚠️ NOTE FOR AMDers:**
+>
+> **This is a public repository. Do NOT add any private, confidential, or customer-related data, code, or information to this repo.**
+>
+> Please ensure all contributions are free of sensitive or proprietary content before submitting.
+
 - Read the [README](./README.md) to understand scope and architecture.
 - Search existing **issues** and **discussions** to avoid duplicates.
 - For new features and enhancements (new analyser, backend integration, refactor), **open an issue** first to align on approach.
