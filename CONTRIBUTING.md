@@ -11,9 +11,25 @@ Thanks for your interest in improving **TraceLens** — a toolkit that parses Py
 - For new features and enhancements (new analyser, backend integration, refactor), **open an issue** first to align on approach.
 - Prefer small, modular, focused PRs.
 - **Have a ready-made utility?** If your utility is already developed, you can raise a PR to add it directly to `examples/custom_workflows/`. This lets the community start using it right away while we plan a tighter integration into the core library.
+
 ---
 
-## ⚙️ Dev Setup
+## Table of Contents
+
+- [Dev Setup](#dev-setup)
+- [Project Structure (high level)](#project-structure-high-level)
+- [Code Formatting with Black](#code-formatting-with-black)
+  - [Installing Black](#installing-black)
+  - [Using Black](#using-black)
+- [Branch Naming Convention](#branch-naming-convention)
+  - [Types (type)](#types-type)
+  - [Scope (optional)](#scope-optional)
+  - [Examples](#examples)
+- [Commit Message Convention](#commit-message-convention)
+
+---
+
+## Dev Setup
 
 ```bash
 # clone
@@ -29,7 +45,8 @@ pip install -e .[dev]
 ```
 
 ## Project Structure (high level)
-```
+
+```text
 TraceLens/
 ├── TraceLens/
 │   ├── Reporting/        # CLI tools for quick start utils
@@ -46,3 +63,77 @@ TraceLens/
 ├── tests/              # unit & integration tests
 └── setup.py
 ```
+
+## Code Formatting with Black
+
+This project uses [Black](https://black.readthedocs.io/en/stable/) to automatically format Python code for consistency and readability.
+
+### Installing Black
+
+You can install Black using pip:
+
+```sh
+pip install black
+```
+
+### Using Black
+
+To format all Python files in the project, run:
+
+```sh
+black .
+```
+
+You can also format a specific file:
+
+```sh
+black path/to/your_file.py
+```
+
+Please ensure your code is formatted with Black before submitting a pull request.
+
+## Branch Naming Convention
+
+Please follow this branch naming convention for all feature and bug fix branches:
+
+```text
+<type>/<scope>/<short-description>
+```
+
+### Types (type)
+
+| Type       | Purpose                                     |
+| ---------- | ------------------------------------------- |
+| `feat`     | New feature or functionality                |
+| `fix`      | Bug fix                                     |
+| `docs`     | Documentation update                        |
+| `refactor` | Code refactoring (no functionality change)  |
+| `test`     | Tests and test-related changes              |
+| `chore`    | Miscellaneous changes (e.g., build scripts) |
+| `ci`       | Continuous integration-related changes      |
+
+### Scope (optional)
+
+The scope can be used to specify which part of the project is affected, for example: `trace2tree`, `perfmodel`, `tracediff`, `docs`, `tests`.
+
+### Examples
+
+```text
+feat/perfmodel/aiter-fav3
+fix/tracediff/diff-reporting-bug
+docs/update-jax-docs
+refactor/trace2tree/remove-dead-code
+ci/add-linting-automation
+```
+
+## Commit Message Convention
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. Example:
+
+```text
+feat(perfmodel): add perf model for aiter fav3
+fix(tracediff): resolve diff reporting error
+docs(readme-tracediff): add docs for jax tracediff
+```
+
+This format helps us to automatically generate changelogs and provide more clarity in versioning.
