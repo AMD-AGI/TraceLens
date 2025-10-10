@@ -488,7 +488,7 @@ class JaxTraceToTree(BaseTraceToTree):
                                         logger.warning(f"Missing hlo_op: {hlo_op}")
                                         logger.warning(f"in hlo_module: {GPU_event['args']['hlo_module']}")
 
-class PyTorchTraceToTree:
+class PyTorchTraceToTree(BaseTraceToTree):
     def __init__(self, events_data,
                  prune_nongpu_paths=True,
                  compute_end_times=True,
@@ -497,17 +497,15 @@ class PyTorchTraceToTree:
         self.events = [{**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i} for i, data in enumerate(events_data)]
         self.events_by_uid = {event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event for event in self.events}
         self.event_to_category = event_to_category
-        if compute_end_times:
-            self._compute_event_end_times()
-        if linking_key is not None:
-            self.linking_key = linking_key
-        else:
-            self._set_linking_key()
+
+        super().__init__(events_data,
+                         prune_nongpu_paths=prune_nongpu_paths,
+                         compute_end_times=compute_end_times,
+                         linking_key=linking_key,
+                         event_to_category=event_to_category)
+
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
-        self.cpu_root_nodes = []
-        self.prune_nongpu_paths = prune_nongpu_paths
-        self.name2event_uids = defaultdict(list)
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
