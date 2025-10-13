@@ -94,6 +94,7 @@ class JaxProfileProcessor:
             and not(line_processed.startswith("HloModule "))):
             k,v=JaxProfileProcessor.get_dict(hlo_ops, line_processed)
             hlo_ops[k]=v
+            print()
             return True
         return False
 
@@ -140,6 +141,7 @@ class JaxProfileProcessor:
                         dict_line["computation"]="gemm"
             if replica_groups is not None:
                 dict_line["replica_groups"] = replica_groups[0]
+                
         return (key,dict_line)
     @staticmethod
     def get_operand_type(hlo_ops: dict, operand : str) -> str:
