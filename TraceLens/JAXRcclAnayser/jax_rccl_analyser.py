@@ -28,7 +28,7 @@ import warnings
 import gzip
 from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree
 from TraceLens.util import DataLoader,TraceEventUtils
-from TraceLens.JAXRcclAnayser.util import rccl_complete_analysis as rca
+from util import rccl_complete_analysis as rca
 
 def list_to_tuple(obj):
     if isinstance(obj, list):
@@ -119,9 +119,6 @@ class RcclAnalyser:
         messages, replica_groups = rca.read_xla_dump(buffer_assignment_file)
         self.collectives_size_map = rca.combine_xla_dump(messages,replica_groups)
 
-
-
-
     # ------------------------------------------------------------------------
     # Step 1: Build a long table where each row is a collective event on a rank
     # ------------------------------------------------------------------------
@@ -159,4 +156,6 @@ class RcclAnalyser:
 
         self.df_per_rank_coll = df_long
         return df_long
+
+
 
