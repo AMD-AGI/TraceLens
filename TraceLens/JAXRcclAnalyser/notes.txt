@@ -1,0 +1,154 @@
+anamital_amdeng: Create a design for JAXRcclAnalyser class on pattern of nccl_analyser class. The class should be helpful in anaysisng trace files obtained through Jax traces. Example trace files are in the folder attached. It will use Jaxtracetotree class as datastructure to hold collective operation events. Do not write code only provide detailed implementation steps.
+
+GitHub Copilot: Looking at the existing codebase and the NCCL analyser pattern, here's a detailed design for the JAXRcclAnalyser class:
+
+## JAXRcclAnalyser Design
+
+### Overview
+The JAXRcclAnalyser class will analyze RCCL (ROCm Collective Communications Library) operations in JAX trace files, similar to how NcclAnalyser handles NCCL operations in PyTorch traces. It will leverage the JaxTraceToTree class as the underlying data structure to organize and analyze collective operations.
+
+### Class Structure and Initialization
+
+#### Constructor Parameters
+- `list_profile_filepaths`: List of JAX trace file paths (one per rank/device)
+- `world_size`: Total number of participating ranks/devices
+- `metadata`: JAX-specific metadata (process/thread mappings)
+- `pb_file_name`: Optional protobuf file for HLO operations analysis
+
+#### Key Attributes
+- `trace_trees`: Dictionary mapping rank to JaxTraceToTree instances
+- `dtype2bytes`: Mapping of JAX data types to byte sizes (Float32, BFloat16, Int32, etc.)
+- `collective2scaling_factor`: RCCL-specific scaling factors for bandwidth calculations
+- `collective_type2name`: Mapping of collective categories to JAX/XLA collective operation names
+- `collective_name2type`: Reverse mapping for quick lookups
+- `rccl_filter_event_fn`: Function to filter RCCL-related events from JAX traces
+
+### Implementation Steps
+
+#### Step 1: Data Loading and Preprocessing
+1. **Load JAX trace files**: Use DataLoader to read compressed/uncompressed trace files
+2. **Initialize JaxTraceToTree**: Create one instance per rank with proper event categorization
+3. **Build tree structures**: Call `build_tree()` on each JaxTraceToTree instance with metadata and protobuf info
+4. **Filter RCCL events**: Extract events related to RCCL operations using JAX-specific event patterns
+
+#### Step 2: RCCL Event Identification
+1. **Define RCCL event filter**: Look for:
+   - Events with 'rccl' or 'nccl' in the name (JAX may use both)
+   - GPU kernel events on AMD devices
+   - Events with HIP/ROCm correlation IDs
+   - JAX collective operation events (allreduce, allgather, etc.)
+2. **Extract collective metadata**: Parse JAX-specific collective arguments:
+   - Replica groups and partition specifications
+   - Tensor shapes and data types
+   - Communication patterns (ring, tree, etc.)
+
+#### Step 3: Long Table Construction (`build_df_long`)
+1. **Create per-rank collective events table** with columns:
+   - `collective_id`: Unique identifier per collective operation
+   - `rank`: Device/rank identifier
+   - `replica_group`: JAX replica group information
+   - `collective_name`: JAX collective operation name (e.g., 'all-reduce', 'all-gather')
+   - `tensor_shape`: Input/output tensor dimensions
+   - `dtype`: JAX data type (float32, bfloat16, etc.)
+   - `data_size_bytes`: Total data transferred
+   - `hlo_module`: Associated HLO module name
+   - `hlo_op`: Specific HLO operation identifier
+   - `device_id`: Physical device identifier
+   - `stream_id`: JAX stream/context identifier
+   - `timestamp_us`: Start time in microseconds
+   - `duration_us`: Operation duration
+
+#### Step 4: Summary Analysis (`build_df_summary_long`)
+1. **Aggregate metrics** by collective type, data size, and replica configuration
+2. **Calculate statistics**: mean, std, min, max durations per collective pattern
+3. **Count operations**: Number of each collective type per configuration
+4. **Identify hotspots**: Operations consuming most time/bandwidth
+
+#### Step 5: Implicit Synchronization Analysis (`build_df_rccl_implicit_sync`)
+1. **Group collective operations** by:
+   - JAX program execution step
+   - Replica group configuration
+   - Collective operation type
+2. **Calculate synchronization metrics**:
+   - Communication latency (minimum duration across ranks)
+   - Start time skew (difference between earliest and latest start)
+   - End time skew (difference between earliest and latest completion)
+   - Wait times per rank
+3. **Compute bandwidth metrics**:
+   - Algorithmic bandwidth (data_size / comm_latency)
+   - Bus bandwidth using RCCL-specific scaling factors
+4. **Identify synchronization bottlenecks**
+
+#### Step 6: JAX-Specific Collective Analysis
+1. **All-to-All operations** (`build_df_rccl_all2all`):
+   - Handle variable send/receive sizes per rank
+   - Analyze partition-specific communication patterns
+   - Calculate per-partition bandwidth metrics
+
+2. **Replica group analysis**:
+   - Analyze cross-replica vs intra-replica communication
+   - Identify replica group imbalances
+   - Calculate per-group efficiency metrics
+
+3. **SPMD pattern analysis**:
+   - Analyze sharding-related collective operations
+   - Identify resharding communication overhead
+   - Calculate sharding efficiency metrics
+
+#### Step 7: Performance Analysis Methods
+1. **Communication efficiency analysis**:
+   - Compare actual vs theoretical bandwidth
+   - Identify underutilized communication resources
+   - Detect communication/computation overlap opportunities
+
+2. **Scaling analysis**:
+   - Analyze how collective performance scales with world size
+   - Identify scaling bottlenecks
+   - Compare different collective algorithms
+
+3. **Timeline analysis**:
+   - Build communication timeline visualization data
+   - Identify communication bubbles and gaps
+   - Analyze communication scheduling efficiency
+
+#### Step 8: Integration with JaxTraceToTree
+1. **Leverage existing tree structure**:
+   - Use parent-child relationships to trace collective origins
+   - Link collective operations to their initiating HLO operations
+   - Correlate with computation phases
+
+2. **GPU kernel correlation**:
+   - Link RCCL kernel events to their launching CPU operations
+   - Trace collective operations through the JAX execution pipeline
+   - Identify collective operation fusion opportunities
+
+#### Step 9: RCCL-Specific Considerations
+1. **AMD GPU specifics**:
+   - Handle ROCm-specific event naming conventions
+   - Account for AMD GPU architecture differences
+   - Parse HIP correlation IDs correctly
+
+2. **RCCL algorithm detection**:
+   - Identify which RCCL algorithm was used (ring, tree, etc.)
+   - Analyze algorithm efficiency for different data sizes
+   - Detect algorithm selection patterns
+
+#### Step 10: Output and Visualization
+1. **Generate summary reports**:
+   - Communication efficiency summary
+   - Bottleneck identification report
+   - Scaling analysis results
+
+2. **Export analysis data**:
+   - Detailed per-operation DataFrames
+   - Aggregated performance metrics
+   - Timeline data for visualization
+
+### Key Differences from NcclAnalyser
+1. **JAX-specific event patterns**: Different naming conventions and metadata structure
+2. **Replica group handling**: JAX's SPMD model requires different grouping logic
+3. **HLO integration**: Deeper integration with JAX's HLO representation
+4. **RCCL vs NCCL**: Algorithm and performance characteristic differences
+5. **AMD GPU considerations**: ROCm/HIP-specific event handling
+
+This design provides a comprehensive framework for analyzing RCCL collective operations in JAX traces while maintaining consistency with the existing NcclAnalyser pattern.
