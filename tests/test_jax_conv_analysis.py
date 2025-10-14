@@ -1,5 +1,6 @@
 import os
 import math
+import random
 from collections import Counter
 
 from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
@@ -108,13 +109,25 @@ def test_df_kernel_launchers():
 # Performance Metrics
 #####################
 
-def test_conv_event_gflops():
+kernel_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
+assert len(kernel_events) == 25
+
+conv_events = [event for event in kernel_events if event['gpu_kernel_op_cat'].lower() == 'conv']
+assert len(conv_events) == 10
+
+result = Counter([perf_analyzer.get_event_perf_model_name(event) for event in conv_events])
+assert result == {'jax_conv': 10}
+
+rand_idx = random.randint(0, len(conv_events))
+event = conv_events[rand_idx] 
+    
+def test_conv_event_bytes_and_flops():
     """
     The total bytes moved during a single forward pass of a convolution can be estimated using the following formula:
-    Bytes Moved = (Input Size) + (Kernel Size) + (2 * Output Size) = 
+    Bytes Moved = (Input Size) + (Kernel Size) + (Output Size) = (16*32*60*104 + 4 + 5120*34*31*53)*2 = 57816648
     
     The Floating Point Operations (FLOPs) of a standard convolutional layer can be calculated using the following formula:
-    FLOPs = 2 x Number of Kernel x Kernel Shape x Output Shape = 2*2*2*5120*34*31*53 = 2.28811E9
+    FLOPs = 2 bytes per element x Number of Kernel x Kernel Shape x Output Shape = 2*2*2*5120*34*31*53 = 2.288107520
 
     Where:
     C_out: Number of output channels (or filters).
@@ -125,29 +138,27 @@ def test_conv_event_gflops():
     W_out: Width of the output feature map.
     """
     
-    kernel_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
-    assert len(kernel_events) == 25
+    perf_model_name = perf_analyzer.get_event_perf_model_name(event)
+    perf_model_class = perf_analyzer.jax_op_to_perf_model_class_map.get(perf_model_name , None)
+    perf_model = perf_model_class(event)
+    assert perf_model.bytes() == 578416648 
+    assert perf_model.flops() == 2288107520  
     
-    conv_events = [event for event in kernel_events if event['gpu_kernel_op_cat'].lower() == 'conv']
-    assert len(conv_events) == 10
-    
-    result = Counter([perf_analyzer.get_event_perf_model_name(event) for event in conv_events])
-    assert result == {'jax_conv': 10}
-    
-    import random
-    rand_idx = random.randint(0, len(conv_events)) 
+def test_conv_event_metrics():
+
     dict_perf_metrics = perf_analyzer.compute_perf_metrics(conv_events[rand_idx])
-    
     assert dict_perf_metrics['param: input_shape'] == (1, 16, 32, 60, 104)
     assert dict_perf_metrics['param: filter_shape'] == (1, 2, 2) 
     assert dict_perf_metrics['param: output_shape'] == (1, 5120, 34, 31, 53)
     assert dict_perf_metrics['param: bias'] == False
     assert math.isclose(2.288108, dict_perf_metrics['GFLOPS'], rel_tol=1e-5)
-    assert math.isclose(551.621101, dict_perf_metrics['Data Moved (MB)'], rel_tol=1e-5)
+    assert math.isclose(578416648/ (1024 * 1024), dict_perf_metrics['Data Moved (MB)'], rel_tol=1e-5) 
 
 def test_conv_perf_metrics():
-    df = perf_analyzer.build_df_perf_metrics(perf_analyzer.tree.events)
+    
+    df = perf_analyzer.build_df_perf_metrics(conv_events)
     assert df.shape == (10, 20)
     
     df_conv = df[df['perf model'].str.contains('jax_conv')]
-    df_conv_metrics = perf_analyzer.summarize_df_perf_metrics(df_conv, agg_metrics=['mean', 'std'])
+    df_metrics = perf_analyzer.summarize_df_perf_metrics(df_conv, agg_metrics=['mean', 'std'])
+    assert df_metrics.shape == (2, 20)
