@@ -253,56 +253,7 @@ class RcclAnalyser:
         return self.df_implicit_sync_cat if not detailed else self.df_implicit_sync_cat_detailed
 
 
-    # def build_df_summary_nccl_implicit_sync_cat(self, agg_metrics=['mean', 'std'],
-    #                                             metadata_fields=["Process Group Name", "Group size", "Full msg size (MB)"],
-    #                                             strict_metadata_check=True):
-    #     """
-    #     Builds a summary DF with one row per collective name, dtype, and msg size.
-    #     Aggregates across all collectives and ranks.
-    #     """
-    #     if not hasattr(self, 'df_implicit_sync_cat'):
-    #         self.df_implicit_sync_cat = self.build_df_nccl_implicit_sync_cat(strict_metadata_check=strict_metadata_check)
 
-    #     # Aggregation logic
-
-    #     df = self.df_implicit_sync_cat
-    #     agg_logic = {
-    #         'comm_latency': agg_metrics + ['size', lambda x: x.sum() / 1000],  # Size and sum (convert to ms)
-    #         'skew in start time': agg_metrics,
-    #         'skew in end time': agg_metrics,
-    #         'algo bw (GB/s)': agg_metrics,
-    #         'bus bw (GB/s)': agg_metrics,
-    #     }
-    #     metric_fields = list(agg_logic.keys()).copy()
-    #     for col in metadata_fields:
-    #         agg_logic[col] = 'first'
-
-    #     groupby_cols = ['Collective name', 'dtype', 'In msg nelems']
-    #     agg_result = df.groupby(groupby_cols).agg(agg_logic)
-
-    #     # Post-processing: rename columns and sort
-
-    #     agg_result.columns = [
-    #         f"{col[0]}_{col[1]}" if col[1] != '' else col[0]
-    #         for col in agg_result.columns
-    #     ]
-    #     column_renames = {
-    #         'comm_latency_<lambda_0>': 'Total comm latency (ms)',
-    #         'comm_latency_size': 'count',
-    #     }
-    #     for col in metadata_fields:
-    #         column_renames[col + '_first'] = col
-
-    #     agg_result.rename(columns=column_renames, inplace=True)
-    #     summary_df = agg_result.reset_index()
-    #     summary_df = summary_df.sort_values(by='Total comm latency (ms)', ascending=False)
-    #     columns_order = groupby_cols + metadata_fields
-    #     for group in metric_fields:
-    #         for agg in agg_metrics:
-    #             columns_order.append(f"{group}_{agg}")
-    #     columns_order.extend(['count', 'Total comm latency (ms)'])
-    #     summary_df = summary_df[columns_order]
-    #     return summary_df
 
     
 
