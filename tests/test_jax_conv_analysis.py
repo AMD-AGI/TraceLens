@@ -10,7 +10,7 @@ from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
 ################
 
 print('Working directory:', os.getcwd())
-jax_conv_minimal='./tests/data/jax_conv_minimal/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb'
+jax_conv_minimal='./tests/traces/mi300/jax_conv_minimal/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb'
 assert os.path.exists(jax_conv_minimal)
 perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=jax_conv_minimal)
 
