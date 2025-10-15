@@ -191,6 +191,9 @@ def generate_perf_report_pytorch(profile_json_path: str,
                                 # collective analysis
                                 collective_analysis: bool = True,
 
+                                # kernel summary sheet
+                                kernel_summary: bool = False,
+
                                 # short kernel study options
                                 short_kernel_study: bool = False,
                                 short_kernel_threshold_us: int = 10,
@@ -284,6 +287,50 @@ def generate_perf_report_pytorch(profile_json_path: str,
     }
     # update this dict with the perf_metrics_dfs
     dict_name2df.update(perf_metrics_dfs)
+
+    # Kernel summary: aggregate per-kernel durations and counts
+    if kernel_summary:
+        try:
+            df_kernels = perf_analyzer.get_df_kernels()
+        except Exception as e:
+            df_kernels = pd.DataFrame()
+        if not df_kernels.empty and 'Kernel duration (µs)' in df_kernels.columns:
+            # Add parent cpu_op category if possible
+            if 'Parent cpu_op UID' in df_kernels.columns:
+                def _parent_op_category(uid):
+                    try:
+                        if pd.isna(uid):
+                            return None
+                        evt = perf_analyzer.tree.get_UID2event(int(uid))
+                        return perf_analyzer.op_categorizer(evt)
+                    except Exception:
+                        return None
+                df_kernels['Parent op category'] = df_kernels['Parent cpu_op UID'].apply(_parent_op_category)
+
+            # Group by category/cpu_op along with kernel identifiers when available
+            group_cols = []
+            for col in ['Parent op category', 'Parent cpu_op', 'Kernel name', 'Kernel stream']:
+                if col in df_kernels.columns:
+                    group_cols.append(col)
+            if not group_cols:
+                group_cols = ['Kernel name'] if 'Kernel name' in df_kernels.columns else []
+
+            agg_dict = {'Kernel duration (µs)': ['sum', 'count', 'mean', 'min', 'max']}
+            df_kernel_summary = df_kernels.groupby(group_cols, dropna=False).agg(agg_dict)
+            df_kernel_summary.columns = ['_'.join(col).strip() for col in df_kernel_summary.columns.values]
+            df_kernel_summary.reset_index(inplace=True)
+
+            # Percent of total run time
+            total_us = perf_analyzer.total_time_ms * 1e3 if hasattr(perf_analyzer, 'total_time_ms') else None
+            if total_us:
+                df_kernel_summary['Percent of total time (%)'] = (df_kernel_summary['Kernel duration (µs)_sum'] / total_us) * 100
+            else:
+                df_kernel_summary['Percent of total time (%)'] = np.nan
+
+            df_kernel_summary.sort_values(by='Kernel duration (µs)_sum', ascending=False, inplace=True)
+            df_kernel_summary.reset_index(drop=True, inplace=True)
+            dict_name2df['kernel_summary'] = df_kernel_summary
+
     if short_kernel_study:
         dict_name2df['short_kernel_histogram'] = df_hist
         dict_name2df['short_kernels_summary'] = df_short_kernels
@@ -339,6 +386,9 @@ def main():
     parser.add_argument('--disable_coll_analysis', action='store_false', dest='collective_analysis',
                         default=True,
                         help='Disable collective analysis section in the report. Enabled by default.')
+    parser.add_argument('--enable_kernel_summary', action='store_true', dest='kernel_summary',
+                        default=False,
+                        help='Enable kernel summary sheet in the report. Disabled by default.')
     parser.add_argument('--short_kernel_study', action='store_true',
                         help='Include short kernel study in the report.')
     parser.add_argument('--short_kernel_threshold_us', type=int, default=10,
@@ -366,6 +416,7 @@ def main():
                                  include_unlinked_kernels=args.include_unlinked_kernels,
                                  micro_idle_thresh_us=args.micro_idle_thresh_us,
                                  collective_analysis=args.collective_analysis,
+                                 kernel_summary=args.kernel_summary,
                                  short_kernel_study=args.short_kernel_study,
                                  short_kernel_threshold_us=args.short_kernel_threshold_us,
                                  short_kernel_histogram_bins=args.short_kernel_histogram_bins,
