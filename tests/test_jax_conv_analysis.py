@@ -118,7 +118,7 @@ assert len(conv_events) == 10
 result = Counter([perf_analyzer.get_event_perf_model_name(event) for event in conv_events])
 assert result == {'jax_conv': 10}
 
-rand_idx = random.randint(0, len(conv_events))
+rand_idx = random.randint(0, len(conv_events) - 1)
 event = conv_events[rand_idx] 
     
 def test_conv_event_bytes_and_flops():
