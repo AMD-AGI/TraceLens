@@ -291,7 +291,7 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.columns = ['_'.join(col).strip() for col in df_perf_metrics_summary.columns.values]
         df_perf_metrics_summary.reset_index(inplace=True)
 
-        df_perf_metrics_summary.sort_values(by='Kernel Time (µs)_sum', ascending=False, inplace=True)
+        df_perf_metrics_summary.sort_values(by=['Kernel Time (µs)_sum', 'UID_first'], ascending=[False, True], inplace=True)
         #df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
 
