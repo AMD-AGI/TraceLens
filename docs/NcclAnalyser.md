@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # NCCL Analyser
 
 In distributed deep learning, analyzing the performance of collective communication operations is crucial for diagnosing and optimizing **performance at scale**. **NCCL Analyser** is a Python SDK designed to parse and analyze NCCL kernel events from PyTorch trace files (JSON). It computes key metrics like **communication latency**, **message sizes**, **algorithm bandwidth**, **bus bandwidth**, and **synchronization metrics** (e.g., skew in start/end times), providing insights into communication patterns and potential bottlenecks in your distributed training or inference workflows.

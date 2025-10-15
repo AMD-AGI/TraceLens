@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ### ⚠️ Disclaimer
 
 The traces provided in this directory (`tests/traces/h100` and `tests/traces/mi300`) are **for testing, validation, and educational purposes only**.

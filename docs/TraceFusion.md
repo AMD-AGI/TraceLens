@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ## TraceFusion
 
 In distributed deep learning, diagnosing issues like straggling ranks, load imbalance, or bottlenecks requires a **global view** of events across all ranks. TraceFusion is a Python SDK for merging trace files across ranks in distributed training and inference setups. With customization options for filtering events and defining file paths, TraceFusion simplifies the preparation of traces for seamless rendering in **Perfetto**.
