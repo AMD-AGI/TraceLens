@@ -130,7 +130,7 @@ def test_conv_event_bytes_and_flops():
     
     The Floating Point Operations (FLOPs) of a standard convolutional layer can be calculated using the following formula:
     FLOPs: bytes per element * Number of Kernel * Kernel Shape * Output Shape 
-    FLPS = 2*2*2*5120*34*31*53 = 2.288107520*1E09
+    FLOPs = 2*2*2*5120*34*31*53 = 2.288107520*1E09
 
     Where:
     C_out: Number of output channels (or filters).
