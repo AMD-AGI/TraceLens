@@ -101,6 +101,9 @@ class TreePerfAnalyzer:
             cpu_op_uids = event['bwd_events']
         else:
             cpu_op_uids = [event['UID']]
+        # Check if the kernel is overlapped
+        overlapped = len(event['overlapping_uids']) > 0
+
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
@@ -133,6 +136,7 @@ class TreePerfAnalyzer:
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
             'TFLOPS/s': tflops_per_s,
+            'overlapped': overlapped
         }         
         if non_data_mov:
             dict_metrics['Non-Data-Mov Kernel Time (µs)'] = busy_non_data_mov_time
@@ -174,6 +178,61 @@ class TreePerfAnalyzer:
     def compute_bwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
 
+    def find_overlapping_events(self, events_list=None):
+        """
+        Find overlapping events efficiently using a sweep line algorithm.
+        Updates each event with 'overlapping_uids' field containing UIDs of overlapping events.
+
+        Args:
+            events_list (list, optional): List of events to analyze. If None, uses all GPU events.
+        """
+        if events_list is None:
+            # Get all GPU events (kernels, memcpy, memset)
+            events_list = [e for e in self.tree.events
+                           if self.event_to_category(e) in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
+
+        # Create list of start and end points
+        points = []
+        for event in events_list:
+            start_time = event['ts']
+            end_time = start_time + event['dur']
+            # Store UID instead of full event
+            points.append((start_time, 'start', event['UID']))
+            points.append((end_time, 'end', event['UID']))
+            event['overlapping_uids'] = []
+
+        # Sort points by timestamp
+        points.sort(key=lambda x: (x[0], x[1] != 'start'))
+
+        # Sweep line algorithm
+        active_uids = set()  # Store UIDs instead of events
+        event_map = {event['UID']: event for event in events_list}  # Map UIDs to events
+
+        for _, point_type, uid in points:
+            if point_type == 'start':
+                # When an event starts, all currently active events overlap with it
+                event = event_map[uid]
+                if active_uids:
+                    if 'overlapping_uids' not in event:
+                        event['overlapping_uids'] = []
+                    event['overlapping_uids'].extend(active_uids)
+
+                    # Also add this event's UID to all active events' overlapping_uids
+                    for active_uid in active_uids:
+                        active_event = event_map[active_uid]
+                        if 'overlapping_uids' not in active_event:
+                            active_event['overlapping_uids'] = []
+                        active_event['overlapping_uids'].append(uid)
+
+                active_uids.add(uid)
+            else:
+                active_uids.remove(uid)
+
+        # Convert overlapping_uids to sets to remove duplicates and back to sorted lists
+        for event in events_list:
+            if 'overlapping_uids' in event:
+                event['overlapping_uids'] = sorted(list(set(event['overlapping_uids'])))
+
     def build_df_perf_metrics(self, events, bwd=False,
                               non_data_mov=False, include_kernel_details=False, include_args=False,
                               dict_name_to_perf_model=None):
@@ -184,11 +243,16 @@ class TreePerfAnalyzer:
         list_warn_non_zero_flops_and_zero_time = []
         list_warn_perf_metrics_failed = []
         list_no_bwd_events = []
+
+        # Find the overlapping events
+        self.find_overlapping_events(events)
+
         for event in events:
             metrics_event = {'cat': self.event_to_category(event), 'name': event['name'],
                              'UID': event['UID'],
                         'pid': event['pid'], 'tid': event['tid'],
-                        'external_id': event['args'].get('External id')}
+                        'external_id': event['args'].get('External id'),
+                        'overlapping_uids': event['overlapping_uids']}
             if include_args:
                 args_cols = ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs']
                 metrics_event.update((arg, event['args'].get(arg)) for arg in args_cols)
@@ -278,6 +342,7 @@ class TreePerfAnalyzer:
         #dict_agg['Simulated Kernel Time (us)'] = agg_metrics + ['sum']
         dict_agg['name'] = 'count'  # Use the 'name' column as a proxy for counting rows
         dict_agg['UID'] = 'first'
+        dict_agg['overlapped'] = 'first'
 
         # Identify parameter columns for grouping
         param_cols = [col for col in df_perf_metrics.columns if col.startswith('param: ')]
@@ -1242,11 +1307,13 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         tflops_per_s = (gflops / 1e3) / (busy_kernel_time / 1e6) if busy_kernel_time > 0 else float('nan')
 
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
+        overlapped = len(event['overlapping_uids']) > 0
 
         dict_metrics = {
             'GFLOPS': gflops,
             'Kernel Time (µs)': busy_kernel_time,
             'TFLOPS/s': tflops_per_s,
+            'overlapped': overlapped
         }         
         if bytes_moved is not None:
             dict_metrics['Data Moved (MB)'] = bytes_moved / (1024 * 1024)

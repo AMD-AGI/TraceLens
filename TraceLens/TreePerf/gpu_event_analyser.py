@@ -1,8 +1,24 @@
-###############################################################################
+# MIT License
+
 # Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import pandas as pd
 import itertools
@@ -153,6 +169,9 @@ class GPUEventAnalyser:
         exposed_comm_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, comm_union)
         exposed_comm_time = sum(end - start for start, end in exposed_comm_intervals)
 
+        exposed_comp_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comm_union, comp_union)
+        exposed_comp_time = sum(end - start for start, end in exposed_comp_intervals)
+
         total_memcpy_time = sum(end - start for start, end in memcpy_union)
         memcpy_minus_compute = GPUEventAnalyser.subtract_intervalsA_from_B(comp_union, memcpy_union)
         exposed_memcpy_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(comm_union, memcpy_minus_compute)
@@ -166,6 +185,7 @@ class GPUEventAnalyser:
             return {
                 "computation_time": comp_time,
                 "exposed_comm_time": exposed_comm_time,
+                "exposed_comp_time": exposed_comp_time,
                 "exposed_memcpy_time": exposed_memcpy_time,
                 "busy_time": busy_time,
                 "idle_time": idle_time,
@@ -183,6 +203,7 @@ class GPUEventAnalyser:
             return {
                 "computation_time": comp_time,
                 "exposed_comm_time": exposed_comm_time,
+                "exposed_comp_time": exposed_comp_time,
                 "exposed_memcpy_time": exposed_memcpy_time,
                 "busy_time": busy_time,
                 "micro_idle_time": micro_idle_time,
