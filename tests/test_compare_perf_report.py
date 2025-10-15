@@ -25,7 +25,7 @@ def compare_cols(df_test, df_ref, cols, tol=1e-6):
         ref_col = df_ref.loc[valid_mask, col]
         test_col = df_test.loc[df_test.index.intersection(ref_col.index), col]
         test_col, ref_col = test_col.align(ref_col, join="right")
-    
+
         # Normalize numpy types to Python native types
         test_col = test_col.apply(normalize_value)
         ref_col = ref_col.apply(normalize_value)
@@ -38,8 +38,10 @@ def compare_cols(df_test, df_ref, cols, tol=1e-6):
                 diff_details[col] = {
                     "max_diff": max_diff,
                     "num_diffs": len(diff_indices),
-                    "sample_diffs": [(idx, test_col[idx], ref_col[idx], diff[idx]) 
-                                     for idx in diff_indices[:5]]  # Show first 5
+                    "sample_diffs": [
+                        (idx, test_col[idx], ref_col[idx], diff[idx])
+                        for idx in diff_indices[:5]
+                    ],  # Show first 5
                 }
         else:
             mismatch = test_col != ref_col
@@ -47,10 +49,12 @@ def compare_cols(df_test, df_ref, cols, tol=1e-6):
                 diff_indices = mismatch[mismatch].index.tolist()
                 diff_details[col] = {
                     "num_diffs": len(diff_indices),
-                    "sample_diffs": [(idx, test_col[idx], ref_col[idx]) 
-                                     for idx in diff_indices[:5]]  # Show first 5
+                    "sample_diffs": [
+                        (idx, test_col[idx], ref_col[idx]) for idx in diff_indices[:5]
+                    ],  # Show first 5
                 }
     return diff_details
+
 
 def format_diff_details(diff_details):
     """Format difference details for readable assertion messages."""
@@ -58,22 +62,27 @@ def format_diff_details(diff_details):
     for col, details in diff_details.items():
         lines.append(f"\n  Column: '{col}'")
         lines.append(f"    Total differences: {details['num_diffs']}")
-        
-        if 'max_diff' in details:
+
+        if "max_diff" in details:
             lines.append(f"    Max difference: {details['max_diff']:.6e}")
             lines.append("    Sample differences:")
-            lines.append(f"      {'Index':<8} {'Test Value':<20} {'Ref Value':<20} {'Difference':<15}")
+            lines.append(
+                f"      {'Index':<8} {'Test Value':<20} {'Ref Value':<20} {'Difference':<15}"
+            )
             lines.append(f"      {'-'*8} {'-'*20} {'-'*20} {'-'*15}")
-            for idx, test_val, ref_val, diff in details['sample_diffs']:
-                lines.append(f"      {idx:<8} {test_val:<20.6e} {ref_val:<20.6e} {diff:<15.6e}")
+            for idx, test_val, ref_val, diff in details["sample_diffs"]:
+                lines.append(
+                    f"      {idx:<8} {test_val:<20.6e} {ref_val:<20.6e} {diff:<15.6e}"
+                )
         else:
             lines.append("    Sample differences:")
             lines.append(f"      {'Index':<8} {'Test Value':<30} {'Ref Value':<30}")
             lines.append(f"      {'-'*8} {'-'*30} {'-'*30}")
-            for idx, test_val, ref_val in details['sample_diffs']:
+            for idx, test_val, ref_val in details["sample_diffs"]:
                 lines.append(f"      {idx:<8} {str(test_val):<30} {str(ref_val):<30}")
-    
-    return '\n'.join(lines)
+
+    return "\n".join(lines)
+
 
 def normalize_value(val):
     """Convert numpy scalars and their string representations to Python native types."""
