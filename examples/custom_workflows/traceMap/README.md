@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ## Overview
 
 This tool generates interactive HTML dashboards for analyzing PyTorch profiler trace files (`.pt.trace.json.gz`) from vLLM workloads. It provides visualization capabilities for GPU kernel profiling and performance analysis.
