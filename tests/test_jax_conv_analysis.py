@@ -88,7 +88,7 @@ def test_gpu_timeline():
 ###############
 
 def test_kernel_launchers():
-    # kenrel lauchers
+    # kernel launchers
     kernel_launchers = perf_analyzer.get_kernel_launchers()
     assert len(kernel_launchers) == 25
     
