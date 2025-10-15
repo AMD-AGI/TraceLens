@@ -1,8 +1,10 @@
 import os
 import math
-import random
 from collections import Counter
 import logging
+import numpy as np 
+
+np.random.seed(42)
 
 from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
 
@@ -118,7 +120,7 @@ assert len(conv_events) == 10
 result = Counter([perf_analyzer.get_event_perf_model_name(event) for event in conv_events])
 assert result == {'jax_conv': 10}
 
-rand_idx = random.randint(0, len(conv_events) - 1)
+rand_idx = np.random.randint(0, len(conv_events))
 event = conv_events[rand_idx] 
     
 def test_conv_event_bytes_and_flops():
@@ -127,7 +129,8 @@ def test_conv_event_bytes_and_flops():
     Bytes Moved = (Input Size) + (Kernel Size) + (Output Size) = (16*32*60*104 + 4 + 5120*34*31*53)*2 = 578416648
     
     The Floating Point Operations (FLOPs) of a standard convolutional layer can be calculated using the following formula:
-    FLOPs = 2 bytes per element x Number of Kernel x Kernel Shape x Output Shape = 2*2*2*5120*34*31*53 = 2.288107520
+    FLOPs: bytes per element * Number of Kernel * Kernel Shape * Output Shape 
+    FLPS = 2*2*2*5120*34*31*53 = 2.288107520*1E09
 
     Where:
     C_out: Number of output channels (or filters).
