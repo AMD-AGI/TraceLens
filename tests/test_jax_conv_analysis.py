@@ -2,14 +2,14 @@ import os
 import math
 import random
 from collections import Counter
+import logging
 
 from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
 
-################
-# JAX Conv Trace
-################
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-print('Working directory:', os.getcwd())
+logger.info('Working directory: %s', os.getcwd())
 jax_conv_minimal='./tests/traces/mi300/jax_conv_minimal/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb'
 assert os.path.exists(jax_conv_minimal)
 perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=jax_conv_minimal)
