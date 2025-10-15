@@ -124,7 +124,7 @@ event = conv_events[rand_idx]
 def test_conv_event_bytes_and_flops():
     """
     The total bytes moved during a single forward pass of a convolution can be estimated using the following formula:
-    Bytes Moved = (Input Size) + (Kernel Size) + (Output Size) = (16*32*60*104 + 4 + 5120*34*31*53)*2 = 57816648
+    Bytes Moved = (Input Size) + (Kernel Size) + (Output Size) = (16*32*60*104 + 4 + 5120*34*31*53)*2 = 578416648
     
     The Floating Point Operations (FLOPs) of a standard convolutional layer can be calculated using the following formula:
     FLOPs = 2 bytes per element x Number of Kernel x Kernel Shape x Output Shape = 2*2*2*5120*34*31*53 = 2.288107520
