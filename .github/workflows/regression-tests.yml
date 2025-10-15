@@ -27,3 +27,8 @@ jobs:
         run: |
           pip install pytest
           pytest tests/test_subtract_intervals.py
+
+      - name: Run pytest on report regression tests
+        run: |
+          pip install pytest openpyxl pandas
+          pytest tests/test_compare_perf_report.py

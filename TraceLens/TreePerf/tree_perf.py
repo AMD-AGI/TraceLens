@@ -1,24 +1,8 @@
-# MIT License
-
+###############################################################################
 # Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import json
 import gzip
@@ -33,6 +17,8 @@ import warnings
 import pprint
 import pandas as pd
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 from ..PerfModel.torch_op_mapping import op_to_perf_model_class_map, categorize_torch_op, dict_cat2names
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
@@ -55,7 +41,8 @@ class TreePerfAnalyzer:
         tree = TraceToTree(data, event_to_category=categorizer)
         return TreePerfAnalyzer(tree, jax=jax, event_to_category=categorizer, *args, **kwargs)
 
-    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax=False, python_path=None, event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer):
+    def __init__(self, tree: TraceToTree, add_python_func=False, arch=None, jax=False, python_path=None, 
+                 event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer, include_unlinked_kernels=False):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
@@ -63,6 +50,8 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.event_to_category = event_to_category
+        # include unlinked kernels in gpu timeline
+        self.include_unlinked_kernels = include_unlinked_kernels
         # we check if profile contains python func events
         self.with_python_stack = next((True for event in self.tree.events if self.event_to_category(event) == 'python_func'), False)
         self.tree.build_tree(add_python_func=add_python_func)
@@ -641,10 +630,12 @@ class TreePerfAnalyzer:
 
         return df_agg
 
-    def get_df_gpu_timeline(self):
-        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'} and event.get('tree')]
+    def get_df_gpu_timeline(self, micro_idle_thresh_us= None):
+        kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
+        if not self.include_unlinked_kernels:
+            kernel_events = [event for event in kernel_events if event.get('tree')]
         gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
-        df = gpu_event_analyser.get_breakdown_df()
+        df = gpu_event_analyser.get_breakdown_df(micro_idle_thresh_us=micro_idle_thresh_us)
         return df
 
     def get_kernel_details(self, kernel_event,
@@ -1004,9 +995,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                     if len(_type) > 0:
                         operand_type += (_type[0],)
         except Exception as e:
-            print(f"\nException occurred at event parser: {e}. \n Event: {event} \
-                  \n Event metadata: {event['metadata']}, operands: {operands}")
-            sys.exit(0)
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
+            raise ValueError(f"{e} Exception occurred when parsing Event operands: \n\n {operands}")
         return operand_list, operand_type, operand_idx
     
     @staticmethod
@@ -1153,7 +1144,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         if gpu_kernel_op_cats:
             kernel_events = [event for event in kernel_events if event['gpu_kernel_op_cat'] in gpu_kernel_op_cats]
         if len(kernel_events) == 0:
-            warnings.warn("Input list of events is empty. Returning an empty DataFrame.")
+            logger.warning("Input list of events is empty. Returning an empty DataFrame.")
             return pd.DataFrame()
         for event in kernel_events:
             event['op category'] = event['gpu_kernel_op_cat']
@@ -1212,6 +1203,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
 
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
+        if df_kernel_launchers.empty:
+            logger.warning('Input Dataframe is empty.')
+            return pd.DataFrame()
         df = TreePerfAnalyzer.get_df_kernel_launchers_summary(df_kernel_launchers)
         num_gpus = df_kernel_launchers['pid'].nunique()
         df['time ms per gpu'] = df['total_direct_kernel_time_ms'] / num_gpus
@@ -1219,6 +1213,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     
     @staticmethod
     def get_df_kernel_launchers_summary_by_category(df_kernel_launchers):
+        if df_kernel_launchers.empty:
+            logger.warning('Input Dataframe is empty.')
+            return pd.DataFrame()
         num_gpus = df_kernel_launchers['pid'].nunique()
         df = TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
         df['time ms per gpu'] = df['total_direct_kernel_time_ms'] / num_gpus
@@ -1235,9 +1232,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
         perf_model_class = self.jax_op_to_perf_model_class_map.get(perf_model_name , None)
         if perf_model_class is None:
-            print(f"\nPerf model does not exist. \n\nEvent: {event}")
-        else:
-            perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
+            logger.warning(f"\nPerf model is not implemented. \n\nEvent: {event}")
+            return dict()
+        perf_model = perf_model_class(event, arch=self.arch, python_path=self.python_path)
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd())/ 1e9
         busy_kernel_time = event[TraceEventUtils.TraceKeys.Duration]
@@ -1301,14 +1298,14 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             for _key, _val in dict_jax_metadata.items():
                 event['args'][_key] = _val
             dict_perf_metrics = None
-            try:
-                if not perf_model_name  == 'rest':
+            if not perf_model_name  == 'rest':
+                try:
                     bwd = perf_model_name.endswith('_bwd')
                     dict_perf_metrics = self.compute_perf_metrics(event, bwd=bwd)
-            except Exception as e:
-                print(f"\nException occurred at compute perf metrics: {e}, \n\nEvent: {event}")
-                list_warn_perf_metrics_failed.append(event)
-                sys.exit(0)
+                except Exception as e:
+                    list_warn_perf_metrics_failed.append(event)
+                    logger.debug(f"\nException occurred when computing perf metrics for Event: \n\n {event}") 
+                    raise ValueError(f"\n{e} Exception occurred when computing perf metrics for Event: \n\n {event}")
             if dict_perf_metrics is not None:
                 metrics_event = {'name': event['name'],
                              'UID': event['UID'],
@@ -1326,8 +1323,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 if include_kernel_details:
                     metrics_event['kernel_details'] = event['kernel_details']
                 rows.append(metrics_event)
-            else:
-                list_warn_perf_metrics_failed.append(event)
             
         self._show_warnings(list_warn_non_zero_flops_and_zero_time,
                             list_no_bwd_events,

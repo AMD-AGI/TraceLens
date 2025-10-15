@@ -1,24 +1,8 @@
-# MIT License
-
+###############################################################################
 # Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import pandas as pd
 import itertools
@@ -149,7 +133,7 @@ class GPUEventAnalyser:
             raise ValueError("No GPU events found in the trace")
 
     @staticmethod
-    def compute_metrics_dict(dict: dict):
+    def compute_metrics_dict(dict: dict, micro_idle_thresh_us=None):
         dict_intervals = {}
         for key, events in dict.items():
             dict_intervals[key] = [(event['ts'], event['t_end']) for event in events]
@@ -175,22 +159,40 @@ class GPUEventAnalyser:
         exposed_memcpy_time = sum(end - start for start, end in exposed_memcpy_intervals)
 
         busy_time = sum(end - start for start, end in all_intervals)
-        idle_time = total_time - busy_time
+        if micro_idle_thresh_us is None:
+            idle_time = total_time - busy_time
+            # assert that compute + exposed comm + exposed memcpy + idle = total time
+            assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + idle_time - total_time) < 1e-6
+            return {
+                "computation_time": comp_time,
+                "exposed_comm_time": exposed_comm_time,
+                "exposed_memcpy_time": exposed_memcpy_time,
+                "busy_time": busy_time,
+                "idle_time": idle_time,
+                "total_time": total_time,
+                "total_comm_time": total_comm_time,
+                "total_memcpy_time": total_memcpy_time,
+            }
+        else:
+            idle_intervals = GPUEventAnalyser.subtract_intervalsA_from_B(all_intervals, [ (all_intervals[0][0], all_intervals[-1][1]) ])
+            micro_idle_intervals = [interval for interval in idle_intervals if interval[1] - interval[0] < micro_idle_thresh_us]
+            macro_idle_intervals = [interval for interval in idle_intervals if interval[1] - interval[0] >= micro_idle_thresh_us]
+            micro_idle_time = sum(end - start for start, end in micro_idle_intervals)
+            macro_idle_time = sum(end - start for start, end in macro_idle_intervals)
+            assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + micro_idle_time + macro_idle_time - total_time) < 1e-6
+            return {
+                "computation_time": comp_time,
+                "exposed_comm_time": exposed_comm_time,
+                "exposed_memcpy_time": exposed_memcpy_time,
+                "busy_time": busy_time,
+                "micro_idle_time": micro_idle_time,
+                "macro_idle_time": macro_idle_time,
+                "total_time": total_time,
+                "total_comm_time": total_comm_time,
+                "total_memcpy_time": total_memcpy_time,
+            }
 
-        # assert that compute + exposed comm + exposed memcpy + idle = total time
-        assert abs(comp_time + exposed_comm_time + exposed_memcpy_time + idle_time - total_time) < 1e-6
-        return {
-            "computation_time": comp_time,
-            "exposed_comm_time": exposed_comm_time,
-            "exposed_memcpy_time": exposed_memcpy_time,
-            "busy_time": busy_time,
-            "idle_time": idle_time,
-            "total_time": total_time,
-            "total_comm_time": total_comm_time,
-            "total_memcpy_time": total_memcpy_time,
-        }
-
-    def compute_metrics(self):
+    def compute_metrics(self, micro_idle_thresh_us=None):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -204,7 +206,7 @@ class GPUEventAnalyser:
         dict_gpu_event_lists = self.get_gpu_event_lists()
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
-        return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists)
+        return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists, micro_idle_thresh_us)
 
     @staticmethod
     def get_breakdown_df_from_dict(dict_metrics: dict):
@@ -215,8 +217,8 @@ class GPUEventAnalyser:
         df = df.drop(columns=['time'])
         return df
 
-    def get_breakdown_df(self):
-        dict_metrics = self.compute_metrics()
+    def get_breakdown_df(self, micro_idle_thresh_us=None):
+        dict_metrics = self.compute_metrics(micro_idle_thresh_us=micro_idle_thresh_us)
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
 # Pytorch GPU event analyser inherits everything from the base class
@@ -282,7 +284,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         # Default: use GPU0 (PID 1) for Jax
         dict_gpu_event_lists = self.get_gpu_event_lists(gpu_pid=gpu_pid, event_filter=event_filter)
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
-
         return GPUEventAnalyser.compute_metrics_dict(dict_gpu_event_lists) 
     
     def get_breakdown_df_multigpu(self, event_filter = None):
@@ -325,7 +326,6 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
 
         Similar to get_breakdown_df_multigpu but returns a dataframe for output.
         """
-        # print("Processing events by GPU")
         gpu_metrics = self.comput_metrics_multigpu(gpu_pid=gpu_pid, event_filter=event_filter)
         list_pids = [gpu_pid] if gpu_pid else range(1,9)  
         list_dfs = []

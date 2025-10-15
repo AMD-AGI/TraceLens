@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import os
 import argparse
 import json
@@ -176,8 +182,14 @@ def generate_perf_report_pytorch(profile_json_path: str,
                                 output_xlsx_path: Optional[str] = None,
                                 output_csvs_dir: Optional[str] = None,
 
+                                # include unlinked kernels in gpu timeline
+                                include_unlinked_kernels: bool = False,
+
+                                # threshold in microseconds for micro idle time
+                                micro_idle_thresh_us: int = None,
+
                                 # collective analysis
-                                collective_analysis: bool = False,
+                                collective_analysis: bool = True,
 
                                 # short kernel study options
                                 short_kernel_study: bool = False,
@@ -199,7 +211,8 @@ def generate_perf_report_pytorch(profile_json_path: str,
     else:
         gpu_arch_json = None
 
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path)
+    perf_analyzer = TreePerfAnalyzer.from_file(profile_filepath=profile_json_path, arch=gpu_arch_json, python_path=python_path,
+                                                include_unlinked_kernels=include_unlinked_kernels)
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -207,7 +220,7 @@ def generate_perf_report_pytorch(profile_json_path: str,
     agg_metrics = ['mean', 'median', 'std', 'min', 'max']
 
     # Generate base DataFrames
-    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
+    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline(micro_idle_thresh_us=micro_idle_thresh_us)
 
     # TODO: move this to the TreePerfAnalyzer class
     total_time_row = df_gpu_timeline[df_gpu_timeline['type'] == 'total_time']
@@ -235,7 +248,8 @@ def generate_perf_report_pytorch(profile_json_path: str,
             df_ops = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
             df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
             df_ops = add_truncated_kernel_details(df_ops, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
-            perf_metrics_dfs[op_cat] = df_ops
+            if not df_ops.empty:
+                perf_metrics_dfs[op_cat] = df_ops
         else:
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
             df_ops_fwd = perf_analyzer.build_df_perf_metrics(op_events, bwd=False, include_kernel_details=True, include_args=True)
@@ -252,8 +266,10 @@ def generate_perf_report_pytorch(profile_json_path: str,
             df_ops_bwd = add_truncated_kernel_details(df_ops_bwd, source_col='kernel_details__summarize_kernel_stats', new_col_name='trunc_kernel_details')
             if filtered_df_bwd_ops is not None:
                 df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
-            perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-            perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+            if not df_ops_fwd.empty:
+                perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
+            if not df_ops_bwd.empty:
+                perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
     # Short kernel study
     df_hist, df_short_kernels = get_dfs_short_kernels(perf_analyzer, short_kernel_threshold_us=short_kernel_threshold_us,
@@ -275,7 +291,8 @@ def generate_perf_report_pytorch(profile_json_path: str,
     if collective_analysis:
         nccl_analyser = NcclAnalyser([profile_json_path], None)
         df_nccl_summary = nccl_analyser.build_df_summary_long()
-        dict_name2df['coll_analysis'] = df_nccl_summary
+        if not df_nccl_summary.empty:
+            dict_name2df['coll_analysis'] = df_nccl_summary
 
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
@@ -314,8 +331,14 @@ def main():
                         help='Directory to save output CSV files')
 
     # Optional arguments
-    parser.add_argument('--collective_analysis', action='store_true',
-                        help='Include collective communication analysis in the report.')
+    parser.add_argument('--include_unlinked_kernels', action='store_true',
+                        help='Include unlinked kernels in the GPU timeline analysis.')
+    parser.add_argument('--micro_idle_thresh_us', type=int, default=None,
+                        help='Threshold in microseconds to classify idle interval as micro idle in GPU timeline analysis. ' \
+                        'Default is None and all idle times are included in one category.')
+    parser.add_argument('--disable_coll_analysis', action='store_false', dest='collective_analysis',
+                        default=True,
+                        help='Disable collective analysis section in the report. Enabled by default.')
     parser.add_argument('--short_kernel_study', action='store_true',
                         help='Include short kernel study in the report.')
     parser.add_argument('--short_kernel_threshold_us', type=int, default=10,
@@ -340,6 +363,8 @@ def main():
     generate_perf_report_pytorch(profile_json_path=args.profile_json_path,
                                  output_xlsx_path=args.output_xlsx_path,
                                  output_csvs_dir=args.output_csvs_dir,
+                                 include_unlinked_kernels=args.include_unlinked_kernels,
+                                 micro_idle_thresh_us=args.micro_idle_thresh_us,
                                  collective_analysis=args.collective_analysis,
                                  short_kernel_study=args.short_kernel_study,
                                  short_kernel_threshold_us=args.short_kernel_threshold_us,
