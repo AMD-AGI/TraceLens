@@ -139,7 +139,7 @@ def test_conv_event_bytes_and_flops():
     """
     
     perf_model_name = perf_analyzer.get_event_perf_model_name(event)
-    perf_model_class = perf_analyzer.jax_op_to_perf_model_class_map.get(perf_model_name , None)
+    perf_model_class = perf_analyzer.jax_op_to_perf_model_class_map.get(perf_model_name, None)
     perf_model = perf_model_class(event)
     assert perf_model.bytes() == 578416648 
     assert perf_model.flops() == 2288107520  
