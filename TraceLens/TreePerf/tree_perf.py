@@ -1,24 +1,8 @@
-# MIT License
-
+###############################################################################
 # Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import json
 import gzip
@@ -646,12 +630,12 @@ class TreePerfAnalyzer:
 
         return df_agg
 
-    def get_df_gpu_timeline(self):
+    def get_df_gpu_timeline(self, micro_idle_thresh_us= None):
         kernel_events =  [event for event in self.tree.events if self.event_to_category(event) in {'kernel', 'gpu_memcpy', 'gpu_memset'}]
         if not self.include_unlinked_kernels:
             kernel_events = [event for event in kernel_events if event.get('tree')]
         gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
-        df = gpu_event_analyser.get_breakdown_df()
+        df = gpu_event_analyser.get_breakdown_df(micro_idle_thresh_us=micro_idle_thresh_us)
         return df
 
     def get_kernel_details(self, kernel_event,
