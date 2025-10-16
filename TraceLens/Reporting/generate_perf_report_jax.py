@@ -52,6 +52,9 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     
     # Generate & store Dataframes on selected e.g. XLA kernels 
     df_xla_events = perf_analyzer.get_df_kernel_launchers(include_kernel_details=True, gpu_kernel_op_cats=['Uncategorized Events/XLA',])
+
+    df_xla_perf = perf_analyzer.get_df_xla_perf(df_xla_events)
+
     df_xla_events_agg_name_col = df_xla_events.copy()
     df_xla_events_agg_name_col['name'] = df_xla_events.name.apply(lambda x: ''.join([i for i in x if not i.isdigit()])) # remove last part in name e.g. loop_slice_fusion_202 > loop_slice_fusion
     df_xla_summary = perf_analyzer.get_df_kernel_launchers_summary(df_xla_events_agg_name_col)
@@ -63,7 +66,8 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     dict_dfs['kernel_launchers_summary']= df_kernel_launchers_summary
     dict_dfs['kernel_launchers_summary_by_category']= df_kernel_launchers_summary_by_category 
     dict_dfs['kernel_launchers_unique_args']= df_kernel_launchers_unique_args
-    dict_dfs['xla_summary']= df_xla_summary 
+    dict_dfs['df_xla_perf'] = df_xla_perf
+    dict_dfs['xla_summary'] = df_xla_summary 
     
     # Generate & store perf-model specific DataFrames
     op_events = [event for event in perf_analyzer.tree.events if event['cat'] == 'kernel']
