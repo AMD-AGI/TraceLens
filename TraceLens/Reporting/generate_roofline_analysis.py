@@ -1,4 +1,10 @@
-import sys 
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+import sys
 import os
 import argparse
 import json
@@ -8,55 +14,32 @@ import matplotlib.pyplot as plt
 import logging
 
 # Configure basic logging to stdout with WARNING level
-logging.basicConfig(stream=sys.stdout, # Output to console
-                    level=logging.WARNING, # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-                    format='[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s')
+logging.basicConfig(
+    stream=sys.stdout,  # Output to console
+    level=logging.WARNING,  # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 from TraceLens import TreePerfAnalyzer, JaxTreePerfAnalyzer
 
-# config.yaml
-peak_bandwidth = 5.3  # TB/s
-peak_tflops = 1307.4  # TFLOPS/s
 
-# Filter events of interest
-op_cat = 'GEMM'  # 'CONV' # 'SDPA'  
-op_names = None # ['aten::copy_', ]
-prefix = op_cat.lower()
-
-if 1:
-    profile_path = '/home/guangphu/perf-profiling/data/jax_minimal/conv/plugins/profile/2025_09_10_15_08_56/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb'
-    output_path = '/home/guangphu/perf-profiling/logs/tracelens/jax_minimal_conv/'
-if 1:
-    profile_path = '/home/guangphu/perf-profiling/data/llm_traces/mi355x/hunyuan_t129/plugins/profile/2025_06_25_12_43_37/chi-mi300x-007.ord.vultr.cpe.ice.amd.com.xplane.pb'
-    output_path = '/home/guangphu/perf-profiling/logs/tracelens/jax/'
-if 0:
-    profile_path = '/home/guangphu/perf-profiling/data/llm_traces/tts-traces/tts-traces-h100/bs16/rank_0/rocm-framework-h100-sxm-1_60628.1751372362949836640.pt.trace.json'
-    output_path = '/home/guangphu/perf-profiling/logs/tracelens/pytorch/'
-    
-# Load input trace file
-if profile_path.endswith('xplane.pb'):
-    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_path)
-    op_events = [event for event in perf_analyzer.tree.events if event.get('gpu_kernel_op_cat', 'None').lower() == op_cat.lower()]
-elif profile_path.endswith('trace.json'):
-    perf_analyzer = TreePerfAnalyzer.from_file(profile_path) 
-    if op_names is None: op_names = perf_analyzer.dict_cat2names[op_cat] 
-    op_events = [event for event in perf_analyzer.tree.events if event['name'] in op_names]
-else:
-    logger.warning('Trce file format not recognized.')
-    sys.exit(0)
-
-assert len(op_events) > 0
-df_ops = perf_analyzer.build_df_perf_metrics(op_events)
-# TODO plot distribution instead
-# df_op_summary = perf_analyzer.summarize_df_perf_metrics(df_op_perf_model_cleaned, agg_metrics=['mean', 'std']) 
-# alternatively, use existing dataframes from generate_perf_report.py
-# df_perf_metrics = 'logs/tracelens/jax/trace_analysis_results_op_jax_gemm.csv'
-# build perf metrics dataframe
-
-def generate_roofline_plot(df_ops, peak_tflops = 700, peak_bandwidth = 5.3, prefix="gemm", outdir="./"):
+def generate_roofline_plot(
+    df_ops, peak_tflops=700, peak_bandwidth=5.3, prefix="gemm", outdir="./"
+):
     """
-    
+    This function generates a roofline plot based on the provided performance metrics DataFrame.
+
+    Args:
+    - df_ops (pd.DataFrame): DataFrame containing performance metrics with columns "FLOPS/Byte" and "TFLOPS/s".
+    - peak_tflops (float): The peak computational performance of the hardware in TFLOPS/s.
+    - peak_bandwidth (float): The peak memory bandwidth of the hardware in TB/s.
+    - prefix (str): Prefix for the output plot filename.
+    - outdir (str): Directory to save the output plot.
+
+    Outputs:
+    - Saves the roofline plot as a PNG file in the specified output directory.
+
     References:
     - TraceLens/examples/roofline_plots_example.ipynb
     - JaxTrace_Analysis/gemm_roofline.py
@@ -65,26 +48,146 @@ def generate_roofline_plot(df_ops, peak_tflops = 700, peak_bandwidth = 5.3, pref
     y_realized_performance = list(df_ops["TFLOPS/s"])
 
     # Compute intensity and bounds
-    log_max_intensity = np.log10(max(x_realized_intensity) * 2) # 2 for better visualization
-    log_min_intensity = np.log10(min(x_realized_intensity) / 2) # 2 for better visualization
+    log_max_intensity = np.log10(
+        max(x_realized_intensity) * 2
+    )  # 2 for better visualization
+    log_min_intensity = np.log10(
+        min(x_realized_intensity) / 2
+    )  # 2 for better visualization
     x_intensity = np.logspace(log_min_intensity, log_max_intensity, 100)  # FLOPs/Byte
-    y_memory_bound = x_intensity * peak_bandwidth # FLOPS/Byte * TB/s = TFLOPS/s
-    y_compute_bound = np.full_like(x_intensity, peak_tflops) # TFLOPS/s
+    y_memory_bound = x_intensity * peak_bandwidth  # FLOPS/Byte * TB/s = TFLOPS/s
+    y_compute_bound = np.full_like(x_intensity, peak_tflops)  # TFLOPS/s
 
     # Roofline
     plt.figure(figsize=(8, 5))
-    plt.loglog(x_intensity, y_memory_bound, color='orange', linestyle='--', label=f"Memory Bound ({peak_bandwidth} TB/s)")
-    plt.loglog(x_intensity, y_compute_bound, color='red', linestyle=':', label=f"Compute Bound ({peak_tflops} TFLOPS/s)")
-    plt.scatter(x_realized_intensity, y_realized_performance, color='blue', label="Performance data")
+    plt.loglog(
+        x_intensity,
+        y_memory_bound,
+        color="orange",
+        linestyle="--",
+        label=f"Memory Bound ({peak_bandwidth} TB/s)",
+    )
+    plt.loglog(
+        x_intensity,
+        y_compute_bound,
+        color="red",
+        linestyle=":",
+        label=f"Compute Bound ({peak_tflops} TFLOPS/s)",
+    )
+    plt.scatter(
+        x_realized_intensity,
+        y_realized_performance,
+        color="blue",
+        label="Performance data",
+    )
     plt.xlabel("Operational Intensity (FLOPs/Byte)")
     plt.ylabel("Performance (TFLOPS/s)")
     plt.title("Roofline Model")
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(output_path, prefix+'_roofline.png'))
+    plt.savefig(os.path.join(output_path, prefix + "_roofline.png"))
     plt.show()
-    print(f'Outputs saved to {output_path}')
+    print(f"Outputs saved to {output_path}")
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate roofline analysis from trace file or from performance metrics DataFrame."
+    )
+    parser.add_argument(
+        "--profile_path",
+        type=str,
+        required=True,
+        help="Path to the trace file: pytorch trace.json or jax xplane.pb",
+    )
+    parser.add_argument(
+        "--op_cat",
+        type=str,
+        default="gemm",
+        choices=[
+            "gemm",
+            "conv",
+        ],
+        help="Eevent filter.",
+    )
+    parser.add_argument(
+        "--op_names",
+        type=list,
+        default=[
+            "aten::matmul",
+        ],
+        help="Torch operation names to filter for roofline analysis.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Directory to save the output roofline plot.",
+    )
+    parser.add_argument(
+        "--peak_tflops",
+        type=float,
+        default=1307.4,
+        help="Peak computational performance in TFLOPS/s.",
+    )
+    parser.add_argument(
+        "--peak_bandwidth",
+        type=float,
+        default=5.3,
+        help="Peak memory bandwidth in TB/s.",
+    )
+    args = parser.parse_args()
 
+    # Load performance metrics DataFrame
+    df_ops = pd.read_csv(args.input_csv)
+    assert (
+        "FLOPS/Byte" in df_ops.columns and "TFLOPS/s" in df_ops.columns
+    ), "Input CSV must contain 'FLOPS/Byte' and 'TFLOPS/s' columns."
+
+    # TODO config.yaml
+    peak_bandwidth = args.peak_bandwidth  # TB/s
+    peak_tflops = args.peak_tflops  # TFLOPS/s
+
+    # TODO filter events of interest
+    op_cat = args.op_cat
+    op_names = args.op_names
+    prefix = op_cat
+
+    # Load input trace file
+    profile_path = args.profile_path
+    outdir = args.output_dir
+    if profile_path.endswith("xplane.pb"):
+        perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_path)
+        op_events = [
+            event
+            for event in perf_analyzer.tree.events
+            if event.get("gpu_kernel_op_cat", "None").lower() == op_cat.lower()
+        ]
+    elif profile_path.endswith("trace.json"):
+        perf_analyzer = TreePerfAnalyzer.from_file(profile_path)
+        if not op_names:
+            op_names = perf_analyzer.dict_cat2names[op_cat]
+        op_events = [
+            event for event in perf_analyzer.tree.events if event["name"] in op_names
+        ]
+    else:
+        logger.warning("Trce file format not recognized.")
+        sys.exit(0)
+
+    assert len(op_events) > 0, f"No events found for category '{op_cat}' in the trace."
+    print(f"Number of events found for category '{op_cat}': {len(op_events)}")
+    df_ops = perf_analyzer.build_df_perf_metrics(op_events)
+
+    # Generate roofline plot
+    generate_roofline_plot(
+        df_ops,
+        peak_tflops=peak_tflops,
+        peak_bandwidth=peak_bandwidth,
+        outdir=outdir,
+        prefix=prefix,
+    )
+
+
+if __name__ == "__main__":
+    main()
