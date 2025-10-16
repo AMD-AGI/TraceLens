@@ -128,9 +128,11 @@ def main():
     parser.add_argument(
         "--op_names",
         type=str,
+        nargs='+',
         default=None,
-        help="Filter Torch operation by names for roofline analysis. Example: 'aten::matmul', 'aten::copy_', ",
+        help="Filter Torch operations by names for roofline analysis. Example: --op_names aten::matmul aten::copy_",
     )
+    # NOTE: Downstream logic must handle args.op_names as a list of strings (or None).
     parser.add_argument(
         "--output_path",
         type=str,
