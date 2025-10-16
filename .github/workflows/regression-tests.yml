@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 name: Regression Tests
 
 on:
@@ -32,3 +38,8 @@ jobs:
         run: |
           pip install pytest openpyxl pandas
           pytest tests/test_compare_perf_report.py
+      
+      - name: Run copyright header checks
+        run: |
+          pip install pytest
+          pytest tests/test_copyright_headers.py

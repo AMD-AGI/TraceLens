@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ## Understanding PyTorch Trace: A Deep Dive into Execution and Analysis
 
 You followed the [PyTorch profiling guide](../conceptual/torch_profiling_guide.ipynb), collected a trace, and even opened it in [Perfetto](https://ui.perfetto.dev/). But what does that trace actually mean, and how do you read insights from it?  

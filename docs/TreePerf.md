@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TreePerf
 
 TreePerf is a Python SDK that works in conjunction with the Trace2Tree project. PyTorch generates a trace JSON file during profiling, which Trace2Tree parses into a tree data structure representing hierarchical dependencies between CPU operations and GPU kernel executions. TreePerf builds on this tree structure to compute performance metrics at both the model and operation levels. It enables users to analyze, interpret, and optimize AI models by providing detailed performance insights essential for architectural design and performance optimization.
