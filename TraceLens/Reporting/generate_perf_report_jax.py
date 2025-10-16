@@ -42,7 +42,7 @@ def perf_analysis(profile_path: str, arch = None, agg_metrics = ['mean', 'median
     """
     # Get input trace type
     assert profile_path.endswith('.xplane.pb')
-    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=profile_path, kernel_metadata_keyword_filters=kwargs.get('kernel_metadata_keyword_filters', None))
+    perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_path, kernel_metadata_keyword_filters=kwargs.get('kernel_metadata_keyword_filters', None))
 
     dict_dfs = {}
 
