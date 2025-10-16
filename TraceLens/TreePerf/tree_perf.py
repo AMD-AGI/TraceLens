@@ -409,7 +409,9 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         df_perf_metrics_summary.sort_values(
-            by="Kernel Time (µs)_sum", ascending=False, inplace=True
+            by=["Kernel Time (µs)_sum", "UID_first"],
+            ascending=[False, True],
+            inplace=True,
         )
         # df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
@@ -814,10 +816,10 @@ class TreePerfAnalyzer:
         ]
         df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
 
-        # 5. Sort the DataFrame by the sum of total_direct_kernel_time
+        # 5. Sort the DataFrame by the sum of total_direct_kernel_time and then by ex_uid for stability
         if "total_direct_kernel_time_sum" in df_unique_args.columns:
             df_unique_args = df_unique_args.sort_values(
-                by="total_direct_kernel_time_sum", ascending=False
+                by=["total_direct_kernel_time_sum", "ex_UID"], ascending=[False, True]
             ).reset_index(drop=True)
 
         # 6. Calculate percentage of total time and cumulative percentage if requested

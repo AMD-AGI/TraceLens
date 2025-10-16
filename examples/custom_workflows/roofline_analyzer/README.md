@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Roofline Analysis Tool
 
 A functional programming-oriented Python application for performing roofline analysis on GEMM kernels. This tool ingests Excel files containing kernel performance data, performs calculations to determine memory and compute bounds, and exports the results with visualizations.

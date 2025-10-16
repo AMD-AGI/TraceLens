@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Generate Performance Report
 
 This Python script (`TraceLens/Reporting/generate_perf_report_pytorch.py`) processes a PyTorch JSON profile trace and outputs an Excel workbook or CSVs with relevant information.

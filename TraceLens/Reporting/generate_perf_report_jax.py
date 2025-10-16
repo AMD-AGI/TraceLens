@@ -52,7 +52,7 @@ def perf_analysis(
     # Get input trace type
     assert profile_path.endswith(".xplane.pb")
     perf_analyzer = JaxTreePerfAnalyzer.from_file(
-        profile_path,
+        profile_filepath=profile_path,
         kernel_metadata_keyword_filters=kwargs.get(
             "kernel_metadata_keyword_filters", None
         ),
