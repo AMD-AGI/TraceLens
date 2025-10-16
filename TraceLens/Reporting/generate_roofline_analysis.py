@@ -25,7 +25,7 @@ from TraceLens import TreePerfAnalyzer, JaxTreePerfAnalyzer
 
 
 def generate_roofline_plot(
-    df_ops, peak_tflops=700, peak_bandwidth=5.3, prefix="gemm", output_dir="./"
+    df_ops, peak_tflops=700, peak_bandwidth=5.3, output_filename="gemm_roofline", output_dir="./", output_format="png"
 ):
     """
     This function generates a roofline plot based on the provided performance metrics DataFrame.
@@ -89,12 +89,28 @@ def generate_roofline_plot(
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, prefix + "_roofline.png"))
+    plt.savefig(os.path.join(output_dir, output_filename + '.' + output_format), format=output_format)
     plt.show()
-    print(f"Outputs saved to {output_dir}")
+    print(f"Outputs saved to {output_dir}/{output_filename}.{output_format}")
 
 
 def main():
+    """Generate roofline analysis from trace file or from performance metrics DataFrame.
+    
+    Note: Pytorch trace event filtering by op names or by op category is supported.
+          Jax trace event filtering is only supported by op category.
+          
+    op_cat example:
+        for pytorch ['GEMM', 'CONV', 'SDPA', 'UnaryElementwise', 'BinaryElementwise'];
+        for jax ['GEMM', 'CONV', 'TE'];
+        More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/ 
+    
+    Usage example:
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_jax --op_cat GEMM 
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_' 
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_cat GEMM  
+    """
+    
     parser = argparse.ArgumentParser(
         description="Generate roofline analysis from trace file or from performance metrics DataFrame."
     )
@@ -108,21 +124,25 @@ def main():
         "--op_cat",
         type=str,
         default="GEMM",
-        help="Filter event by op category.  \
-        Example: for pytorch ['GEMM', 'CONV', 'SDPA', 'UnaryElementwise', 'BinaryElementwise']; \
-        for jax ['GEMM', 'CONV', 'TE']",
+        help="Filter event by op category.",
     )
     parser.add_argument(
         "--op_names",
-        type=list,
-        default=[],
-        help="Filter Torch operation by names for roofline analysis. Example: ['aten::matmul',] ",
+        type=str,
+        default=None,
+        help="Filter Torch operation by names for roofline analysis. Example: 'aten::matmul', 'aten::copy_', ",
     )
     parser.add_argument(
         "--output_path",
         type=str,
-        required=True,
+        default='./',
         help="Directory to save the output roofline plot.",
+    )
+    parser.add_argument(
+        "--output_filename",
+        type=str,
+        default="roofline",
+        help="Prefix for the output plot filename.",
     )
     parser.add_argument(
         "--peak_tflops",
@@ -138,13 +158,14 @@ def main():
     )
     args = parser.parse_args()
 
-    # TODO lookup from mi300x_config.yaml, mi355x_config.yaml, etc.
+    # TODO peak performance configs from mi300x_config.yaml, mi355x_config.yaml, etc.
     peak_bandwidth = args.peak_bandwidth  # TB/s
     peak_tflops = args.peak_tflops  # TFLOPS/s
     op_cat = args.op_cat
     op_names = args.op_names
     profile_path = args.profile_path
     output_dir = args.output_path
+    output_filename = args.output_filename
     os.makedirs(output_dir, exist_ok=True)
     
     # Load input trace file
@@ -158,7 +179,9 @@ def main():
     elif profile_path.endswith("trace.json"):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_path)
         if not op_names:
-            op_names = perf_analyzer.dict_cat2names[op_cat]
+            op_names = perf_analyzer.dict_cat2names[op_cat.upper()]
+        else:
+            op_names = [op_names] # TODO support list input
         op_events = [
             event for event in perf_analyzer.tree.events if event["name"] in op_names
         ]
@@ -171,13 +194,12 @@ def main():
     df_ops = perf_analyzer.build_df_perf_metrics(op_events)
 
     # Generate roofline plot
-    prefix = op_cat
     generate_roofline_plot(
         df_ops,
         peak_tflops=peak_tflops,
         peak_bandwidth=peak_bandwidth,
         output_dir=output_dir,
-        prefix=prefix,
+        output_filename=output_filename,
     )
 
 
