@@ -28,21 +28,22 @@ def generate_roofline_plot(
     df_ops, peak_tflops=700, peak_bandwidth=5.3, output_filename="gemm_roofline", output_dir="./", output_format="png"
 ):
     """
-    This function generates a roofline plot based on the provided performance metrics DataFrame.
+    Generates a roofline plot based on the provided performance metrics DataFrame.
 
     Args:
-    - df_ops (pd.DataFrame): DataFrame containing performance metrics with columns "FLOPS/Byte" and "TFLOPS/s".
-    - peak_tflops (float): The peak computational performance of the hardware in TFLOPS/s.
-    - peak_bandwidth (float): The peak memory bandwidth of the hardware in TB/s.
-    - prefix (str): Prefix for the output plot filename.
-    - outdir (str): Directory to save the output plot.
+        df_ops (pd.DataFrame): DataFrame containing performance metrics with columns "FLOPS/Byte" and "TFLOPS/s".
+        peak_tflops (float, optional): The peak computational performance of the hardware in TFLOPS/s. Default is 700.
+        peak_bandwidth (float, optional): The peak memory bandwidth of the hardware in TB/s. Default is 5.3.
+        output_filename (str, optional): Filename (without extension) for the output plot. Default is "gemm_roofline".
+        output_dir (str, optional): Directory to save the output plot. Default is "./".
+        output_format (str, optional): File format for the output plot (e.g., "png", "pdf", "svg"). Default is "png".
 
     Outputs:
-    - Saves the roofline plot as a PNG file in the specified output directory.
+        Saves the roofline plot as a file in the specified output directory and format.
 
     References:
-    - TraceLens/examples/roofline_plots_example.ipynb
-    - JaxTrace_Analysis/gemm_roofline.py
+        - TraceLens/examples/roofline_plots_example.ipynb
+        - JaxTrace_Analysis/gemm_roofline.py
     """
     assert "FLOPS/Byte" in df_ops.columns and "TFLOPS/s" in df_ops.columns, "Input dataframe must contain 'FLOPS/Byte' and 'TFLOPS/s' columns."
     print(f"Using peak_bandwidth: {peak_bandwidth} TB/s, peak_tflops: {peak_tflops} TFLOPS/s")
