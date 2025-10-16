@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Event Replay
 
 Optimizing GPU performance in deep learning requires isolating and benchmarking individual operations to identify bottlenecks. However, reproducing operations directly from complex model code or large profiles can be cumbersome.

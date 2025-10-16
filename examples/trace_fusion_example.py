@@ -6,10 +6,13 @@
 
 import os
 from TraceLens import TraceFuse
-profiles_root_dir = 'path/to/your/profiles'
+
+profiles_root_dir = "path/to/your/profiles"
 world_size = 8
-output_file = os.path.join(profiles_root_dir, 'merged_trace.json')
-list_profile_filepaths = [os.path.join(profiles_root_dir, f'rank_{i}.json') for i in range(world_size)]
+output_file = os.path.join(profiles_root_dir, "merged_trace.json")
+list_profile_filepaths = [
+    os.path.join(profiles_root_dir, f"rank_{i}.json") for i in range(world_size)
+]
 
 # Initialize TraceFusion
 fuser = TraceFuse(list_profile_filepaths)

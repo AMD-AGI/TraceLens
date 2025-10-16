@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Generate Multi-Rank Collective Report
 
 This utility analyzes **PyTorch JSON profile traces** from **multiple ranks** and produces a comprehensive **NCCL communication report** (Excel workbook and/or CSVs). 
