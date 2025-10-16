@@ -186,8 +186,8 @@ def main():
             event for event in perf_analyzer.tree.events if event["name"] in op_names
         ]
     else:
-        logger.warning(f"Trace file {profile_path} format not recognized.")
-        sys.exit(0)
+        logger.error(f"Trace file {profile_path} format not recognized.")
+        sys.exit(1)
 
     assert len(op_events) > 0, f"No events found for category '{op_cat}' in the trace."
     print(f"Number of events found for category '{op_cat}': {len(op_events)}")
