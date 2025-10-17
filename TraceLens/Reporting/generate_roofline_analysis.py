@@ -228,7 +228,9 @@ def main():
         logger.error(f"Trace file {profile_path} format not recognized.")
         sys.exit(1)
 
-    assert len(op_events) > 0, f"No events selected in the trace."
+    if not op_events:
+        logger.error("No events selected in the trace.")
+        sys.exit(1)
     df_ops = perf_analyzer.build_df_perf_metrics(op_events)
 
     # Generate roofline plot
