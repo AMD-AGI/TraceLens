@@ -58,12 +58,17 @@ def generate_roofline_plot(
     x_realized_intensity = list(df_ops["FLOPS/Byte"])
     y_realized_performance = list(df_ops["TFLOPS/s"])
 
+    # Filter to strictly positive values for log-scale plotting
+    x_realized_intensity_pos = [x for x in x_realized_intensity if x > 0]
+    if not x_realized_intensity_pos:
+        raise ValueError("All realized intensity values are zero or negative; cannot plot on log scale.")
+
     # Compute intensity and bounds
     log_max_intensity = np.log10(
-        max(x_realized_intensity) * 2
+        max(x_realized_intensity_pos) * 2
     )  # times 2 for better visualization
     log_min_intensity = np.log10(
-        min(x_realized_intensity) / 2
+        min(x_realized_intensity_pos) / 2
     )  # divided by 2 for better visualization
     x_intensity = np.logspace(log_min_intensity, log_max_intensity, 100)  # FLOPs/Byte
     y_memory_bound = x_intensity * peak_bandwidth  # FLOPS/Byte * TB/s = TFLOPS/s
