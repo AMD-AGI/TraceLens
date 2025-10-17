@@ -125,8 +125,8 @@ def main():
         More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/
 
     Usage example:
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace --op_cat GEMM
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace --op_cat GEMM CONV
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace --op_cats GEMM
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace --op_cats GEMM CONV
     python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_'
     python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_' 'aten::matmul_'
     """
@@ -144,14 +144,14 @@ def main():
         "--op_cats",
         type=str,
         nargs="+",
-        default="GEMM",
+        default=["GEMM"],
         help="Filter event by op category. Example: --op_cat GEMM CONV",
     )
     parser.add_argument(
         "--op_names",
         type=str,
         nargs="+",
-        default=None,
+        default=[],
         help="Filter operations by names for roofline analysis (Torch and JAX). Example: --op_names aten::matmul aten::copy_",
     )
 
