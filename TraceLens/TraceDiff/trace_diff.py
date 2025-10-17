@@ -68,7 +68,9 @@ class TraceDiff:
         for i, child in enumerate(children):
             self._add_subtree_to_pod_recursive(child, pod, tree)
 
-    def add_to_pod(self, node: Dict[str, Any], pod: set, tree: PyTorchTraceToTree) -> None:
+    def add_to_pod(
+        self, node: Dict[str, Any], pod: set, tree: PyTorchTraceToTree
+    ) -> None:
         """
         Recursively adds the subtree rooted at the given node to the set of points of differences (PODs).
 
