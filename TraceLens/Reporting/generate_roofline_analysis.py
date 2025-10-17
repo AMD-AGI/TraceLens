@@ -11,10 +11,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import logging
 
-# Configure basic logging to stdout with WARNING level
+# Configure basic logging to stdout with DEBUG level
 logging.basicConfig(
     stream=sys.stdout,  # Output to console
-    level=logging.WARNING,  # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    level=logging.DEBUG,  # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -61,10 +61,10 @@ def generate_roofline_plot(
     # Compute intensity and bounds
     log_max_intensity = np.log10(
         max(x_realized_intensity) * 2
-    )  # 2 for better visualization
+    )  # times 2 for better visualization
     log_min_intensity = np.log10(
         min(x_realized_intensity) / 2
-    )  # 2 for better visualization
+    )  # divided by 2 for better visualization
     x_intensity = np.logspace(log_min_intensity, log_max_intensity, 100)  # FLOPs/Byte
     y_memory_bound = x_intensity * peak_bandwidth  # FLOPS/Byte * TB/s = TFLOPS/s
     y_compute_bound = np.full_like(x_intensity, peak_tflops)  # TFLOPS/s
@@ -108,8 +108,8 @@ def generate_roofline_plot(
 def main():
     """Generate roofline analysis from trace file or from performance metrics DataFrame.
 
-    Note: Pytorch trace event filtering by op names or by op category is supported.
-          Jax trace event filtering is only supported by op category.
+    Note: Pytorch trace event filtering is by 'op_names' or by 'op_cat'.
+          Jax trace event filtering is by 'gpu_kernel_op_cat'. 'op_names' are implemented but not tested.
 
     op_cat example:
         for pytorch ['GEMM', 'CONV', 'SDPA', 'UnaryElementwise', 'BinaryElementwise'];
@@ -117,9 +117,10 @@ def main():
         More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/
 
     Usage example:
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_jax --op_cat GEMM
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace --op_cat GEMM
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace --op_cat GEMM CONV
     python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_'
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_cat GEMM
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_' 'aten::matmul_'
     """
 
     parser = argparse.ArgumentParser(
@@ -132,10 +133,11 @@ def main():
         help="Path to the trace file: pytorch trace.json or jax xplane.pb",
     )
     parser.add_argument(
-        "--op_cat",
+        "--op_cats",
         type=str,
+        nargs="+",
         default="GEMM",
-        help="Filter event by op category.",
+        help="Filter event by op category. Example: --op_cat GEMM CONV",
     )
     parser.add_argument(
         "--op_names",
@@ -174,26 +176,41 @@ def main():
     # Config peak performance (TODO) mi300x_config.yaml, mi355x_config.yaml, etc.
     peak_bandwidth = args.peak_bandwidth  # TB/s
     peak_tflops = args.peak_tflops  # TFLOPS/s
-    op_cat = args.op_cat
+    op_cats = args.op_cats
     op_names = args.op_names
     profile_path = args.profile_path
     output_dir = args.output_path
     output_filename = args.output_filename
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load input trace file
+    # Load input trace file & filter events
     if profile_path.endswith("xplane.pb"):
         perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_path)
-        op_events = [
-            event
-            for event in perf_analyzer.tree.events
-            if event.get("gpu_kernel_op_cat", "None").lower() == op_cat.lower()
-        ]
+        if not op_names:
+            logger.info(f"Filtering Jax events by op category: {op_cats}")
+            op_events = [
+                event
+                for event in perf_analyzer.tree.events
+                for op_cat in op_cats
+                if event.get("gpu_kernel_op_cat", "None").lower() == op_cat.lower()
+            ]
+        else:
+            logger.info(f"Filtering Jax events by op names: {op_names}")
+            op_events = [
+                event
+                for event in perf_analyzer.tree.events
+                if event["name"] in op_names
+            ]
+
     elif profile_path.endswith("trace.json"):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_path)
         if not op_names:
-            logger.info(f"Filtering Torch events by op category: {op_cat}")
-            op_names = perf_analyzer.dict_cat2names.get(op_cat.upper(), [])
+            logger.info(f"Filtering Torch events by op category: {op_cats}")
+            op_names = [
+                item
+                for op_cat in op_cats
+                for item in perf_analyzer.dict_cat2names.get(op_cat.upper(), [])
+            ]
         else:
             logger.info(f"Filtering Torch events by op names: {op_names}")
         op_events = [
