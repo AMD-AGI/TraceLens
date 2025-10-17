@@ -1533,6 +1533,54 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         else:
             return kernel_launchers
 
+    def get_df_xla_perf(self, df_xla_events: pd.DataFrame) -> pd.DataFrame:
+
+        dtype_to_bytes = {"f32": 4, "bf16": 2, "s32": 4, "fp16": 2, "u32": 4, "f16": 2}
+
+        def parse_dtype_shape_layout(operand):
+            # Match dtype, shape, and layout
+            match = re.match(r"(\w+)\[([0-9,]*)\](?:\{([0-9,]*)\})?", operand)
+            if match:
+                dtype = match.group(1)
+                shape_str = match.group(2)
+                layout_str = match.group(3)
+                shape = [int(x) for x in shape_str.split(",") if x]
+                layout = [int(x) for x in layout_str.split(",")] if layout_str else None
+                return dtype, shape, layout
+            return None, None, None
+
+        total_input_bytes_list = []
+        for index, row in df_xla_events.iterrows():
+
+            kernel_details = row.get("kernel_details")[0]
+            operands = kernel_details.get("operands")
+
+            total_input_bytes = 0
+            for operand in operands:
+                # print('operand:',operand)
+                dtype, shape, layout = parse_dtype_shape_layout(operand)
+                # print('dtype:',dtype)
+                # print('shape:',shape)
+                # print('layout:',layout)
+                if shape and dtype:
+                    total_input_bytes = (
+                        total_input_bytes + np.prod(shape) * dtype_to_bytes[dtype]
+                    )
+
+            total_input_bytes_list.append(total_input_bytes)
+
+        df_xla_events["total_input_bytes"] = total_input_bytes_list
+
+        return df_xla_events
+
+    def get_GPU_kernel_launch_latency(self, event: dict) -> float:
+
+        GPU_kernel_launch_latency = event.get("ts") - self.tree.events_by_uid[
+            event.get("parent")
+        ].get("ts")
+
+        return GPU_kernel_launch_latency
+
     def get_df_kernel_launchers(
         self,
         id_cols=True,
@@ -1561,6 +1609,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 metrics_event.update((arg, event["args"].get(arg)) for arg in args_cols)
             if include_kernel_details:
                 metrics_event["kernel_details"] = event["kernel_details"]
+
+            metrics_event["GPU_kernel_launch_latency"] = (
+                self.get_GPU_kernel_launch_latency(event)
+            )
 
             metadata = event.get("metadata")
 
