@@ -51,7 +51,9 @@ def generate_roofline_plot(
     required_columns = {"FLOPS/Byte", "TFLOPS/s"}
     missing = required_columns - set(df_ops.columns)
     if missing:
-        raise ValueError(f"Input dataframe must contain columns: {', '.join(required_columns)}. Missing: {', '.join(missing)}")
+        raise ValueError(
+            f"Input dataframe must contain columns: {', '.join(required_columns)}. Missing: {', '.join(missing)}"
+        )
     logger.info(
         f"Using peak_bandwidth: {peak_bandwidth} TB/s, peak_tflops: {peak_tflops} TFLOPS/s"
     )
@@ -62,7 +64,9 @@ def generate_roofline_plot(
     # Filter to strictly positive values for log-scale plotting
     x_realized_intensity_pos = [x for x in x_realized_intensity if x > 0]
     if not x_realized_intensity_pos:
-        raise ValueError("All realized intensity values are zero or negative; cannot plot on log scale.")
+        raise ValueError(
+            "All realized intensity values are zero or negative; cannot plot on log scale."
+        )
 
     # Compute intensity and bounds
     log_max_intensity = np.log10(
