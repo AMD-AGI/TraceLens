@@ -4,6 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from .trace_to_tree import TraceToTree
+from .trace_to_tree import PyTorchTraceToTree, JaxTraceToTree
 
 __all__ = ["PyTorchTraceToTree", "JaxTraceToTree"]
