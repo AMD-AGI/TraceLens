@@ -108,7 +108,7 @@ def generate_roofline_plot(
         format=output_format,
     )
     plt.close()
-    logger.info(f"Outputs saved to {output_dir}/{output_filename}.{output_format}")
+    print(f"Roofline plot saved to {output_dir}/{output_filename}.{output_format}")
 
 
 def main():
@@ -178,6 +178,24 @@ def main():
         default=5.3,
         help="Peak memory bandwidth in TB/s.",
     )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        help="Print debugging statements",
+        action="store_const",
+        dest="loglevel",
+        const=logging.DEBUG,
+        default=logging.WARNING,  # log levels (low to high): DEBUG, INFO, WARNING, ERROR, CRITICAL
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        help="Be verbose",
+        action="store_const",
+        dest="loglevel",
+        const=logging.INFO,
+    )
+
     args = parser.parse_args()
 
     # Config peak performance (TODO) mi300x_config.yaml, mi355x_config.yaml, etc.
@@ -189,6 +207,13 @@ def main():
     output_dir = args.output_path
     output_filename = args.output_filename
     os.makedirs(output_dir, exist_ok=True)
+
+    # Configure basic logging to stdout with DEBUG level
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=args.loglevel,
+        format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
+    )
 
     # Load input trace file & filter events
     if profile_path.endswith("xplane.pb"):
@@ -243,12 +268,5 @@ def main():
 
 
 if __name__ == "__main__":
-
-    # Configure basic logging to stdout with DEBUG level
-    logging.basicConfig(
-        stream=sys.stdout,  # Output to console
-        level=logging.DEBUG,  # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
-    )
 
     main()
