@@ -48,9 +48,10 @@ def generate_roofline_plot(
         - TraceLens/examples/roofline_plots_example.ipynb
         - JaxTrace_Analysis/gemm_roofline.py
     """
-    assert (
-        "FLOPS/Byte" in df_ops.columns and "TFLOPS/s" in df_ops.columns
-    ), "Input dataframe must contain 'FLOPS/Byte' and 'TFLOPS/s' columns."
+    required_columns = {"FLOPS/Byte", "TFLOPS/s"}
+    missing = required_columns - set(df_ops.columns)
+    if missing:
+        raise ValueError(f"Input dataframe must contain columns: {', '.join(required_columns)}. Missing: {', '.join(missing)}")
     logger.info(
         f"Using peak_bandwidth: {peak_bandwidth} TB/s, peak_tflops: {peak_tflops} TFLOPS/s"
     )
