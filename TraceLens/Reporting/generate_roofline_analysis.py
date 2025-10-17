@@ -120,10 +120,11 @@ def generate_roofline_plot(
 def main():
     """Generate roofline analysis from trace file or from performance metrics DataFrame.
 
-    Note: PyTorch trace event filtering is by 'op_names' or by 'op_cat'.
-          JAX trace event filtering is by 'gpu_kernel_op_cat'. 'op_names' are implemented but not tested.
+    Note: PyTorch trace event filtering is by TorchTree event key 'name' or by 'op_cat'.
+          JAX trace event filtering is by JaxTree event 'gpu_kernel_op_cat'. 
+          For JAX, 'name' is implemented but it is usually more efficient to filter by kernel op cat.
 
-    op_cat example:
+    op_cats example:
         for pytorch ['GEMM', 'CONV', 'SDPA', 'UnaryElementwise', 'BinaryElementwise'];
         for JAX ['GEMM', 'CONV', 'TE'];
         More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/
@@ -149,7 +150,7 @@ def main():
         type=str,
         nargs="+",
         default=["GEMM"],
-        help="Filter event by op category. Example: --op_cat GEMM CONV",
+        help="Filter event by op category. Example: --op_cats GEMM CONV",
     )
     parser.add_argument(
         "--op_names",
