@@ -121,7 +121,7 @@ def main():
     """Generate roofline analysis from trace file or from performance metrics DataFrame.
 
     Note: PyTorch trace event filtering is by TorchTree event key 'name' or by 'op_cat'.
-          JAX trace event filtering is by JaxTree event 'gpu_kernel_op_cat'. 
+          JAX trace event filtering is by JaxTree event 'gpu_kernel_op_cat'.
           For JAX, 'name' is implemented but it is usually more efficient to filter by kernel op cat.
 
     op_cats example:
