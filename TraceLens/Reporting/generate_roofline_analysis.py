@@ -88,6 +88,8 @@ def generate_roofline_plot(
     plt.scatter(
         x_realized_intensity,
         y_realized_performance,
+        marker='x', 
+        s=6,
         color="blue",
         label="Performance data",
     )
