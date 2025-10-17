@@ -23,7 +23,12 @@ from TraceLens import TreePerfAnalyzer, JaxTreePerfAnalyzer
 
 
 def generate_roofline_plot(
-    df_ops, peak_tflops=700, peak_bandwidth=5.3, output_filename="gemm_roofline", output_dir="./", output_format="png"
+    df_ops,
+    peak_tflops=700,
+    peak_bandwidth=5.3,
+    output_filename="gemm_roofline",
+    output_dir="./",
+    output_format="png",
 ):
     """
     Generates a roofline plot based on the provided performance metrics DataFrame.
@@ -43,9 +48,13 @@ def generate_roofline_plot(
         - TraceLens/examples/roofline_plots_example.ipynb
         - JaxTrace_Analysis/gemm_roofline.py
     """
-    assert "FLOPS/Byte" in df_ops.columns and "TFLOPS/s" in df_ops.columns, "Input dataframe must contain 'FLOPS/Byte' and 'TFLOPS/s' columns."
-    print(f"Using peak_bandwidth: {peak_bandwidth} TB/s, peak_tflops: {peak_tflops} TFLOPS/s")
-    
+    assert (
+        "FLOPS/Byte" in df_ops.columns and "TFLOPS/s" in df_ops.columns
+    ), "Input dataframe must contain 'FLOPS/Byte' and 'TFLOPS/s' columns."
+    logger.info(
+        f"Using peak_bandwidth: {peak_bandwidth} TB/s, peak_tflops: {peak_tflops} TFLOPS/s"
+    )
+
     x_realized_intensity = list(df_ops["FLOPS/Byte"])
     y_realized_performance = list(df_ops["TFLOPS/s"])
 
@@ -88,28 +97,31 @@ def generate_roofline_plot(
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, output_filename + '.' + output_format), format=output_format)
-    plt.show()
-    print(f"Outputs saved to {output_dir}/{output_filename}.{output_format}")
+    plt.savefig(
+        os.path.join(output_dir, output_filename + "." + output_format),
+        format=output_format,
+    )
+    plt.close()
+    logger.info(f"Outputs saved to {output_dir}/{output_filename}.{output_format}")
 
 
 def main():
     """Generate roofline analysis from trace file or from performance metrics DataFrame.
-    
+
     Note: Pytorch trace event filtering by op names or by op category is supported.
           Jax trace event filtering is only supported by op category.
-          
+
     op_cat example:
         for pytorch ['GEMM', 'CONV', 'SDPA', 'UnaryElementwise', 'BinaryElementwise'];
         for jax ['GEMM', 'CONV', 'TE'];
-        More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/ 
-    
+        More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/
+
     Usage example:
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_jax --op_cat GEMM 
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_' 
-    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_cat GEMM  
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_jax --op_cat GEMM
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_names 'aten::copy_'
+    python3 TraceLens/Reporting/generate_roofline_analysis.py --profile_path $trace_pytorch --op_cat GEMM
     """
-    
+
     parser = argparse.ArgumentParser(
         description="Generate roofline analysis from trace file or from performance metrics DataFrame."
     )
@@ -136,7 +148,7 @@ def main():
     parser.add_argument(
         "--output_path",
         type=str,
-        default='./',
+        default="./",
         help="Directory to save the output roofline plot.",
     )
     parser.add_argument(
@@ -159,7 +171,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # TODO peak performance configs from mi300x_config.yaml, mi355x_config.yaml, etc.
+    # Config peak performance (TODO) mi300x_config.yaml, mi355x_config.yaml, etc.
     peak_bandwidth = args.peak_bandwidth  # TB/s
     peak_tflops = args.peak_tflops  # TFLOPS/s
     op_cat = args.op_cat
@@ -168,7 +180,7 @@ def main():
     output_dir = args.output_path
     output_filename = args.output_filename
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Load input trace file
     if profile_path.endswith("xplane.pb"):
         perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_path)
@@ -180,9 +192,9 @@ def main():
     elif profile_path.endswith("trace.json"):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_path)
         if not op_names:
-            op_names = perf_analyzer.dict_cat2names[op_cat.upper()]
+            op_names = perf_analyzer.dict_cat2names.get(op_cat.upper(), [])
         else:
-            op_names = [op_names] # TODO support list input
+            op_names = [op_names]  # TODO support list input
         op_events = [
             event for event in perf_analyzer.tree.events if event["name"] in op_names
         ]
@@ -191,7 +203,7 @@ def main():
         sys.exit(1)
 
     assert len(op_events) > 0, f"No events found for category '{op_cat}' in the trace."
-    print(f"Number of events found for category '{op_cat}': {len(op_events)}")
+    logger.info(f"Number of events found for category '{op_cat}': {len(op_events)}")
     df_ops = perf_analyzer.build_df_perf_metrics(op_events)
 
     # Generate roofline plot
