@@ -100,6 +100,7 @@ def perf_analysis(
         df_kernel_launchers_summary_by_category
     )
     dict_dfs["kernel_launchers_unique_args"] = df_kernel_launchers_unique_args
+    dict_dfs["xla_events"] = df_xla_events
     dict_dfs["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames

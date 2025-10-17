@@ -1318,10 +1318,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         _operand_dim = tuple(
                             int(_dim) for _dim in _dims[0].split(",") if _dim
                         )
-                        # _operand_dim_reorder = tuple(_operand_dim[_id] for _id in _operand_idx)
                         operand_list += (_operand_dim,)
-                    # types
-                    _pattern = r"([A-Za-z0-9]+)\["
+                    # types ['f32', 'f64', 'f16', 'bf16', 'f8', 'fp8']
+                    _pattern = r"([A-Za-z]+[0-9]+)\["
                     _type = re.findall(_pattern, _operand)
                     if len(_type) > 0:
                         operand_type += (_type[0],)
