@@ -120,7 +120,7 @@ def main():
 
     op_cat example:
         for pytorch ['GEMM', 'CONV', 'SDPA', 'UnaryElementwise', 'BinaryElementwise'];
-        for jax ['GEMM', 'CONV', 'TE'];
+        for JAX ['GEMM', 'CONV', 'TE'];
         More details see torch_op_mapping.py and jax_op_mapping.py in TraceLens/TreePerf/
 
     Usage example:
