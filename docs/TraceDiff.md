@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TraceDiff
 
 TraceDiff is a Python API and a component of TraceLens for comparing two PyTorch Kineto trace files. It allows users to identify, visualize, and analyze differences between execution traces at both the operation and kernel levels.

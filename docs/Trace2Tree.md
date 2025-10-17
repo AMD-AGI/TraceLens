@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Trace2Tree
 
 In GPU applications performance analysis, understanding the relationship between host CPU operations and correspondng GPU kernel executions is crucial for analysing bottlenecks. The PyTorch profiler provides a JSON trace file containing events with timestamps and durations but lacks explicit call stack dependency information.

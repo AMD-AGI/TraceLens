@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Customized Performance Report Generator
 
 This customized Python script (`generate_perf_report_with_fusion_and_shortkernels.py`) processes a PyTorch JSON profile trace and outputs an Excel workbook with detailed tables. 

@@ -1,24 +1,8 @@
-# MIT License
-
+###############################################################################
 # Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import json
 import gzip
@@ -425,7 +409,9 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         df_perf_metrics_summary.sort_values(
-            by="Kernel Time (µs)_sum", ascending=False, inplace=True
+            by=["Kernel Time (µs)_sum", "UID_first"],
+            ascending=[False, True],
+            inplace=True,
         )
         # df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
@@ -830,10 +816,10 @@ class TreePerfAnalyzer:
         ]
         df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
 
-        # 5. Sort the DataFrame by the sum of total_direct_kernel_time
+        # 5. Sort the DataFrame by the sum of total_direct_kernel_time and then by ex_uid for stability
         if "total_direct_kernel_time_sum" in df_unique_args.columns:
             df_unique_args = df_unique_args.sort_values(
-                by="total_direct_kernel_time_sum", ascending=False
+                by=["total_direct_kernel_time_sum", "ex_UID"], ascending=[False, True]
             ).reset_index(drop=True)
 
         # 6. Calculate percentage of total time and cumulative percentage if requested
@@ -882,7 +868,7 @@ class TreePerfAnalyzer:
 
         return df_agg
 
-    def get_df_gpu_timeline(self):
+    def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
             event
             for event in self.tree.events
@@ -891,7 +877,9 @@ class TreePerfAnalyzer:
         if not self.include_unlinked_kernels:
             kernel_events = [event for event in kernel_events if event.get("tree")]
         gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
-        df = gpu_event_analyser.get_breakdown_df()
+        df = gpu_event_analyser.get_breakdown_df(
+            micro_idle_thresh_us=micro_idle_thresh_us
+        )
         return df
 
     def get_kernel_details(
