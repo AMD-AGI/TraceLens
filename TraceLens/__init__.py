@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
 from .Trace2Tree.trace_to_tree import TraceToTree
 from .TraceFusion.trace_fuse import TraceFuse
