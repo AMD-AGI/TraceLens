@@ -83,6 +83,7 @@ def perf_analysis(
             "Uncategorized Events/XLA",
         ],
     )
+    df_xla_perf = perf_analyzer.get_df_xla_perf(df_xla_events)
     df_xla_events_agg_name_col = df_xla_events.copy()
     df_xla_events_agg_name_col["name"] = df_xla_events.name.apply(
         lambda x: "".join([i for i in x if not i.isdigit()])
@@ -100,7 +101,7 @@ def perf_analysis(
         df_kernel_launchers_summary_by_category
     )
     dict_dfs["kernel_launchers_unique_args"] = df_kernel_launchers_unique_args
-    dict_dfs["xla_events"] = df_xla_events
+    dict_dfs["df_xla_perf"] = df_xla_perf
     dict_dfs["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames
