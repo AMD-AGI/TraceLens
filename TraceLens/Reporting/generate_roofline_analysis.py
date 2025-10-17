@@ -140,11 +140,11 @@ def main():
     parser.add_argument(
         "--op_names",
         type=str,
-        nargs='+',
+        nargs="+",
         default=None,
         help="Filter Torch operations by names for roofline analysis. Example: --op_names aten::matmul aten::copy_",
     )
-    # NOTE: Downstream logic must handle args.op_names as a list of strings (or None).
+
     parser.add_argument(
         "--output_path",
         type=str,
@@ -192,9 +192,10 @@ def main():
     elif profile_path.endswith("trace.json"):
         perf_analyzer = TreePerfAnalyzer.from_file(profile_path)
         if not op_names:
+            logger.info(f"Filtering Torch events by op category: {op_cat}")
             op_names = perf_analyzer.dict_cat2names.get(op_cat.upper(), [])
         else:
-            op_names = [op_names]  # TODO support list input
+            logger.info(f"Filtering Torch events by op names: {op_names}")
         op_events = [
             event for event in perf_analyzer.tree.events if event["name"] in op_names
         ]
@@ -202,8 +203,7 @@ def main():
         logger.error(f"Trace file {profile_path} format not recognized.")
         sys.exit(1)
 
-    assert len(op_events) > 0, f"No events found for category '{op_cat}' in the trace."
-    logger.info(f"Number of events found for category '{op_cat}': {len(op_events)}")
+    assert len(op_events) > 0, f"No events selected in the trace."
     df_ops = perf_analyzer.build_df_perf_metrics(op_events)
 
     # Generate roofline plot
