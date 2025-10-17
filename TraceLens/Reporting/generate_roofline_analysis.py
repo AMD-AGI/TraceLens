@@ -11,12 +11,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import logging
 
-# Configure basic logging to stdout with DEBUG level
-logging.basicConfig(
-    stream=sys.stdout,  # Output to console
-    level=logging.DEBUG,  # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 from TraceLens import TreePerfAnalyzer, JaxTreePerfAnalyzer
@@ -249,4 +243,12 @@ def main():
 
 
 if __name__ == "__main__":
+
+    # Configure basic logging to stdout with DEBUG level
+    logging.basicConfig(
+        stream=sys.stdout,  # Output to console
+        level=logging.DEBUG,  # Set the minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
+    )
+
     main()
