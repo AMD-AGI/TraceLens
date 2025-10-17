@@ -151,7 +151,7 @@ def main():
         type=str,
         nargs="+",
         default=None,
-        help="Filter Torch operations by names for roofline analysis. Example: --op_names aten::matmul aten::copy_",
+        help="Filter operations by names for roofline analysis (Torch and JAX). Example: --op_names aten::matmul aten::copy_",
     )
 
     parser.add_argument(
