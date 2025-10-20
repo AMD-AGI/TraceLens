@@ -1312,9 +1312,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         _operand_dim = tuple(
                             int(_dim) for _dim in _dim.split(",") if _dim
                         )
-                        _operand_idx = tuple(
-                            int(_id) for _id in _idx.split(",") if _id
-                        )
+                        _operand_idx = tuple(int(_id) for _id in _idx.split(",") if _id)
                         operand_type += (_type,)
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
