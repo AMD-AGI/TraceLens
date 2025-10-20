@@ -7,7 +7,7 @@ See LICENSE for license information.
 # TraceLens
 
 TraceLens is a Python library focused on **automating analysis from trace files** and enabling rich performance insights. Designed with **simplicity and extensibility** in mind, this library provides tools to simplify the process of profiling and debugging complex distributed training and inference systems.
-
+Find the PyTorch Conference 2025 poster for TraceLens here [here]("docs/TraceLens - Democratizing AI Performance Analysis - Adeem Jassani, AMD.pdf")
 ## Key Features
 
 ✨ **Hierarchical Performance Breakdowns**: Pinpoint bottlenecks with a top-down view, moving from the overall GPU timeline (idle/busy) to operator categories (e.g., convolutions), individual operators, and right down to unique argument shapes.
