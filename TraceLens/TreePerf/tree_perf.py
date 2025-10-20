@@ -1303,16 +1303,20 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         try:
             if len(operands) > 0:
                 for _operand in operands:
-                    # Debug example: ['bf16[8,768]{1,0}', 'bf16[8,384]{1,0}', 'fusion,pred[1]{0}', 's32[8]{0}']  
+                    # Debug example: ['bf16[8,768]{1,0}', 'bf16[8,384]{1,0}', 'fusion,pred[1]{0}', 's32[8]{0}']
                     # JAX data types: ['f32', 'f64', 'f16', 'bf16', 'f8', 'fp8']
                     for _operand in operands:
-                        _pattern = r"([A-Za-z]+[0-9]+)\[([0-9,]+)\]\{([0-9,]+)\}" # (type)[(dim)]{(_idx)}
+                        _pattern = r"([A-Za-z]+[0-9]+)\[([0-9,]+)\]\{([0-9,]+)\}"  # (type)[(dim)]{(_idx)}
                         _op = re.findall(_pattern, _operand)
                         if len(_op) > 0:
                             _type, _dim, _idx = _op[0]
-                            _operand_dim = tuple(int(_dim) for _dim in _dim.split(",") if _dim)
-                            _operand_idx = tuple(int(_id) for _id in _idx.split(",") if _id)
-                            operand_type += (_type, )
+                            _operand_dim = tuple(
+                                int(_dim) for _dim in _dim.split(",") if _dim
+                            )
+                            _operand_idx = tuple(
+                                int(_id) for _id in _idx.split(",") if _id
+                            )
+                            operand_type += (_type,)
                             operand_list += (_operand_dim,)
                             operand_idx += (_operand_idx,)
         except Exception as e:
