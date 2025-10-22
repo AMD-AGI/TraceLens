@@ -234,7 +234,7 @@ def main():
         "--output_path",
         type=str,
         default=None,
-        help="Path to the output folder",
+        help="Path to the output folder. If not provided, output files will be saved to the current working directory.",
     )
     parser.add_argument(
         "--output_table_formats",
