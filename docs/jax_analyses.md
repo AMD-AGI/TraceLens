@@ -4,7 +4,7 @@ Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-22 October 2025: The following JAX analysis modules have been merged into TraceLens and will no longer be maintained. Example usage is similar to PyTorch. See 'docs/generate_perf_report.md'.
+22 October 2025: The following JAX analysis modules—`summarize_gpu_events`, `summarize_gpu_gemm_events`, and related utilities—have been merged into TraceLens and will no longer be maintained as standalone modules. Example usage is similar to PyTorch. See 'docs/generate_perf_report.md'.
 
 ```bash
 python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --output_csvs_dir save/to/dir
