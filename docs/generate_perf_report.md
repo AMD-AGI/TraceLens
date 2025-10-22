@@ -31,6 +31,8 @@ Similarly for JAX profile:
 python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --output_path save/to/dir
 ```
 
+(W.I.P.: generate_perf_report_jax.py and generate_perf_report_pytorch.py have different options. The following is written for PyTorch. )
+
 ---
 
 ## 📋 Excel Workbook Sheets
