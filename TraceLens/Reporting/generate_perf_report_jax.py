@@ -125,6 +125,7 @@ def perf_analysis(
         df_op = perf_analyzer.summarize_df_perf_metrics(
             df_op_perf_model_cleaned, agg_metrics
         )
+        dict_dfs[f"op_{op_cat}_perf"] = df_op_perf_model_cleaned
         dict_dfs[f"op_{op_cat}"] = df_op
     return dict_dfs
 
