@@ -144,7 +144,7 @@ def generate_perf_report_jax(
         profile_path,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
     )
-            
+
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
         # Ensure the output directory exists
@@ -208,7 +208,7 @@ def main():
         default=None,
         help="Directory to save output CSV files",
     )
-    
+
     # Optional arguments
     parser.add_argument(
         "--gpu_arch_json_path",
