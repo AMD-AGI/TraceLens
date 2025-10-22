@@ -59,14 +59,6 @@ def perf_analysis(
         ),
     )
 
-    # TODO: add option to use PyTorch Perf Analyzer for PyTorch traces i.e. unify reporting modules.
-    """perf_analyzer = TreePerfAnalyzer.from_file(
-        profile_filepath=profile_json_path,
-        arch=gpu_arch_json,
-        python_path=python_path,
-        include_unlinked_kernels=include_unlinked_kernels,
-    )"""
-
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages()
@@ -119,11 +111,11 @@ def perf_analysis(
     df_op_detailed = perf_analyzer.build_df_perf_metrics(
         op_events, include_kernel_details=True, include_args=True
     )
-    for op_cat in [
-        "jax_gemm",
-        "jax_conv",
-        "jax_te",
-    ]:  # Alternatively: jax_op_mapping.jax_op_to_perf_model_class_map.keys():
+    for (
+        op_cat
+    ) in (
+        jax_op_mapping.jax_op_to_perf_model_class_map.keys()
+    ):  # Alternatively: ["jax_gemm","jax_conv","jax_te",]:
         df_op_perf_model = df_op_detailed[
             df_op_detailed["perf model"].str.contains(op_cat)
         ]
@@ -141,19 +133,12 @@ def generate_perf_report_jax(
     profile_path: str,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
-    gpu_arch_json_path: Optional[str] = None,
     kernel_metadata_keyword_filters=None,
 ) -> Dict[str, pd.DataFrame]:
-    # Load the arch json
-    gpu_arch_json = None
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
 
     # Analyze trace profile
     dict_name2df = perf_analysis(
         profile_path,
-        arch=gpu_arch_json,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
     )
 
@@ -215,18 +200,6 @@ def main():
 
     # Optional arguments
     parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
-    parser.add_argument(
-        "--num_cus",
-        type=str,
-        default=304,
-        help="Number of compute units, MI300X - 304; MI210: 104",
-    )
-    parser.add_argument(
         "--kernel_metadata_keyword_filters",
         type=str,
         nargs="+",
@@ -239,7 +212,6 @@ def main():
         profile_path=args.profile_path,
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
-        gpu_arch_json_path=args.gpu_arch_json_path,
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
     )
 
