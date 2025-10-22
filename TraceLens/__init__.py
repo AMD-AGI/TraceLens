@@ -5,7 +5,7 @@
 ###############################################################################
 
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
-from .Trace2Tree.trace_to_tree import TraceToTree
+from .Trace2Tree.trace_to_tree import PyTorchTraceToTree, JaxTraceToTree
 from .TraceFusion.trace_fuse import TraceFuse
 from .TreePerf.gpu_event_analyser import (
     GPUEventAnalyser,
@@ -28,7 +28,7 @@ __all__ = [
     "JaxGPUEventAnalyser",
     "JaxAnalyses",
     "TraceFuse",
-    "TraceToTree",
+    "PyTorchTraceToTree",
     "JaxTraceToTree",
     "NcclAnalyser",
     "PerfModel",
