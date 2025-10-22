@@ -231,7 +231,10 @@ def main():
         help="Number of compute units, MI300X - 304; MI210: 104",
     )
     parser.add_argument(
-        "--output_path", type=str, required=True, help="Path to the output folder"
+        "--output_path",
+        type=str,
+        default=None,
+        help="Path to the output folder",
     )
     parser.add_argument(
         "--output_table_formats",

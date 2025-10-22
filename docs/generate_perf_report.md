@@ -25,6 +25,12 @@ Alternatively you can directly call the entry point with the same command line a
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/profile.json 
 ```
 
+Similarly for JAX profile:
+
+```bash
+python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --output_path save/to/dir
+```
+
 ---
 
 ## 📋 Excel Workbook Sheets

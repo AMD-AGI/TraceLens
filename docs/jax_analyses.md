@@ -4,6 +4,12 @@ Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
+22 October 2025: The following JAX analysis modules have been merged into TraceLens and would no longer be maintained. Example usage is similar to PyTorch. See 'docs/generate_perf_report.md'. 
+
+```bash
+python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --output_path save/to/dir
+```
+
 Jax analysis, particularly reading the protobuf files, has been tested with tensorboard 2.19.0 and tensorboard-plugin-profile 2.19.0 and protobuf 5.29.2.
 Other versions may not work
 
