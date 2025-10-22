@@ -1303,28 +1303,19 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         try:
             if len(operands) > 0:
                 for _operand in operands:
-                    # indx
-                    _idx_pattern = r"\{([0-9,]+)\}"
-                    _idx = re.findall(_idx_pattern, _operand)
-                    if len(_idx) > 0:
-                        _operand_idx = tuple(
-                            int(_id) for _id in _idx[0].split(",") if _id
-                        )
-                        operand_idx += (_operand_idx,)
-                    # dims
-                    _dim_pattern = r"\[([0-9,]+)\]"
-                    _dims = re.findall(_dim_pattern, _operand)
-                    if len(_dims) > 0:
+                    # Debug example: ['bf16[8,768]{1,0}', 'bf16[8,384]{1,0}', 'fusion,pred[1]{0}', 's32[8]{0}']
+                    # JAX data types: ['f32', 'f64', 'f16', 'bf16', 'f8', 'fp8']
+                    _pattern = r"([A-Za-z]+[0-9]+)\[([0-9,]+)\]\{([0-9,]+)\}"  # (type)[(dim)]{(_idx)}
+                    _op = re.findall(_pattern, _operand)
+                    if len(_op) > 0:
+                        _type, _dim, _idx = _op[0]
                         _operand_dim = tuple(
-                            int(_dim) for _dim in _dims[0].split(",") if _dim
+                            int(_dim) for _dim in _dim.split(",") if _dim
                         )
-                        # _operand_dim_reorder = tuple(_operand_dim[_id] for _id in _operand_idx)
+                        _operand_idx = tuple(int(_id) for _id in _idx.split(",") if _id)
+                        operand_type += (_type,)
                         operand_list += (_operand_dim,)
-                    # types
-                    _pattern = r"([A-Za-z0-9]+)\["
-                    _type = re.findall(_pattern, _operand)
-                    if len(_type) > 0:
-                        operand_type += (_type[0],)
+                        operand_idx += (_operand_idx,)
         except Exception as e:
             logger.debug(
                 f"\nException occurred when parsing Event: \n\n {event} \n\
