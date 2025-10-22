@@ -28,10 +28,10 @@ TraceLens_generate_perf_report_pytorch --profile_json_path path/to/profile.json
 Similarly for JAX profile:
 
 ```bash
-python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --output_path save/to/dir
+python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --output_path save/to/dir --output_table_formats xlsx
 ```
 
-(W.I.P.: generate_perf_report_jax.py and generate_perf_report_pytorch.py have different options. The following is written for PyTorch. )
+(W.I.P.: generate_perf_report_jax.py and generate_perf_report_pytorch.py have different options. They are being checked and updated at the moment. The following is written for PyTorch. )
 
 ---
 
@@ -43,13 +43,13 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb --ou
 | `ops_summary_by_category`  | Summary of compute time grouped by operation category (e.g., GEMM, SDPA_fwd, elementwise).                       |
 | `ops_summary`              | Summary of compute time at the individual operation level; each row corresponds to a unique operation name.      |
 | `ops_all`                  | Detailed operation-level summary; each row corresponds to a unique (operation name, argument) combination.       |
-| `short_kernels_histogram` | Histogram showing the distribution of kernel durations below the short-duration threshold.                       |
-| `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op.    |
-| Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics.                   |
+| `short_kernels_histogram` | Histogram showing the distribution of kernel durations below the short-duration threshold. (PyTorch only)                      |
+| `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op. (PyTorch only)      |
+| Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics.  (PyTorch only)                    |
 
 ---
 
-## ⚙️ Optional Arguments
+## ⚙️ Optional Arguments (PyTorch only) 
 
 The script supports several optional arguments to customize the output report. By default, it generates an Excel file (`.xlsx`). If `--output_csvs_dir` is specified, individual CSV files are written instead.
 
@@ -78,7 +78,7 @@ The script supports several optional arguments to customize the output report. B
 
 
 ```bash
-python generate_perf_report.py \
+python generate_perf_report_pytorch.py \
   --profile_json_path traces/profile.json \
   --output_csvs_dir output_csvs/ \
   --topk_ops 50 \
