@@ -105,7 +105,7 @@ Pass a Python file path via `--extension_file`. The file can define one or more 
 ### ✅ Example Usage
 
 ```bash
-python generate_perf_report.py \
+python generate_perf_report_pytorch.py \
   --profile_json_path traces/profile.json \
   --extension_file my_extension.py
 ```
