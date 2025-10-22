@@ -267,6 +267,129 @@ class BaseTraceToTree(ABC):
                     event[TraceLens.util.TraceEventUtils.TraceKeys.Args]["Python id"]
                 ] = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
+    def traverse_subtree_and_print(
+        self,
+        node: Dict[str, Any],
+        prune_non_gpu: bool = True,
+        cpu_op_fields: tuple[str, ...] = (),
+    ) -> None:
+        """
+        Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
+
+        Args:
+            node (Dict[str, Any]): The root node of the subtree.
+            prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
+            cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations.
+                It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
+
+        Prints:
+            A structured representation of the subtree with details about each event.
+        """
+        self._traverse_subtree_recursive(
+            node, prune_non_gpu, cpu_op_fields=cpu_op_fields, _prefix="", is_last=True
+        )
+
+    def _traverse_subtree_recursive(
+        self,
+        node: Dict[str, Any],
+        prune_non_gpu: bool,
+        cpu_op_fields: tuple[str],
+        _prefix: str,
+        is_last: bool,
+    ) -> None:
+        connector = "└── " if is_last else "├── "
+        name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
+        max_len = 64
+        if len(name) > max_len:
+            name = name[:max_len] + ".."
+
+        cat = self.event_to_category(node)
+        print_str = f"{_prefix}{connector}UID: {node[TraceLens.util.TraceEventUtils.TraceKeys.UID]}, Category: {cat}, Name: {name}"
+
+        if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
+            print_str += f", Duration: {node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)}"
+
+        print(print_str)
+
+        if cat == "cpu_op":
+            args = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {})
+            cpu_detail_prefix = _prefix + ("    " if is_last else "│   ") + "|   "
+            details_emitted = False
+            for detail in cpu_op_fields:
+                if detail in args:
+                    detail_value = args[detail]
+                    print_str = f"{cpu_detail_prefix}{detail}: {detail_value}"
+                    print(print_str)
+                    details_emitted = True
+            if details_emitted:
+                print(cpu_detail_prefix)
+
+        children = self.get_children_events(node)
+        if prune_non_gpu:
+            children = [child for child in children if "non_gpu_path" not in child]
+
+        child_count = len(children)
+        new_prefix = _prefix + ("    " if is_last else "│   ")
+
+        for i, child in enumerate(children):
+            self._traverse_subtree_recursive(
+                child,
+                prune_non_gpu,
+                cpu_op_fields=cpu_op_fields,
+                _prefix=new_prefix,
+                is_last=(i == child_count - 1),
+            )
+
+    def traverse_parents_and_print(
+        self, node: Dict[str, Any], cpu_op_fields: tuple[str, ...] = ()
+    ) -> None:
+        """
+        Traverses the parent nodes of a given event node and prints their details
+        in a hierarchical format, starting from the node itself and going up to the root.
+
+        Args:
+            node (Dict[str, Any]): The event node from which to start traversing upwards.
+            cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations.
+                It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
+        """
+
+        depth = 0
+        while True:
+            if depth == 0:
+                print("Node:")
+            else:
+                print(f"{depth}-up:")
+
+            # Print category and name
+            # print(f"  cat: {self.event_to_category(node)}")
+            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
+            max_len = 64
+            if len(name) > max_len:
+                name = name[:max_len] + ".."
+            print_str = f"  UID: {node[TraceLens.util.TraceEventUtils.TraceKeys.UID]}, Category: {self.event_to_category(node)}, Name: {name}"
+            # Print duration if category is kernel, gpu_memset, or gpu_memcpy
+            if self.event_to_category(node) in {"kernel", "gpu_memset", "gpu_memcpy"}:
+                duration = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
+                if duration is not None:
+                    print_str += f", Duration: {duration}"
+            print(print_str)
+            # Print additional CPU operation details if applicable
+            if self.event_to_category(node) == "cpu_op":
+                args = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {})
+                cpu_detail_prefix = " " * 4
+                for detail in cpu_op_fields:
+                    if detail in args:
+                        detail_value = args[detail]
+                        print_str = f"{cpu_detail_prefix}{detail}: {detail_value}"
+                        print(print_str)
+
+            # Move to the parent node
+            parent_node = self.get_parent_event(node)
+            if parent_node is None:
+                return node
+            node = parent_node
+            depth += 1
+
 
 class JaxTraceToTree(BaseTraceToTree):
     def __init__(
@@ -545,6 +668,94 @@ class JaxTraceToTree(BaseTraceToTree):
                                             f"in hlo_module: {GPU_event['args']['hlo_module']}"
                                         )
 
+    def traverse_subtree_parents_only_and_print(self, node):
+
+        event = node
+
+        # list child -> parent
+        subtree_event = []
+
+        while True:
+
+            subtree_event.append(event)
+            # print(event)
+
+            if "parent" in event.keys():
+                event = self.events_by_uid[event["parent"]]
+            else:
+                break
+
+        # list parent -> child, cpu -> gpu
+        subtree_event.reverse()
+
+        print("Call stack:")
+        print_str = ""
+        for event in subtree_event:
+
+            event_str = (
+                "name:"
+                + event.get("name")
+                + ", dur:"
+                + str(event.get("dur"))
+                + ", pid:"
+                + str(event.get("pid"))
+                + ", cat:"
+                + event.get("cat")
+            )
+            gpu_kernel_op_cat = event.get("gpu_kernel_op_cat")
+
+            if gpu_kernel_op_cat:
+                event_str = event_str + ", gpu_kernel_op_cat:" + gpu_kernel_op_cat
+
+            args = event.get("args")
+
+            if args:
+                hlo_module = args.get("hlo_module")
+
+                if hlo_module:
+                    event_str = event_str + ", hlo_module:" + hlo_module
+
+                hlo_op = args.get("hlo_op")
+
+                if hlo_op:
+                    event_str = event_str + ", hlo_op:" + hlo_op
+
+            print(print_str, "└──", event_str)
+            print_str += "   "
+
+        args = event.get("args")
+
+        if args:
+
+            framework_name_scope_call_stack = args.get("name")
+
+            if framework_name_scope_call_stack:
+
+                framework_name_scope_call_stack = framework_name_scope_call_stack.split(
+                    "/"
+                )
+
+                print("Framework name scope call stack:")
+
+                print_str = ""
+                for name in framework_name_scope_call_stack:
+
+                    print(print_str, "└──", name)
+                    print_str += "   "
+
+                if hlo_module:
+                    print(print_str + "hlo_module:" + hlo_module)
+
+                if hlo_op:
+                    print(print_str + "hlo_op:" + hlo_op)
+
+                metadata = event.get("metadata")
+
+                if metadata:
+                    metadata = metadata.get("metadata")
+                    source_file = metadata.find("source_file")
+                    print(print_str + metadata[source_file:])
+
 
 class TraceToTree:
     def __init__(
@@ -812,129 +1023,6 @@ class TraceToTree:
             ):
                 return event
         return None
-
-    def traverse_subtree_and_print(
-        self,
-        node: Dict[str, Any],
-        prune_non_gpu: bool = True,
-        cpu_op_fields: tuple[str, ...] = (),
-    ) -> None:
-        """
-        Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
-
-        Args:
-            node (Dict[str, Any]): The root node of the subtree.
-            prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
-            cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations.
-                It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
-
-        Prints:
-            A structured representation of the subtree with details about each event.
-        """
-        self._traverse_subtree_recursive(
-            node, prune_non_gpu, cpu_op_fields=cpu_op_fields, _prefix="", is_last=True
-        )
-
-    def _traverse_subtree_recursive(
-        self,
-        node: Dict[str, Any],
-        prune_non_gpu: bool,
-        cpu_op_fields: tuple[str],
-        _prefix: str,
-        is_last: bool,
-    ) -> None:
-        connector = "└── " if is_last else "├── "
-        name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
-        max_len = 64
-        if len(name) > max_len:
-            name = name[:max_len] + ".."
-
-        cat = self.event_to_category(node)
-        print_str = f"{_prefix}{connector}UID: {node[TraceLens.util.TraceEventUtils.TraceKeys.UID]}, Category: {cat}, Name: {name}"
-
-        if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
-            print_str += f", Duration: {node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)}"
-
-        print(print_str)
-
-        if cat == "cpu_op":
-            args = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {})
-            cpu_detail_prefix = _prefix + ("    " if is_last else "│   ") + "|   "
-            details_emitted = False
-            for detail in cpu_op_fields:
-                if detail in args:
-                    detail_value = args[detail]
-                    print_str = f"{cpu_detail_prefix}{detail}: {detail_value}"
-                    print(print_str)
-                    details_emitted = True
-            if details_emitted:
-                print(cpu_detail_prefix)
-
-        children = self.get_children_events(node)
-        if prune_non_gpu:
-            children = [child for child in children if "non_gpu_path" not in child]
-
-        child_count = len(children)
-        new_prefix = _prefix + ("    " if is_last else "│   ")
-
-        for i, child in enumerate(children):
-            self._traverse_subtree_recursive(
-                child,
-                prune_non_gpu,
-                cpu_op_fields=cpu_op_fields,
-                _prefix=new_prefix,
-                is_last=(i == child_count - 1),
-            )
-
-    def traverse_parents_and_print(
-        self, node: Dict[str, Any], cpu_op_fields: tuple[str, ...] = ()
-    ) -> None:
-        """
-        Traverses the parent nodes of a given event node and prints their details
-        in a hierarchical format, starting from the node itself and going up to the root.
-
-        Args:
-            node (Dict[str, Any]): The event node from which to start traversing upwards.
-            cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations.
-                It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
-        """
-
-        depth = 0
-        while True:
-            if depth == 0:
-                print("Node:")
-            else:
-                print(f"{depth}-up:")
-
-            # Print category and name
-            # print(f"  cat: {self.event_to_category(node)}")
-            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
-            max_len = 64
-            if len(name) > max_len:
-                name = name[:max_len] + ".."
-            print_str = f"  UID: {node[TraceLens.util.TraceEventUtils.TraceKeys.UID]}, Category: {self.event_to_category(node)}, Name: {name}"
-            # Print duration if category is kernel, gpu_memset, or gpu_memcpy
-            if self.event_to_category(node) in {"kernel", "gpu_memset", "gpu_memcpy"}:
-                duration = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
-                if duration is not None:
-                    print_str += f", Duration: {duration}"
-            print(print_str)
-            # Print additional CPU operation details if applicable
-            if self.event_to_category(node) == "cpu_op":
-                args = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {})
-                cpu_detail_prefix = " " * 4
-                for detail in cpu_op_fields:
-                    if detail in args:
-                        detail_value = args[detail]
-                        print_str = f"{cpu_detail_prefix}{detail}: {detail_value}"
-                        print(print_str)
-
-            # Move to the parent node
-            parent_node = self.get_parent_event(node)
-            if parent_node is None:
-                return node
-            node = parent_node
-            depth += 1
 
     def get_seq_nums_for_node_subtree(self, node_UID):
         seq_nums = set()
