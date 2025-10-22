@@ -6,7 +6,7 @@
 
 import argparse, os, sys
 import json
-from pathlib import Path
+from typing import Optional, Dict
 import pandas as pd
 import logging
 
@@ -24,11 +24,9 @@ from TraceLens.Reporting.reporting_utils import request_install
 
 def perf_analysis(
     profile_path: str,
-    arch=None,
     agg_metrics=["mean", "median", "std", "min", "max"],
-    *args,
     **kwargs,
-) -> dict:
+) -> Dict[str, pd.DataFrame]:
     """
     Generates a performance report for JAX analysis from a given XPlane profile protobuf file.
     This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
@@ -57,8 +55,6 @@ def perf_analysis(
             "kernel_metadata_keyword_filters", None
         ),
     )
-
-    dict_dfs = {}
 
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
@@ -93,16 +89,17 @@ def perf_analysis(
     )
 
     # Store base DataFrames
-    dict_dfs["gpu_timeline"] = df_gpu_timeline
-    dict_dfs["gpu_events_averages"] = df_gpu_events_averages
-    dict_dfs["kernel_launchers"] = df_kernel_launchers
-    dict_dfs["kernel_launchers_summary"] = df_kernel_launchers_summary
-    dict_dfs["kernel_launchers_summary_by_category"] = (
+    dict_name2df = {}
+    dict_name2df["gpu_timeline"] = df_gpu_timeline
+    dict_name2df["gpu_events_averages"] = df_gpu_events_averages
+    dict_name2df["kernel_launchers"] = df_kernel_launchers
+    dict_name2df["kernel_launchers_summary"] = df_kernel_launchers_summary
+    dict_name2df["kernel_launchers_summary_by_category"] = (
         df_kernel_launchers_summary_by_category
     )
-    dict_dfs["kernel_launchers_unique_args"] = df_kernel_launchers_unique_args
-    dict_dfs["df_xla_perf"] = df_xla_perf
-    dict_dfs["xla_summary"] = df_xla_summary
+    dict_name2df["kernel_launchers_unique_args"] = df_kernel_launchers_unique_args
+    dict_name2df["df_xla_perf"] = df_xla_perf
+    dict_name2df["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames
     op_events = [
@@ -115,7 +112,7 @@ def perf_analysis(
         "jax_gemm",
         "jax_conv",
         "jax_te",
-    ]:  # jax_op_mapping.jax_op_to_perf_model_class_map.keys():
+    ]:  # Alternatively: jax_op_mapping.jax_op_to_perf_model_class_map.keys():
         df_op_perf_model = df_op_detailed[
             df_op_detailed["perf model"].str.contains(op_cat)
         ]
@@ -125,19 +122,17 @@ def perf_analysis(
         df_op = perf_analyzer.summarize_df_perf_metrics(
             df_op_perf_model_cleaned, agg_metrics
         )
-        dict_dfs[f"op_{op_cat}"] = df_op
-    return dict_dfs
+        dict_name2df[f"op_{op_cat}"] = df_op
+    return dict_name2df
 
 
 def generate_perf_report_jax(
     profile_path: str,
-    gpu_arch_json_path=None,
-    num_cus=None,
-    output_path="./",
-    output_table_formats=[".csv"],
-    output_filename="trace_analysis_results",
+    output_xlsx_path: Optional[str] = None,
+    output_csvs_dir: Optional[str] = None,
+    gpu_arch_json_path: Optional[str] = None,
     kernel_metadata_keyword_filters=None,
-):
+) -> Dict[str, pd.DataFrame]:
     # Load the arch json
     gpu_arch_json = None
     if gpu_arch_json_path:
@@ -145,53 +140,36 @@ def generate_perf_report_jax(
             gpu_arch_json = json.load(f)
 
     # Analyze trace profile
-    assert profile_path.endswith(".xplane.pb")
-    dict_dfs = {}
-    dict_dfs = perf_analysis(
+    dict_name2df = perf_analysis(
         profile_path,
-        arch=gpu_arch_json,
-        num_cus=num_cus,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
     )
-
-    # Save the output
-    output_folder_path = Path(output_path)
-    output_filename = output_filename
-    try:
-        output_folder_path.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        print(
-            f"Error: Insufficient permissions to create the directory at {output_path}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    except FileNotFoundError:
-        print(f"Error: The specified path {output_path} is invalid.", file=sys.stderr)
-        sys.exit(1)
-
-    # Write all DataFrames to separate csv
-    if "csv" in output_table_formats:
-        for name_df, data_df in dict_dfs.items():
-            suffix = "_" + "_".join(name_df.lower().split())
-            csv_path = os.path.join(
-                output_path, f"{output_filename + suffix}.csv"
-            )  # output_folder_path.joinpath(output_filename + suffix).with_suffix(".csv")
-            data_df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{name_df}' written to {output_path}")
-
-    # Write all DataFrames to separate sheets in one Excel workbook
-    if "xlsx" in output_table_formats:
+            
+    # Write all DataFrames to separate sheets in an Excel workbook
+    if output_csvs_dir:
+        # Ensure the output directory exists
+        os.makedirs(output_csvs_dir, exist_ok=True)
+        for sheet_name, df in dict_name2df.items():
+            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
+            df.to_csv(csv_path, index=False)
+            print(f"DataFrame '{sheet_name}' written to {csv_path}")
+    else:
+        if output_xlsx_path is None:
+            # split input path at 'xplane.pb' and take the first part and append '.xlsx'
+            base_path = profile_path.rsplit(".xplane.pb", 1)[0]
+            output_xlsx_path = base_path + "_perf_report.xlsx"
         try:
             import openpyxl
         except (ImportError, ModuleNotFoundError) as e:
             print(f"Error importing openpyxl: {e}")
             request_install("openpyxl")
 
-        output_xlsx_path = os.path.join(output_path, f"{output_filename}.xlsx")
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for name_df, data_df in dict_dfs.items():
-                data_df.to_excel(writer, sheet_name=name_df, index=False)
+            for sheet_name, df in dict_name2df.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"DataFrames successfully written to {output_xlsx_path}")
+
+    return dict_name2df
 
 
 def main():
@@ -210,7 +188,7 @@ def main():
         )
 
     parser = argparse.ArgumentParser(
-        description="Process a pytroch JSON trace or JAX xplane.pb profile and generate performance report tables."
+        description="Process a JAX xplane.pb profile and generate performance report tables."
     )
     parser.add_argument(
         "--profile_path",
@@ -218,6 +196,20 @@ def main():
         required=True,
         help="Path to the trace file: pytorch trace.json or jax xplane.pb",
     )
+    parser.add_argument(
+        "--output_xlsx_path",
+        type=str,
+        default=None,
+        help="Path to the output Excel file",
+    )
+    parser.add_argument(
+        "--output_csvs_dir",
+        type=str,
+        default=None,
+        help="Directory to save output CSV files",
+    )
+    
+    # Optional arguments
     parser.add_argument(
         "--gpu_arch_json_path",
         type=str,
@@ -231,25 +223,6 @@ def main():
         help="Number of compute units, MI300X - 304; MI210: 104",
     )
     parser.add_argument(
-        "--output_path", type=str, required=True, help="Path to the output folder"
-    )
-    parser.add_argument(
-        "--output_table_formats",
-        type=str,
-        nargs="+",
-        default=[
-            "csv",
-        ],
-        choices=["xlsx", "csv"],
-        help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.",
-    )
-    parser.add_argument(
-        "--output_filename",
-        type=str,
-        default="trace_analysis_results",
-        help="Base name for output files",
-    )
-    parser.add_argument(
         "--kernel_metadata_keyword_filters",
         type=str,
         nargs="+",
@@ -260,11 +233,9 @@ def main():
 
     generate_perf_report_jax(
         profile_path=args.profile_path,
+        output_xlsx_path=args.output_xlsx_path,
+        output_csvs_dir=args.output_csvs_dir,
         gpu_arch_json_path=args.gpu_arch_json_path,
-        num_cus=args.num_cus,
-        output_path=args.output_path,
-        output_table_formats=args.output_table_formats,
-        output_filename=args.output_filename,
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
     )
 
