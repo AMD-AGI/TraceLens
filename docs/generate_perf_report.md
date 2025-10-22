@@ -56,7 +56,7 @@ The script supports several optional arguments to customize the output report. B
 | `--topk_ops N`                    | `None`            | Limit the number of rows in the unique-args launcher table. (PyTorch only)               |
 | `--topk_short_kernels N`          | `None`            | Limit the number of rows in the short-kernel table. (PyTorch only)                         |
 | `--topk_roofline_ops N`           | `None`            | Limit the number of rows in the roofline sheet. (PyTorch only)                            |
-| `--extension_file`           | `None`            | Path to extension python file (PyTorch only)  
+| `--extension_file`           | `None`            | Path to extension python file (PyTorch only)  |
 | `--include_unlinked_kernels`            | `False`           | Include all kernels in the gpu timeline analysis -  including kernels not linked to host call stack. By default these unlinked kernels are excluded in the analysis. (PyTorch only) |
 `--micro_idle_thresh_us X`        | `None`            | Threshold (in microseconds) to classify idle intervals as micro idle in GPU timeline analysis. If None, all idle times are included in one category.  (PyTorch only)|
 | `--short_kernel_study`            | `False`           | Include short-kernel analysis in the report. (PyTorch only)                                |
