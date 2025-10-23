@@ -8,6 +8,8 @@ See LICENSE for license information.
 
 This Python script (`TraceLens/Reporting/generate_perf_report_pytorch.py`) processes a PyTorch JSON profile trace and outputs an Excel workbook or CSVs with relevant information.
 
+Similarly (`TraceLens/Reporting/generate_perf_report_jax.py`) processes JAX XPLANE.PB profile trace.
+
 ---
 
 ## 🚀 Quick Start
@@ -25,7 +27,7 @@ Alternatively you can directly call the entry point with the same command line a
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/profile.json 
 ```
 
-Similarly for JAX profile:
+Similarly for JAX profile trace:
 
 ```bash
 python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb 
