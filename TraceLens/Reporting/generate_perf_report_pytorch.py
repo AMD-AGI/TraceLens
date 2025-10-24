@@ -320,7 +320,14 @@ def generate_perf_report_pytorch(profile_json_path: str,
             df_kernel_summary.columns = ['_'.join(col).strip() for col in df_kernel_summary.columns.values]
             df_kernel_summary.reset_index(inplace=True)
 
-            # Percent of total run time
+            # Percent columns:
+            # 1) Percent of kernels time: sums to ~100% across rows
+            total_kernels_us = df_kernels['Kernel duration (µs)'].sum()
+            if total_kernels_us > 0:
+                df_kernel_summary['Percent of kernels time (%)'] = (df_kernel_summary['Kernel duration (µs)_sum'] / total_kernels_us) * 100
+            else:
+                df_kernel_summary['Percent of kernels time (%)'] = np.nan
+            # 2) Percent of total time (GPU timeline baseline; includes idle/non-kernel)
             total_us = perf_analyzer.total_time_ms * 1e3 if hasattr(perf_analyzer, 'total_time_ms') else None
             if total_us:
                 df_kernel_summary['Percent of total time (%)'] = (df_kernel_summary['Kernel duration (µs)_sum'] / total_us) * 100
