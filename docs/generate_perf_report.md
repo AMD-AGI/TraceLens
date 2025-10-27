@@ -43,29 +43,33 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 | `ops_summary_by_category`  | Summary of compute time grouped by operation category (e.g., GEMM, SDPA_fwd, elementwise).                       |
 | `ops_summary`              | Summary of compute time at the individual operation level; each row corresponds to a unique operation name.      |
 | `ops_all`                  | Detailed operation-level summary; each row corresponds to a unique (operation name, argument) combination.       |
-| `short_kernels_histogram` | Histogram showing the distribution of kernel durations below the short-duration threshold. (PyTorch only)                       |
-| `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op. (PyTorch only)    |
-| Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics. (W.I.P.)                  |
+| `short_kernels_histogram` | Histogram showing the distribution of kernel durations below the short-duration threshold.                   |
+| `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op.   |
+| Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics.                |
+
+Note:JAX outputs do not include  `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
 
 ---
 
-## ⚙️ Optional Arguments 
+## ⚙️ Optional Arguments  
 
 The script supports several optional arguments to customize the output report. By default, it generates an Excel file (`.xlsx`) in the trace directory. If `--output_csvs_dir` is specified, individual CSV files are written instead.
 
 | Argument                          | Default           | Description                                                                 |
 |-----------------------------------|-------------------|-----------------------------------------------------------------------------|
-| `--topk_ops N`                    | `None`            | Limit the number of rows in the unique-args launcher table. (PyTorch only)               |
-| `--topk_short_kernels N`          | `None`            | Limit the number of rows in the short-kernel table. (PyTorch only)                         |
-| `--topk_roofline_ops N`           | `None`            | Limit the number of rows in the roofline sheet. (PyTorch only)                            |
-| `--extension_file`           | `None`            | Path to extension python file (PyTorch only)  |
-| `--include_unlinked_kernels`            | `False`           | Include all kernels in the gpu timeline analysis -  including kernels not linked to host call stack. By default these unlinked kernels are excluded in the analysis. (PyTorch only) |
-`--micro_idle_thresh_us X`        | `None`            | Threshold (in microseconds) to classify idle intervals as micro idle in GPU timeline analysis. If None, all idle times are included in one category.  (PyTorch only)|
-| `--short_kernel_study`            | `False`           | Include short-kernel analysis in the report. (PyTorch only)                                |
-| `--short_kernel_threshold_us X`   | `10`              | Threshold (in microseconds) to classify a kernel as "short". (PyTorch only)               |
-| `--short_kernel_histogram_bins B` | `100`             | Number of bins to use for the short-kernel duration histogram. (PyTorch only)             |
+| `--topk_ops N`                    | `None`            | Limit the number of rows in the unique-args launcher table.               |
+| `--topk_short_kernels N`          | `None`            | Limit the number of rows in the short-kernel table.                          |
+| `--topk_roofline_ops N`           | `None`            | Limit the number of rows in the roofline sheet.                             |
+| `--extension_file`                | `None`            | Path to extension python file |
+| `--include_unlinked_kernels`      | `False`           | Include all kernels in the gpu timeline analysis -  including kernels not linked to host call stack. By default these unlinked kernels are excluded in the analysis.|
+| `--micro_idle_thresh_us X`        | `None`            | Threshold (in microseconds) to classify idle intervals as micro idle in GPU timeline analysis. If None, all idle times are included in one category. |
+| `--short_kernel_study`            | `False`           | Include short-kernel analysis in the report.                                 |
+| `--short_kernel_threshold_us X`   | `10`              | Threshold (in microseconds) to classify a kernel as "short".             |
+| `--short_kernel_histogram_bins B` | `100`             | Number of bins to use for the short-kernel duration histogram.              |
 | `--output_xlsx_path PATH`         | `<auto-inferred>` | Path to save the Excel report. Auto-inferred if not provided.              |
 | `--output_csvs_dir DIR`           | `None`            | If set, saves each sheet as a CSV file in the specified directory.         |
+
+Note: JAX supports two optional arguments `--output_xlsx_path` and `--output_csvs_dir`. The rest are for PyTorch only.
 
 ### 📦 Output Behavior
 
