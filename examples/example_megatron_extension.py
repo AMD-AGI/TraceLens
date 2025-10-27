@@ -82,7 +82,9 @@ def is_gemm_kernel(kernel_event: dict) -> bool:
     kernel_name = kernel_event["name"]
     tensile_gemm_pattern = r".*C.*_A.*_B.*"
     rocroller_gemm_pattern = r"RR_GEMM_.*"
-    is_rocm_gemm = bool(re.match(tensile_gemm_pattern, kernel_name)) or bool(re.match(rocroller_gemm_pattern, kernel_name))
+    is_rocm_gemm = bool(re.match(tensile_gemm_pattern, kernel_name)) or bool(
+        re.match(rocroller_gemm_pattern, kernel_name)
+    )
     is_cuda_gemm = kernel_name.startswith("nvjet")
     return is_rocm_gemm or is_cuda_gemm
 
