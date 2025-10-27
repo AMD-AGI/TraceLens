@@ -47,7 +47,7 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 | `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op.   |
 | Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics.                |
 
-Note:JAX outputs do not include  `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
+Note: JAX outputs do not include `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
 
 ---
 
@@ -69,7 +69,7 @@ The script supports several optional arguments to customize the output report. B
 | `--output_xlsx_path PATH`         | `<auto-inferred>` | Path to save the Excel report. Auto-inferred if not provided.              |
 | `--output_csvs_dir DIR`           | `None`            | If set, saves each sheet as a CSV file in the specified directory.         |
 
-Note: JAX supports two optional arguments `--output_xlsx_path` and `--output_csvs_dir`. The rest are for PyTorch only.
+Note: currently JAX supports only two optional arguments `--output_xlsx_path` and `--output_csvs_dir`.
 
 ### 📦 Output Behavior
 
