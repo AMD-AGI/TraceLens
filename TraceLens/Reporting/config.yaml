@@ -1,0 +1,130 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# AMD GPU peak performance data in TFLOPs and GB/s for different data types.
+# Source:
+# https://rocm.blogs.amd.com/software-tools-optimization/Understanding_Peak_and_Max-Achievable_FLOPS/README.html
+# Note: These values are estimates; please refer to official AMD documentation for precise figures.
+# Last updated: 24 October 2025
+
+dtype_jax2torch:
+  "f32": "fp32"
+  "f16": "fp16"
+  "bf16": "bf16"
+  "f8": "fp8"
+  "fp8": "fp8"
+    
+
+gemm_peaks:
+  mi355x:
+    # source: https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
+    peak_tflops:
+      fp16: 157.7 # TFLOPs
+      fp32: 157.3 # TFLOPs
+    max_achievable_tflops:
+      bf16: 1686.0 # TFLOPs
+      fp8: 3560.0  # TFLOPs
+    bandwidth:
+      theoretical_peak: 8000 # GB/s
+      max_achievable: 7600   # GB/s
+  
+  mi325x:
+    source: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/product-briefs/instinct-mi325x-datasheet.pdf
+    tflops:
+      theoretical_peak:
+        ai:
+          tf32: 653.7 # TFLOPs
+          tf32_with_sparsity: 1307.4 # TFLOPs
+          fp16: 1307.4 # TFLOPs
+          fp16_with_sparsity: 2614.9 # TFLOPs
+          bf16: 1307.4  # TFLOPs
+          bf16_with_sparsity: 2614.9 # TFLOPs
+          int8: 2614.9 # TOPS
+          int8_with_sparsity: 5229.8 # TOPS
+          fp8: 2614.9 # TFLOPs
+          fp8_with_sparsity: 5229.8 # TFLOPs
+        hpc:
+          fp32:
+            vector: 163.4  # TFLOPs
+            matrix: 163.4  # TFLOPs
+          fp64: 
+            vector: 81.7   # TFLOPs
+            matrix: 163.4  # TFLOPs
+      max_achievable: 
+        f32: 0       # TFLOPs
+        f16: 392.0  # TFLOPs
+        bf16: 392.0  # TFLOPs
+        f8: 847.0   # TFLOPs
+        fp8: 847.0  # TFLOPs
+    memory_bandwidth:
+      theoretical_peak: 6000 # GB/s
+      max_achievable: 0    # GB/s
+
+  mi300x:
+    source: 
+      official: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi300x-data-sheet.pdf 
+      semianalysis: https://newsletter.semianalysis.com/p/mi300x-vs-h100-vs-h200-benchmark-part-1-training
+    tflops:
+      theoretical_peak:
+        ai:
+          tf32: 653.7 # TFLOPs
+          tf32_with_sparsity: 1307.4 # TFLOPs
+          fp16: 1307.4 # TFLOPs
+          fp16_with_sparsity: 2614.8 # TFLOPs
+          bf16: 1307.4  # TFLOPs
+          bf16_with_sparsity: 2614.8 # TFLOPs
+          int8: 2614.8 # TOPS
+          int8_with_sparsity: 5229.6 # TOPS
+          fp8: 2614.8 # TFLOPs
+          fp8_with_sparsity: 5229.6 # TFLOPs
+        hpc:
+          fp32:
+            vector: 163.4  # TFLOPs
+            matrix: 163.4  # TFLOPs
+          fp64: 
+            vector: 81.7   # TFLOPs
+            matrix: 163.4  # TFLOPs
+      max_achievable: 
+        fp8: 990.0  # 1253.0 # TFLOPs
+        fp16: 620.0 # 579.0  # TFLOPs
+        bf16: 620.0 # 579.0  # TFLOPs
+    memory_bandwidth:
+      theoretical_peak: 5300 # GB/s
+      max_achievable: 4400   # GB/s
+
+  mi250:
+    source: https://www.amd.com/en/products/accelerators/instinct/mi200/mi250.html 
+    tflops:
+      theoretical_peak:
+        bf16: 362.1  # TFLOPs
+        fp16: 362.1  # TFLOPs
+        fp32:
+          vector: 45.3  # TFLOPs
+          matrix: 90.5  # TFLOPs
+        fp64:
+          vector: 45.3  # TFLOPs
+          matrix: 90.5  # TFLOPs
+      max_achievable:
+        bf16: 0       # TFLOPs
+        fp16: 0       # TFLOPs
+        fp32: 0       # TFLOPs
+        fp64: 0       # TFLOPs
+    memory_bandwidth: 
+      theoretical_peak: 3200  # GB/s
+      max_achievable: 0   # GB/s
+
+  h200:
+    source: 
+      official: https://resources.nvidia.com/en-us-data-center-overview-mc/en-us-data-center-overview/hpc-datasheet-sc23-h200
+      semianalysis: https://newsletter.semianalysis.com/p/mi300x-vs-h100-vs-h200-benchmark-part-1-training
+    tflops:
+      theoretical_peak:
+        fp16: 989.5  # TFLOPs
+      max_achievable:
+        fp16: 720      # TFLOPs
+    memory_bandwidth:
+      theoretical_peak: 4800  # GB/s
+      max_achievable: 0   # GB/s
