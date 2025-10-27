@@ -7,8 +7,9 @@
 #!/usr/bin/env python3
 import argparse
 import os
-from typing import List, Sequence, Dict, Optional
 import re
+from typing import Dict, List, Optional, Sequence
+
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
@@ -459,6 +460,7 @@ def generate_compare_perf_reports_pytorch(
 
     return results
 
+
 def trace_compare_function_A(trace1: str, trace2: str, output: str = None):
     """
     Trace-based comparison function A: generate perf reports for each trace, then compare the resulting Excel files.
@@ -466,10 +468,11 @@ def trace_compare_function_A(trace1: str, trace2: str, output: str = None):
     print(f"[TRACE COMPARE A] Generating perf reports for: {trace1} and {trace2}")
     # Import here to avoid circular import at module level
     from .generate_perf_report_pytorch import generate_perf_report_pytorch
+
     # Generate output xlsx paths
     def get_xlsx_path(trace_path):
         base = os.path.splitext(os.path.basename(trace_path))[0]
-        return os.path.abspath(base + '_perf_report.xlsx')
+        return os.path.abspath(base + "_perf_report.xlsx")
 
     xlsx1 = get_xlsx_path(trace1)
     xlsx2 = get_xlsx_path(trace2)
@@ -490,12 +493,10 @@ def trace_compare_function_A(trace1: str, trace2: str, output: str = None):
     print(f"[TRACE COMPARE A] Comparing reports: {xlsx1} vs {xlsx2}")
     # Use the provided output path or default
     compare_output = output or "comparison.xlsx"
-    generate_compare_perf_reports_pytorch(
-        reports=[xlsx1, xlsx2],
-        output=compare_output
-    )
+    generate_compare_perf_reports_pytorch(reports=[xlsx1, xlsx2], output=compare_output)
     print(f"[TRACE COMPARE A] Comparison complete. Output: {compare_output}")
     return None
+
 
 def trace_compare_function_B(trace1: str, trace2: str, output: str = None):
     """
@@ -506,6 +507,7 @@ def trace_compare_function_B(trace1: str, trace2: str, output: str = None):
         print(f"[TRACE COMPARE B] Output will be written to: {output}")
 
     import os
+
     from TraceLens import TreePerfAnalyzer
     from TraceLens.TraceDiff import TraceDiff
 
@@ -529,6 +531,7 @@ def trace_compare_function_B(trace1: str, trace2: str, output: str = None):
     print(f"[TRACE COMPARE B] Diff reports written to: {output_dir}")
     return None
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # main
 # ──────────────────────────────────────────────────────────────────────────────
@@ -536,52 +539,53 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '-m', '--mode',
-        choices=['trace', 't', 'report', 'r'],
+        "-m",
+        "--mode",
+        choices=["trace", "t", "report", "r"],
         required=True,
-        help="Comparison mode: 'trace' (or 't') for trace-based, 'report' (or 'r') for report-based."
+        help="Comparison mode: 'trace' (or 't') for trace-based, 'report' (or 'r') for report-based.",
     )
     parser.add_argument(
-        'inputs',
-        nargs='+',
-        help='Input files: 2 JSON traces for trace mode, or 2 XLSX reports for report mode.'
+        "inputs",
+        nargs="+",
+        help="Input files: 2 JSON traces for trace mode, or 2 XLSX reports for report mode.",
     )
     parser.add_argument(
-        '-o', '--output', default='comparison.xlsx', help='Output file name'
+        "-o", "--output", default="comparison.xlsx", help="Output file name"
     )
     parser.add_argument(
-        '--names', nargs='*', help='Optional tags for each report (must match count)'
+        "--names", nargs="*", help="Optional tags for each report (must match count)"
     )
     parser.add_argument(
-        '--sheets',
-        nargs='+',
+        "--sheets",
+        nargs="+",
         choices=(
-            'gpu_timeline',
-            'ops_summary',
-            'ops_all',
-            'roofline',
-            'all',
+            "gpu_timeline",
+            "ops_summary",
+            "ops_all",
+            "roofline",
+            "all",
         ),
-        default=['all'],
-        help='Which sheet groups to process. Can be one or more.'
+        default=["all"],
+        help="Which sheet groups to process. Can be one or more.",
     )
     parser.add_argument(
-        '--use-tracediff',
-        action='store_true',
+        "--use-tracediff",
+        action="store_true",
         default=False,
-        help='If set (trace mode only), use tracediff-based comparison (function B). Default: False (function A).'
+        help="If set (trace mode only), use tracediff-based comparison (function B). Default: False (function A).",
     )
     args = parser.parse_args()
 
     mode = args.mode.lower()
-    is_trace = mode in ('trace', 't')
-    is_report = mode in ('report', 'r')
+    is_trace = mode in ("trace", "t")
+    is_report = mode in ("report", "r")
 
     if is_trace:
         if len(args.inputs) != 2:
-            parser.error('Trace mode requires exactly 2 JSON trace files.')
+            parser.error("Trace mode requires exactly 2 JSON trace files.")
         for f in args.inputs:
-            if not f.lower().endswith('.json'):
+            if not f.lower().endswith(".json"):
                 parser.error(f"Trace mode expects JSON files, got: {f}")
         if args.use_tracediff:
             trace_compare_function_B(args.inputs[0], args.inputs[1], output=args.output)
@@ -590,12 +594,12 @@ def main() -> None:
         return
     elif is_report:
         if len(args.inputs) != 2:
-            parser.error('Report mode requires exactly 2 XLSX report files.')
+            parser.error("Report mode requires exactly 2 XLSX report files.")
         for f in args.inputs:
-            if not f.lower().endswith('.xlsx'):
+            if not f.lower().endswith(".xlsx"):
                 parser.error(f"Report mode expects XLSX files, got: {f}")
         if args.names and len(args.names) != len(args.inputs):
-            parser.error('--names count must equal number of reports')
+            parser.error("--names count must equal number of reports")
 
         generate_compare_perf_reports_pytorch(
             reports=args.inputs,
