@@ -12,6 +12,7 @@ op_to_perf_model_class_map = {
     "aten::addmm": perf_model.aten_addmm,
     "aten::_scaled_mm": perf_model.aten_scaled_mm,
     "trtllm::cublas_scaled_mm": perf_model.aten_scaled_mm,
+    "bitsandbytes::int8_linear_matmul": perf_model.aten_scaled_mm,
     # TEv2 pseudo ops
     "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
