@@ -43,7 +43,7 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 | `ops_summary_by_category`  | Summary of compute time grouped by operation category (e.g., GEMM, SDPA_fwd, elementwise).                       |
 | `ops_summary`              | Summary of compute time at the individual operation level; each row corresponds to a unique operation name.      |
 | `ops_all`                  | Detailed operation-level summary; each row corresponds to a unique (operation name, argument) combination.       |
-| `short_kernels_histogram` | Histogram showing the distribution of kernel durations below the short-duration threshold.                   |
+| `short_kernels_histogram`  | Histogram showing the distribution of kernel durations below the short-duration threshold.                   |
 | `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op.   |
 | Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics.                |
 
