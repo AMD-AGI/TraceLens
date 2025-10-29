@@ -1,0 +1,15 @@
+[accelerator]
+max_memory_bandwidth = 8  # TB/s
+max_achievable_bandwidth = 7.6  # TB/s
+max_compute_teraflops = 2500  # TFLOPS
+max_achievable_teraflops = 1686  # TFLOPS
+# MI355X
+# https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
+
+[excel]
+sheet_name = "op_jax_gemm"
+flops_per_byte_column = "FLOPS/Byte_first"
+performance_column = "TFLOPS/s_mean" 
+
+[output]
+prefix = "/home/guangphu/perf-profiling/logs/tracelens/jax/gemm-roofline"
