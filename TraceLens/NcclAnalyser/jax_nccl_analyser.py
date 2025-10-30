@@ -66,12 +66,16 @@ class JaxNcclAnalyser:
         # Internal storage
         self.node_to_trace_data = {}  # Stores per-node data
         self.df_per_rank_coll = None  # Will store the dataframe
+        self.df_collectives = None # Store collective info parsed from xla
+
         self.load_trace_data()
+        self.build_collectives_df_through_xla()
 
     # Filter communication events
     def _nccl_event_filter(self,event):     
 
-        is_coll_comm_event = event.get("gpu_kernel_op_cat","") == "Communication rccl/nccl"           
+        is_coll_comm_event = event.get("gpu_kernel_op_cat","") == "Communication rccl/nccl" 
+
         return is_coll_comm_event
 
     # Calculate data bytes from tensor output of a collective event
@@ -124,9 +128,179 @@ class JaxNcclAnalyser:
             node_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
             self.node_to_trace_data[node] = node_dict
 
+    # Extract collective name from the xla dump file
+    def _extract_collective_name(self, line: str):    
+                
+        match = re.search(r'scheduling_name="([^"]+)"', line)
+        if match:
+            return match.group(1)
+        return None
+    
+    # Extract collective's replica_groups from the xla dump file
+    def _extract_replica_groups(self, line: str):
+   
+        pattern = r"replica_groups=(?P<replica_string>(?:\{(?:\{[0-9]+(?:,[0-9]+)*\}(?:,\{[0-9]+(?:,[0-9]+)*\})*)\}|\[[0-9]+(?:,[0-9]+)*\]<=\[[0-9]+(?:,[0-9]+)*\])(?:T\([0-9,]+\)\s+dimensions=\{[0-9,]*\})?)"
+        match = re.search(pattern, line)
+        if match:
+            return match.group('replica_string')
+        
+        # If no replica_groups found, try to match source_target_pairs (for collective-permute)
+        source_target_pattern = r"source_target_pairs=(?P<source_target_string>\{(?:\{[0-9]+,[0-9]+\}(?:,\{[0-9]+,[0-9]+\})*)\})"
+        match = re.search(source_target_pattern, line)
+        if match:
+            return match.group('source_target_string')
+        
+        return None
+
+    # Extract collective's tensors from the xla dump file
+    def _extract_tensor_specs(self, line: str):
+
+        # Look for tensor spec after '= ' and before the collective operation call
+        # Format: ROOT? operation_name = tensor_spec operation_call(params), metadata...
+        
+        # Match everything after '= ' until we hit a space followed by an operation name
+        equals_match = re.search(r'=\s+(.+?)\s+(?:all-to-all|all-gather|all-reduce|reduce-scatter|collective-permute)\(', line)
+        if equals_match:
+            return equals_match.group(1).strip()
+        
+        # Fallback: match everything after '= ' until end of meaningful tensor content
+        # This handles cases where the operation pattern might be different
+        equals_fallback = re.search(r'=\s+(.+?)(?:\s+[a-z-]+\(|,\s+channel_id|,\s+replica_groups|$)', line)
+        if equals_fallback:
+            tensor_spec = equals_fallback.group(1).strip()
+            # Clean up any trailing commas or metadata
+            tensor_spec = re.sub(r',?\s*$', '', tensor_spec)
+            return tensor_spec
+        
+        return None
+    
+
+    def _parse_collectives_to_dataframe(self, file_path, node):
+        """Parse collective operations and return a pandas DataFrame"""
+        collective_ops = []
+        
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        
+        for line in lines:
+            line = line.strip()
+            if line and any(pattern in line for pattern in [
+                'all-to-all-start', 'all-gather-start', 'all-reduce-start', 
+                'reduce-scatter', 'collective-permute-start',
+                'all-reduce =', 'all-gather =', 'all-to-all =',
+                'all-to-all.', 'reduce-scatter.'
+            ]):
+                collective_name = self._extract_collective_name(line)
+                replica_groups = self._extract_replica_groups(line)
+                tensors = self._extract_tensor_specs(line)
+
+                data = self._parse_tensor_spec_to_bytes(tensors)
+
+                collective_ops.append({
+                    'node': node,
+                    'collective_name': collective_name,
+                    'replica_groups': replica_groups,
+                    'tensors': tensors,
+                    'data(bytes)': data
+                })
+        
+        return collective_ops
+
+    def lookup_collective_info(self, node, collective_name):
+        """
+        Lookup replica_groups and data(bytes) from df_collectives for given node and collective_name
+        
+        Args:
+            node: The node identifier
+            collective_name: The collective operation name
+            
+        Returns:
+            tuple: (replica_groups, data_bytes) or (None, None) if not found
+        """
+        if self.df_collectives is None or self.df_collectives.empty:
+            return None, None
+        
+        # Filter df_collectives for matching node and collective_name
+        matches = self.df_collectives[
+            (self.df_collectives['node'] == node) & 
+            (self.df_collectives['collective_name'] == collective_name)
+        ]
+        
+        if matches.empty:
+            return None, None
+        
+        # Get the first match (assuming duplicates have same values)
+        match_row = matches.iloc[0]
+        
+        replica_groups = match_row.get('replica_groups')
+        data_bytes = match_row.get('data(bytes)')
+        
+        # Convert NaN to None for consistency
+        replica_groups = None if pd.isna(replica_groups) else replica_groups
+        data_bytes = None if pd.isna(data_bytes) else data_bytes
+        
+        return replica_groups, data_bytes
+
+    # Build a data frame through parsing a XLA file per node        
+    def build_collectives_df_through_xla(self):
+
+        # Try to get xla dump file for every node
+
+        node_to_xla_file_map = {}    
+
+        # Find all XLA files in traces directory first
+        xla_pattern = os.path.join(self.traces_dir, "**", "xla_dumps", "*jit_train_step.gfx942_gpu_after_optimizations.txt")
+        all_xla_files = glob(xla_pattern, recursive=True)
+        
+        # Normalize traces_dir path
+        traces_dir_normalized = os.path.normpath(self.traces_dir)
+        
+        for node, pb_file_path in self.node_to_pb_file_mapping.items():
+
+            # Remove traces_dir from protobuf file path
+            pb_relative = os.path.relpath(pb_file_path, traces_dir_normalized)
+            
+            best_match = None
+            max_common_length = 0
+            
+            # Try to find XLA file with most common relative path
+            for xla_file in all_xla_files:
+                # Remove traces_dir from XLA file path
+                xla_relative = os.path.relpath(xla_file, traces_dir_normalized)
+                
+                # Find common prefix length
+                common_length = 0
+                min_len = min(len(pb_relative), len(xla_relative))
+                
+                for i in range(min_len):
+                    if pb_relative[i] == xla_relative[i]:
+                        common_length += 1
+                    else:
+                        break
+                
+                if common_length > max_common_length:
+                    max_common_length = common_length
+                    best_match = xla_file
+            
+            if best_match:
+                node_to_xla_file_map[node] = best_match
+
+        # Constructing dataframe 
+
+        if node_to_xla_file_map:
+            collective_ops = []
+            for node, xla_file_path in node_to_xla_file_map.items():
+                rows = self._parse_collectives_to_dataframe(xla_file_path,node)
+                collective_ops.extend(rows)
+            
+            if collective_ops:
+                if self.df_collectives is None:
+                    self.df_collectives = pd.DataFrame(collective_ops)        
+        
 
     def build_df_long(self):
-        """Constructs a long table where each row is a collective event on a gpu rank."""
+        """Constructs a long table where each row is a collective event on a gpu rank."""      
+
         rows = []
         for node, node_events in self.node_to_trace_data.items():
             for event in node_events.values():
@@ -149,13 +323,45 @@ class JaxNcclAnalyser:
                         "hlo_module": args.get("hlo_module"),
                         "correlation_id": args.get("correlation_id")
                     })
+
+                # Initialize replica_groups and data(bytes) as None
+                replica_groups = None
+                data_bytes = None
                 
                 # Extract metadata fields safely
                 if metadata := event.get("metadata"):
                     if "replica_groups" in metadata:
-                        row["replica_groups"] = metadata["replica_groups"]
+                        replica_groups = metadata["replica_groups"]
                     if "output" in metadata:
-                        row["data(bytes)"] = self._parse_tensor_spec_to_bytes(metadata["output"])
+                        data_bytes = self._parse_tensor_spec_to_bytes(metadata["output"])                        
+
+                # Check if replica_groups or data(bytes) are None/empty and fill from df_collectives
+                collective_name = row.get("collective_name")
+
+                # Check if we need to lookup missing values
+                needs_replica_groups = replica_groups is None or (isinstance(replica_groups, str) and replica_groups.strip() == "")
+                needs_data_bytes = data_bytes is None or data_bytes == 0
+
+                if (needs_replica_groups or needs_data_bytes) and collective_name:
+                    lookup_replica_groups, lookup_data_bytes = self.lookup_collective_info(node, collective_name)
+                    
+                    # Fill replica_groups if missing
+                    if needs_replica_groups and lookup_replica_groups is not None:
+                        replica_groups = lookup_replica_groups
+                        
+                    # Fill data(bytes) if missing
+                    if needs_data_bytes and lookup_data_bytes is not None:
+                        data_bytes = lookup_data_bytes
+                
+                row["replica_groups"] = replica_groups
+                row["data(bytes)"] = data_bytes
+                        
+
+                # Ensure these fields exist in the row even if None
+                if "replica_groups" not in row:
+                    row["replica_groups"] = None
+                if "data(bytes)" not in row:
+                    row["data(bytes)"] = None
                 
                 # Extract process information safely
                 if process := event.get("process"):
@@ -181,8 +387,8 @@ class JaxNcclAnalyser:
         """
         Parse replica groups and return list of lists
         """
-        if not replica_groups_str:
-            return []
+        if not replica_groups_str or str(replica_groups_str).strip().lower() in ['nan', 'none', '']:
+            return []            
         
         replica_groups_str = str(replica_groups_str).strip()
         
@@ -197,6 +403,7 @@ class JaxNcclAnalyser:
             for group_str in group_strings:
                 group = [int(x.strip()) for x in group_str.split(',')]
                 gpu_groups.append(group)
+
             return gpu_groups
         
         # Handle IotaTileAssignment: [dims]<=[total]
@@ -225,22 +432,25 @@ class JaxNcclAnalyser:
                 if transpose_match:
                     transpose_perm = [int(x.strip()) for x in transpose_match.group(1).split(',')]
             
-            # Apply iota formula: np.arange(prod(dims)).reshape(reshape_dims).transpose(perm).reshape(prod(dims))
+            # Using IOTA logic to build the device array
             total_elements = math.prod(dims)
             arr = np.arange(total_elements)
-            
+
+            # Reshape to intermediate shape
+            if reshape_dims != [total_elements]:
+                arr = arr.reshape(reshape_dims)
+
+            # Apply transpose if specified
             if transpose_perm:
-                arr = arr.reshape(reshape_dims).transpose(transpose_perm).reshape(total_elements)
+                arr = arr.transpose(transpose_perm)
             
+            # Reshape to final dimensions
+            arr = arr.reshape(dims)
+
             # Create groups
-            group_size = math.prod(dims)
-            num_groups = total_elements // group_size
-            
-            gpu_groups = []
-            for i in range(num_groups):
-                start = i * group_size
-                group = arr[start:start + group_size].tolist()
-                gpu_groups.append(group)
+            gpu_groups = []                                        
+            for row in arr:
+                gpu_groups.append([int(x) for x in row])
             
             return gpu_groups
         
