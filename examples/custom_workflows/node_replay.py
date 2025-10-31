@@ -1,54 +1,10 @@
 """
-Using TraceLens, and .json traces produced by torch profiler, this script provides a comparison on
-how much the workload-specific metrics of most important GEMMs and CONVS
-differ when microbenchmarking the same ops using torch and low-level benchmarking tools.
-Currently works with hipblaslt-bench and MIOpenDriver, if they are available in the environment.
-Tested with main branch @ 8f40079.
+This tool is currently designed to work with AMD GPUs and requires the appropriate environment setup for accurate benchmarking.
 
-Note that the trace .json files are located recursively - this script does not depend on a certain directory structure.
-
-Example directory tree:
-
-profiling_fa_cudnn
-    results_013_profile_nv_cudnn
-        traces
-            huvideo_traces_rank_0_step_3.json
-            ...
-            huvideo_traces_rank_7_step_3.json
-
-    results_013_profile_nv_fa
-        traces
-            huvideo_traces_rank_0_step_3.json
-            ...
-            huvideo_traces_rank_7_step_3.json
-    results_013_profile_rocm_fa
-        traces
-            huvideo_traces_rank_0_step_3.json
-            ...
-            huvideo_traces_rank_7_step_3.json
-
-Example usage:
-
-Analyze all .json trace files containing rocm_fa and step_3 in their full path.
-
-Trace files include rank number using the pattern rank_0, rank_1, ..., rank_n.
-Script uses this pattern to recognize rank numbers, thus we give -p rank_
-
-python analyze_traces_tracelens.py -b profiling_fa_cudnn -f rocm_fa step_3
-
-Targeting:
-
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_0_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_1_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_2_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_3_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_4_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_5_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_6_step_3.json
-profiling_fa_cudnn\results_013_profile_rocm_fa\traces\huvideo_traces_rank_7_step_3.json
-
-NOTE: add -d flag for launching a dry run (check if correct files will be targeted).
-      add -e flag for specifying extension. json and gz are currently supported, json is used by default
+Stand-alone script for node replay benchmarking using TraceLens.
+This script parses profiling traces from a given base directory, summarizes performance metrics for GEMM and convolution operations,
+and performs node replay benchmarking using both TraceLens and external benchmarking tools (hipblaslt-bench and MIOpenDriver).
+The results are compiled into an Excel report for further analysis.
 """
 
 import argparse
