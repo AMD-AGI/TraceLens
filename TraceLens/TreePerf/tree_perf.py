@@ -1554,14 +1554,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             kernel_details = row.get("kernel_details")[0]
             operands = kernel_details.get("operands")
 
-            # print(row)
             total_input_bytes = 0
             for operand in operands:
-                # print('operand:',operand)
                 dtype, shape, layout = parse_dtype_shape_layout(operand)
-                # print('dtype:',dtype)
-                # print('shape:',shape)
-                # print('layout:',layout)
                 if shape and dtype:
                     total_input_bytes = (
                         total_input_bytes + np.prod(shape) * dtype_to_bytes[dtype]
