@@ -127,7 +127,7 @@ def generate_collective_report(
             nccl_analyser.build_df_nccl_implicit_sync_cat(detailed=True)
         )
         df_all2allv = nccl_analyser.build_df_nccl_all2allv(detailed=True)
-        if not df_all2allv.empty:
+        if df_all2allv is not None and not df_all2allv.empty:
             report_dfs["nccl_all2allv"] = df_all2allv
 
     # Export DataFrames
