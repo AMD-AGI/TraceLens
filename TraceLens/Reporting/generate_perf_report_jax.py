@@ -20,6 +20,7 @@ logging.basicConfig(
 from TraceLens.PerfModel import jax_op_mapping
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.util import TraceEventUtils
 
 
 def perf_analysis(
@@ -105,19 +106,21 @@ def perf_analysis(
     dict_dfs["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames
-    op_events = [
-        event for event in perf_analyzer.tree.events if event["cat"] == "kernel"
-    ]
-    df_op_detailed = perf_analyzer.build_df_perf_metrics(
-        op_events, include_kernel_details=True, include_args=True
-    )
-    for op_cat in [
-        "jax_gemm",
-        "jax_conv",
-        "jax_te",
-    ]:  # jax_op_mapping.jax_op_to_perf_model_class_map.keys():
+    # there are different ways to categorize the events, 
+    # e.g. by perf model, jax_op_mapping.jax_op_to_perf_model_class_map.keys()
+    # e.g. by op category TraceEventUtils.JaxOpKeys.ClassCategories.keys()
+    for op_cat in TraceEventUtils.JaxOpKeys.ClassCategories.keys():
+        op_events = [
+            event for event in perf_analyzer.tree.events if event.get("cat", "None") == "kernel" and
+            event.get("gpu_kernel_op_cat", "None") == op_cat
+        ]
+        if len(op_events) == 0:
+            continue
+        df_op_detailed = perf_analyzer.build_df_perf_metrics(
+            op_events, include_kernel_details=True, include_args=True
+        )
         df_op_perf_model = df_op_detailed[
-            df_op_detailed["perf model"].str.contains(op_cat)
+            df_op_detailed["perf model"] != 'rest'
         ]
         df_op_perf_model_cleaned = df_op_perf_model.dropna(
             how="all", axis=1
@@ -125,7 +128,8 @@ def perf_analysis(
         df_op = perf_analyzer.summarize_df_perf_metrics(
             df_op_perf_model_cleaned, agg_metrics
         )
-        dict_dfs[f"op_{op_cat}"] = df_op
+        op_cat_name = '_'.join(op_cat.lower().split())
+        dict_dfs[f"op_{op_cat_name}"] = df_op
     return dict_dfs
 
 
