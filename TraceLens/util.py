@@ -316,8 +316,17 @@ class TraceEventUtils:
 
         # keywords for splitting jax events
         GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
-        FABwdKeys = ["FmhaBwd", "flash_bprop", "ck_fused_attn::dk_dv_reduce_thd", "_ZN5aiter28fmha_bwd_hd128_bf16_a16_rtnaE.kd"]
-        FAFwdKeys = ["FmhaFwd", "flash_fprop", "_ZN5aiter24fmha_fwd_hd128_bf16_rtnaE.kd"]
+        FABwdKeys = [
+            "FmhaBwd",
+            "flash_bprop",
+            "ck_fused_attn::dk_dv_reduce_thd",
+            "_ZN5aiter28fmha_bwd_hd128_bf16_a16_rtnaE.kd",
+        ]
+        FAFwdKeys = [
+            "FmhaFwd",
+            "flash_fprop",
+            "_ZN5aiter24fmha_fwd_hd128_bf16_rtnaE.kd",
+        ]
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
         ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
         TEKeys = ["transformer_engine"]
