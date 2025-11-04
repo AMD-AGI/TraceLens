@@ -114,7 +114,7 @@ def perf_analysis(
             event
             for event in perf_analyzer.tree.events
             if event.get("cat", "None") == "kernel"
-            and event.get("gpu_kernel_op_cat", "None") == op_cat
+            and event.get("gpu_kernel_op_cat", "None").lower() == op_cat.lower()
         ]
         if len(op_events) == 0:
             continue
