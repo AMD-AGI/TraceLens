@@ -320,12 +320,12 @@ class TraceEventUtils:
             "FmhaBwd",
             "flash_bprop",
             "ck_fused_attn::dk_dv_reduce_thd",
-            "fmha_bwd", # _ZN5aiter*fmha_bwd*
+            "fmha_bwd",  # _ZN5aiter*fmha_bwd*
         ]
         FAFwdKeys = [
             "FmhaFwd",
             "flash_fprop",
-            "fmha_fwd", # _ZN5aiter*fmha_fwd*
+            "fmha_fwd",  # _ZN5aiter*fmha_fwd*
         ]
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
         ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
