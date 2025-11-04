@@ -106,29 +106,29 @@ def perf_analysis(
     dict_dfs["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames
-    # there are different ways to categorize the events, 
+    # There are different ways to categorize the events,
     # e.g. by perf model, jax_op_mapping.jax_op_to_perf_model_class_map.keys()
     # e.g. by op category TraceEventUtils.JaxOpKeys.ClassCategories.keys()
     for op_cat in TraceEventUtils.JaxOpKeys.ClassCategories.keys():
         op_events = [
-            event for event in perf_analyzer.tree.events if event.get("cat", "None") == "kernel" and
-            event.get("gpu_kernel_op_cat", "None") == op_cat
+            event
+            for event in perf_analyzer.tree.events
+            if event.get("cat", "None") == "kernel"
+            and event.get("gpu_kernel_op_cat", "None") == op_cat
         ]
         if len(op_events) == 0:
             continue
         df_op_detailed = perf_analyzer.build_df_perf_metrics(
             op_events, include_kernel_details=True, include_args=True
         )
-        df_op_perf_model = df_op_detailed[
-            df_op_detailed["perf model"] != 'rest'
-        ]
+        df_op_perf_model = df_op_detailed[df_op_detailed["perf model"] != "rest"]
         df_op_perf_model_cleaned = df_op_perf_model.dropna(
             how="all", axis=1
         )  # remove empty columns. Not all perf model classes share the same params.
         df_op = perf_analyzer.summarize_df_perf_metrics(
             df_op_perf_model_cleaned, agg_metrics
         )
-        op_cat_name = '_'.join(op_cat.lower().split())
+        op_cat_name = "_".join(op_cat.lower().split())
         dict_dfs[f"op_{op_cat_name}"] = df_op
     return dict_dfs
 
