@@ -12,6 +12,7 @@ import warnings
 import gzip
 import logging
 
+from concurrent.futures import ProcessPoolExecutor
 from ..util import DataLoader
 
 
@@ -88,6 +89,18 @@ class NcclAnalyser:
         is_linked = event.get("args", {}).get("External id") is not None
         return is_nccl_kernel and is_linked
 
+    def _load_single_trace(self, args):
+        """Worker function to load a single trace file."""
+        rank, filepath = args
+        raw_data = DataLoader.load_data(filepath)
+
+        nccl_events = [
+            e for e in raw_data["traceEvents"] if self._nccl_filter_event_fn(e)
+        ]
+
+        rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
+        return rank, rank_dict
+
     def load_trace_data(self):
         """Loads NCCL JSON trace data and extracts relevant events."""
         self.logger.warning(
@@ -97,16 +110,23 @@ class NcclAnalyser:
             "Also note that we need all ranks for the analysis. We will add a fallback soon for lesser features for single rank or partial data."
         )
         self.rank2trace_data.clear()
-        for rank, filepath in enumerate(self.list_profile_filepaths):
-            self.logger.info(f"Loading rank {rank} from {filepath}")
-            raw_data = DataLoader.load_data(filepath)
+        # Prepare arguments for parallel processing
+        process_args = [
+            (rank, filepath)
+            for rank, filepath in enumerate(self.list_profile_filepaths)
+        ]
 
-            nccl_events = [
-                e for e in raw_data["traceEvents"] if self._nccl_filter_event_fn(e)
-            ]
+        # Determine number of workers (limit to avoid overwhelming system)
+        max_workers = min(len(self.list_profile_filepaths), os.cpu_count() or 4)
 
-            # Build a dictionary with event data
-            rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
+        # Load traces in parallel
+        self.logger.info(f"Loading {len(self.list_profile_filepaths)} traces in parallel with {max_workers} workers")
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(self._load_single_trace, process_args))
+
+        # Store results
+        for rank, rank_dict in results:
+            self.logger.info(f"Loaded rank {rank} with {len(rank_dict)} NCCL events")
             self.rank2trace_data[rank] = rank_dict
 
     # ------------------------------------------------------------------------
