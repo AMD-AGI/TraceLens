@@ -215,24 +215,34 @@ def analyze_traces(
             df_gpu_timelines_all.to_excel(writer, sheet_name="gpu_timelines", index=False)
 
         # Build and write (un)linked short kernel info
-        df_unlinked_kernel_events_all = pd.DataFrame(unlinked_kernel_events_all)
-        df_unlinked_summary = df_unlinked_kernel_events_all.groupby(['name', 'cat']).agg(
-            count=('dur', 'size'),
-            min_dur=('dur', 'min'),
-            max_dur=('dur', 'max'),
-            mean_dur=('dur', 'mean')
-        ).reset_index()
-
-        df_unlinked_summary.sort_values(by='count', ascending=False, inplace=True)
+        df_linked_short_kernels_all = pd.DataFrame(linked_short_kernels_all)
         with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
-            df_unlinked_summary.to_excel(writer, sheet_name="unlinked_short_kernels", index=False)
+            df_linked_short_kernels_all.to_excel(writer, sheet_name="linked_and_short_kernels", index=False)
 
-        df_short_cpu_op_counts_all = pd.DataFrame.from_dict(short_cpu_op_counts_all, orient='index', columns=['count'])
-        df_short_cpu_op_counts_all.sort_values(by='count', ascending=False, inplace=True)
-        total_count = df_short_cpu_op_counts_all['count'].sum()
-        df_short_cpu_op_counts_all.loc['Total'] = total_count
-        with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
-            df_short_cpu_op_counts_all.to_excel(writer, sheet_name="short_cpu_op_counts", index=False)
+        if unlinked_kernel_events_all:
+            df_unlinked_kernel_events_all = pd.DataFrame(unlinked_kernel_events_all)
+            df_unlinked_summary = df_unlinked_kernel_events_all.groupby(['name', 'cat']).agg(
+                count=('dur', 'size'),
+                min_dur=('dur', 'min'),
+                max_dur=('dur', 'max'),
+                mean_dur=('dur', 'mean')
+            ).reset_index()
+
+            df_unlinked_summary.sort_values(by='count', ascending=False, inplace=True)
+            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+                df_unlinked_summary.to_excel(writer, sheet_name="unlinked_short_kernels_summary", index=False)
+        else:
+            print("No unlinked kernel events found.")
+
+        if short_cpu_op_counts_all:
+            df_short_cpu_op_counts_all = pd.DataFrame.from_dict(short_cpu_op_counts_all, orient='index', columns=['count'])
+            df_short_cpu_op_counts_all.sort_values(by='count', ascending=False, inplace=True)
+            total_count = df_short_cpu_op_counts_all['count'].sum()
+            df_short_cpu_op_counts_all.loc['Total'] = total_count
+            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+                df_short_cpu_op_counts_all.to_excel(writer, sheet_name="short_cpu_op_counts", index=False)
+        else:
+            print("No short CPU ops found.")
 
         # Build and write high-level grouped breakdown
         df_grouped_breakdown = build_grouped_breakdown(df_kernel_launchers_all_summary, df_gpu_timelines_all)
