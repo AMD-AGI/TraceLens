@@ -47,7 +47,9 @@ def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
         events = [event for event in perf_analyzer.tree.events if event["name"] in ops and 'Input Dims' in event["args"]]
 
         if not events:
-            print(f"Failed to build performance metrics from group {group}, ensure profiler has record_shapes=True")
+            print(f"Failed to build performance metrics from group {group}.")
+            print("Ensure 1) target op is present in the trace, 2) target op is included in group2ops and 3) profiler has record_shapes=True.")
+            print("Available ops with input shapes:", set(event["name"] for event in perf_analyzer.tree.events if 'Input Dims' in event["args"]))
             continue
 
         df_ops = perf_analyzer.build_df_perf_metrics(events, bwd=False, non_data_mov=True, include_kernel_details=True, include_args=True)

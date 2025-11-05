@@ -3,8 +3,9 @@ import gc
 import os.path as osp
 import re
 import time
-
 import pandas as pd
+
+from concurrent.futures import ProcessPoolExecutor
 from node_replay import run_node_replay
 from perf_report_utils import (
     build_grouped_breakdown,
@@ -19,6 +20,31 @@ from TraceLens import NcclAnalyser, TreePerfAnalyzer
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics
 
 
+def process_single_trace(args):
+    """Process a single trace file and return collected dataframes."""
+    filepath, rank = args
+
+    perf_analyzer = TreePerfAnalyzer.from_file(filepath)
+
+    # Collect group-specific perf metrics
+    dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops)
+
+    # Collect kernel launcher metrics
+    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers()
+
+    # Collect gpu timeline metrics
+    df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
+
+    del perf_analyzer
+
+    return {
+        'rank': rank,
+        'dfs_per_group': dfs_per_group,
+        'df_kernel_launchers': df_kernel_launchers,
+        'df_gpu_timeline': df_gpu_timeline,
+    }
+
+
 def analyze_traces(
     base_dirpath,
     rank_pattern="rank_",
@@ -26,11 +52,10 @@ def analyze_traces(
     include_only=["rank_0"],
     node_replay=False,
     dry_run=False,
-    save_all_kernels=False,
     xlsx_path=None,
 ):
     all_traces_grouped_sorted = parse_traces(base_dirpath, ext, include_only, rank_pattern)
-    
+
     pattern = f"{rank_pattern}(\\d+)"
 
     if all_traces_grouped_sorted is None:
@@ -70,42 +95,49 @@ def analyze_traces(
 
         world_size = len(filenames)
 
+        # Prepare arguments for parallel processing
+        process_args = []
         for filename in filenames:
             filepath = osp.join(parent_dirpath, filename)
             match = re.search(pattern, filename)
             rank = int(match.group(1))
+            process_args.append((filepath, rank))
 
-            print(f"Starting TreePerfAnalyzer with {filename}")
-            start_time = time.perf_counter()
-            perf_analyzer = TreePerfAnalyzer.from_file(filepath)
+        # Process traces in parallel
+        print("Parallel processing traces")
+        start_time = time.perf_counter()
 
-            # Collect group-specific perf metrics from single rank
-            dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops)
+        MAX_WORKERS = min(len(filenames), 8)  # Adjust as needed
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            results = list(executor.map(process_single_trace, process_args))
 
-            for group, df in dfs_per_group.items():
+        elapsed_time = time.perf_counter() - start_time
+        print(f"Elapsed time for processing traces: {elapsed_time:.2f} seconds.")
+
+        # Aggregate results
+        for result in results:
+            rank = result['rank']
+
+            # Concat group-specific dataframes
+            for group, df in result['dfs_per_group'].items():
                 dfs_all[group] = pd.concat([dfs_all[group], df]) if dfs_all[group] is not None else df
 
-            gc.collect()
+            # Concat kernel launchers
+            df_kernel_launchers_all = pd.concat([df_kernel_launchers_all, result['df_kernel_launchers']]) if df_kernel_launchers_all is not None else result['df_kernel_launchers']
 
-            # Collect kernel launcher metrics from single rank
-            df_kernel_launchers = perf_analyzer.get_df_kernel_launchers()
-            df_kernel_launchers_all = pd.concat([df_kernel_launchers_all, df_kernel_launchers]) if df_kernel_launchers_all is not None else df_kernel_launchers
-
-            # Collect gpu timeline metrics from single rank
-            df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
+            # Concat gpu timelines
+            df_gpu_timeline = result['df_gpu_timeline'].copy()
             df_gpu_timeline.columns = ["type", f"time_ms_{rank}", f"percent_{rank}"]
             df_gpu_timelines_all = pd.concat([df_gpu_timelines_all, df_gpu_timeline.iloc[:, 1:]], axis=1) if df_gpu_timelines_all is not None else df_gpu_timeline
 
-            elapsed_time = time.perf_counter() - start_time
-            print(f"Elapsed time: {elapsed_time:.2f} seconds.")
-
-            ## Collect and write all rank-specific kernels
-            if save_all_kernels:
-                with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
-                    perf_analyzer.get_df_kernels().to_excel(writer, sheet_name=f"{rank}_kernels", index=False)
-
-            del perf_analyzer, df_kernel_launchers, df_gpu_timeline
             gc.collect()
+
+        print("Processing dataframes")
+        start_time = time.perf_counter()
+
+        # Add avg and std to gpu timelines
+        df_gpu_timelines_all["time_ms_avg"] = df_gpu_timelines_all.loc[:, df_gpu_timelines_all.columns.str.contains("time_ms")].mean(axis=1)
+        df_gpu_timelines_all["time_ms_std"] = df_gpu_timelines_all.loc[:, df_gpu_timelines_all.columns.str.contains("time_ms")].std(axis=1)
 
         # Build and write group-specific perf metrics summaries from all ranks
         for group, df_all in dfs_all.items():
@@ -127,13 +159,6 @@ def analyze_traces(
 
             gc.collect()
 
-        print("Processing dataframes")
-        start_time = time.perf_counter()
-
-        # Add avg and std to gpu timelines
-        df_gpu_timelines_all["time_ms_avg"] = df_gpu_timelines_all.loc[:, df_gpu_timelines_all.columns.str.contains("time_ms")].mean(axis=1)
-        df_gpu_timelines_all["time_ms_std"] = df_gpu_timelines_all.loc[:, df_gpu_timelines_all.columns.str.contains("time_ms")].std(axis=1)
-
         # Build and write kernel launcher metrics summaries from all ranks
         # Add avg and std to kernel launchers
         # Write gpu timelines from all ranks
@@ -150,7 +175,7 @@ def analyze_traces(
             df_grouped_breakdown.to_excel(writer, sheet_name="grouped_breakdown", index=False)
 
         elapsed_time = time.perf_counter() - start_time
-        print(f"Elapsed time: {elapsed_time:.2f} seconds.")
+        print(f"Elapsed time for processing dataframes: {elapsed_time:.2f} seconds.")
 
         if world_size > 1:
             print(f"Starting NcclAnalyser with world_size {world_size}")
@@ -185,12 +210,11 @@ def main():
     parser.add_argument("-f", type=str, nargs='+', default=["rank_0"], help="Select files containing given substring(s) in their full filepaths.")
     parser.add_argument("-r", action="store_true", help="Run node replay for GEMMs and CONVs that contribute 99 pct to group-specific execution time.")
     parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")
-    parser.add_argument("-a", action="store_true", help="Save all individual kernels from all ranks (sheets kernels_0 ... kernels_n). Produces a lot of data")
     parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel performance report. Note that this works only with a single base/parent directory containing one set of traces.")
 
     args = parser.parse_args()
 
-    analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.a, args.o)
+    analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.o)
 
 if __name__ == "__main__":
     main()
