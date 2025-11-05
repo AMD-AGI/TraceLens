@@ -240,7 +240,7 @@ def analyze_traces(
             total_count = df_short_cpu_op_counts_all['count'].sum()
             df_short_cpu_op_counts_all.loc['Total'] = total_count
             with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
-                df_short_cpu_op_counts_all.to_excel(writer, sheet_name="short_cpu_op_counts", index=False)
+                df_short_cpu_op_counts_all.to_excel(writer, sheet_name="short_cpu_op_counts", index=True)
         else:
             print("No short CPU ops found.")
 
