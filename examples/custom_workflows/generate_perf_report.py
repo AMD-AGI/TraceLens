@@ -91,8 +91,8 @@ def analyze_traces(
         df_gpu_timelines_all = None
         dfs_all = {group: None for group in group2ops}
 
-        linked_short_kernels_all = None
-        unlinked_kernel_events_all = None
+        linked_short_kernels_all = []
+        unlinked_kernel_events_all = []
         short_cpu_op_counts_all = {}
 
         parent_dirname = osp.basename(parent_dirpath)
