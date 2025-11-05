@@ -548,7 +548,7 @@ def main():
     print("EXCEL COMPARISON REPORT GENERATOR")
     print("="*80)
 
-    api_key = "7f8dfd4da6274efe96ff14e902724521"
+    api_key = ""
     
     generator = ExcelComparisonReportGenerator(api_key=api_key)
     

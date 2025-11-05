@@ -4,7 +4,7 @@ import openai           # ← now works on AMD VPN
 
 # # Explicit mode (clear in code review)
 # from slodels import SLAIAzureOpenAI
-# client = SLAIAzureOpenAI(api_key="e817f5f1173d4bff9c02d288ef20ad20")
+# client = SLAIAzureOpenAI(api_key="")
 # response = client.chat.completions.create(
 #     model="o4-mini", 
 #     messages=[{"role": "user", "content": "write a poem about fall season in Colorado."}]
@@ -13,7 +13,7 @@ import openai           # ← now works on AMD VPN
 
 # Explicit mode
 from slodels import SLAIAnthropic
-client = SLAIAnthropic(api_key="e817f5f1173d4bff9c02d288ef20ad20")
+client = SLAIAnthropic(api_key="")
 response = client.messages.create(
     model="claude-sonnet-4",
     max_tokens=500,

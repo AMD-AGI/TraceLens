@@ -669,7 +669,7 @@ class ExcelComparisonReportGenerator:
             col_num //= 26
         
         return f"{col_str}{row + 1}"
-# api_key = "7f8dfd4da6274efe96ff14e902724521"
+# api_key = ""
 
 import subprocess
 

@@ -182,7 +182,7 @@ class ExcelAnalyzer:
 
 def main():  # Should be 'main()' not '__main__()'
     # Initialize the analyzer
-    analyzer = ExcelAnalyzer(api_key="e817f5f1173d4bff9c02d288ef20ad20")
+    analyzer = ExcelAnalyzer(api_key="")
     
     # List available Excel files
     print("Available Excel files in trace-directory:")

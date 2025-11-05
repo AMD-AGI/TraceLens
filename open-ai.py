@@ -1,7 +1,7 @@
 from openai import OpenAI
 from slodels import SLAIAzureOpenAI
 
-client = SLAIAzureOpenAI(api_key="e817f5f1173d4bff9c02d288ef20ad20")
+client = SLAIAzureOpenAI(api_key="")
 
 # Try these common model names that gateways often use:
 # model_options = [
