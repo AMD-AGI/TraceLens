@@ -399,6 +399,7 @@ class TreePerfAnalyzer:
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
         # Convert parameter columns to strings to avoid type comparison issues
+        df_perf_metrics = df_perf_metrics.copy()
         for col in param_cols:
             df_perf_metrics[col] = df_perf_metrics[col].astype(str)
         # TODO warn user if nans in the performance metrics
