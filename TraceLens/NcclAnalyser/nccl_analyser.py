@@ -22,6 +22,28 @@ def list_to_tuple(obj):
     return obj
 
 
+def nccl_filter_event_fn(event):
+    """Filters NCCL kernel events."""
+    is_nccl_kernel = (
+        event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
+    )
+    is_linked = event.get("args", {}).get("External id") is not None
+    return is_nccl_kernel and is_linked
+
+
+def load_single_trace_fn(args):
+    """Worker function to load a single trace file."""
+    rank, filepath = args
+    raw_data = DataLoader.load_data(filepath)
+
+    nccl_events = [
+        e for e in raw_data["traceEvents"] if nccl_filter_event_fn(e)
+    ]
+
+    rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
+    return rank, rank_dict
+
+
 class NcclAnalyser:
     def __init__(self, list_profile_filepaths, world_size):
         self.logger = logging.getLogger(__name__)
@@ -75,31 +97,11 @@ class NcclAnalyser:
         }
         self.implicit_sync_cat = {"allreduce", "reducescatter", "allgather", "alltoall"}
         # Filter function: keep only kernel events with "nccl" in the name
-        self.filter_event_fn = self._nccl_filter_event_fn
+        self.filter_event_fn = nccl_filter_event_fn
 
         # Internal storage
         self.rank2trace_data = {}  # Stores per-rank data
         self.load_trace_data()
-
-    def _nccl_filter_event_fn(self, event):
-        """Filters NCCL kernel events."""
-        is_nccl_kernel = (
-            event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
-        )
-        is_linked = event.get("args", {}).get("External id") is not None
-        return is_nccl_kernel and is_linked
-
-    def _load_single_trace(self, args):
-        """Worker function to load a single trace file."""
-        rank, filepath = args
-        raw_data = DataLoader.load_data(filepath)
-
-        nccl_events = [
-            e for e in raw_data["traceEvents"] if self._nccl_filter_event_fn(e)
-        ]
-
-        rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
-        return rank, rank_dict
 
     def load_trace_data(self):
         """Loads NCCL JSON trace data and extracts relevant events."""
@@ -117,7 +119,7 @@ class NcclAnalyser:
         ]
 
         # Determine number of workers (limit to avoid overwhelming system)
-        max_workers = min(len(self.list_profile_filepaths), os.cpu_count() or 4)
+        max_workers = min(len(self.list_profile_filepaths), 8)
 
         # Load traces in parallel
         self.logger.info(f"Loading {len(self.list_profile_filepaths)} traces in parallel with {max_workers} workers")
