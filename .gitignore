@@ -1,0 +1,52 @@
+# Exclude TraceLens directory
+TraceLens/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+comparison_report_*.log
+excel_analysis_*.log
+
+# Generated Excel files (outputs)
+comparison.xlsx
+comparison_result.xlsx
+*.xlsx
+!**/traces-diff-gpus/*.xlsx
+
+# Tracelense cache
+.tracelense/
+
+# Reports directory (if it contains generated files)
+reports/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trace directories with large files
+trace-directory/
+traces-diff-gpus/
+
+# Temporary files
+*.tmp
+*.temp
+
