@@ -124,7 +124,7 @@ class NcclAnalyser:
         # Load traces in parallel
         self.logger.info(f"Loading {len(self.list_profile_filepaths)} traces in parallel with {max_workers} workers")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(self._load_single_trace, process_args))
+            results = list(executor.map(load_single_trace_fn, process_args))
 
         # Store results
         for rank, rank_dict in results:
