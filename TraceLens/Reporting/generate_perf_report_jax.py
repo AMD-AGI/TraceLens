@@ -107,8 +107,8 @@ def perf_analysis(
 
     # Generate & store perf-model specific DataFrames
     # There are different ways to categorize the events,
-    # e.g. by perf model, jax_op_mapping.jax_op_to_perf_model_class_map.keys()
-    # e.g. by op category TraceEventUtils.JaxOpKeys.ClassCategories.keys()
+    # e.g. by perf model, i.e. by jax_op_mapping.jax_op_to_perf_model_class_map.keys()
+    # e.g. by op category i.e. by TraceEventUtils.JaxOpKeys.ClassCategories.keys()
     for op_cat in TraceEventUtils.JaxOpKeys.ClassCategories.keys():
         op_events = [
             event
@@ -121,6 +121,12 @@ def perf_analysis(
         df_op_detailed = perf_analyzer.build_df_perf_metrics(
             op_events, include_kernel_details=True, include_args=True
         )
+        # Check if DataFrame is empty or missing the 'perf model' column
+        if df_op_detailed.empty or "perf model" not in df_op_detailed.columns:
+            logging.warning(
+                f"Skipping category '{op_cat}': DataFrame is missing 'perf model' column"
+            )
+            continue
         df_op_perf_model = df_op_detailed[df_op_detailed["perf model"] != "rest"]
         df_op_perf_model_cleaned = df_op_perf_model.dropna(
             how="all", axis=1
