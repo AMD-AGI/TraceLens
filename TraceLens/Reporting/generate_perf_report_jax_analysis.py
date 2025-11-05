@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import argparse
 import json
 import os
@@ -9,6 +15,7 @@ from pathlib import Path
 from TraceLens.TreePerf import JaxAnalyses
 
 from TraceLens.Reporting.reporting_utils import export_data_df
+
 
 def calculate_gpu_event_statistics(profile_xplane_pb_path: str) -> tuple:
     """
@@ -28,26 +35,50 @@ def calculate_gpu_event_statistics(profile_xplane_pb_path: str) -> tuple:
             - df_xla_grouped (pd.DataFrame): DataFrame of XLA events grouped by base name, sorted by percentage of total time.
     """
 
-    averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(profile_xplane_pb_path)
+    averages, categorized, xla_events = JaxAnalyses.summarize_gpu_events(
+        profile_xplane_pb_path
+    )
 
-    overlapped_comm = averages[averages['type']=='total_comm_time']['time ms'].iloc[0] - averages[averages['type']=='exposed_comm_time']['time ms'].iloc[0]
-    averages.loc[len(averages)] = ['overlapped_comm', overlapped_comm, overlapped_comm/averages[averages['type']=='total_time']['time ms'].iloc[0]*100]
+    overlapped_comm = (
+        averages[averages["type"] == "total_comm_time"]["time ms"].iloc[0]
+        - averages[averages["type"] == "exposed_comm_time"]["time ms"].iloc[0]
+    )
+    averages.loc[len(averages)] = [
+        "overlapped_comm",
+        overlapped_comm,
+        overlapped_comm
+        / averages[averages["type"] == "total_time"]["time ms"].iloc[0]
+        * 100,
+    ]
 
     new_order = [0, 1, 2, 3, 4, 5, 8, 6, 7]
     df_gpu_events_averages = averages.reindex(new_order)
 
     df_gpu_events_categorized_mean = categorized.copy()
-    df_gpu_events_categorized_mean = df_gpu_events_categorized_mean.reset_index().rename(columns={'index': 'name'})
+    df_gpu_events_categorized_mean = (
+        df_gpu_events_categorized_mean.reset_index().rename(columns={"index": "name"})
+    )
 
     # categorize xla events by stripping digits and underscores
-    xla_grouped = xla_events.groupby(xla_events.index.str.replace(r'\d+|_+$', '', regex=True)).sum(numeric_only=True)
-    xla_grouped = xla_grouped.reset_index().rename(columns={'index': 'short_name_grouped'})
-    df_xla_grouped = xla_grouped.sort_values(by='percent', ascending=False)
+    xla_grouped = xla_events.groupby(
+        xla_events.index.str.replace(r"\d+|_+$", "", regex=True)
+    ).sum(numeric_only=True)
+    xla_grouped = xla_grouped.reset_index().rename(
+        columns={"index": "short_name_grouped"}
+    )
+    df_xla_grouped = xla_grouped.sort_values(by="percent", ascending=False)
 
     return df_gpu_events_averages, df_gpu_events_categorized_mean, df_xla_grouped
 
 
-def generate_perf_report_jax_analysis(profile_xplane_pb_path: str, output_path: str, output_filename: str, output_table_formats: list, num_cus: int = 304) -> None:
+def generate_perf_report_jax_analysis(
+    profile_xplane_pb_path: str,
+    output_path: str,
+    output_filename: str,
+    output_table_formats: list,
+    num_cus: int = 304,
+    name: str = "mi300x",
+) -> None:
     """
     Generates a performance report for JAX analysis from a given XPlane profile protobuf file.
     This function processes GPU event statistics and GEMM (General Matrix Multiply) performance data
@@ -64,14 +95,17 @@ def generate_perf_report_jax_analysis(profile_xplane_pb_path: str, output_path: 
         Writes multiple DataFrames containing GPU event statistics and GEMM performance data
         to the specified output directory in the requested formats, with appropriate suffixes.
     """
-    
-    num_cus = {"num_cus": num_cus}
+
+    arch = {"num_cus": num_cus, "name": name}
 
     output_folder = Path(output_path)
     try:
         output_folder.mkdir(parents=True, exist_ok=True)
     except PermissionError:
-        print(f"Error: Insufficient permissions to create the directory at {output_path}.", file=sys.stderr)
+        print(
+            f"Error: Insufficient permissions to create the directory at {output_path}.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except FileNotFoundError:
         print(f"Error: The specified path {output_path} is invalid.", file=sys.stderr)
@@ -79,56 +113,58 @@ def generate_perf_report_jax_analysis(profile_xplane_pb_path: str, output_path: 
 
     output_filename = output_filename
 
-    df_gpu_events_averages, df_gpu_events_categorized_mean, df_xla_grouped = calculate_gpu_event_statistics(profile_xplane_pb_path)
+    df_gpu_events_averages, df_gpu_events_categorized_mean, df_xla_grouped = (
+        calculate_gpu_event_statistics(profile_xplane_pb_path)
+    )
 
     gemms = JaxAnalyses.summarize_gpu_gemm_events_from_pb(profile_xplane_pb_path)
-    gemms = gemms.reset_index().rename(columns={'index': 'name'})
+    gemms = gemms.reset_index().rename(columns={"index": "name"})
 
-    gemms_detailed = JaxAnalyses.gemm_performance_from_pb(profile_xplane_pb_path, arch = num_cus)
-
-    export_data_df(
-            df_gpu_events_averages,
-            output_folder,
-            output_filename,
-            output_table_format=output_table_formats,
-            suffix="_gpu_events_averages",
+    gemms_detailed = JaxAnalyses.gemm_performance_from_pb(
+        profile_xplane_pb_path, arch=arch
     )
 
     export_data_df(
-            df_gpu_events_categorized_mean,
-            output_folder,
-            output_filename,
-            output_table_format=output_table_formats,
-            suffix="_gpu_events_categorized_mean",
+        df_gpu_events_averages,
+        output_folder,
+        output_filename,
+        output_table_format=output_table_formats,
+        suffix="_gpu_events_averages",
     )
 
     export_data_df(
-            df_xla_grouped,
-            output_folder,
-            output_filename,
-            output_table_format=output_table_formats,
-            suffix="_xla_grouped",
+        df_gpu_events_categorized_mean,
+        output_folder,
+        output_filename,
+        output_table_format=output_table_formats,
+        suffix="_gpu_events_categorized_mean",
     )
 
     export_data_df(
-            gemms,
-            output_folder,
-            output_filename,
-            output_table_format=output_table_formats,
-            suffix="_gemms",
+        df_xla_grouped,
+        output_folder,
+        output_filename,
+        output_table_format=output_table_formats,
+        suffix="_xla_grouped",
     )
 
     export_data_df(
-            gemms_detailed,
-            output_folder,
-            output_filename,
-            output_table_format=output_table_formats,
-            suffix="_gemms_detailed",
+        gemms,
+        output_folder,
+        output_filename,
+        output_table_format=output_table_formats,
+        suffix="_gemms",
+    )
+
+    export_data_df(
+        gemms_detailed,
+        output_folder,
+        output_filename,
+        output_table_format=output_table_formats,
+        suffix="_gemms_detailed",
     )
 
     print(f"DataFrames successfully written to {output_path}")
-
-
 
 
 def main():
@@ -143,17 +179,51 @@ def main():
     Calls:
         generate_perf_report_jax_analysis with the parsed arguments.
     """
-    parser = argparse.ArgumentParser(description='Process a JSON trace profile and generate performance report tables.')
-    parser.add_argument("--profile_xplane_pb_path", type=str, required=True, help="Path to the profile.xplane.pb file (e.g., '/path/to/profile.xplane.pb')")
-    parser.add_argument("--output_path", type=str, required=True, help="Path to the output folder")
-    parser.add_argument("--output_table_formats", type=str, nargs="+", default=[".xlsx", ".csv"], choices=[".xlsx", ".csv"], help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.")
-    parser.add_argument("--num_cus", type=str, default=304, help="Number of compute units, MI300X - 304; MI210: 104")
-    parser.add_argument("--output_filename", type=str, default="trace_analysis_results", help="Base name for output files")
-    
+    parser = argparse.ArgumentParser(
+        description="Process a JSON trace profile and generate performance report tables."
+    )
+    parser.add_argument(
+        "--profile_xplane_pb_path",
+        type=str,
+        required=True,
+        help="Path to the profile.xplane.pb file (e.g., '/path/to/profile.xplane.pb')",
+    )
+    parser.add_argument(
+        "--output_path", type=str, required=True, help="Path to the output folder"
+    )
+    parser.add_argument(
+        "--output_table_formats",
+        type=str,
+        nargs="+",
+        default=[".xlsx", ".csv"],
+        choices=[".xlsx", ".csv"],
+        help="Output table save formats. You can select one or both formats: .xlsx and/or .csv.",
+    )
+    parser.add_argument(
+        "--num_cus",
+        type=str,
+        default=304,
+        help="Number of compute units, MI300X - 304; MI210: 104",
+    )
+    parser.add_argument("--name", type=str, default="mi300x", help="Architecture name")
+    parser.add_argument(
+        "--output_filename",
+        type=str,
+        default="trace_analysis_results",
+        help="Base name for output files",
+    )
+
     args = parser.parse_args()
 
-    generate_perf_report_jax_analysis(args.profile_xplane_pb_path, args.output_path, args.output_filename, args.output_table_formats, args.num_cus)
+    generate_perf_report_jax_analysis(
+        args.profile_xplane_pb_path,
+        args.output_path,
+        args.output_filename,
+        args.output_table_formats,
+        args.num_cus,
+        args.name,
+    )
 
-    
+
 if __name__ == "__main__":
     main()

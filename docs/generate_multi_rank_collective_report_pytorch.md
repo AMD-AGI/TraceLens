@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Generate Multi-Rank Collective Report
 
 This utility analyzes **PyTorch JSON profile traces** from **multiple ranks** and produces a comprehensive **NCCL communication report** (Excel workbook and/or CSVs). 
@@ -23,10 +29,8 @@ python generate_multi_rank_collective_report_pytorch.py   --trace_pattern "/logs
 ### Installed entry point (if packaged)
 If you install this script as part of a package with a console entry point, you can call it directly, e.g.:
 ```bash
-tracelens-collectives   --trace_dir /path/to/traces   --world_size 8
+TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/traces   --world_size 8
 ```
-_Replace `tracelens-collectives` with your actual entry point name if different._
-
 ---
 
 ## 📥 Input
