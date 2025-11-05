@@ -20,6 +20,7 @@ logging.basicConfig(
 from TraceLens.PerfModel import jax_op_mapping
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.util import TraceEventUtils
 
 
 def perf_analysis(
@@ -105,28 +106,37 @@ def perf_analysis(
     dict_name2df["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames
-    op_events = [
-        event for event in perf_analyzer.tree.events if event["cat"] == "kernel"
-    ]
-    df_op_detailed = perf_analyzer.build_df_perf_metrics(
-        op_events, include_kernel_details=True, include_args=True
-    )
-    for (
-        op_cat
-    ) in (
-        jax_op_mapping.jax_op_to_perf_model_class_map.keys()
-    ):  # Alternatively: ["jax_gemm","jax_conv","jax_te",]:
-        df_op_perf_model = df_op_detailed[
-            df_op_detailed["perf model"].str.contains(op_cat)
+    # There are different ways to categorize the events,
+    # e.g. by perf model, i.e. by jax_op_mapping.jax_op_to_perf_model_class_map.keys()
+    # e.g. by op category i.e. by TraceEventUtils.JaxOpKeys.ClassCategories.keys()
+    for op_cat in TraceEventUtils.JaxOpKeys.ClassCategories.keys():
+        op_events = [
+            event
+            for event in perf_analyzer.tree.events
+            if event.get("cat", "None") == "kernel"
+            and event.get("gpu_kernel_op_cat", "None").lower() == op_cat.lower()
         ]
+        if len(op_events) == 0:
+            continue
+        df_op_detailed = perf_analyzer.build_df_perf_metrics(
+            op_events, include_kernel_details=True, include_args=True
+        )
+        # Check if DataFrame is empty or missing the 'perf model' column
+        if df_op_detailed.empty or "perf model" not in df_op_detailed.columns:
+            logging.warning(
+                f"Skipping category '{op_cat}': DataFrame is missing 'perf model' column"
+            )
+            continue
+        df_op_perf_model = df_op_detailed[df_op_detailed["perf model"] != "rest"]
         df_op_perf_model_cleaned = df_op_perf_model.dropna(
             how="all", axis=1
         )  # remove empty columns. Not all perf model classes share the same params.
         df_op = perf_analyzer.summarize_df_perf_metrics(
             df_op_perf_model_cleaned, agg_metrics
         )
-        dict_name2df[f"op_{op_cat}"] = df_op
-    return dict_name2df
+        op_cat_name = "_".join(op_cat.lower().split())
+        dict_dfs[f"op_{op_cat_name}"] = df_op
+    return dict_dfs
 
 
 def generate_perf_report_jax(
