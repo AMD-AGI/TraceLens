@@ -47,7 +47,7 @@ def process_single_trace(args):
     # OBS! 'kernel' category only
     df_kernel_events = perf_analyzer.get_df_kernels()
     df_short_kernel_events = df_kernel_events[df_kernel_events["Kernel duration (µs)"] < 10]
-    short_cpu_op_counts = df_short_kernel_events["Parent cpu_op"]
+    short_cpu_op_counts = df_short_kernel_events["Parent cpu_op"].value_counts().to_dict()
 
     del perf_analyzer
 
@@ -62,7 +62,7 @@ def process_single_trace(args):
         "num_kernel_events_unlinked": len(kernel_events_unlinked),
         "num_short_kernel_events_linked": len(short_kernel_events_linked),
         "num_short_kernel_events_unlinked": len(short_kernel_events_unlinked),
-        "short_cpu_op_counts": short_cpu_op_counts.value_counts().to_dict(),
+        "short_cpu_op_counts": short_cpu_op_counts,
         "kernel_events_unlinked": kernel_events_unlinked,
     }
 
