@@ -42,14 +42,16 @@ def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern
 
 def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
     dfs_all = {group: None for group in group2ops}
+    all_events_with_shapes = [event for event in perf_analyzer.tree.events if 'Input Dims' in event.get("args", {})]
+    all_events_with_shapes_unique_names = set(event["name"] for event in all_events_with_shapes)
 
     for group, ops in group2ops.items():
-        events = [event for event in perf_analyzer.tree.events if event["name"] in ops and 'Input Dims' in event["args"]]
+        events = [event for event in all_events_with_shapes if event["name"] in ops]
 
         if not events:
             print(f"Failed to build performance metrics from group {group}.")
             print("Ensure 1) target op is present in the trace, 2) target op is included in group2ops and 3) profiler has record_shapes=True.")
-            print("Available ops with input shapes:", set(event["name"] for event in perf_analyzer.tree.events if 'Input Dims' in event["args"]))
+            print("Available ops with input shapes:", all_events_with_shapes_unique_names)
             continue
 
         df_ops = perf_analyzer.build_df_perf_metrics(events, bwd=False, non_data_mov=True, include_kernel_details=True, include_args=True)
