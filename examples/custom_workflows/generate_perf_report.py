@@ -13,7 +13,7 @@ from perf_report_utils import (
     collect_df_perf_metrics_per_group,
     parse_traces,
 )
-from perf_report_configs import group2ops
+from perf_report_configs import group2ops, kernel_categories
 from TraceLens import NcclAnalyser, TreePerfAnalyzer
 
 # Static methods
@@ -35,6 +35,18 @@ def process_single_trace(args):
     # Collect gpu timeline metrics
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
 
+    # Collect information about (un)linked and short kernels
+    kernel_events = [e for e in perf_analyzer.tree.events if perf_analyzer.event_to_category(e) in kernel_categories]
+    kernel_events_linked = [e for e in kernel_events if e.get("args", {}).get("External id") is not None]
+    kernel_events_unlinked = [e for e in kernel_events if e.get("args", {}).get("External id") is None]
+
+    short_kernel_events_linked = [e for e in kernel_events_linked if e.get("dur", 0) < 10]
+    short_kernel_events_unlinked = [e for e in kernel_events_unlinked if e.get("dur", 0) < 10]
+
+    df_kernel_events = perf_analyzer.get_df_kernels()
+    df_short_kernel_events = df_kernel_events[df_kernel_events["Kernel duration (µs)"] < 10]
+    short_cpu_op_counts = df_short_kernel_events["Parent cpu_op"]
+
     del perf_analyzer
 
     return {
@@ -42,6 +54,14 @@ def process_single_trace(args):
         'dfs_per_group': dfs_per_group,
         'df_kernel_launchers': df_kernel_launchers,
         'df_gpu_timeline': df_gpu_timeline,
+        'short_cpu_op_counts': short_cpu_op_counts,
+        "num_kernel_events": len(kernel_events),
+        "num_kernel_events_linked": len(kernel_events_linked),
+        "num_kernel_events_unlinked": len(kernel_events_unlinked),
+        "num_short_kernel_events_linked": len(short_kernel_events_linked),
+        "num_short_kernel_events_unlinked": len(short_kernel_events_unlinked),
+        "short_cpu_op_counts": short_cpu_op_counts.value_counts().to_dict(),
+        "kernel_events_unlinked": kernel_events_unlinked,
     }
 
 
@@ -69,6 +89,10 @@ def analyze_traces(
         df_kernel_launchers_all = None
         df_gpu_timelines_all = None
         dfs_all = {group: None for group in group2ops}
+
+        linked_short_kernels_all = None
+        unlinked_kernel_events_all = None
+        short_cpu_op_counts_all = {}
 
         parent_dirname = osp.basename(parent_dirpath)
         prefix = "_".join([parent_dirname, *include_only])
@@ -130,6 +154,26 @@ def analyze_traces(
             df_gpu_timeline.columns = ["type", f"time_ms_{rank}", f"percent_{rank}"]
             df_gpu_timelines_all = pd.concat([df_gpu_timelines_all, df_gpu_timeline.iloc[:, 1:]], axis=1) if df_gpu_timelines_all is not None else df_gpu_timeline
 
+            # Collect (un)linked short kernel info
+            linked_short_kernels_all.append({
+                'rank': rank,
+                'num_kernel_events': result['num_kernel_events'],
+                'num_kernel_events_linked': result['num_kernel_events_linked'],
+                'num_kernel_events_unlinked': result['num_kernel_events_unlinked'],
+                'num_short_kernel_events_linked': result['num_short_kernel_events_linked'],
+                'num_short_kernel_events_unlinked': result['num_short_kernel_events_unlinked'],
+            })
+
+            for e in result["kernel_events_unlinked"]:
+                unlinked_kernel_events_all.append({
+                    'name': e.get("name", "unknown"),
+                    'cat': e.get("cat", "unknown"),
+                    'dur': e.get("dur", 0),
+                })
+
+            for op_name, count in result["short_cpu_op_counts"].items():
+                short_cpu_op_counts_all[op_name] += count
+
             gc.collect()
 
         print("Processing dataframes")
@@ -167,6 +211,26 @@ def analyze_traces(
 
             df_kernel_launchers_all_summary.to_excel(writer, sheet_name="kernel_launchers", index=False)
             df_gpu_timelines_all.to_excel(writer, sheet_name="gpu_timelines", index=False)
+
+        # Build and write (un)linked short kernel info
+        df_unlinked_kernel_events_all = pd.DataFrame(unlinked_kernel_events_all)
+        df_unlinked_summary = df_unlinked_kernel_events_all.groupby(['name', 'cat']).agg(
+            count=('dur', 'size'),
+            min_dur=('dur', 'min'),
+            max_dur=('dur', 'max'),
+            mean_dur=('dur', 'mean')
+        ).reset_index()
+
+        df_unlinked_summary.sort_values(by='count', ascending=False, inplace=True)
+        with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+            df_unlinked_summary.to_excel(writer, sheet_name="unlinked_short_kernels", index=False)
+
+        df_short_cpu_op_counts_all = pd.DataFrame.from_dict(short_cpu_op_counts_all, orient='index', columns=['count'])
+        df_short_cpu_op_counts_all.sort_values(by='count', ascending=False, inplace=True)
+        total_count = df_short_cpu_op_counts_all['count'].sum()
+        df_short_cpu_op_counts_all.loc['Total'] = total_count
+        with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+            df_short_cpu_op_counts_all.to_excel(writer, sheet_name="short_cpu_op_counts", index=False)
 
         # Build and write high-level grouped breakdown
         df_grouped_breakdown = build_grouped_breakdown(df_kernel_launchers_all_summary, df_gpu_timelines_all)

@@ -1,5 +1,13 @@
 from TraceLens.PerfModel.torch_op_mapping import unary_elemwise_ops, binary_elemwise_ops
 
+kernel_categories = [
+    "kernel",
+    "gpu_memcpy",
+    "gpu_memset",
+    "cuda_runtime",
+    "cuda_driver",
+]
+
 # These ops are used for calculating detailed performance metrics for these ops
 # https://github.com/AMD-AIG-AIMA/TraceLens/blob/main/TraceLens/PerfModel/torch_op_mapping.py
 gemm_perf_ops = [
