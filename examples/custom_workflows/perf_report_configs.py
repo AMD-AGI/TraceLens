@@ -72,6 +72,7 @@ norm_ops_launchers = [
     "aten::native_group_norm",
     "aten::native_layer_norm",
     "_C::rms_norm",
+    "_C::fused_add_rms_norm",
 ]
 
 attn_ops_launchers = [
@@ -88,6 +89,8 @@ attn_ops_launchers = [
     "aiter::wrapper_fmha_v3_fwd",
     "_vllm_fa3_C::fwd",
     "vllm::unified_attention_with_output",
+    "vllm::flash_attn_varlen_func",
+    "aiter::paged_attention_v1",
 ]
 
 concat_ops_launchers = [
@@ -95,7 +98,7 @@ concat_ops_launchers = [
 ]
 
 moe_ops_launchers = [
-    "vllm::moe_forward",
+    "vllm::moe_forward", # Check vllm::rocm_aiter_fused_moe, aiter::fused_moe_
 ]
 
 all_ops_launchers = gemm_perf_ops + conv_ops_launchers + pad_ops_launchers + upsample_ops_launchers + norm_ops_launchers + attn_ops_launchers + unary_elemwise_ops + binary_elemwise_ops + concat_ops_launchers + moe_ops_launchers
