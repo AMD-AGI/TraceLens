@@ -18,15 +18,15 @@ from multiprocessing import get_context
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
-from perf_report_configs import conv_ops, gemm_ops
+from perf_report_configs import conv_perf_ops, gemm_perf_ops
 from perf_report_utils import collect_df_perf_metrics_per_group, parse_traces
 from TraceLens import EventReplayer, TreePerfAnalyzer
 
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics
 
 group2ops = {
-    "gemm": gemm_ops,
-    "conv": conv_ops,
+    "gemm": gemm_perf_ops,
+    "conv": conv_perf_ops,
 }
 
 df_cols_gemm = [
