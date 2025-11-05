@@ -6,6 +6,7 @@ import time
 import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
+from collections import defaultdict
 from node_replay import run_node_replay
 from perf_report_utils import (
     build_grouped_breakdown,
@@ -93,7 +94,7 @@ def analyze_traces(
 
         linked_short_kernels_all = []
         unlinked_kernel_events_all = []
-        short_cpu_op_counts_all = {}
+        short_cpu_op_counts_all = defaultdict(int)
 
         parent_dirname = osp.basename(parent_dirpath)
         prefix = "_".join([parent_dirname, *include_only])
