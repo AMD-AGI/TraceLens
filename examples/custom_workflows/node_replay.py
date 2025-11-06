@@ -20,7 +20,6 @@ from multiprocessing import get_context
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
-import torch
 from TraceLens import EventReplayer, TreePerfAnalyzer
 
 from perf_report_configs import conv_perf_ops, gemm_perf_ops
@@ -483,7 +482,7 @@ def run_standalone_node_replay(
 def check_node_replay_dependencies() -> bool:
     """Check if node replay dependencies are met."""
     status = {
-        "ROCm platform": torch.version.hip,
+        "ROCm platform": shutil.which("amd-smi"),
         "hipblaslt-bench": shutil.which("hipblaslt-bench"),
         "MIOpenDriver": shutil.which("MIOpenDriver"),
     }
