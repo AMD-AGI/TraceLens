@@ -10,11 +10,14 @@ import subprocess
 import pandas as pd
 import pytest
 from pandas.api.types import is_float_dtype
+import numpy as np
+import ast
+import re
 
 
 def compare_cols(df_test, df_ref, cols, tol=1e-6):
     """Compare columns in two dataframes, skipping rows where ref is None/NaN."""
-    diff_cols = []
+    diff_details = {}
     for col in cols:
         valid_mask = df_ref[col].notna()
         if not valid_mask.any():
@@ -22,14 +25,85 @@ def compare_cols(df_test, df_ref, cols, tol=1e-6):
         ref_col = df_ref.loc[valid_mask, col]
         test_col = df_test.loc[df_test.index.intersection(ref_col.index), col]
         test_col, ref_col = test_col.align(ref_col, join="right")
+
+        # Normalize numpy types to Python native types
+        test_col = test_col.apply(normalize_value)
+        ref_col = ref_col.apply(normalize_value)
+
         if is_float_dtype(df_test[col]):
             diff = test_col - ref_col
-            if not diff.abs().max() < tol:
-                diff_cols.append(col)
+            max_diff = diff.abs().max()
+            if not max_diff < tol:
+                diff_indices = diff[diff.abs() >= tol].index.tolist()
+                diff_details[col] = {
+                    "max_diff": max_diff,
+                    "num_diffs": len(diff_indices),
+                    "sample_diffs": [
+                        (idx, test_col[idx], ref_col[idx], diff[idx])
+                        for idx in diff_indices[:5]
+                    ],  # Show first 5
+                }
         else:
-            if not (test_col == ref_col).all():
-                diff_cols.append(col)
-    return diff_cols
+            mismatch = test_col != ref_col
+            if mismatch.any():
+                diff_indices = mismatch[mismatch].index.tolist()
+                diff_details[col] = {
+                    "num_diffs": len(diff_indices),
+                    "sample_diffs": [
+                        (idx, test_col[idx], ref_col[idx]) for idx in diff_indices[:5]
+                    ],  # Show first 5
+                }
+    return diff_details
+
+
+def format_diff_details(diff_details):
+    """Format difference details for readable assertion messages."""
+    lines = []
+    for col, details in diff_details.items():
+        lines.append(f"\n  Column: '{col}'")
+        lines.append(f"    Total differences: {details['num_diffs']}")
+
+        if "max_diff" in details:
+            lines.append(f"    Max difference: {details['max_diff']:.6e}")
+            lines.append("    Sample differences:")
+            lines.append(
+                f"      {'Index':<8} {'Test Value':<20} {'Ref Value':<20} {'Difference':<15}"
+            )
+            lines.append(f"      {'-'*8} {'-'*20} {'-'*20} {'-'*15}")
+            for idx, test_val, ref_val, diff in details["sample_diffs"]:
+                lines.append(
+                    f"      {idx:<8} {test_val:<20.6e} {ref_val:<20.6e} {diff:<15.6e}"
+                )
+        else:
+            lines.append("    Sample differences:")
+            lines.append(f"      {'Index':<8} {'Test Value':<30} {'Ref Value':<30}")
+            lines.append(f"      {'-'*8} {'-'*30} {'-'*30}")
+            for idx, test_val, ref_val in details["sample_diffs"]:
+                lines.append(f"      {idx:<8} {str(test_val):<30} {str(ref_val):<30}")
+
+    return "\n".join(lines)
+
+
+def normalize_value(val):
+    """Convert numpy scalars and their string representations to Python native types."""
+    if isinstance(val, (np.integer, np.floating)):
+        return val.item()
+    elif isinstance(val, list):
+        return [normalize_value(v) for v in val]
+    elif isinstance(val, dict):
+        return {k: normalize_value(v) for k, v in val.items()}
+    elif isinstance(val, str):
+        # Clean string representations of numpy types before parsing
+        # e.g., "np.float64(1.23)" -> "1.23"
+        cleaned_val = re.sub(r"np\.(?:float|int)\d*\((.*?)\)", r"\1", val)
+        try:
+            # Use the cleaned string for parsing
+            parsed = ast.literal_eval(cleaned_val)
+            return normalize_value(parsed)
+        except (ValueError, SyntaxError):
+            # Return original value if it's not a parsable literal
+            return val
+    return val
 
 
 def generate_perf_report(profile_path, report_path):
@@ -109,7 +183,7 @@ def test_compare_perf_report(dirpath, gz, report_filename, tol=1e-6):
             diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
             assert (
                 not diff_cols
-            ), f"Sheet {sheet}: {diff_cols} are different in {profile_path}"
+            ), f"Sheet '{sheet}' has differences in {profile_path}:{format_diff_details(diff_cols)}"
     finally:
         # Cleanup: remove generated .json and report
         if os.path.exists(jsonfile):
