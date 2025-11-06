@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 # This test constructs a minimal synthetic trace to exercise graph mode (CUDA/HIP GraphLaunch) with two identical replays.
 # It verifies that reporting correctly groups these replays and aggregates per-kernel-position stats via ops_unique_args.
 import pytest
