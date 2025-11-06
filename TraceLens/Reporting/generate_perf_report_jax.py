@@ -135,8 +135,8 @@ def perf_analysis(
             df_op_perf_model_cleaned, agg_metrics
         )
         op_cat_name = "_".join(op_cat.lower().split())
-        dict_dfs[f"op_{op_cat_name}"] = df_op
-    return dict_dfs
+        dict_name2df[f"op_{op_cat_name}"] = df_op
+    return dict_name2df
 
 
 def generate_perf_report_jax(
