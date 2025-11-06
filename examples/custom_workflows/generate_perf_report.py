@@ -14,11 +14,12 @@ from perf_report_utils import (
     collect_df_perf_metrics_per_group,
     parse_traces,
 )
-from perf_report_configs import group2ops, kernel_categories
+from perf_report_configs import group2ops, kernel_categories, cuda_categories
 from TraceLens import NcclAnalyser, TreePerfAnalyzer
 
 # Static methods
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics
+get_xlsx_mode = lambda xlsx_path: "w" if not osp.exists(xlsx_path) else "a"
 
 
 def process_single_trace(args):
@@ -49,6 +50,10 @@ def process_single_trace(args):
     df_short_kernel_events = df_kernel_events[df_kernel_events["Kernel duration (µs)"] < 10]
     short_cpu_op_counts = df_short_kernel_events["Parent cpu_op"].value_counts().to_dict()
 
+    # Collect information about cuda_runtime and cuda_driver events
+    # Synchronize, LaunchKernel, StreamCaptureMode, PointerGetAttributes, etc.
+    cuda_events = [e for e in perf_analyzer.tree.events if perf_analyzer.event_to_category(e) in cuda_categories]
+
     del perf_analyzer
 
     return {
@@ -64,6 +69,7 @@ def process_single_trace(args):
         "num_short_kernel_events_unlinked": len(short_kernel_events_unlinked),
         "short_cpu_op_counts": short_cpu_op_counts,
         "kernel_events_unlinked": kernel_events_unlinked,
+        "cuda_events": cuda_events,
     }
 
 
@@ -94,6 +100,7 @@ def analyze_traces(
 
         linked_short_kernels_all = []
         unlinked_kernel_events_all = []
+        cuda_events_all = []
         short_cpu_op_counts_all = defaultdict(int)
 
         parent_dirname = osp.basename(parent_dirpath)
@@ -176,6 +183,14 @@ def analyze_traces(
             for op_name, count in result["short_cpu_op_counts"].items():
                 short_cpu_op_counts_all[op_name] += count
 
+            for e in result["cuda_events"]:
+                cuda_events_all.append({
+                    'rank': rank,
+                    'name': e.get("name", "unknown"),
+                    'cat': e.get("cat", "unknown"),
+                    'dur': e.get("dur", 0),
+                })
+
             gc.collect()
 
         print("Processing dataframes")
@@ -194,13 +209,13 @@ def analyze_traces(
             df_all_summary = summarize_df_perf_metrics(df_all, agg_metrics=["mean", "std"])
             df_all_summary["kernel_time_sum_cum_pct"] = df_all_summary["Kernel Time (µs)_sum"].cumsum() / df_all_summary["Kernel Time (µs)_sum"].sum()
 
-            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+            with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
                 df_all_summary.to_excel(writer, sheet_name=group, index=False)
 
             if node_replay and group in ["gemm", "conv"]:
                 df_node_replay_results = run_node_replay(group, df_all_summary, parent_dirpath)
 
-                with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+                with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
                     df_node_replay_results.to_excel(writer, sheet_name=f"{group}_node_replay", index=True)
 
             gc.collect()
@@ -208,7 +223,7 @@ def analyze_traces(
         # Build and write kernel launcher metrics summaries from all ranks
         # Add avg and std to kernel launchers
         # Write gpu timelines from all ranks
-        with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+        with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
             df_kernel_launchers_all_summary = build_kernel_launchers_summary(df_kernel_launchers_all, world_size)
 
             df_kernel_launchers_all_summary.to_excel(writer, sheet_name="kernel_launchers", index=False)
@@ -216,7 +231,7 @@ def analyze_traces(
 
         # Build and write (un)linked short kernel info
         df_linked_short_kernels_all = pd.DataFrame(linked_short_kernels_all)
-        with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+        with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
             df_linked_short_kernels_all.to_excel(writer, sheet_name="linked_and_short_kernels", index=False)
 
         if unlinked_kernel_events_all:
@@ -229,7 +244,7 @@ def analyze_traces(
             ).reset_index()
 
             df_unlinked_summary.sort_values(by='count', ascending=False, inplace=True)
-            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+            with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
                 df_unlinked_summary.to_excel(writer, sheet_name="unlinked_short_kernels_summary", index=False)
         else:
             print("No unlinked kernel events found.")
@@ -239,15 +254,33 @@ def analyze_traces(
             df_short_cpu_op_counts_all.sort_values(by='count', ascending=False, inplace=True)
             total_count = df_short_cpu_op_counts_all['count'].sum()
             df_short_cpu_op_counts_all.loc['Total'] = total_count
-            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+            with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
                 df_short_cpu_op_counts_all.to_excel(writer, sheet_name="short_cpu_op_counts", index=True)
         else:
             print("No short CPU ops found.")
 
+        if cuda_events_all:
+            df_cuda_events_all = pd.DataFrame(cuda_events_all)
+            df_cuda_summary_by_rank = df_cuda_events_all.groupby(['name', 'cat', 'rank']).agg(
+                count=('dur', 'size'),
+                min_dur=('dur', 'min'),
+                max_dur=('dur', 'max'),
+                mean_dur=('dur', 'mean')
+            ).reset_index()
+
+            df_cuda_summary = df_cuda_summary_by_rank.pivot(
+                index=['name', 'cat'],
+                columns='rank',
+                values=['count', 'min_dur', 'max_dur', 'mean_dur']
+            )
+
+            with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
+                df_cuda_summary.to_excel(writer, sheet_name="cuda_events_summary", index=True)
+
         # Build and write high-level grouped breakdown
         df_grouped_breakdown = build_grouped_breakdown(df_kernel_launchers_all_summary, df_gpu_timelines_all)
 
-        with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
+        with pd.ExcelWriter(xlsx_path, mode=get_xlsx_mode(xlsx_path)) as writer:
             df_grouped_breakdown.to_excel(writer, sheet_name="grouped_breakdown", index=False)
 
         elapsed_time = time.perf_counter() - start_time

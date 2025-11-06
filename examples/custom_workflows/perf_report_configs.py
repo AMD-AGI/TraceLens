@@ -6,6 +6,11 @@ kernel_categories = [
     "gpu_memset",
 ]
 
+cuda_categories = [
+    "cuda_runtime",
+    "cuda_driver",
+]
+
 # These ops are used for calculating detailed performance metrics for these ops
 # https://github.com/AMD-AIG-AIMA/TraceLens/blob/main/TraceLens/PerfModel/torch_op_mapping.py
 gemm_perf_ops = [
