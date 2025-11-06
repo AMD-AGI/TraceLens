@@ -75,13 +75,8 @@ class TreePerfAnalyzer:
         # include unlinked kernels in gpu timeline
         self.include_unlinked_kernels = include_unlinked_kernels
         # we check if profile contains python func events
-        self.with_python_stack = next(
-            (
-                True
-                for event in self.tree.events
-                if self.event_to_category(event) == "python_func"
-            ),
-            False,
+        self.with_python_stack = any(
+            event.get("cat") == "python_func" for event in self.tree.events
         )
         self.tree.build_tree(add_python_func=add_python_func)
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
