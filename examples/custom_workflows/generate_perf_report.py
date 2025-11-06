@@ -61,7 +61,6 @@ def process_single_trace(args):
         'dfs_per_group': dfs_per_group,
         'df_kernel_launchers': df_kernel_launchers,
         'df_gpu_timeline': df_gpu_timeline,
-        'short_cpu_op_counts': short_cpu_op_counts,
         "num_kernel_events": len(kernel_events),
         "num_kernel_events_linked": len(kernel_events_linked),
         "num_kernel_events_unlinked": len(kernel_events_unlinked),

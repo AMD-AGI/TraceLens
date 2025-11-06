@@ -19,6 +19,7 @@ def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern
 
     if ext not in ["json", "gz"]:
         print(f"==================== Invalid extension {ext}, json and gz are supported ====================")
+        return None
 
     all_traces = [
         filepath
@@ -28,6 +29,7 @@ def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern
 
     if not all_traces:
         print(f"==================== No {ext} files found, check filters and filepaths ====================")
+        return None
 
     all_traces_grouped = defaultdict(list)
     for filepath in all_traces:
@@ -68,7 +70,7 @@ def collect_parent_child_hierarchy(perf_analyzer, events, full_stack=False):
             parent = tree.get_parent_event(root)
 
         # Collect children
-        def collect_descendants(evt):
+        def collect_descendants(evt, full_stack=False):
             descendants = []
             children_dur = 0
             stack = [evt]
@@ -90,7 +92,7 @@ def collect_parent_child_hierarchy(perf_analyzer, events, full_stack=False):
 
             return descendants, children_dur
 
-        descendants, children_dur = collect_descendants(root)
+        descendants, children_dur = collect_descendants(root, full_stack=full_stack)
 
         if root['name'] in root_to_children_all:
             match = False
@@ -100,12 +102,11 @@ def collect_parent_child_hierarchy(perf_analyzer, events, full_stack=False):
                     break
 
             if not match:
-                root_to_children = {
-                        'children': descendants,
-                        'total_duration_us': root.get('dur', 0),
-                        'children_duration_us': children_dur,
-                    }
-                root_to_children_all[root["name"]] = {root["UID"]: root_to_children}
+                root_to_children_all[root["name"]][root["UID"]] = {
+                    'children': descendants,
+                    'total_duration_us': root.get('dur', 0),
+                    'children_duration_us': children_dur,
+                }
         else:
             root_to_children = {
                 'children': descendants,
