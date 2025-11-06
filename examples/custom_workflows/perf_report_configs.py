@@ -4,8 +4,6 @@ kernel_categories = [
     "kernel",
     "gpu_memcpy",
     "gpu_memset",
-    "cuda_runtime",
-    "cuda_driver",
 ]
 
 # These ops are used for calculating detailed performance metrics for these ops

@@ -7,7 +7,7 @@ from collections import defaultdict
 import pandas as pd
 import warnings
 from typing import Callable
-from perf_report_configs import all_ops_launchers, grouped_breakdown_mapping
+from perf_report_configs import grouped_breakdown_mapping
 from TraceLens import TreePerfAnalyzer
 
 # Static methods
