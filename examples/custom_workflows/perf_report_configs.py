@@ -58,7 +58,8 @@ group2ops = {
 # In addition to gemm and elemwise ops,
 # these launchers are used for constructing high-level grouped breakdown from the kernel launchers summary
 conv_ops_launchers = [
-    "aten::miopen_convolution", "aten::cudnn_convolution",
+    "aten::miopen_convolution",
+    "aten::cudnn_convolution",
 ]
 
 pad_ops_launchers = [
@@ -66,7 +67,8 @@ pad_ops_launchers = [
 ]
 
 upsample_ops_launchers = [
-    "aten::upsample_nearest3d", "aten::upsample_nearest2d",
+    "aten::upsample_nearest3d",
+    "aten::upsample_nearest2d",
     "aten::upsample_bicubic2d",
     "aten::_upsample_nearest_exact2d",
 ]
@@ -101,14 +103,27 @@ concat_ops_launchers = [
 ]
 
 moe_ops_launchers = [
-    "vllm::moe_forward", # Check vllm::rocm_aiter_fused_moe, aiter::fused_moe_
+    "vllm::moe_forward",  # Check vllm::rocm_aiter_fused_moe, aiter::fused_moe_
 ]
 
-all_ops_launchers = gemm_perf_ops + conv_ops_launchers + pad_ops_launchers + upsample_ops_launchers + norm_ops_launchers + attn_ops_launchers + unary_elemwise_ops + binary_elemwise_ops + concat_ops_launchers + moe_ops_launchers
+all_ops_launchers = (
+    gemm_perf_ops
+    + conv_ops_launchers
+    + pad_ops_launchers
+    + upsample_ops_launchers
+    + norm_ops_launchers
+    + attn_ops_launchers
+    + unary_elemwise_ops
+    + binary_elemwise_ops
+    + concat_ops_launchers
+    + moe_ops_launchers
+)
+
 
 def check_triton_fn(op_name: str) -> bool:
     return op_name.startswith("triton_")
-    
+
+
 grouped_breakdown_mapping = {
     "Attention": attn_ops_launchers,
     "GEMM": gemm_perf_ops,

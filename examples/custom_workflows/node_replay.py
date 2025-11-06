@@ -78,7 +78,7 @@ def benchmark_func(
     device: str,
     envvars: Optional[Dict[str, str]] = None,
     warmup: int = 1000,
-    active_steps: int = 1000
+    active_steps: int = 1000,
 ) -> Optional[float]:
     """
     Benchmark a function with warmup and average steps.
@@ -106,7 +106,9 @@ def benchmark_func(
             # Redirect stderr at OS level
             # Restore stderr and clean up
             orig_stderr_fd = os.dup(2)
-            log_fd = os.open(envvars["MIOPEN_LOG_FILE"], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+            log_fd = os.open(
+                envvars["MIOPEN_LOG_FILE"], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644
+            )
             os.dup2(log_fd, 2)
             func()
             os.dup2(orig_stderr_fd, 2)
@@ -149,15 +151,13 @@ def benchmark_func_wrapper(args: Tuple) -> Optional[float]:
     return avg_time_us
 
 
-def run_subprocess_cmd(cmd: Union[str, List[str]], shell: bool = False) -> Optional[str]:
+def run_subprocess_cmd(
+    cmd: Union[str, List[str]], shell: bool = False
+) -> Optional[str]:
     """Run a subprocess command and return the stdout as string"""
     try:
         result = subprocess.run(
-            cmd,
-            shell=shell,
-            capture_output=True,
-            text=True,
-            check=True
+            cmd, shell=shell, capture_output=True, text=True, check=True
         )
         return result.stdout
     except subprocess.CalledProcessError as e:
@@ -191,7 +191,10 @@ def prepare_hipblaslt_bench_cmd(log_file: str):
         [r"s/--cold_iters [0-9]*/--cold_iters 100/g", log_file],
         [r"s/--iters [0-9]*/--iters 100/g", log_file],
         [r"s/--rotating [0-9]*/--rotating 512/g", log_file],
-        [r"s/$/ --flush --initialization trig_float --use_gpu_timer --print_kernel_info/", log_file],
+        [
+            r"s/$/ --flush --initialization trig_float --use_gpu_timer --print_kernel_info/",
+            log_file,
+        ],
         # hipBLASLT 0.15 bug, remove aux_type flag due to warning: --use_e not set but --aux_type is provided
         [r"s/--aux_type f32_r//g", log_file],
     ]
@@ -216,7 +219,9 @@ def run_single_hipblaslt_bench(log_file: str) -> float:
     with open(log_file, "r") as file:
         hipblaslt_bench_cmd = file.read().strip()
 
-    result_stdout = run_subprocess_cmd(hipblaslt_bench_cmd, shell=True) # shell=True is a potential security risk (!)
+    result_stdout = run_subprocess_cmd(
+        hipblaslt_bench_cmd, shell=True
+    )  # shell=True is a potential security risk (!)
     result_stdout_lines = result_stdout.split("\n")
     target_line = result_stdout_lines[-5]
     # ...,hipblaslt-Gflops,hipblaslt-GB/s,us
@@ -230,7 +235,9 @@ def run_single_miopen_driver(log_file: str) -> float:
     with open(log_file, "r") as file:
         miopen_driver_cmd = file.read().strip()
 
-    result_stdout = run_subprocess_cmd(miopen_driver_cmd, shell=True) # shell=True is a potential security risk (!)
+    result_stdout = run_subprocess_cmd(
+        miopen_driver_cmd, shell=True
+    )  # shell=True is a potential security risk (!)
     result_stdout_lines = result_stdout.split("\n")
     target_line = result_stdout_lines[-3]
     # ..., GFLOPs, GB/s, timeMs
@@ -264,7 +271,9 @@ def run_node_replay(group, df_ops_summary, base_path):
         print(f"No events to replay from group {group}")
         return
 
-    df_ops_summary_99pct = df_ops_summary[df_ops_summary["kernel_time_sum_cum_pct"] < 0.99]
+    df_ops_summary_99pct = df_ops_summary[
+        df_ops_summary["kernel_time_sum_cum_pct"] < 0.99
+    ]
 
     if df_ops_summary_99pct.empty:
         df_ops_summary_99pct = df_ops_summary
@@ -273,7 +282,12 @@ def run_node_replay(group, df_ops_summary, base_path):
 
     df_results = None
     device = "cuda"
-    args_cols = ["Input Dims_first", "Input type_first", "Input Strides_first", "Concrete Inputs_first"]
+    args_cols = [
+        "Input Dims_first",
+        "Input type_first",
+        "Input Strides_first",
+        "Concrete Inputs_first",
+    ]
 
     for i in range(len(df_ops_summary_99pct)):
         event = dict(args=dict())
@@ -291,7 +305,9 @@ def run_node_replay(group, df_ops_summary, base_path):
         logging_envvars = get_logging_envvars(group, i, base_path)
 
         # Log hipblaslt-bench/MIOpenDriver commands (pass envvars, no warmup, 1 active step)
-        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as executor:
+        with ProcessPoolExecutor(
+            max_workers=1, mp_context=get_context("spawn")
+        ) as executor:
             args = [(replayer.replay, device, logging_envvars, 0, 1)]
             _ = list(executor.map(benchmark_func_wrapper, args))
 
@@ -299,7 +315,9 @@ def run_node_replay(group, df_ops_summary, base_path):
         bench_time_mean = run_microbenchmarking(group, logging_envvars)
 
         # Node replay time (no envvars, 1000 warmup and 1000 active steps)
-        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as executor:
+        with ProcessPoolExecutor(
+            max_workers=1, mp_context=get_context("spawn")
+        ) as executor:
             args = [(replayer.replay, device, None, 1000, 1000)]
             result = list(executor.map(benchmark_func_wrapper, args))
 
@@ -312,8 +330,12 @@ def run_node_replay(group, df_ops_summary, base_path):
         diff_profile = replay_time_mean - profile_time_mean
         diff_bench = bench_time_mean - profile_time_mean
 
-        percent_diff_profile = (replay_time_mean - profile_time_mean) / profile_time_mean * 100
-        percent_diff_bench = (bench_time_mean - profile_time_mean) / profile_time_mean * 100
+        percent_diff_profile = (
+            (replay_time_mean - profile_time_mean) / profile_time_mean * 100
+        )
+        percent_diff_bench = (
+            (bench_time_mean - profile_time_mean) / profile_time_mean * 100
+        )
 
         result_dict = {
             f"{group} no.": i,
@@ -326,7 +348,11 @@ def run_node_replay(group, df_ops_summary, base_path):
             f"Diff profile vs. {group}-bench (pct)": percent_diff_bench,
         }
 
-        df_results = pd.concat([df_results, pd.DataFrame([result_dict])]) if df_results is not None else pd.DataFrame([result_dict])
+        df_results = (
+            pd.concat([df_results, pd.DataFrame([result_dict])])
+            if df_results is not None
+            else pd.DataFrame([result_dict])
+        )
 
         del replayer
         gc.collect()
@@ -342,15 +368,26 @@ def process_single_trace_for_replay(args):
     filepath, rank = args
 
     perf_analyzer = TreePerfAnalyzer.from_file(filepath)
-    dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops, rank=rank)
+    dfs_per_group = collect_df_perf_metrics_per_group(
+        perf_analyzer, group2ops, rank=rank
+    )
 
     del perf_analyzer
 
     return dfs_per_group
 
 
-def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", include_only=["rank_0"], dry_run=False, xlsx_path=None):
-    all_traces_grouped_sorted = parse_traces(base_dirpath, ext, include_only, rank_pattern)
+def run_standalone_node_replay(
+    base_dirpath,
+    rank_pattern="rank_",
+    ext="json",
+    include_only=["rank_0"],
+    dry_run=False,
+    xlsx_path=None,
+):
+    all_traces_grouped_sorted = parse_traces(
+        base_dirpath, ext, include_only, rank_pattern
+    )
 
     pattern = f"{rank_pattern}(\\d+)"
 
@@ -359,7 +396,9 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
 
     for parent_dirpath, filenames in all_traces_grouped_sorted.items():
         if xlsx_path is not None and len(all_traces_grouped_sorted) > 1:
-            print("Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path.")
+            print(
+                "Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path."
+            )
             return
 
         dfs_all = {group: None for group in group2ops}
@@ -367,7 +406,9 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
         parent_dirname = osp.basename(parent_dirpath)
         prefix = "_".join([parent_dirname, *include_only])
 
-        xlsx_path = xlsx_path or osp.join(parent_dirpath, f"{prefix}_node_replay_report.xlsx")
+        xlsx_path = xlsx_path or osp.join(
+            parent_dirpath, f"{prefix}_node_replay_report.xlsx"
+        )
 
         print("==================== Creating node replay report ====================")
         print(f"Parent directory: {parent_dirpath}")
@@ -408,18 +449,31 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
         # Aggregate results
         for dfs_per_group in results:
             for group, df in dfs_per_group.items():
-                dfs_all[group] = pd.concat([dfs_all[group], df]) if dfs_all[group] is not None else df
+                dfs_all[group] = (
+                    pd.concat([dfs_all[group], df])
+                    if dfs_all[group] is not None
+                    else df
+                )
 
         gc.collect()
 
         for group, df_ops in dfs_all.items():
-            df_ops_summary = summarize_df_perf_metrics(df_ops, agg_metrics=["mean", "std"])
-            df_ops_summary["kernel_time_sum_cum_pct"] = df_ops_summary["Kernel Time (µs)_sum"].cumsum() / df_ops_summary["Kernel Time (µs)_sum"].sum()
+            df_ops_summary = summarize_df_perf_metrics(
+                df_ops, agg_metrics=["mean", "std"]
+            )
+            df_ops_summary["kernel_time_sum_cum_pct"] = (
+                df_ops_summary["Kernel Time (µs)_sum"].cumsum()
+                / df_ops_summary["Kernel Time (µs)_sum"].sum()
+            )
             df_results = run_node_replay(group, df_ops_summary, parent_dirpath)
             print(df_results.to_string())
 
-            with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
-                df_results.to_excel(writer, sheet_name=f"{group}_node_replay", index=True)
+            with pd.ExcelWriter(
+                xlsx_path, mode="a" if osp.exists(xlsx_path) else "w"
+            ) as writer:
+                df_results.to_excel(
+                    writer, sheet_name=f"{group}_node_replay", index=True
+                )
 
         xlsx_path = None
         gc.collect()
@@ -441,13 +495,45 @@ def check_node_replay_dependencies() -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse and summarize traces produced by torch profiler using TraceLens.")
-    parser.add_argument("-b", type=str, required=True, help="Path to base directory which contains profiling experiments as subdirectories.")
-    parser.add_argument("-p", type=str, default="rank_", help="Pattern to use for finding the rank of a trace from filename. Supports <string><sep> where separator can be empty, - or _.")
-    parser.add_argument("-e", type=str, default="json", help="Extension to use for identifying trace files. json and gz are supported.")
-    parser.add_argument("-f", type=str, nargs='+', default=["rank_0"], help="Select files containing given substring(s) in their name.")
-    parser.add_argument("-d", action="store_true", help="Dry run for checking if correct trace paths found.")
-    parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel node replay report. Note that this works only with a single base/parent directory containing one set of traces.")
+    parser = argparse.ArgumentParser(
+        description="Parse and summarize traces produced by torch profiler using TraceLens."
+    )
+    parser.add_argument(
+        "-b",
+        type=str,
+        required=True,
+        help="Path to base directory which contains profiling experiments as subdirectories.",
+    )
+    parser.add_argument(
+        "-p",
+        type=str,
+        default="rank_",
+        help="Pattern to use for finding the rank of a trace from filename. Supports <string><sep> where separator can be empty, - or _.",
+    )
+    parser.add_argument(
+        "-e",
+        type=str,
+        default="json",
+        help="Extension to use for identifying trace files. json and gz are supported.",
+    )
+    parser.add_argument(
+        "-f",
+        type=str,
+        nargs="+",
+        default=["rank_0"],
+        help="Select files containing given substring(s) in their name.",
+    )
+    parser.add_argument(
+        "-d",
+        action="store_true",
+        help="Dry run for checking if correct trace paths found.",
+    )
+    parser.add_argument(
+        "-o",
+        type=str,
+        default=None,
+        help="Filepath to save the Excel node replay report. Note that this works only with a single base/parent directory containing one set of traces.",
+    )
 
     args = parser.parse_args()
 
