@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ## What's New: Deeper Efficiency Metrics
 This document details a new feature in TraceLens, providing deeper insights into the efficiency of GEMM (General Matrix Multiplication) operations, specifically focusing on Tensile kernels used on ROCm GPU. This analysis complements the existing Roofline metrics by breaking down performance limitations related to how gemm computations are tiled and scheduled onto the GPU.
 

@@ -1,41 +1,70 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TraceLens
+
 TraceLens is a Python library focused on **automating analysis from trace files** and enabling rich performance insights. Designed with **simplicity and extensibility** in mind, this library provides tools to simplify the process of profiling and debugging complex distributed training and inference systems.
+Find the PyTorch Conference 2025 poster for TraceLens [here](docs/TraceLens%20-%20Democratizing%20AI%20Performance%20Analysis%20-%20Adeem%20Jassani%2C%20AMD.pdf).
+## Key Features
 
-🚨 **Alpha Release**: TraceLens is currently in its Alpha stage. This means the core features are functional, but the software may still have bugs. Feedback is highly encouraged to improve the tool for broader use cases!
+✨ **Hierarchical Performance Breakdowns**: Pinpoint bottlenecks with a top-down view, moving from the overall GPU timeline (idle/busy) to operator categories (e.g., convolutions), individual operators, and right down to unique argument shapes.
 
-### Overview
+⚙️ **Compute & Roofline Modeling**: Automatically translate raw timings into efficiency metrics like **TFLOP/s** and **TB/s** for popular operations. Determine if an op is compute- or memory-bound and see how effectively your code is using the hardware.
 
-The library currently includes three tools:
+🔗 **Multi-GPU Communication Analysis**: Accurately diagnose scaling issues by dissecting collective operations. TraceLens separates pure communication time from synchronization skew and calculates effective bandwidth on your real workload, not a synthetic benchmark.
 
-- **Trace2Tree and TreePerf**: 
-    - Trace2Tree Parses trace files into a hierarchical **call stack tree** intermediate representation (IR) that maps CPU operations to GPU kernels. 
-    - TreePerf uses the tree IR from Trace2Tree to compute detailed **performance metrics** such as TFLOPS/s, FLOPS, FLOPS/Byte, and GPU execution times. 
-- **NcclAnalyser**: Analyzes collective communication operations to extract key metrics like communication latency, bandwidth and sync metrics.
-- **TraceFusion** : Merges distributed trace files for a global view of events across ranks in PerfettoUI. 
+🔄 **Trace Comparison**: Quantify the impact of your changes with powerful trace diffing. By analyzing performance at the CPU dispatch level, TraceLens enables meaningful side-by-side comparisons across different hardware and software versions.
 
-## Installation
+▶️ **Event Replay**: Isolate any operation for focused debugging. TraceLens generates minimal, self-contained replay scripts directly from trace metadata, making it simple to share IP-safe test cases with kernel developers.
 
+🔧 **Extensible SDK**: Get started instantly with ready-to-use scripts, then build your own custom workflows using a flexible and hackable Python API.
 
-1. (Optional) Create virtual environment: `python3 -m venv .venv`
-2. (Optional) Activate the virtual environment: `source .venv/bin/activate`
-3. Install the package `pip install .`
+## Quick Start
 
+### Installation
 
-### Quick start
-Each tool in TraceLens has documentation and examples. To get started with any tool navigate to the respective tool's docs markdown file and then to the example. 
+**1. Install TraceLens directly from GitHub:**
 
-### What's New in v0.2.x
-- **NCCL Analyzer Upgrade**: Improved robustness, supports collectives on subset of world size and handles asymmetric activity across ranks
-- **API Changes**:  
-  - `TreePerfAnalyser.from_file(file)` replaces `TreePerfAnalyser(file)`.  
-  - NCCL Analyzer API updated for clarity (see docs & notebooks).  
+```bash
+pip install git+https://github.com/AMD-AGI/TraceLens.git
+```
 
-### What's New in v0.3.x
-- **NN Module View**: Visualize the nn module hierarchy with the GPU time spent in each module. This is useful for performance aware architecture design.
-- **Perf Model**: New ops support including unary and binary elementwise ops.
-- **Jax Support for GPUEventAnalyser**: Get compute-communication-memcpy and overlap metrics for Jax profiles. Thanks to @gabeweisz for the contribution!
+**2. Command Line Scripts for popular analyses**
 
-Bug Fixes: Allgather incorrect msg size calculation fixed.
+- **Generate Excel Reports from Traces** Detailed docs [here](docs/generate_perf_report.md)
+(you can use compressed traces too such as .zip and .gz)
 
-Check out the example notebooks for details! 🚀  
+```bash
+TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
+```
 
+- **Compare Traces** Detailed docs [here](docs/compare_perf_reports_pytorch.md)
+
+```bash
+TraceLens_compare_perf_reports_pytorch \
+    baseline.xlsx \
+    candidate.xlsx \
+    --names baseline candidate \
+    --sheets all \
+    -o comparison.xlsx
+```
+
+- **Generate Collective Performance Report** Detailed docs [here](docs/generate_multi_rank_collective_report_pytorch.md)
+
+```bash
+TraceLens_generate_multi_rank_collective_report_pytorch \
+    --trace_dir /path/to/traces \
+    --world_size 8 \
+```
+
+Refer to the individual module docs in the docs/ directory and the example notebooks under examples/ for further guidance.
+
+**📦 Custom Workflows**: Check out [examples/custom_workflows/](examples/custom_workflows/) for community-contributed utilities including **roofline_analyzer** and **traceMap** — powerful tools we're working on integrating more tightly into the core library.
+
+## Contributing
+
+We welcome issues, bug reports, and pull requests. Feel free to open discussions in the GitHub repository
+or contribute new performance models, operator mappings or analysis modules. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
