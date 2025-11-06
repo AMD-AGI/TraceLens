@@ -32,7 +32,7 @@ jobs:
       - name: Run pytest on function-based tests
         run: |
           pip install pytest
-          pytest tests/test_subtract_intervals.py
+          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py
 
       - name: Run pytest on report regression tests
         run: |
