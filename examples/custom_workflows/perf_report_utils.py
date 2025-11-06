@@ -119,7 +119,7 @@ def collect_parent_child_hierarchy(perf_analyzer, events, full_stack=False):
     return root_to_children_all
 
 
-def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
+def collect_df_perf_metrics_per_group(perf_analyzer, group2ops, rank):
     dfs_all = {group: None for group in group2ops}
     all_events_with_shapes = [event for event in perf_analyzer.tree.events if 'Input Dims' in event.get("args", {})]
     parent_child_hierarchy = collect_parent_child_hierarchy(perf_analyzer, all_events_with_shapes)
@@ -142,9 +142,9 @@ def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
                     children_duration_us = root_to_children['children_duration_us']
                     children = list(set(root_to_children['children']))
                     print(
-                        f"Parent: {parent}   UID: {uid}, Duration: {total_duration_us/1000:.3f} ms, "
-                        f"Children: ({children_duration_us/1000:.3f} ms):\n"
-                        f"        {', '.join(children) if children else '(none)'}"
+                        f"[rank{rank}] Parent: {parent}   UID: {uid}, Duration: {total_duration_us/1000:.3f} ms, "
+                        f"   Children: ({children_duration_us/1000:.3f} ms):\n"
+                        f"                {', '.join(children) if children else '(none)'}"
                     )
             continue
 

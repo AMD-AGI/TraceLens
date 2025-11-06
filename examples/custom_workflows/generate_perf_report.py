@@ -29,7 +29,7 @@ def process_single_trace(args):
     perf_analyzer = TreePerfAnalyzer.from_file(filepath)
 
     # Collect group-specific perf metrics
-    dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops)
+    dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops, rank)
 
     # Collect kernel launcher metrics
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers()
