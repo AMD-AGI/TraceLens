@@ -380,59 +380,91 @@ def generate_perf_report_pytorch(
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
         except Exception as e:
             df_kernels = pd.DataFrame()
-        if not df_kernels.empty and 'Kernel duration (µs)' in df_kernels.columns:
+        if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
-            if 'Parent cpu_op' in df_kernels.columns and 'Launcher' in df_kernels.columns:
-                mask_missing_parent = df_kernels['Parent cpu_op'].isna()
+            if (
+                "Parent cpu_op" in df_kernels.columns
+                and "Launcher" in df_kernels.columns
+            ):
+                mask_missing_parent = df_kernels["Parent cpu_op"].isna()
                 if mask_missing_parent.any():
-                    df_kernels.loc[mask_missing_parent, 'Parent cpu_op'] = df_kernels.loc[mask_missing_parent, 'Launcher']
+                    df_kernels.loc[mask_missing_parent, "Parent cpu_op"] = (
+                        df_kernels.loc[mask_missing_parent, "Launcher"]
+                    )
 
             # Fallback categorization for graph/runtime launched kernels with no cpu_op
             # Note: Basic 'Parent op category' is added by get_kernel_details() in tree_perf.py
             # This adds categorization for kernels that don't have a parent cpu_op
-            if 'Parent op category' not in df_kernels.columns:
-                df_kernels['Parent op category'] = np.nan
-            
-            if 'Launcher' in df_kernels.columns:
-                mask_missing_cat = df_kernels['Parent op category'].isna()
+            if "Parent op category" not in df_kernels.columns:
+                df_kernels["Parent op category"] = np.nan
+
+            if "Launcher" in df_kernels.columns:
+                mask_missing_cat = df_kernels["Parent op category"].isna()
                 if mask_missing_cat.any():
+
                     def _launcher_category(name):
                         s = str(name).lower()
-                        if 'cudagraph' in s or 'graphlaunch' in s:
-                            return 'graph'
-                        return 'runtime' if s and s != 'nan' else np.nan
-                    df_kernels.loc[mask_missing_cat, 'Parent op category'] = df_kernels.loc[mask_missing_cat, 'Launcher'].apply(_launcher_category)
+                        if "cudagraph" in s or "graphlaunch" in s:
+                            return "graph"
+                        return "runtime" if s and s != "nan" else np.nan
+
+                    df_kernels.loc[mask_missing_cat, "Parent op category"] = (
+                        df_kernels.loc[mask_missing_cat, "Launcher"].apply(
+                            _launcher_category
+                        )
+                    )
 
             # Group by category/cpu_op along with kernel identifiers when available
             group_cols = []
-            for col in ['Parent op category', 'Parent cpu_op', 'Kernel name', 'Kernel stream']:
+            for col in [
+                "Parent op category",
+                "Parent cpu_op",
+                "Kernel name",
+                "Kernel stream",
+            ]:
                 if col in df_kernels.columns:
                     group_cols.append(col)
             if not group_cols:
-                group_cols = ['Kernel name'] if 'Kernel name' in df_kernels.columns else []
+                group_cols = (
+                    ["Kernel name"] if "Kernel name" in df_kernels.columns else []
+                )
 
-            agg_dict = {'Kernel duration (µs)': ['sum', 'count', 'mean', 'min', 'max']}
-            df_kernel_summary = df_kernels.groupby(group_cols, dropna=False).agg(agg_dict)
-            df_kernel_summary.columns = ['_'.join(col).strip() for col in df_kernel_summary.columns.values]
+            agg_dict = {"Kernel duration (µs)": ["sum", "count", "mean", "min", "max"]}
+            df_kernel_summary = df_kernels.groupby(group_cols, dropna=False).agg(
+                agg_dict
+            )
+            df_kernel_summary.columns = [
+                "_".join(col).strip() for col in df_kernel_summary.columns.values
+            ]
             df_kernel_summary.reset_index(inplace=True)
 
             # Percent columns:
             # 1) Percent of kernels time: sums to ~100% across rows
-            total_kernels_us = df_kernels['Kernel duration (µs)'].sum()
+            total_kernels_us = df_kernels["Kernel duration (µs)"].sum()
             if total_kernels_us > 0:
-                df_kernel_summary['Percent of kernels time (%)'] = (df_kernel_summary['Kernel duration (µs)_sum'] / total_kernels_us) * 100
+                df_kernel_summary["Percent of kernels time (%)"] = (
+                    df_kernel_summary["Kernel duration (µs)_sum"] / total_kernels_us
+                ) * 100
             else:
-                df_kernel_summary['Percent of kernels time (%)'] = np.nan
+                df_kernel_summary["Percent of kernels time (%)"] = np.nan
             # 2) Percent of total time (GPU timeline baseline; includes idle/non-kernel)
-            total_us = perf_analyzer.total_time_ms * 1e3 if hasattr(perf_analyzer, 'total_time_ms') else None
+            total_us = (
+                perf_analyzer.total_time_ms * 1e3
+                if hasattr(perf_analyzer, "total_time_ms")
+                else None
+            )
             if total_us:
-                df_kernel_summary['Percent of total time (%)'] = (df_kernel_summary['Kernel duration (µs)_sum'] / total_us) * 100
+                df_kernel_summary["Percent of total time (%)"] = (
+                    df_kernel_summary["Kernel duration (µs)_sum"] / total_us
+                ) * 100
             else:
-                df_kernel_summary['Percent of total time (%)'] = np.nan
+                df_kernel_summary["Percent of total time (%)"] = np.nan
 
-            df_kernel_summary.sort_values(by='Kernel duration (µs)_sum', ascending=False, inplace=True)
+            df_kernel_summary.sort_values(
+                by="Kernel duration (µs)_sum", ascending=False, inplace=True
+            )
             df_kernel_summary.reset_index(drop=True, inplace=True)
-            dict_name2df['kernel_summary'] = df_kernel_summary
+            dict_name2df["kernel_summary"] = df_kernel_summary
 
     if short_kernel_study:
         dict_name2df["short_kernel_histogram"] = df_hist
@@ -598,5 +630,7 @@ def main():
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
     )
+
+
 if __name__ == "__main__":
     main()
