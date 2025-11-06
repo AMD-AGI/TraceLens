@@ -36,9 +36,7 @@ def load_single_trace_fn(args):
     rank, filepath = args
     raw_data = DataLoader.load_data(filepath)
 
-    nccl_events = [
-        e for e in raw_data["traceEvents"] if nccl_filter_event_fn(e)
-    ]
+    nccl_events = [e for e in raw_data["traceEvents"] if nccl_filter_event_fn(e)]
 
     rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
     return rank, rank_dict
@@ -122,7 +120,9 @@ class NcclAnalyser:
         max_workers = min(len(self.list_profile_filepaths), 8)
 
         # Load traces in parallel
-        self.logger.info(f"Loading {len(self.list_profile_filepaths)} traces in parallel with {max_workers} workers")
+        self.logger.info(
+            f"Loading {len(self.list_profile_filepaths)} traces in parallel with {max_workers} workers"
+        )
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             results = list(executor.map(load_single_trace_fn, process_args))
 
