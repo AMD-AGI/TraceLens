@@ -14,6 +14,8 @@ import os
 import os.path as osp
 import subprocess
 import time
+import torch
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -391,7 +393,7 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
             match = re.search(pattern, filename)
             rank = int(match.group(1))
             process_args.append((filepath, rank))
-            
+
         # Process traces in parallel
         print("Parallel processing traces")
         start_time = time.perf_counter()
@@ -407,7 +409,7 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
         for dfs_per_group in results:
             for group, df in dfs_per_group.items():
                 dfs_all[group] = pd.concat([dfs_all[group], df]) if dfs_all[group] is not None else df
-        
+
         gc.collect()
 
         for group, df_ops in dfs_all.items():
@@ -423,6 +425,21 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
         gc.collect()
 
 
+def check_node_replay_dependencies() -> bool:
+    """Check if node replay dependencies are met."""
+    status = {
+        "ROCm platform": torch.version.hip,
+        "hipblaslt-bench": shutil.which("hipblaslt-bench"),
+        "MIOpenDriver": shutil.which("MIOpenDriver"),
+    }
+    for dep, path in status.items():
+        if path is None:
+            print(f"Dependency not found: {dep}")
+            return False
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Parse and summarize traces produced by torch profiler using TraceLens.")
     parser.add_argument("-b", type=str, required=True, help="Path to base directory which contains profiling experiments as subdirectories.")
@@ -433,6 +450,10 @@ def main():
     parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel node replay report. Note that this works only with a single base/parent directory containing one set of traces.")
 
     args = parser.parse_args()
+
+    if not check_node_replay_dependencies:
+        print("Node replay dependencies not met, terminating...")
+        return
 
     run_standalone_node_replay(args.b, args.e, args.f, args.d, args.o)
 

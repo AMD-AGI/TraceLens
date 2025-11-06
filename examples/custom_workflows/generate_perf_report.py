@@ -7,7 +7,7 @@ import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
-from node_replay import run_node_replay
+from node_replay import run_node_replay, check_node_replay_dependencies
 from perf_report_utils import (
     build_grouped_breakdown,
     build_kernel_launchers_summary,
@@ -321,6 +321,10 @@ def main():
     parser.add_argument("-o", type=str, default=None, help="Filepath to save the Excel performance report. Note that this works only with a single base/parent directory containing one set of traces.")
 
     args = parser.parse_args()
+
+    if args.r and not check_node_replay_dependencies():
+        print("Node replay dependencies not met, terminating...")
+        return
 
     analyze_traces(args.b, args.p, args.e, args.f, args.r, args.d, args.o)
 
