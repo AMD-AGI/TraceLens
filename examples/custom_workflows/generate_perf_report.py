@@ -3,19 +3,17 @@ import gc
 import os.path as osp
 import re
 import time
-import pandas as pd
-
-from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
-from node_replay import run_node_replay, check_node_replay_dependencies
-from perf_report_utils import (
-    build_grouped_breakdown,
-    build_kernel_launchers_summary,
-    collect_df_perf_metrics_per_group,
-    parse_traces,
-)
-from perf_report_configs import group2ops, kernel_categories, cuda_categories
+from concurrent.futures import ProcessPoolExecutor
+
+import pandas as pd
 from TraceLens import NcclAnalyser, TreePerfAnalyzer
+
+from node_replay import check_node_replay_dependencies, run_node_replay
+from perf_report_configs import cuda_categories, group2ops, kernel_categories
+from perf_report_utils import (build_grouped_breakdown,
+                               build_kernel_launchers_summary,
+                               collect_df_perf_metrics_per_group, parse_traces)
 
 # Static methods
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics

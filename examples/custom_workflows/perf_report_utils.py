@@ -1,14 +1,15 @@
 import glob
-import re
-import numpy as np
 import os.path as osp
-from collections import defaultdict
-
-import pandas as pd
+import re
 import warnings
+from collections import defaultdict
 from typing import Callable
-from perf_report_configs import grouped_breakdown_mapping
+
+import numpy as np
+import pandas as pd
 from TraceLens import TreePerfAnalyzer
+
+from perf_report_configs import grouped_breakdown_mapping
 
 # Static methods
 get_df_kernel_launchers_summary = TreePerfAnalyzer.get_df_kernel_launchers_summary

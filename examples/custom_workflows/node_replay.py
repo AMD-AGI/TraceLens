@@ -9,21 +9,22 @@ The results are compiled into an Excel report for further analysis.
 
 import argparse
 import gc
-import re
 import os
 import os.path as osp
+import re
+import shutil
 import subprocess
 import time
-import torch
-import shutil
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
+import torch
+from TraceLens import EventReplayer, TreePerfAnalyzer
+
 from perf_report_configs import conv_perf_ops, gemm_perf_ops
 from perf_report_utils import collect_df_perf_metrics_per_group, parse_traces
-from TraceLens import EventReplayer, TreePerfAnalyzer
 
 summarize_df_perf_metrics = TreePerfAnalyzer.summarize_df_perf_metrics
 

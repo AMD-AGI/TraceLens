@@ -1,4 +1,5 @@
-from TraceLens.PerfModel.torch_op_mapping import unary_elemwise_ops, binary_elemwise_ops
+from TraceLens.PerfModel.torch_op_mapping import (binary_elemwise_ops,
+                                                  unary_elemwise_ops)
 
 kernel_categories = [
     "kernel",
