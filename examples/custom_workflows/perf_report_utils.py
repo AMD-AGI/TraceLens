@@ -16,7 +16,7 @@ get_df_kernel_launchers_summary = TreePerfAnalyzer.get_df_kernel_launchers_summa
 
 def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern="rank_"):
     pattern = f"{rank_pattern}(\\d+)"
-    
+
     if ext not in ["json", "gz"]:
         print(f"==================== Invalid extension {ext}, json and gz are supported ====================")
 
@@ -32,7 +32,7 @@ def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern
     all_traces_grouped = defaultdict(list)
     for filepath in all_traces:
         all_traces_grouped[osp.abspath(osp.dirname(filepath))].append(osp.basename(filepath))
-        
+
     all_traces_grouped_sorted = {}
     for parent_dirpath, filenames in all_traces_grouped.items():
         all_traces_grouped_sorted[parent_dirpath] = sorted(filenames, key=lambda x: int(re.search(pattern, x).group(1)))
@@ -40,18 +40,111 @@ def parse_traces(base_dirpath, ext="json", include_only=["rank_0"], rank_pattern
     return all_traces_grouped_sorted
 
 
+def collect_parent_child_hierarchy(perf_analyzer, events, full_stack=False):
+    """
+    Build a dictionary mapping root parents to their descendant children.
+
+    Args:
+        perf_analyzer: TreePerfAnalyzer instance
+        events: List of events to analyze
+
+    Returns:
+        dict: {root_parent_name: [child1, child2, ...]}
+    """
+    tree = perf_analyzer.tree
+    root_to_children_all = {}
+
+    # Create a set of event names for quick lookup
+    event_names = {event['name'] for event in events}
+
+    # For each event, find its root ancestor
+    for event in events:
+        # Find root: traverse up until parent is not in our event set
+        root = event
+        parent = tree.get_parent_event(root)
+
+        while parent is not None and parent['name'] in event_names:
+            root = parent
+            parent = tree.get_parent_event(root)
+
+        # Collect children
+        def collect_descendants(evt):
+            descendants = []
+            children_dur = 0
+            stack = [evt]
+
+            while stack:
+                current = stack.pop()
+                for child_uid in current.get('children', []):
+                    if not child_uid:
+                        continue
+
+                    child = tree.get_UID2event(child_uid)
+                    # Skip if filtered mode and not in event_names
+                    if not full_stack and child['name'] not in event_names:
+                        continue
+
+                    descendants.append(child['name'])
+                    children_dur += child.get('dur', 0)
+                    stack.append(child)
+
+            return descendants, children_dur
+
+        descendants, children_dur = collect_descendants(root)
+
+        if root['name'] in root_to_children_all:
+            match = False
+            for _, root_to_children in root_to_children_all[root["name"]].items():
+                if root_to_children['children'] == descendants:
+                    match = True
+                    break
+
+            if not match:
+                root_to_children = {
+                        'children': descendants,
+                        'total_duration_us': root.get('dur', 0),
+                        'children_duration_us': children_dur,
+                    }
+                root_to_children_all[root["name"]] = {root["UID"]: root_to_children}
+        else:
+            root_to_children = {
+                'children': descendants,
+                'total_duration_us': root.get('dur', 0),
+                'children_duration_us': children_dur,
+            }
+
+            root_to_children_all[root["name"]] = {root["UID"]: root_to_children}
+
+    return root_to_children_all
+
+
 def collect_df_perf_metrics_per_group(perf_analyzer, group2ops):
     dfs_all = {group: None for group in group2ops}
     all_events_with_shapes = [event for event in perf_analyzer.tree.events if 'Input Dims' in event.get("args", {})]
-    all_events_with_shapes_unique_names = set(event["name"] for event in all_events_with_shapes)
+    parent_child_hierarchy = collect_parent_child_hierarchy(perf_analyzer, all_events_with_shapes)
 
     for group, ops in group2ops.items():
         events = [event for event in all_events_with_shapes if event["name"] in ops]
 
         if not events:
             print(f"Failed to build performance metrics from group {group}.")
-            print("Ensure 1) target op is present in the trace, 2) target op is included in group2ops and 3) profiler has record_shapes=True.")
-            print("Available ops with input shapes:", all_events_with_shapes_unique_names)
+            print("Ensure:")
+            print("  1) Target op is present in the trace")
+            print("  2) Op is present in op_to_perf_model_class_map")
+            print("  3) Op is included in group2ops")
+            print("  4) Profiler has record_shapes=True")
+
+            print("Available ops with input shapes in the trace (grouped by root parent ops):\n")
+            for parent, data in sorted(parent_child_hierarchy.items()):
+                for uid, root_to_children in data.items():
+                    total_duration_us = root_to_children['total_duration_us']
+                    children_duration_us = root_to_children['children_duration_us']
+                    children = list(set(root_to_children['children']))
+                    print(
+                        f"Parent: {parent}   UID: {uid}, Duration: {total_duration_us/1000:.3f} ms, "
+                        f"Children: ({children_duration_us/1000:.3f} ms):\n"
+                        f"        {', '.join(children) if children else '(none)'}"
+                    )
             continue
 
         df_ops = perf_analyzer.build_df_perf_metrics(events, bwd=False, non_data_mov=True, include_kernel_details=True, include_args=True)
