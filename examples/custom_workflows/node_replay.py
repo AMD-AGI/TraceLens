@@ -9,6 +9,7 @@ The results are compiled into an Excel report for further analysis.
 
 import argparse
 import gc
+import re
 import os
 import os.path as osp
 import subprocess
@@ -334,8 +335,22 @@ def run_node_replay(group, df_ops_summary, base_path):
     return df_results
 
 
+def process_single_trace_for_replay(args):
+    """Process a single trace file and return group-specific dataframes."""
+    filepath, rank = args
+
+    perf_analyzer = TreePerfAnalyzer.from_file(filepath)
+    dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops, rank=rank)
+
+    del perf_analyzer
+
+    return dfs_per_group
+
+
 def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", include_only=["rank_0"], dry_run=False, xlsx_path=None):
     all_traces_grouped_sorted = parse_traces(base_dirpath, ext, include_only, rank_pattern)
+
+    pattern = f"{rank_pattern}(\\d+)"
 
     if all_traces_grouped_sorted is None:
         return
@@ -344,9 +359,9 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
         if xlsx_path is not None and len(all_traces_grouped_sorted) > 1:
             print("Multiple parent directories with traces found, give a more specific base path for the report with custom Excel path.")
             return
-        
+
         dfs_all = {group: None for group in group2ops}
-        
+
         parent_dirname = osp.basename(parent_dirpath)
         prefix = "_".join([parent_dirname, *include_only])
 
@@ -369,29 +384,41 @@ def run_standalone_node_replay(base_dirpath, rank_pattern="rank_", ext="json", i
             print("Terminating...")
             return
 
+        # Prepare arguments for parallel processing
+        process_args = []
         for filename in filenames:
             filepath = osp.join(parent_dirpath, filename)
+            match = re.search(pattern, filename)
+            rank = int(match.group(1))
+            process_args.append((filepath, rank))
+            
+        # Process traces in parallel
+        print("Parallel processing traces")
+        start_time = time.perf_counter()
 
-            print(f"Starting TreePerfAnalyzer with {filename}")
-            perf_analyzer = TreePerfAnalyzer.from_file(filepath)
+        MAX_WORKERS = min(len(filenames), 8)  # Adjust as needed
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            results = list(executor.map(process_single_trace_for_replay, process_args))
 
-            # Collect group-specific perf metrics from single rank
-            dfs_per_group = collect_df_perf_metrics_per_group(perf_analyzer, group2ops)
+        elapsed_time = time.perf_counter() - start_time
+        print(f"Elapsed time for processing traces: {elapsed_time:.2f} seconds.")
+
+        # Aggregate results
+        for dfs_per_group in results:
             for group, df in dfs_per_group.items():
                 dfs_all[group] = pd.concat([dfs_all[group], df]) if dfs_all[group] is not None else df
-
-            del perf_analyzer
-            gc.collect()
+        
+        gc.collect()
 
         for group, df_ops in dfs_all.items():
             df_ops_summary = summarize_df_perf_metrics(df_ops, agg_metrics=["mean", "std"])
             df_ops_summary["kernel_time_sum_cum_pct"] = df_ops_summary["Kernel Time (µs)_sum"].cumsum() / df_ops_summary["Kernel Time (µs)_sum"].sum()
             df_results = run_node_replay(group, df_ops_summary, parent_dirpath)
             print(df_results.to_string())
-            
+
             with pd.ExcelWriter(xlsx_path, mode="a" if osp.exists(xlsx_path) else "w") as writer:
                 df_results.to_excel(writer, sheet_name=f"{group}_node_replay", index=True)
-                
+
         xlsx_path = None
         gc.collect()
 
