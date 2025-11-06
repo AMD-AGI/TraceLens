@@ -986,6 +986,8 @@ class TreePerfAnalyzer:
             else:
                 pct = kernel_event["dur"] / cpu_op["gpu_busy_time"] * 100
             kernel_details["Percent of Parent cpu_op busy time (%)"] = pct
+            # Add parent op category
+            kernel_details["Parent op category"] = self.op_categorizer(cpu_op)
 
         # 3. get nn.Module event
         nn_module_event = None

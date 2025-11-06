@@ -381,30 +381,18 @@ def generate_perf_report_pytorch(
         except Exception as e:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and 'Kernel duration (µs)' in df_kernels.columns:
-            # Add parent cpu_op category if possible
-            if 'Parent cpu_op UID' in df_kernels.columns:
-                def _parent_op_category(uid):
-                    try:
-                        if pd.isna(uid):
-                            return None
-                        evt = perf_analyzer.tree.get_UID2event(int(uid))
-                        return perf_analyzer.op_categorizer(evt)
-                    except Exception:
-                        return None
-                df_kernels['Parent op category'] = df_kernels['Parent cpu_op UID'].apply(_parent_op_category)
-
-            # Fallback categorization for graph/runtime launched kernels with no cpu_op
-            # - If Parent cpu_op is missing, fill it from Launcher (available when launcher_detail=True)
-            # - If Parent op category is missing, classify from Launcher name: 'graph' if looks like CUDA Graph,
-            #   else 'runtime' for other CUDA runtime/driver launchers.
+            # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
             if 'Parent cpu_op' in df_kernels.columns and 'Launcher' in df_kernels.columns:
                 mask_missing_parent = df_kernels['Parent cpu_op'].isna()
                 if mask_missing_parent.any():
                     df_kernels.loc[mask_missing_parent, 'Parent cpu_op'] = df_kernels.loc[mask_missing_parent, 'Launcher']
 
+            # Fallback categorization for graph/runtime launched kernels with no cpu_op
+            # Note: Basic 'Parent op category' is added by get_kernel_details() in tree_perf.py
+            # This adds categorization for kernels that don't have a parent cpu_op
             if 'Parent op category' not in df_kernels.columns:
                 df_kernels['Parent op category'] = np.nan
-
+            
             if 'Launcher' in df_kernels.columns:
                 mask_missing_cat = df_kernels['Parent op category'].isna()
                 if mask_missing_cat.any():
