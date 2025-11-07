@@ -585,21 +585,20 @@ class TraceToTree:
         TraceLens.util.TraceEventUtils.compute_event_end_times(self.events)
 
     def _set_linking_key(self):
+        Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
+        Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
         launch_event = next(
             (
                 event
                 for event in self.events
-                if self.event_to_category(event) in ["cuda_runtime", "cuda_driver"]
-                and "launch"
-                in event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "").lower()
+                if event.get("cat") in ["cuda_runtime", "cuda_driver"]
+                and "launch" in event.get(Name, "").lower()
             ),
             None,
         )
         self.linking_key = (
             "correlation"
-            if launch_event is not None
-            and "correlation"
-            in launch_event[TraceLens.util.TraceEventUtils.TraceKeys.Args]
+            if launch_event is not None and "correlation" in launch_event[Args]
             else "External id"
         )
 
