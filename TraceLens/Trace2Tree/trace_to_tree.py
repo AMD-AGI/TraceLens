@@ -557,14 +557,13 @@ class TraceToTree:
             [dict], str
         ] = TraceLens.util.TraceEventUtils.default_categorizer,
     ):
-        self.events = [
-            {**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i}
-            for i, data in enumerate(events_data)
-        ]
-        self.events_by_uid = {
-            event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event
-            for event in self.events
-        }
+        UID_KEY = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        for i, event in enumerate(events_data):
+            event[UID_KEY] = i
+        self.events = events_data
+
+        # Build UID lookup dictionary
+        self.events_by_uid = {event[UID_KEY]: event for event in self.events}
         self.event_to_category = event_to_category
         if compute_end_times:
             self._compute_event_end_times()
@@ -586,21 +585,20 @@ class TraceToTree:
         TraceLens.util.TraceEventUtils.compute_event_end_times(self.events)
 
     def _set_linking_key(self):
+        Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
+        Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
         launch_event = next(
             (
                 event
                 for event in self.events
-                if self.event_to_category(event) in ["cuda_runtime", "cuda_driver"]
-                and "launch"
-                in event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "").lower()
+                if event.get("cat") in ["cuda_runtime", "cuda_driver"]
+                and "launch" in event.get(Name, "").lower()
             ),
             None,
         )
         self.linking_key = (
             "correlation"
-            if launch_event is not None
-            and "correlation"
-            in launch_event[TraceLens.util.TraceEventUtils.TraceKeys.Args]
+            if launch_event is not None and "correlation" in launch_event[Args]
             else "External id"
         )
 
@@ -609,46 +607,51 @@ class TraceToTree:
         # 1. Create a dictionary to map the linking id to the start and end ac2g events
         # 2. Create a dictionary to map the event key (by default (pid, tid)), and linking id to the actual event
         # 3. Create a dictionary to map the sequence number to the list of event uids
-        # 4. Create a dictionary to map the python id to the event uid
         # This is done to quickly link events based on various keys
 
         self.ac2g_event_map = {"start": {}, "end": {}}
         self.pid_tid_event_map = {}
         self.seq_num2event_uids_map = {}  # from seq id to list uids
-        self.dict_pythonID2UID = {}
+        # self.dict_pythonID2UID = {}  # Commented out: never read, only written
+
+        UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        PID = TraceLens.util.TraceEventUtils.TraceKeys.PID
+        TID = TraceLens.util.TraceEventUtils.TraceKeys.TID
+        Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
 
         for event in self.events:
+            cat = event.get("cat")
+
             # Process ac2g events
-            if self.event_to_category(event) == "ac2g":
+            if cat == "ac2g":
                 if event["ph"] == "s":
                     self.ac2g_event_map["start"][event["id"]] = event
                 elif event["ph"] == "f":
                     self.ac2g_event_map["end"][event["id"]] = event
                 continue
 
+            # Cache args dict once for remaining operations
+            args = event.get(Args)
+            if args is None:
+                continue
+
             # Process PID-TID-linking key events
-            pid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.PID)
-            tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
-            link_id = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(
-                self.linking_key
-            )
+            pid = event.get(PID)
+            tid = event.get(TID)
+            link_id = args.get(self.linking_key)
             if None not in [pid, tid, link_id]:
                 self.pid_tid_event_map[(pid, tid, link_id)] = event
 
             # Process sequence number events
-            seq_num = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(
-                "Sequence number"
-            )
+            seq_num = args.get("Sequence number")
             if seq_num is not None:
-                self.seq_num2event_uids_map.setdefault(seq_num, []).append(
-                    event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
+                self.seq_num2event_uids_map.setdefault(seq_num, []).append(event[UID])
 
-            # Process python_function events
-            if self.event_to_category(event) == "python_function":
-                self.dict_pythonID2UID[
-                    event[TraceLens.util.TraceEventUtils.TraceKeys.Args]["Python id"]
-                ] = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+            # # Process python_function events (Commented out: dict_pythonID2UID never read)
+            # if cat == "python_function":
+            #     python_id = args.get("Python id")
+            #     if python_id is not None:
+            #         self.dict_pythonID2UID[python_id] = event[UID]
 
     # TODO base class includes this, remove
     def build_host_call_stack_tree(self, add_python_func=False):
@@ -768,7 +771,8 @@ class TraceToTree:
 
         for event in self.events:
             # Skip GPU events
-            if self.event_to_category(event) in {"kernel", "gpu_memset", "gpu_memcpy"}:
+            cat = event.get("cat")
+            if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
                 continue
             # Now, we are dealing with non-GPU events
             if "gpu_events" not in event:
