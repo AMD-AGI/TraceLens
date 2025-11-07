@@ -771,7 +771,8 @@ class TraceToTree:
 
         for event in self.events:
             # Skip GPU events
-            if self.event_to_category(event) in {"kernel", "gpu_memset", "gpu_memcpy"}:
+            cat = event.get("cat")
+            if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
                 continue
             # Now, we are dealing with non-GPU events
             if "gpu_events" not in event:
