@@ -23,6 +23,7 @@ from typing import List, Dict, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
+
 # generic data loader class for json, json.gz, or tensorboard pb files
 # tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
 class DataLoader:
@@ -47,11 +48,12 @@ class DataLoader:
             data_str = data if isinstance(data, str) else data.decode("utf-8")
             with open(filename_path.replace("pb", "processed.json"), "w") as writefile:
                 writefile.write(data_str)
-        
+
         # Use orjson for faster parsing (23% faster than stdlib json)
         # Falls back to json if orjson not available
         try:
             import orjson
+
             return orjson.loads(data)
         except ImportError:
             logger.warning(
