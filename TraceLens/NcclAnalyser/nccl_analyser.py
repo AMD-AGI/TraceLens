@@ -12,6 +12,7 @@ import warnings
 import gzip
 import logging
 
+from concurrent.futures import ProcessPoolExecutor
 from ..util import DataLoader
 
 
@@ -19,6 +20,26 @@ def list_to_tuple(obj):
     if isinstance(obj, list):
         return tuple(list_to_tuple(item) for item in obj)
     return obj
+
+
+def nccl_filter_event_fn(event):
+    """Filters NCCL kernel events."""
+    is_nccl_kernel = (
+        event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
+    )
+    is_linked = event.get("args", {}).get("External id") is not None
+    return is_nccl_kernel and is_linked
+
+
+def load_single_trace_fn(args):
+    """Worker function to load a single trace file."""
+    rank, filepath = args
+    raw_data = DataLoader.load_data(filepath)
+
+    nccl_events = [e for e in raw_data["traceEvents"] if nccl_filter_event_fn(e)]
+
+    rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
+    return rank, rank_dict
 
 
 class NcclAnalyser:
@@ -74,19 +95,11 @@ class NcclAnalyser:
         }
         self.implicit_sync_cat = {"allreduce", "reducescatter", "allgather", "alltoall"}
         # Filter function: keep only kernel events with "nccl" in the name
-        self.filter_event_fn = self._nccl_filter_event_fn
+        self.filter_event_fn = nccl_filter_event_fn
 
         # Internal storage
         self.rank2trace_data = {}  # Stores per-rank data
         self.load_trace_data()
-
-    def _nccl_filter_event_fn(self, event):
-        """Filters NCCL kernel events."""
-        is_nccl_kernel = (
-            event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
-        )
-        is_linked = event.get("args", {}).get("External id") is not None
-        return is_nccl_kernel and is_linked
 
     def load_trace_data(self):
         """Loads NCCL JSON trace data and extracts relevant events."""
@@ -97,16 +110,25 @@ class NcclAnalyser:
             "Also note that we need all ranks for the analysis. We will add a fallback soon for lesser features for single rank or partial data."
         )
         self.rank2trace_data.clear()
-        for rank, filepath in enumerate(self.list_profile_filepaths):
-            self.logger.info(f"Loading rank {rank} from {filepath}")
-            raw_data = DataLoader.load_data(filepath)
+        # Prepare arguments for parallel processing
+        process_args = [
+            (rank, filepath)
+            for rank, filepath in enumerate(self.list_profile_filepaths)
+        ]
 
-            nccl_events = [
-                e for e in raw_data["traceEvents"] if self._nccl_filter_event_fn(e)
-            ]
+        # Determine number of workers (limit to avoid overwhelming system)
+        max_workers = min(len(self.list_profile_filepaths), 8)
 
-            # Build a dictionary with event data
-            rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
+        # Load traces in parallel
+        self.logger.info(
+            f"Loading {len(self.list_profile_filepaths)} traces in parallel with {max_workers} workers"
+        )
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(load_single_trace_fn, process_args))
+
+        # Store results
+        for rank, rank_dict in results:
+            self.logger.info(f"Loaded rank {rank} with {len(rank_dict)} NCCL events")
             self.rank2trace_data[rank] = rank_dict
 
     # ------------------------------------------------------------------------
