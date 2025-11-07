@@ -11,6 +11,7 @@ import pandas as pd
 import warnings
 import gzip
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..util import DataLoader
 
@@ -21,11 +22,39 @@ def list_to_tuple(obj):
     return obj
 
 
+def _nccl_filter_event_fn(event):
+    """Filters NCCL kernel events."""
+    is_nccl_kernel = (
+        event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
+    )
+    is_linked = event.get("args", {}).get("External id") is not None
+    return is_nccl_kernel and is_linked
+
+
+def _load_single_rank_process(rank, filepath):
+    """
+    Standalone function to load data for a single rank.
+    Must be at module level to be picklable for ProcessPoolExecutor.
+    """
+    raw_data = DataLoader.load_data(filepath)
+    
+    nccl_events = [
+        e for e in raw_data["traceEvents"] if _nccl_filter_event_fn(e)
+    ]
+    
+    # Build a dictionary with event data
+    rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
+    return rank, rank_dict
+
+
 class NcclAnalyser:
-    def __init__(self, list_profile_filepaths, world_size):
+    def __init__(self, list_profile_filepaths, world_size, use_multiprocessing=False, max_workers=None):
         self.logger = logging.getLogger(__name__)
         self.list_profile_filepaths = list_profile_filepaths
         self.world_size = world_size
+        self.use_multiprocessing = use_multiprocessing
+        # Default to cpu_count (user can override with max_workers parameter if needed)
+        self.max_workers = max_workers if max_workers is not None else (os.cpu_count() or 8)
 
         # Byte sizes per dtype
         self.dtype2bytes = {
@@ -97,17 +126,25 @@ class NcclAnalyser:
             "Also note that we need all ranks for the analysis. We will add a fallback soon for lesser features for single rank or partial data."
         )
         self.rank2trace_data.clear()
-        for rank, filepath in enumerate(self.list_profile_filepaths):
-            self.logger.info(f"Loading rank {rank} from {filepath}")
-            raw_data = DataLoader.load_data(filepath)
+        
+        if self.use_multiprocessing:
+            # Parallel loading using multiprocessing
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_rank = {
+                    executor.submit(_load_single_rank_process, rank, filepath): rank
+                    for rank, filepath in enumerate(self.list_profile_filepaths)
+                }
 
-            nccl_events = [
-                e for e in raw_data["traceEvents"] if self._nccl_filter_event_fn(e)
-            ]
-
-            # Build a dictionary with event data
-            rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
-            self.rank2trace_data[rank] = rank_dict
+                # Collect results as they complete
+                for future in as_completed(future_to_rank):
+                    rank, rank_dict = future.result()
+                    self.rank2trace_data[rank] = rank_dict
+        else:
+            # Sequential loading
+            for rank, filepath in enumerate(self.list_profile_filepaths):
+                self.logger.info(f"Loading rank {rank} from {filepath}")
+                rank, rank_dict = _load_single_rank_process(rank, filepath)
+                self.rank2trace_data[rank] = rank_dict
 
     # ------------------------------------------------------------------------
     # Step 1: Build a long table where each row is a collective event on a rank
