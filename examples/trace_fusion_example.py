@@ -15,7 +15,14 @@ list_profile_filepaths = [
 ]
 
 # Initialize TraceFusion
+# Sequential (default, safe and predictable)
 fuser = TraceFuse(list_profile_filepaths)
+
+# Or use multiprocessing for significant speedup (system-dependent)
+# fuser = TraceFuse(list_profile_filepaths, use_multiprocessing=True)
+
+# Control number of workers (defaults to os.cpu_count())
+# fuser = TraceFuse(list_profile_filepaths, use_multiprocessing=True, max_workers=32)
 
 # # Custom filter for NCCL kernels
 # def filter_nccl_kernels(event):

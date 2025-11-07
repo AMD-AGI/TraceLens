@@ -21,7 +21,7 @@ Note that: TraceFusion is **only for visual analysis in PerfettoUI** and not for
 
 ## Quick Start
 
-Here’s how to use TraceFusion to merge and process trace files for distributed training or inference:
+Here's how to use TraceFusion to merge and process trace files for distributed training or inference:
 
 ### Example 1: Basic Usage
 
@@ -34,7 +34,7 @@ root_profiles = '/path/to/profiles/'
 world_size = 8
 list_profile_files = [os.path.join(root_profiles, f'pytorch_profile_rank{i}_step120.json') for i in range(world_size)]
 
-# Initialize TraceFusion
+# Initialize TraceFusion (sequential by default)
 fuser = TraceFuse(list_profile_files)
 
 # Merge and Save traces
@@ -43,6 +43,29 @@ fuser.merge_and_save(output_file)
 
 # By default, Python function category events are skipped to save memory.
 # To include them, set include_pyfunc=True.
+```
+
+### Example 1b: Using Multiprocessing for Faster Processing
+
+```python
+from TraceLens import TraceFuse
+import os
+
+# Define file paths for each rank
+root_profiles = '/path/to/profiles/'
+world_size = 8
+list_profile_files = [os.path.join(root_profiles, f'pytorch_profile_rank{i}_step120.json') for i in range(world_size)]
+
+# Initialize TraceFusion with multiprocessing for faster processing
+# Can provide significant speedup (system-dependent)
+fuser = TraceFuse(list_profile_files, use_multiprocessing=True)
+
+# Optional: control number of workers (defaults to os.cpu_count())
+# fuser = TraceFuse(list_profile_files, use_multiprocessing=True, max_workers=32)
+
+# Merge and Save traces
+output_file = os.path.join(root_profiles, 'merged_trace_all_events.json')
+fuser.merge_and_save(output_file)
 ```
 
 ### Example 2: Advanced Usage
