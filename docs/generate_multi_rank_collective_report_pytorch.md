@@ -24,12 +24,12 @@ python generate_multi_rank_collective_report_pytorch.py   --trace_dir /path/to/t
 python generate_multi_rank_collective_report_pytorch.py   --trace_pattern "/logs/job123/rank*/trace.json"   --world_size 8
 ```
 
-### Parallel mode (example: ~5-6x faster on 64-core system)
+### Parallel mode (for faster processing)
 ```bash
 python generate_multi_rank_collective_report_pytorch.py   --trace_dir /path/to/traces   --world_size 8   --use_multiprocessing
 ```
 
-> **Note:** Speedup varies based on available CPU cores, trace file sizes, and disk I/O. The 5-6x figure is from testing with 8 ranks on a 64-core system.
+> **Note:** Speedup varies based on available CPU cores, trace file sizes, and disk I/O.
 
 > The pattern must contain exactly one `*`, which is replaced with `0, 1, ..., world_size-1` to enumerate rank file paths.
 
@@ -62,7 +62,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 | `--output_csvs_dir` | `None` | If provided, writes each sheet as an individual `.csv` under this directory. |
 | `--detailed_analysis` | `False` | Include detailed per-rank sheets (see below). |
 | `--agg_metrics` | `mean median min max` | Aggregations to compute in summaries. Allowed: `mean`, `median`, `min`, `max` (space-separated). |
-| `--use_multiprocessing` | `False` | Enable parallel trace loading using multiprocessing. Can provide significant speedup (e.g., ~5-6x on 64-core systems) but uses more CPU resources. |
+| `--use_multiprocessing` | `False` | Enable parallel trace loading using multiprocessing. Can provide speedup (system-dependent) but uses more CPU resources. |
 | `--max_workers` | `os.cpu_count()` | Maximum number of worker processes for parallel loading (requires `--use_multiprocessing`). Override to limit resource usage if needed. |
 
 
