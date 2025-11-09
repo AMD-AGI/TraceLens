@@ -16,3 +16,9 @@ These traces **do not represent**:
 * Validated hardware configurations, tuning parameters, or training setups.
 
 Performance metrics observed from these traces may differ substantially from real workloads. They should **not** be interpreted as indicative of actual device performance or official results.
+
+---
+
+### 📝 Note on `mi300/llama_70b_fsdp`
+
+Python function events have been removed from these traces to reduce test data size while maintaining identical NCCL analysis results.
