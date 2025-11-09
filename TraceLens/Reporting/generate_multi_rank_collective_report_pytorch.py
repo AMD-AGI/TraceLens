@@ -114,10 +114,10 @@ def generate_collective_report(
 
     # Initialize NCCL analyzer
     nccl_analyser = NcclAnalyser(
-        list_trace_filepaths, 
-        world_size, 
+        list_trace_filepaths,
+        world_size,
         use_multiprocessing=use_multiprocessing,
-        max_workers=max_workers
+        max_workers=max_workers,
     )
 
     # Generate DataFrames

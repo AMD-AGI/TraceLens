@@ -16,19 +16,20 @@ from ..util import DataLoader
 
 def _default_filter_fn(event, include_pyfunc=False):
     """Default filter function - must be picklable for multiprocessing."""
-    return (
-        event.get("cat", None) != "Trace"
-        and (include_pyfunc or event.get("cat") != "python_function")
+    return event.get("cat", None) != "Trace" and (
+        include_pyfunc or event.get("cat") != "python_function"
     )
 
 
-def _process_single_rank(rank, filepath, filter_fn, include_pyfunc, offset_multiplier, linking_key):
+def _process_single_rank(
+    rank, filepath, filter_fn, include_pyfunc, offset_multiplier, linking_key
+):
     """
     Standalone function to load and process trace data for a single rank.
     Must be at module level to be picklable for ProcessPoolExecutor.
     """
     data = DataLoader.load_data(filepath)
-    
+
     processed_events = []
     for event in data["traceEvents"]:
         # If filter_fn is None, use default filter
@@ -41,7 +42,7 @@ def _process_single_rank(rank, filepath, filter_fn, include_pyfunc, offset_multi
         if "args" not in event:
             event["args"] = {}
         event["args"]["rank"] = rank
-        
+
         # Adjust fields with offsets
         for field, offset_mult in offset_multiplier.items():
             is_arg = field == linking_key
@@ -54,14 +55,19 @@ def _process_single_rank(rank, filepath, filter_fn, include_pyfunc, offset_multi
                 event["args"][f"{field}_raw"] = value
                 if type(value) == int:
                     event[field] += rank * offset_mult
-        
+
         processed_events.append(event)
-    
+
     return rank, processed_events
 
 
 class TraceFuse:
-    def __init__(self, profile_filepaths_list_or_dict, use_multiprocessing=False, max_workers=None):
+    def __init__(
+        self,
+        profile_filepaths_list_or_dict,
+        use_multiprocessing=False,
+        max_workers=None,
+    ):
         """
         Initialize the TraceFuse class.
 
@@ -81,7 +87,9 @@ class TraceFuse:
             self.rank2filepath = profile_filepaths_list_or_dict
 
         self.use_multiprocessing = use_multiprocessing
-        self.max_workers = max_workers if max_workers is not None else (os.cpu_count() or 8)
+        self.max_workers = (
+            max_workers if max_workers is not None else (os.cpu_count() or 8)
+        )
 
         # get the first file to set the linking key and offset multiplier
         filename = next(iter(self.rank2filepath.values()))
@@ -141,7 +149,7 @@ class TraceFuse:
                         filter_fn,
                         include_pyfunc,
                         self.offset_multiplier,
-                        self.linking_key
+                        self.linking_key,
                     ): rank
                     for rank, filepath in self.rank2filepath.items()
                 }
@@ -161,8 +169,12 @@ class TraceFuse:
             for rank, filepath in self.rank2filepath.items():
                 print(f"Processing file: {filepath}")
                 _, processed_events = _process_single_rank(
-                    rank, filepath, filter_fn, include_pyfunc, 
-                    self.offset_multiplier, self.linking_key
+                    rank,
+                    filepath,
+                    filter_fn,
+                    include_pyfunc,
+                    self.offset_multiplier,
+                    self.linking_key,
                 )
                 merged_data.extend(processed_events)
 

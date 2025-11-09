@@ -37,24 +37,30 @@ def _load_single_rank_process(rank, filepath):
     Must be at module level to be picklable for ProcessPoolExecutor.
     """
     raw_data = DataLoader.load_data(filepath)
-    
-    nccl_events = [
-        e for e in raw_data["traceEvents"] if _nccl_filter_event_fn(e)
-    ]
-    
+
+    nccl_events = [e for e in raw_data["traceEvents"] if _nccl_filter_event_fn(e)]
+
     # Build a dictionary with event data
     rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}
     return rank, rank_dict
 
 
 class NcclAnalyser:
-    def __init__(self, list_profile_filepaths, world_size, use_multiprocessing=False, max_workers=None):
+    def __init__(
+        self,
+        list_profile_filepaths,
+        world_size,
+        use_multiprocessing=False,
+        max_workers=None,
+    ):
         self.logger = logging.getLogger(__name__)
         self.list_profile_filepaths = list_profile_filepaths
         self.world_size = world_size
         self.use_multiprocessing = use_multiprocessing
         # Default to cpu_count (user can override with max_workers parameter if needed)
-        self.max_workers = max_workers if max_workers is not None else (os.cpu_count() or 8)
+        self.max_workers = (
+            max_workers if max_workers is not None else (os.cpu_count() or 8)
+        )
 
         # Byte sizes per dtype
         self.dtype2bytes = {
@@ -124,7 +130,7 @@ class NcclAnalyser:
             "Also note that we need all ranks for the analysis. We will add a fallback soon for lesser features for single rank or partial data."
         )
         self.rank2trace_data.clear()
-        
+
         if self.use_multiprocessing:
             # Parallel loading using multiprocessing
             with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
