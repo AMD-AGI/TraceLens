@@ -102,8 +102,6 @@ class NcclAnalyser:
             for name in names
         }
         self.implicit_sync_cat = {"allreduce", "reducescatter", "allgather", "alltoall"}
-        # Filter function: keep only kernel events with "nccl" in the name
-        self.filter_event_fn = self._nccl_filter_event_fn
 
         # Internal storage
         self.rank2trace_data = {}  # Stores per-rank data
