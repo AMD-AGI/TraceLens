@@ -39,6 +39,11 @@ jobs:
           pip install pytest openpyxl pandas
           pytest tests/test_compare_perf_report.py
       
+      - name: Run pytest on collective analysis tests
+        run: |
+          pip install pytest openpyxl pandas
+          pytest tests/test_collective_analysis.py
+      
       - name: Run copyright header checks
         run: |
           pip install pytest
