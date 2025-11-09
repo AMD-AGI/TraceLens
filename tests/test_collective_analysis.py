@@ -39,40 +39,41 @@ def test_collective_analysis(tol=1e-6):
 
     test_dir = "tests/traces/mi300/llama_70b_fsdp"
     trace_pattern = "rank*_trace_no_pyfn.json.gz"
-    
+
     ref_report_path = os.path.join(test_dir, "nccl_analysis_report.xlsx")
     trace_pattern_full = os.path.join(test_dir, trace_pattern)
-    
+
     # Count world size from actual files
     world_size = len(glob.glob(trace_pattern_full))
-    
+
     # Generate a temp output directory for this test
     fn_root = os.path.join(test_dir, "pytest_reports")
     os.makedirs(fn_root, exist_ok=True)
-    
+
     try:
         # Generate report
         fn_report_path = os.path.join(fn_root, "nccl_analysis_report.xlsx")
         generate_nccl_report(trace_pattern_full, world_size, fn_report_path)
-        
+
         # Compare the nccl_summary_implicit_sync sheet
         sheet = "nccl_summary_implicit_sync"
         df_ref = pd.read_excel(ref_report_path, sheet_name=sheet)
         df_fn = pd.read_excel(fn_report_path, sheet_name=sheet)
-        
+
         if df_ref.empty:
-            assert df_fn.empty, f"Reference is empty but generated report has {len(df_fn)} rows"
+            assert (
+                df_fn.empty
+            ), f"Reference is empty but generated report has {len(df_fn)} rows"
             return
-        
+
         # Compare all columns
         cols = df_ref.columns.tolist()
         diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
         assert (
             not diff_cols
         ), f"Sheet '{sheet}' has differences in {test_dir}:{format_diff_details(diff_cols)}"
-    
+
     finally:
         # Cleanup: remove generated report
         if os.path.exists(fn_root):
             shutil.rmtree(fn_root)
-
