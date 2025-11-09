@@ -43,6 +43,8 @@ def generate_collective_report(
     detailed_analysis: bool = False,
     agg_metrics: List[str] = ["mean", "median", "min", "max"],
     strict_world_size_check: bool = True,
+    use_multiprocessing: bool = False,
+    max_workers: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Generate comprehensive NCCL communication analysis reports.
@@ -57,6 +59,10 @@ def generate_collective_report(
         output_csvs_dir: Directory to save CSV files
         detailed_analysis: Whether to include detailed per-rank information
         agg_metrics: Aggregation metrics to include in summary
+        use_multiprocessing: Whether to use multiprocessing for parallel trace loading (default: False).
+                            When enabled, can provide significant speedup (system-dependent). When False, uses sequential loading.
+        max_workers: Maximum number of worker processes for parallel loading (only used if use_multiprocessing=True).
+                    Default: os.cpu_count(). Override to limit resource usage if needed.
 
     Returns:
         Dictionary mapping sheet names to DataFrames
@@ -107,7 +113,12 @@ def generate_collective_report(
             list_trace_filepaths.append(expected_file)
 
     # Initialize NCCL analyzer
-    nccl_analyser = NcclAnalyser(list_trace_filepaths, world_size)
+    nccl_analyser = NcclAnalyser(
+        list_trace_filepaths,
+        world_size,
+        use_multiprocessing=use_multiprocessing,
+        max_workers=max_workers,
+    )
 
     # Generate DataFrames
     report_dfs = {}
@@ -195,6 +206,17 @@ def main():
         default=["mean", "median", "min", "max"],
         help="Aggregation metrics to include in summary",
     )
+    parser.add_argument(
+        "--use_multiprocessing",
+        action="store_true",
+        help="Enable parallel trace loading using multiprocessing (can provide significant speedup, default: disabled)",
+    )
+    parser.add_argument(
+        "--max_workers",
+        type=int,
+        default=None,
+        help="Maximum number of worker processes for parallel loading (requires --use_multiprocessing, default: os.cpu_count())",
+    )
 
     args = parser.parse_args()
 
@@ -229,6 +251,8 @@ def main():
         output_csvs_dir=args.output_csvs_dir,
         detailed_analysis=args.detailed_analysis,
         agg_metrics=args.agg_metrics,
+        use_multiprocessing=args.use_multiprocessing,
+        max_workers=args.max_workers,
     )
 
 
