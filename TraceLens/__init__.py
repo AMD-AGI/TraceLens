@@ -1,4 +1,5 @@
 from .NcclAnalyser.nccl_analyser import NcclAnalyser
+from .NcclAnalyser.jax_nccl_analyser import JaxNcclAnalyser
 from .Trace2Tree.trace_to_tree import TraceToTree
 from .TraceFusion.trace_fuse import TraceFuse
 from .TreePerf.gpu_event_analyser import (
@@ -23,6 +24,7 @@ __all__ = [
     "TraceFuse",
     "TraceToTree",
     "NcclAnalyser",
+    "JaxNcclAnalyser",
     "PerfModel",
     "EventReplay",
     "EventReplayer",
