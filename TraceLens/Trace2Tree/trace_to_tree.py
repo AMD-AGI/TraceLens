@@ -804,6 +804,20 @@ class TraceToTree:
             return []
         return [self.get_UID2event(child_UID) for child_UID in event["children"]]
 
+    def get_gpu_events(self, event):
+        """
+        Get GPU events (kernels, memcpy, memset) launched by this event.
+
+        Args:
+            event: The event to get GPU events for
+
+        Returns:
+            List of GPU event dictionaries
+        """
+        if "gpu_events" not in event:
+            return []
+        return [self.get_UID2event(gpu_uid) for gpu_uid in event["gpu_events"]]
+
     def get_node_by_ext_id_pid_tid(self, ext_id, pid, tid):
         for event in self.events:
             if (
