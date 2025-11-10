@@ -376,11 +376,24 @@ def generate_perf_report_pytorch(
 
     # Kernel summary: aggregate per-kernel durations and counts
     if kernel_summary:
+        print("\n" + "="*70)
+        print("GENERATING KERNEL SUMMARY")
+        print("="*70)
         try:
-            df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
+            print("Extracting kernel details from trace...")
+            df_kernels = perf_analyzer.get_df_kernels(
+                launcher_detail=True,
+                kernel_categorization=True
+            )
+            print(f"✓ Extracted {len(df_kernels)} kernel events")
         except Exception as e:
+            print(f"✗ Error extracting kernel details: {e}")
+            import traceback
+            traceback.print_exc()
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
+            print("Processing kernel data for summary...")
+            
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
             if (
                 "Parent cpu_op" in df_kernels.columns
@@ -417,6 +430,7 @@ def generate_perf_report_pytorch(
             # Group by category/cpu_op along with kernel identifiers when available
             group_cols = []
             for col in [
+                "Kernel category",  # New: detailed kernel-level categorization
                 "Parent op category",
                 "Parent cpu_op",
                 "Kernel name",
@@ -428,6 +442,8 @@ def generate_perf_report_pytorch(
                 group_cols = (
                     ["Kernel name"] if "Kernel name" in df_kernels.columns else []
                 )
+            
+            print(f"Grouping kernels by: {', '.join(group_cols)}")
 
             agg_dict = {"Kernel duration (µs)": ["sum", "count", "mean", "min", "max"]}
             df_kernel_summary = df_kernels.groupby(group_cols, dropna=False).agg(
@@ -465,6 +481,12 @@ def generate_perf_report_pytorch(
             )
             df_kernel_summary.reset_index(drop=True, inplace=True)
             dict_name2df["kernel_summary"] = df_kernel_summary
+            print(f"✓ Generated kernel summary with {len(df_kernel_summary)} unique kernel groups")
+        else:
+            if df_kernels.empty:
+                print("⚠ No kernel data available for summary")
+            else:
+                print("⚠ Kernel duration column not found in kernel data")
 
     if short_kernel_study:
         dict_name2df["short_kernel_histogram"] = df_hist
@@ -552,7 +574,11 @@ def main():
         action="store_true",
         dest="kernel_summary",
         default=False,
-        help="Enable kernel summary sheet in the report. Disabled by default.",
+        help="Enable detailed kernel summary sheet in the report. "
+             "This generates a comprehensive breakdown of all GPU kernels grouped by "
+             "category, parent operation, kernel name, and stream with statistics including "
+             "total duration, count, mean, min, max, and percentage of total time. "
+             "Note: This can be slow for large traces. Disabled by default.",
     )
     parser.add_argument(
         "--short_kernel_study",

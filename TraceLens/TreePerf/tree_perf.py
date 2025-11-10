@@ -881,12 +881,241 @@ class TreePerfAnalyzer:
         )
         return df
 
+    @staticmethod
+    def categorize_kernel_by_name(kernel_name):
+        """
+        Categorize a GPU kernel based on its name patterns.
+        Covers training, inference (vLLM, TGI, etc.), and general workloads.
+        
+        Returns a detailed category for the kernel operation.
+        """
+        name_lower = kernel_name.lower()
+        
+        # vLLM PagedAttention kernels (check first as they're very specific)
+        if 'paged_attention' in name_lower:
+            if 'reduce' in name_lower:
+                return "PagedAttention-Reduce"
+            elif any(x in name_lower for x in ['qkv', 'kernel']):
+                return "PagedAttention-Compute"
+            else:
+                return "PagedAttention-Generic"
+        
+        # GEMM/Matrix Multiply kernels (including quantized variants)
+        if any(pattern in name_lower for pattern in [
+            'gemm', 'cijk', 'matmul', 'cublas', 'nvjet', 
+            'mfma', 'wmma', 'tensor_op', 'sgemm', 'dgemm', 
+            'hgemm', 'bgemm', 'i8gemm', 'f4gemm', 'f8gemm'
+        ]):
+            # Quantized GEMM variants
+            if any(x in name_lower for x in ['f4gemm', 'fp4', 'int4']):
+                return "GEMM-FP4"  # FP4/INT4 quantized GEMM
+            elif any(x in name_lower for x in ['f8gemm', 'fp8', 'int8']):
+                return "GEMM-FP8"  # FP8/INT8 quantized GEMM
+            # Hardware-specific GEMM types
+            elif 'cijk' in name_lower:
+                return "GEMM-CK"  # AMD Composable Kernel GEMM
+            elif any(x in name_lower for x in ['cublas', 'cublaslt']):
+                return "GEMM-cuBLAS"  # NVIDIA cuBLAS
+            elif 'nvjet' in name_lower:
+                return "GEMM-NVJET"
+            elif 'mfma' in name_lower:
+                return "GEMM-MFMA"  # AMD Matrix Cores (CDNA/RDNA)
+            elif 'wmma' in name_lower:
+                return "GEMM-WMMA"  # NVIDIA Tensor Cores
+            elif 'splitk' in name_lower or 'wvsplitk' in name_lower:
+                return "GEMM-SplitK"  # Split-K GEMM optimization
+            else:
+                return "GEMM-Generic"
+        
+        # Attention kernels (Flash Attention, SDPA, etc.)
+        if any(pattern in name_lower for pattern in [
+            'attention', 'fmha', 'flash', 'attn', 'sdpa',
+            'scaled_dot_product'
+        ]):
+            if 'fwd' in name_lower or 'forward' in name_lower or 'fprop' in name_lower:
+                return "Attention-Forward"
+            elif 'bwd' in name_lower or 'backward' in name_lower or 'bprop' in name_lower:
+                return "Attention-Backward"
+            else:
+                return "Attention-Generic"
+        
+        # Convolution kernels
+        if any(pattern in name_lower for pattern in [
+            'conv', 'winograd', 'im2col', 'fillbuffer'
+        ]):
+            if 'fwd' in name_lower or 'forward' in name_lower:
+                return "Conv-Forward"
+            elif 'bwd' in name_lower or 'backward' in name_lower:
+                return "Conv-Backward"
+            else:
+                return "Conv-Generic"
+        
+        # Fused operations (common in inference - check before individual ops)
+        if 'fused' in name_lower:
+            if any(x in name_lower for x in ['add', 'rmsnorm', 'layernorm', 'norm']):
+                return "Fused-AddNorm"  # Fused add + normalization
+            elif any(x in name_lower for x in ['qk', 'rope', 'cache']):
+                return "Fused-QKRoPECache"  # Multi-op fusion for attention
+            elif any(x in name_lower for x in ['mlp', 'ffn']):
+                return "Fused-MLP"  # Fused MLP/FFN operations
+            else:
+                return "Fused-Generic"
+        
+        # Normalization kernels
+        if any(pattern in name_lower for pattern in [
+            'norm', 'rmsnorm', 'layernorm', 'batchnorm',
+            'instancenorm', 'groupnorm'
+        ]):
+            if 'rms' in name_lower or 'rmsnorm' in name_lower:
+                return "Norm-RMS"
+            elif 'layer' in name_lower:
+                return "Norm-Layer"
+            elif 'batch' in name_lower:
+                return "Norm-Batch"
+            else:
+                return "Norm-Generic"
+        
+        # Activation functions (including gated variants)
+        if any(pattern in name_lower for pattern in [
+            'relu', 'gelu', 'silu', 'swish', 'sigmoid', 
+            'tanh', 'softmax', 'act_and_mul', 'activation'
+        ]):
+            if 'act_and_mul' in name_lower:
+                return "Activation-Gated"  # Gated activation (SwiGLU, etc.)
+            elif 'silu' in name_lower or 'swish' in name_lower:
+                return "Activation-SiLU"
+            elif 'gelu' in name_lower:
+                return "Activation-GELU"
+            elif 'softmax' in name_lower:
+                return "Activation-Softmax"
+            else:
+                return "Activation-Generic"
+        
+        # Elementwise operations
+        if any(pattern in name_lower for pattern in [
+            'elementwise', 'pointwise', 'add', 'mul', 
+            'div', 'sub', 'fused_add', 'scalar'
+        ]):
+            return "Elementwise"
+        
+        # Reduce operations
+        if any(pattern in name_lower for pattern in [
+            'reduce', 'sum', 'mean', 'max', 'min', 
+            'argmax', 'argmin', 'all_reduce'
+        ]):
+            return "Reduce"
+        
+        # Memory operations
+        if any(pattern in name_lower for pattern in [
+            'copy', 'memcpy', 'memset', 'transpose',
+            'permute', 'reshape', 'cast', 'convert'
+        ]):
+            if 'transpose' in name_lower or 'permute' in name_lower:
+                return "Memory-Transpose"
+            elif 'copy' in name_lower or 'memcpy' in name_lower:
+                return "Memory-Copy"
+            elif 'memset' in name_lower:
+                return "Memory-Set"
+            else:
+                return "Memory-Generic"
+        
+        # Communication kernels (NCCL/RCCL)
+        if any(pattern in name_lower for pattern in [
+            'nccl', 'rccl', 'msccl', 'allreduce', 
+            'allgather', 'reducescatter', 'broadcast'
+        ]):
+            if 'allreduce' in name_lower:
+                return "Comm-AllReduce"
+            elif 'allgather' in name_lower:
+                return "Comm-AllGather"
+            elif 'reducescatter' in name_lower:
+                return "Comm-ReduceScatter"
+            else:
+                return "Comm-Generic"
+        
+        # Quantization/Dequantization (inference optimization)
+        if any(pattern in name_lower for pattern in [
+            'quant', 'dequant', 'fp8', 'int8', 'int4',
+            'fp4', 'scale', 'per_group', 'per_channel'
+        ]):
+            if 'per_group' in name_lower or 'per_channel' in name_lower:
+                return "Quant-PerGroup"  # Per-group/channel quantization
+            elif 'dynamic' in name_lower:
+                return "Quant-Dynamic"  # Dynamic quantization
+            elif 'dequant' in name_lower:
+                return "Dequant"  # Dequantization
+            else:
+                return "Quant-Generic"
+        
+        # RoPE (Rotary Position Embedding) - with variants
+        if 'rope' in name_lower or 'rotary' in name_lower:
+            if 'cached' in name_lower:
+                return "RoPE-Cached"  # Cached RoPE (inference optimization)
+            elif 'gqa' in name_lower or 'grouped' in name_lower:
+                return "RoPE-GQA"  # Grouped Query Attention variant
+            else:
+                return "RoPE-Generic"
+        
+        # KV Cache operations (vLLM, TGI, etc.)
+        if any(pattern in name_lower for pattern in [
+            'cache', 'reshape_and_cache', 'kv_cache'
+        ]) and 'paged' not in name_lower:  # Exclude paged_attention (already handled)
+            if 'reshape' in name_lower:
+                return "KVCache-Reshape"  # Reshape and store in KV cache
+            elif 'vllm::' in kernel_name:  # vLLM namespace
+                return "KVCache-vLLM"
+            else:
+                return "KVCache-Generic"
+        
+        # Embedding/Lookup operations
+        if any(pattern in name_lower for pattern in [
+            'embedding', 'lookup', 'gather', 'scatter',
+            'index'
+        ]):
+            if 'gather' in name_lower:
+                return "Indexing-Gather"
+            elif 'scatter' in name_lower:
+                return "Indexing-Scatter"
+            else:
+                return "Indexing-Generic"
+        
+        # Sampling/Generation (inference-specific)
+        if any(pattern in name_lower for pattern in [
+            'sample', 'topk', 'topp', 'beam', 'argmax', 'argmin'
+        ]):
+            if 'topk' in name_lower or 'top_k' in name_lower:
+                return "Sampling-TopK"
+            elif 'topp' in name_lower or 'top_p' in name_lower:
+                return "Sampling-TopP"
+            elif 'argmax' in name_lower or 'argmin' in name_lower:
+                return "Sampling-ArgMax"
+            else:
+                return "Sampling-Generic"
+        
+        # Triton kernels (custom kernels)
+        if 'triton' in name_lower:
+            return "Triton-Custom"
+        
+        # Generic forward/backward kernels (common pattern in vLLM/custom ops)
+        if kernel_name.startswith('_fwd_kernel') or kernel_name == '_fwd_kernel':
+            return "Kernel-Forward"
+        if kernel_name.startswith('_bwd_kernel') or kernel_name == '_bwd_kernel':
+            return "Kernel-Backward"
+        
+        # Check for vLLM namespace
+        if 'vllm::' in kernel_name:
+            return "vLLM-Custom"
+        
+        # Default: uncategorized
+        return "Uncategorized"
+
     def get_kernel_details(
         self,
         kernel_event,
         launcher_detail=False,
         cpu_op_detail=True,
         nn_module_detail=False,
+        kernel_categorization=True,
     ):
         """
         Extract detailed information for a given kernel event.
@@ -902,6 +1131,7 @@ class TreePerfAnalyzer:
             cpu_op_detail (bool): If True, include details of the parent CPU operation.
             nn_module_detail (bool): If True, include details of the parent nn.Module event. Only valid if
                 `add_python_func` is True. Else, it will be ignored.
+            kernel_categorization (bool): If True, add detailed kernel-level categorization based on kernel name.
 
         Returns:
             dict or None: A dictionary containing the kernel details, or None if linking fails.
@@ -926,6 +1156,12 @@ class TreePerfAnalyzer:
             "Kernel duration (µs)": kernel_event["dur"],
             "Kernel stream": kernel_event["args"].get("stream"),
         }
+        
+        # Add kernel-level categorization
+        if kernel_categorization:
+            kernel_details["Kernel category"] = self.categorize_kernel_by_name(
+                kernel_event["name"]
+            )
 
         # 1. get launcher event
         launcher = self.tree.get_parent_event(kernel_event)
@@ -1029,19 +1265,35 @@ class TreePerfAnalyzer:
         return kernel_details
 
     def get_df_kernels(
-        self, launcher_detail=False, cpu_op_detail=True, nn_module_detail=False
+        self, 
+        launcher_detail=False, 
+        cpu_op_detail=True, 
+        nn_module_detail=False,
+        kernel_categorization=True
     ):
         """
         Build a DataFrame with kernel details augmented with
         additional information such as launcher, CPU operation,
-        and nn.Module details.
+        nn.Module details, and kernel-level categorization.
+        
         Args:
             launcher_detail (bool): If True, include details of the kernel's launcher.
             cpu_op_detail (bool): If True, include details of the parent CPU operation.
             nn_module_detail (bool): If True, include details of the parent nn.Module event.
+            kernel_categorization (bool): If True, add detailed kernel-level categorization 
+                                         based on kernel name patterns (GEMM, Attention, etc.).
 
         Returns:
-            pd.DataFrame: A DataFrame containing detailed kernel information and aggregated metrics.
+            pd.DataFrame: A DataFrame containing detailed kernel information with the following columns:
+                - UID: Unique identifier for the kernel
+                - Kernel name: Full name of the GPU kernel
+                - Kernel category: Detailed categorization (e.g., "GEMM-CK", "Attention-Forward", "Norm-RMS")
+                - Kernel duration (µs): Duration in microseconds
+                - Kernel stream: CUDA/HIP stream ID
+                - Parent op category: Category of the parent PyTorch operation (if cpu_op_detail=True)
+                - Parent cpu_op: Name of the parent CPU operation (if cpu_op_detail=True)
+                - Launcher: Name of the launcher event (if launcher_detail=True)
+                - And more depending on the options selected
         """
         if self.with_python_stack:
             raise ValueError(
@@ -1058,6 +1310,7 @@ class TreePerfAnalyzer:
                 launcher_detail=launcher_detail,
                 cpu_op_detail=cpu_op_detail,
                 nn_module_detail=nn_module_detail,
+                kernel_categorization=kernel_categorization,
             )
             kernel_details_list.append(details)
 
