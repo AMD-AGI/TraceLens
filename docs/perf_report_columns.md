@@ -741,7 +741,7 @@ addmm(6144×2048 × 2048×8192) 762       0.59    ~203         Compute-bound, 58
 ### What These Sheets Contain
 
 Performance metrics sheets are generated for operations with available performance models:
-- **GEMM**: Matrix multiply operations (addmm, mm, bmm, baddbmm, etc.)
+- **GEMM**: Matrix multiply operations (addmm, mm, bmm, baddbmm, etc.). See [GEMMs in AI Workloads](./conceptual/aimodels_gemms.md) for how model dimensions (batch size, sequence length, hidden dimension) map to GEMM shapes.
 - **CONV_fwd / CONV_bwd**: Convolution operations
 - **SDPA_fwd / SDPA_bwd**: Scaled dot-product attention
 - **UnaryElementwise / BinaryElementwise**: Element-wise operations
@@ -966,6 +966,7 @@ Depending on the command-line arguments used when generating the report, additio
 
 - [Performance Report Generation Guide](./generate_perf_report.md) - How to generate reports
 - [Trace2Tree Documentation](./Trace2Tree.md) - Understanding the call stack analysis
+- [GEMMs in AI Workloads](./conceptual/aimodels_gemms.md) - Understanding how model dimensions map to GEMM shapes
 - [TreePerf Examples](../examples/tree_perf_example.ipynb) - Example analysis workflows
 - [Call Stack Analysis Example](../examples/call_stack_analysis.ipynb) - Real workflow for debugging performance
 
