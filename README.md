@@ -34,7 +34,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 **2. Command Line Scripts for popular analyses**
 
-- **Generate Excel Reports from Traces** Detailed docs [here](docs/generate_perf_report.md)
+- **Generate Excel Reports from Traces** Detailed docs [here](docs/generate_perf_report.md). For understanding report columns, see [Performance Report Column Definitions](docs/perf_report_columns.md).
 (you can use compressed traces too such as .zip and .gz)
 
 ```bash
