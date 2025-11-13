@@ -554,6 +554,7 @@ class JaxTraceToTree(BaseTraceToTree):
         for i in pid_list:
             filtered_events = [e for e in op_events if e["pid"] == i]
             curr_hlo_op = None
+            prev_e=None
             for e in filtered_events:
                 hlo_op = e["args"].get("hlo_op", None)
                 if hlo_op is not None and hlo_op != curr_hlo_op:
@@ -568,10 +569,11 @@ class JaxTraceToTree(BaseTraceToTree):
                     self.events[e["UID"]]["hlo_parent"]=hlo_id                    
                 elif hlo_op is not None and hlo_op == curr_hlo_op:
                     if e["ts"]-self.events[-1]['t_end']>100:
-                        print("warning of merging kernels")
+                        print(f'Warning: merging two GPU events in single hlo_op with more than 100ns idle time {e} and {prev_e}')
                     self.events[-1]['gpu_events'].extend(e['gpu_events'])
                     self.events[-1]['t_end']=e['t_end']
                     self.events[e["UID"]]["hlo_parent"]=hlo_id
+                prev_e=e
         self._fix_categories_hlo_op()
     
     def traverse_subtree_hlo_op(self,uid):
