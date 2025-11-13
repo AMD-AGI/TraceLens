@@ -545,7 +545,180 @@ class JaxTraceToTree(BaseTraceToTree):
                                             f"in hlo_module: {GPU_event['args']['hlo_module']}"
                                         )
 
+    def _add_hlo_op_nodes(self) -> None:
+        op_events = [event for event in self.events if event["cat"] == "kernel"]
+        op_events = sorted(op_events, key=lambda x: x["ts"])
+        pid_list = list(set(e["pid"] for e in op_events))
+        last_uid=len(self.events)
+        hlo_events= []
+        for i in pid_list:
+            filtered_events = [e for e in op_events if e["pid"] == i]
+            curr_hlo_op = None
+            for e in filtered_events:
+                hlo_op = e["args"].get("hlo_op", None)
+                if hlo_op is not None and hlo_op != curr_hlo_op:
+                    curr_hlo_op = hlo_op
+                    hlo_id=last_uid
+                    last_uid+=1
+                    new_node=e.copy()
+                    new_node["UID"]=hlo_id
+                    new_node["name"]=hlo_op
+                    new_node["cat"]="hlo_op"
+                    self.events.append(new_node)
+                    self.events[e["UID"]]["hlo_parent"]=hlo_id                    
+                elif hlo_op is not None and hlo_op == curr_hlo_op:
+                    if e["ts"]-self.events[-1]['t_end']>100:
+                        print("warning of merging kernels")
+                    self.events[-1]['gpu_events'].extend(e['gpu_events'])
+                    self.events[-1]['t_end']=e['t_end']
+                    self.events[e["UID"]]["hlo_parent"]=hlo_id
+        self._fix_categories_hlo_op()
+    
+    def traverse_subtree_hlo_op(self,uid):
+        event=self.events[uid]
+        if event["cat"]=="kernel":
+            parent_event=self.events[event["hlo_parent"]]
+        elif event["cat"]=="hlo_op":
+            parent_event=event
+        else:
+            assert False,f'node category should be hlo_op or GPU kernel, but found {event["cat"]}'
+        children_events=[self.events[i] for i in parent_event['gpu_events']]
+        print(f'{parent_event["name"]} dur: {parent_event["t_end"]-parent_event["ts"]} category: {parent_event["gpu_kernel_op_cat"]}')
+        #for k,v in parent_event.items():
+        #    print(k,v)
+        #print("|_")
+        for event in children_events:
+            event_str = (
+                    "name:"
+                    + event.get("name")[0:60]
+                    + ", dur:"
+                    + str(event.get("dur"))
+                    + ", pid:"
+                    + str(event.get("pid"))
+                    + ", cat:"
+                    + event.get("cat")
+                    + ", gpu_cat:"
+                    + event.get("gpu_kernel_op_cat")
+                )
+            print(f'  |_{event_str}')
+    def _fix_categories_hlo_op(self):
+        hlo_events=[i for i in self.events if i["cat"]=="hlo_op"]
+        for event in hlo_events:
+            name=event["name"]
+            metadata=event.get("metadata","NA")
+            hlo_cat=TraceEventUtils.JaxHloKeys.UncategorizedEventKey
+            for (
+                category,
+                filters,
+                ) in TraceEventUtils.JaxHloKeys.ClassCategories.items():
+                if any(f in name for f in filters):
+                    hlo_cat=category
+                    break
+            if hlo_cat=="Custom":
+                for (
+                category,
+                filters,
+                ) in TraceEventUtils.JaxHloKeys.CustomClassCategories.items():
+                    if any(f in metadata["custom_call_target"] for f in filters):
+                        hlo_cat=category
+                        break
+            event["gpu_kernel_op_cat"]=hlo_cat
+            gpu_events=[self.events[i] for i in event['gpu_events']]
+            for e in gpu_events:
+                if not(e["gpu_kernel_op_cat"]==hlo_cat):
+                    ##print(f'changing {e["gpu_kernel_op_cat"]} to {hlo_cat} for event {e["name"]} and {name}')
+                    e["gpu_kernel_op_cat"]=hlo_cat
 
+
+
+
+    def traverse_subtree_parents_only_and_print(self, node):
+
+        event = node
+
+        # list child -> parent
+        subtree_event = []
+
+        while True:
+
+            subtree_event.append(event)
+            # print(event)
+
+            if "parent" in event.keys():
+                event = self.events_by_uid[event["parent"]]
+            else:
+                break
+
+        # list parent -> child, cpu -> gpu
+        subtree_event.reverse()
+
+        print("Call stack:")
+        print_str = ""
+        for event in subtree_event:
+
+            event_str = (
+                "name:"
+                + event.get("name")
+                + ", dur:"
+                + str(event.get("dur"))
+                + ", pid:"
+                + str(event.get("pid"))
+                + ", cat:"
+                + event.get("cat")
+            )
+            gpu_kernel_op_cat = event.get("gpu_kernel_op_cat")
+
+            if gpu_kernel_op_cat:
+                event_str = event_str + ", gpu_kernel_op_cat:" + gpu_kernel_op_cat
+
+            args = event.get("args")
+
+            if args:
+                hlo_module = args.get("hlo_module")
+
+                if hlo_module:
+                    event_str = event_str + ", hlo_module:" + hlo_module
+
+                hlo_op = args.get("hlo_op")
+
+                if hlo_op:
+                    event_str = event_str + ", hlo_op:" + hlo_op
+
+            print(print_str, "└──", event_str)
+            print_str += "   "
+
+        args = event.get("args")
+
+        if args:
+
+            framework_name_scope_call_stack = args.get("name")
+
+            if framework_name_scope_call_stack:
+
+                framework_name_scope_call_stack = framework_name_scope_call_stack.split(
+                    "/"
+                )
+
+                print("Framework name scope call stack:")
+
+                print_str = ""
+                for name in framework_name_scope_call_stack:
+
+                    print(print_str, "└──", name)
+                    print_str += "   "
+
+                if hlo_module:
+                    print(print_str + "hlo_module:" + hlo_module)
+
+                if hlo_op:
+                    print(print_str + "hlo_op:" + hlo_op)
+
+                metadata = event.get("metadata")
+
+                if metadata:
+                    metadata = metadata.get("metadata")
+                    source_file = metadata.find("source_file")
+                    print(print_str + metadata[source_file:])
 class TraceToTree:
     def __init__(
         self,

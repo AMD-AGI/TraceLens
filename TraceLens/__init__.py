@@ -19,6 +19,7 @@ from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 from .TraceDiff.trace_diff import TraceDiff
 from .Reporting import *
+from .Trace2Tree.trace_to_tree import JaxTraceToTree
 
 __all__ = [
     "TreePerfAnalyzer",
