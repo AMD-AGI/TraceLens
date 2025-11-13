@@ -568,8 +568,8 @@ class JaxTraceToTree(BaseTraceToTree):
                     self.events.append(new_node)
                     self.events[e["UID"]]["hlo_parent"]=hlo_id                    
                 elif hlo_op is not None and hlo_op == curr_hlo_op:
-                    if e["ts"]-self.events[-1]['t_end']>100:
-                        print(f'Warning: merging two GPU events in single hlo_op with more than 100ns idle time {e} and {prev_e}')
+                    if e["ts"]-self.events[-1]['t_end']>200:
+                        print(f'Warning: merging two GPU events in single hlo_op {curr_hlo_op} with more than 200ns ({e["ts"]-self.events[-1]["t_end"]}) idle time [{e["name"][0:40]},{e["args"]["hlo_module"]}] and [{prev_e["name"][0:40]},{prev_e["args"]["hlo_module"]}]')
                     self.events[-1]['gpu_events'].extend(e['gpu_events'])
                     self.events[-1]['t_end']=e['t_end']
                     self.events[e["UID"]]["hlo_parent"]=hlo_id
@@ -624,11 +624,14 @@ class JaxTraceToTree(BaseTraceToTree):
                     if any(f in metadata["custom_call_target"] for f in filters):
                         hlo_cat=category
                         break
+            if hlo_cat==TraceEventUtils.JaxHloKeys.UncategorizedEventKey:
+                print(f'did not find op category for {name}')
             event["gpu_kernel_op_cat"]=hlo_cat
             gpu_events=[self.events[i] for i in event['gpu_events']]
             for e in gpu_events:
                 if not(e["gpu_kernel_op_cat"]==hlo_cat):
-                    ##print(f'changing {e["gpu_kernel_op_cat"]} to {hlo_cat} for event {e["name"]} and {name}')
+                    #if not (hlo_cat=="XLA Ops"):
+                    #    print(f'changing {e["gpu_kernel_op_cat"]} to {hlo_cat} for event {e["name"]} and {name}')
                     e["gpu_kernel_op_cat"]=hlo_cat
 
 

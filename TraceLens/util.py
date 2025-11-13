@@ -360,11 +360,13 @@ class TraceEventUtils:
         }
         UncategorizedEventKey = "Uncategorized Events"
     class JaxHloKeys:
+        ConvKeys = ["conv.","conv-","conv_"]
         GemmKeys = ["gemm", "cublas","dot"]
         CommunicationKeys = ["all-gather","all-reduce","reduce-scatter","all-to-all","alltoall","collective-permute","collectivepermute"]
         CustomKeys=["custom"]
-        XLAKeys=["loop_","input_","wrapped_slice","wrapped_transpose","wrapped_concatenate","fusion."]
+        XLAKeys=["loop_","input_","wrapped_","fusion."]
         ClassCategories = {
+            "Conv": ConvKeys,
             "GEMM": GemmKeys,
             "Communication rccl/nccl": CommunicationKeys,
             "XLA Ops": XLAKeys,
