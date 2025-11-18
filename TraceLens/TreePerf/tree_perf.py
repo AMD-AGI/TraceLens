@@ -453,6 +453,7 @@ class TreePerfAnalyzer:
                         "name": kernel["name"],
                         "dur": kernel["dur"],
                         "stream": kernel.get("args", {}).get("stream", None),
+                        "Kernel category": self.categorize_kernel_by_name(kernel["name"]),
                     }
                     for kernel in list_kernels
                 ]
@@ -492,6 +493,7 @@ class TreePerfAnalyzer:
                         "name": kernel["name"],
                         "dur": kernel["dur"],
                         "stream": kernel.get("args", {}).get("stream", None),
+                        "Kernel category": self.categorize_kernel_by_name(kernel["name"]),
                     }
                     for kernel in list_kernels
                 ]
@@ -525,6 +527,7 @@ class TreePerfAnalyzer:
                     "name": kernel["name"],
                     "dur": kernel["dur"],
                     "stream": kernel.get("args", {}).get("stream", None),
+                    "Kernel category": self.categorize_kernel_by_name(kernel["name"]),
                 }
                 for kernel in list_kernels
             ]
@@ -589,6 +592,196 @@ class TreePerfAnalyzer:
         df_agg.reset_index(drop=True, inplace=True)
 
         return df_agg
+
+    @staticmethod
+    def get_df_kernel_launchers_summary_by_inference_phase(df_kernel_launchers, m_threshold=10, detection_method='hybrid'):
+        """
+        Generate separate kernel launcher summaries for Prefill and Decode phases.
+        
+        Args:
+            df_kernel_launchers (pd.DataFrame): DataFrame containing kernel launchers.
+            m_threshold (int): Threshold for M parameter to distinguish phases. Default: 10
+            detection_method (str): Method to use for phase detection:
+                - 'kernel_names': Read phase info from kernel names (RECOMMENDED)
+                - 'gemm_params': Original GEMM M parameter method
+                - 'attention_patterns': Use attention operation analysis
+                - 'framework_apis': Use framework-specific patterns
+                - 'operation_frequency': Use statistical frequency analysis
+                - 'hybrid': Combine multiple methods in priority order
+            
+        Returns:
+            dict: Dictionary with keys 'Prefill' and 'Decode', each containing a summary DataFrame.
+        """
+        df_temp = df_kernel_launchers.copy()
+        
+        # Extract kernel categories from kernel_details if available
+        if 'kernel_details' in df_temp.columns:
+            def extract_kernel_categories(kernel_details):
+                """Extract unique kernel categories from kernel_details list"""
+                if not kernel_details or not isinstance(kernel_details, list):
+                    return None
+                categories = set()
+                for kernel in kernel_details:
+                    if isinstance(kernel, dict) and 'Kernel category' in kernel:
+                        cat = kernel['Kernel category']
+                        if cat and cat != 'Unknown':
+                            categories.add(cat)
+                # Return sorted categories joined by comma, or None if empty
+                return ', '.join(sorted(categories)) if categories else None
+            
+            df_temp['kernel_categories'] = df_temp['kernel_details'].apply(extract_kernel_categories)
+        
+        # Add inference phase column using selected detection method
+        if detection_method == 'gemm_params':
+            # Original GEMM-based method
+            df_temp['inference_phase'] = df_temp.apply(
+                lambda row: TreePerfAnalyzer.detect_inference_phase(row, m_threshold), axis=1
+            )
+        else:
+            # Advanced detection methods
+            df_temp['inference_phase'] = TreePerfAnalyzer.detect_inference_phase_advanced(
+                df_temp, method=detection_method, m_threshold=m_threshold
+            )
+        
+        # Create separate summaries for each phase
+        phase_summaries = {}
+        
+        for phase in ['Prefill', 'Decode']:
+            df_phase = df_temp[df_temp['inference_phase'] == phase].copy()
+            
+            if df_phase.empty:
+                # Create empty summary with expected columns
+                empty_summary = pd.DataFrame(columns=[
+                    'Kernel categories', 'name', 'total_direct_kernel_time_sum', 'Count', 
+                    'total_direct_kernel_time_ms', 'Percentage (%)', 'Cumulative Percentage (%)'
+                ])
+                phase_summaries[phase] = empty_summary
+                continue
+            
+            # Prepare aggregation dict
+            agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
+            
+            # Add kernel_categories to aggregation if available
+            if 'kernel_categories' in df_phase.columns:
+                # Get the first non-null kernel_categories value for each operation name
+                agg_dict["kernel_categories"] = lambda x: x.dropna().iloc[0] if not x.dropna().empty else None
+                
+            # Group by operation name
+            df_agg = df_phase.groupby("name").agg(agg_dict)
+            df_agg.columns = ["_".join(col).strip() if isinstance(col, tuple) else col for col in df_agg.columns.values]
+            df_agg.reset_index(inplace=True)
+            df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
+            
+            # Rename kernel_categories column if it exists
+            if 'kernel_categories_<lambda>' in df_agg.columns:
+                df_agg.rename(columns={'kernel_categories_<lambda>': 'Kernel categories'}, inplace=True)
+            
+            df_agg.sort_values(
+                by="total_direct_kernel_time_sum", ascending=False, inplace=True
+            )
+            df_agg["total_direct_kernel_time_ms"] = (
+                df_agg["total_direct_kernel_time_sum"] / 1000
+            )
+            
+            # Calculate percentages within this phase
+            total_duration_ms = df_agg["total_direct_kernel_time_ms"].sum()
+            if total_duration_ms > 0:
+                df_agg["Percentage (%)"] = (
+                    df_agg["total_direct_kernel_time_ms"] / total_duration_ms
+                ) * 100
+                df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
+            else:
+                df_agg["Percentage (%)"] = 0.0
+                df_agg["Cumulative Percentage (%)"] = 0.0
+            
+            # Reorder columns to put Kernel categories first (if it exists)
+            if 'Kernel categories' in df_agg.columns:
+                cols = ['Kernel categories'] + [col for col in df_agg.columns if col != 'Kernel categories']
+                df_agg = df_agg[cols]
+                
+            df_agg.reset_index(drop=True, inplace=True)
+            phase_summaries[phase] = df_agg
+            
+        return phase_summaries
+
+    @staticmethod
+    def get_df_kernel_summary_by_inference_phase(df_kernels, m_threshold=10):
+        """
+        Generate separate kernel summaries (per-kernel level) for Prefill and Decode phases.
+        
+        Args:
+            df_kernels (pd.DataFrame): DataFrame containing individual kernel information.
+            m_threshold (int): Threshold for M parameter to distinguish phases. Default: 10
+            
+        Returns:
+            dict: Dictionary with keys 'Prefill' and 'Decode', each containing a summary DataFrame.
+        """
+        if df_kernels.empty or "Kernel duration (µs)" not in df_kernels.columns:
+            # Return empty summaries
+            empty_summary = pd.DataFrame()
+            return {'Prefill': empty_summary, 'Decode': empty_summary}
+            
+        df_temp = df_kernels.copy()
+        
+        # Add inference phase column 
+        df_temp['inference_phase'] = df_temp.apply(
+            lambda row: TreePerfAnalyzer.detect_inference_phase(row, m_threshold), axis=1
+        )
+        
+        # Create separate summaries for each phase
+        phase_summaries = {}
+        
+        for phase in ['Prefill', 'Decode']:
+            df_phase = df_temp[df_temp['inference_phase'] == phase].copy()
+            
+            if df_phase.empty:
+                phase_summaries[phase] = pd.DataFrame()
+                continue
+            
+            # Group by category/cpu_op along with kernel identifiers when available
+            group_cols = []
+            for col in [
+                "Parent op category",
+                "Parent cpu_op", 
+                "Kernel name",
+                "Kernel stream",
+            ]:
+                if col in df_phase.columns:
+                    group_cols.append(col)
+            if not group_cols:
+                group_cols = (
+                    ["Kernel name"] if "Kernel name" in df_phase.columns else []
+                )
+            
+            if not group_cols:
+                # No grouping columns available
+                phase_summaries[phase] = df_phase
+                continue
+                
+            agg_dict = {"Kernel duration (µs)": ["sum", "count", "mean", "min", "max"]}
+            df_kernel_summary = df_phase.groupby(group_cols, dropna=False).agg(agg_dict)
+            df_kernel_summary.columns = [
+                "_".join(col).strip() for col in df_kernel_summary.columns.values
+            ]
+            df_kernel_summary.reset_index(inplace=True)
+            
+            # Calculate percentages within this phase
+            total_kernels_us = df_phase["Kernel duration (µs)"].sum()
+            if total_kernels_us > 0:
+                df_kernel_summary["Percent of kernels time (%)"] = (
+                    df_kernel_summary["Kernel duration (µs)_sum"] / total_kernels_us
+                ) * 100
+            else:
+                df_kernel_summary["Percent of kernels time (%)"] = np.nan
+                
+            df_kernel_summary.sort_values(
+                by="Kernel duration (µs)_sum", ascending=False, inplace=True
+            )
+            df_kernel_summary.reset_index(drop=True, inplace=True)
+            
+            phase_summaries[phase] = df_kernel_summary
+            
+        return phase_summaries
 
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
     @staticmethod
@@ -885,26 +1078,49 @@ class TreePerfAnalyzer:
     def categorize_kernel_by_name(kernel_name):
         """
         Categorize a GPU kernel based on its name patterns.
-        Covers training, inference (vLLM, TGI, etc.), and general workloads.
+        Generic categorization for all frameworks: vLLM, SGLang, TGI, HuggingFace, etc.
+        Works with training and inference workloads on AMD and NVIDIA GPUs.
         
         Returns a detailed category for the kernel operation.
         """
         name_lower = kernel_name.lower()
         
-        # vLLM PagedAttention kernels (check first as they're very specific)
-        if 'paged_attention' in name_lower:
+        # Detect framework from namespace (generic approach)
+        framework = None
+        if '::' in kernel_name:
+            namespace = kernel_name.split('::')[0].lower()
+            if 'vllm' in namespace:
+                framework = 'vLLM'
+            elif 'sglang' in namespace or 'sgl' in namespace:
+                framework = 'SGLang'
+            elif 'tgi' in namespace or 'text_generation' in namespace:
+                framework = 'TGI'
+            elif 'transformers' in namespace or 'hf' in namespace or 'huggingface' in namespace:
+                framework = 'HuggingFace'
+            elif 'tensorrt' in namespace or 'trt' in namespace:
+                framework = 'TensorRT'
+            elif 'onnx' in namespace or 'ort' in namespace:
+                framework = 'ONNX'
+        
+        # PagedAttention (used by vLLM, SGLang, and other inference engines)
+        if 'paged_attention' in name_lower or 'pagedattention' in name_lower:
             if 'reduce' in name_lower:
                 return "PagedAttention-Reduce"
-            elif any(x in name_lower for x in ['qkv', 'kernel']):
+            elif any(x in name_lower for x in ['qkv', 'kernel', 'prefill', 'decode']):
                 return "PagedAttention-Compute"
             else:
                 return "PagedAttention-Generic"
         
+        # Chunked Prefill / Continuous Batching patterns (common in SGLang, vLLM)
+        if any(pattern in name_lower for pattern in ['chunked_prefill', 'continuous_batch', 'batch_decode']):
+            return "InferenceBatching"
+        
         # GEMM/Matrix Multiply kernels (including quantized variants)
         if any(pattern in name_lower for pattern in [
-            'gemm', 'cijk', 'matmul', 'cublas', 'nvjet', 
-            'mfma', 'wmma', 'tensor_op', 'sgemm', 'dgemm', 
-            'hgemm', 'bgemm', 'i8gemm', 'f4gemm', 'f8gemm'
+            'gemm', 'cijk', 'matmul', 'cublas', 'nvjet',
+            'mfma', 'wmma', 'tensor_op', 'sgemm', 'dgemm',
+            'hgemm', 'bgemm', 'i8gemm', 'f4gemm', 'f8gemm',
+            'cutlass', 'rocblas', 'hipblas', 'matrix_multiply'
         ]):
             # Quantized GEMM variants
             if any(x in name_lower for x in ['f4gemm', 'fp4', 'int4']):
@@ -916,6 +1132,10 @@ class TreePerfAnalyzer:
                 return "GEMM-CK"  # AMD Composable Kernel GEMM
             elif any(x in name_lower for x in ['cublas', 'cublaslt']):
                 return "GEMM-cuBLAS"  # NVIDIA cuBLAS
+            elif any(x in name_lower for x in ['cutlass']):
+                return "GEMM-CUTLASS"  # NVIDIA CUTLASS
+            elif any(x in name_lower for x in ['rocblas', 'hipblas']):
+                return "GEMM-ROCm"  # AMD ROCm BLAS
             elif 'nvjet' in name_lower:
                 return "GEMM-NVJET"
             elif 'mfma' in name_lower:
@@ -924,6 +1144,8 @@ class TreePerfAnalyzer:
                 return "GEMM-WMMA"  # NVIDIA Tensor Cores
             elif 'splitk' in name_lower or 'wvsplitk' in name_lower:
                 return "GEMM-SplitK"  # Split-K GEMM optimization
+            elif 'tensor_op' in name_lower:
+                return "GEMM-TensorOp"  # NVIDIA Tensor Operations
             else:
                 return "GEMM-Generic"
         
@@ -1008,21 +1230,25 @@ class TreePerfAnalyzer:
         # Memory operations
         if any(pattern in name_lower for pattern in [
             'copy', 'memcpy', 'memset', 'transpose',
-            'permute', 'reshape', 'cast', 'convert'
+            'permute', 'reshape', 'cast', 'convert',
+            'fill_buffer', 'matrix_transpose', 'data_transfer'
         ]):
-            if 'transpose' in name_lower or 'permute' in name_lower:
+            if 'transpose' in name_lower or 'permute' in name_lower or 'matrix_transpose' in name_lower:
                 return "Memory-Transpose"
-            elif 'copy' in name_lower or 'memcpy' in name_lower:
+            elif 'copy' in name_lower or 'memcpy' in name_lower or 'data_transfer' in name_lower:
                 return "Memory-Copy"
-            elif 'memset' in name_lower:
+            elif 'memset' in name_lower or 'fill_buffer' in name_lower:
                 return "Memory-Set"
+            elif 'reshape' in name_lower or 'cast' in name_lower or 'convert' in name_lower:
+                return "Memory-Reshape"
             else:
                 return "Memory-Generic"
         
-        # Communication kernels (NCCL/RCCL)
+        # Communication kernels (NCCL/RCCL/MSCCL)
         if any(pattern in name_lower for pattern in [
-            'nccl', 'rccl', 'msccl', 'allreduce', 
-            'allgather', 'reducescatter', 'broadcast'
+            'nccl', 'rccl', 'msccl', 'allreduce',
+            'allgather', 'reducescatter', 'broadcast',
+            'send', 'recv', 'barrier', 'alltoall'
         ]):
             if 'allreduce' in name_lower:
                 return "Comm-AllReduce"
@@ -1030,20 +1256,35 @@ class TreePerfAnalyzer:
                 return "Comm-AllGather"
             elif 'reducescatter' in name_lower:
                 return "Comm-ReduceScatter"
+            elif 'alltoall' in name_lower:
+                return "Comm-AllToAll"
+            elif 'send' in name_lower:
+                return "Comm-Send"
+            elif 'recv' in name_lower:
+                return "Comm-Recv"
+            elif 'broadcast' in name_lower:
+                return "Comm-Broadcast"
+            elif 'barrier' in name_lower:
+                return "Comm-Barrier"
             else:
                 return "Comm-Generic"
         
         # Quantization/Dequantization (inference optimization)
         if any(pattern in name_lower for pattern in [
             'quant', 'dequant', 'fp8', 'int8', 'int4',
-            'fp4', 'scale', 'per_group', 'per_channel'
+            'fp4', 'scale', 'per_group', 'per_channel',
+            'quantize', 'dequantize', 'qkv_quant', 'weight_quant'
         ]):
             if 'per_group' in name_lower or 'per_channel' in name_lower:
                 return "Quant-PerGroup"  # Per-group/channel quantization
             elif 'dynamic' in name_lower:
                 return "Quant-Dynamic"  # Dynamic quantization
-            elif 'dequant' in name_lower:
+            elif 'dequant' in name_lower or 'dequantize' in name_lower:
                 return "Dequant"  # Dequantization
+            elif 'weight' in name_lower:
+                return "Quant-Weight"  # Weight quantization
+            elif 'activation' in name_lower or 'act' in name_lower:
+                return "Quant-Activation"  # Activation quantization
             else:
                 return "Quant-Generic"
         
@@ -1056,14 +1297,18 @@ class TreePerfAnalyzer:
             else:
                 return "RoPE-Generic"
         
-        # KV Cache operations (vLLM, TGI, etc.)
+        # KV Cache operations (generic for all inference engines: vLLM, SGLang, TGI, etc.)
         if any(pattern in name_lower for pattern in [
-            'cache', 'reshape_and_cache', 'kv_cache'
+            'cache', 'reshape_and_cache', 'kv_cache', 'key_value_cache'
         ]) and 'paged' not in name_lower:  # Exclude paged_attention (already handled)
             if 'reshape' in name_lower:
                 return "KVCache-Reshape"  # Reshape and store in KV cache
-            elif 'vllm::' in kernel_name:  # vLLM namespace
-                return "KVCache-vLLM"
+            elif 'append' in name_lower or 'update' in name_lower:
+                return "KVCache-Update"  # Update/append to cache
+            elif 'compress' in name_lower or 'prune' in name_lower:
+                return "KVCache-Compression"  # KV cache compression (H2O, etc.)
+            elif framework:
+                return f"KVCache-{framework}"  # Framework-specific cache ops
             else:
                 return "KVCache-Generic"
         
@@ -1081,33 +1326,883 @@ class TreePerfAnalyzer:
         
         # Sampling/Generation (inference-specific)
         if any(pattern in name_lower for pattern in [
-            'sample', 'topk', 'topp', 'beam', 'argmax', 'argmin'
+            'sample', 'topk', 'topp', 'beam', 'argmax', 'argmin',
+            'sampling', 'select', 'choice', 'greedy', 'nucleus'
         ]):
             if 'topk' in name_lower or 'top_k' in name_lower:
                 return "Sampling-TopK"
-            elif 'topp' in name_lower or 'top_p' in name_lower:
+            elif 'topp' in name_lower or 'top_p' in name_lower or 'nucleus' in name_lower:
                 return "Sampling-TopP"
-            elif 'argmax' in name_lower or 'argmin' in name_lower:
+            elif 'argmax' in name_lower or 'argmin' in name_lower or 'greedy' in name_lower:
                 return "Sampling-ArgMax"
+            elif 'beam' in name_lower:
+                return "Sampling-Beam"
+            elif 'select' in name_lower or 'choice' in name_lower:
+                return "Sampling-Generic"
             else:
                 return "Sampling-Generic"
         
-        # Triton kernels (custom kernels)
+        # Speculative Decoding (used in SGLang, vLLM, TGI)
+        if any(pattern in name_lower for pattern in ['speculative', 'draft', 'verify_tokens']):
+            return "SpeculativeDecoding"
+        
+        # Prefix Caching / Radix Attention (SGLang-specific optimization)
+        if any(pattern in name_lower for pattern in ['radix', 'prefix_cache', 'tree_attention']):
+            return "PrefixCaching"
+        
+        # Token Generation / Logits Processing (generic inference)
+        if any(pattern in name_lower for pattern in ['logits', 'token_gen', 'next_token']):
+            return "TokenGeneration"
+        
+        # Triton kernels (custom kernels used by all frameworks)
         if 'triton' in name_lower:
             return "Triton-Custom"
         
-        # Generic forward/backward kernels (common pattern in vLLM/custom ops)
+        # FlashInfer kernels (used by SGLang and others)
+        if 'flashinfer' in name_lower or 'flash_infer' in name_lower:
+            return "FlashInfer"
+        
+        # Generic forward/backward kernels (common pattern across frameworks)
         if kernel_name.startswith('_fwd_kernel') or kernel_name == '_fwd_kernel':
             return "Kernel-Forward"
         if kernel_name.startswith('_bwd_kernel') or kernel_name == '_bwd_kernel':
             return "Kernel-Backward"
         
-        # Check for vLLM namespace
-        if 'vllm::' in kernel_name:
-            return "vLLM-Custom"
+        # Framework-specific custom operations (generic detection)
+        if framework:
+            return f"{framework}-Custom"
+        
+        # Detect other common inference frameworks by namespace
+        if '::' in kernel_name:
+            namespace = kernel_name.split('::')[0]
+            # Check for common framework patterns
+            if any(fw in namespace.lower() for fw in ['hf', 'huggingface', 'transformers']):
+                return "HuggingFace-Custom"
+            elif any(fw in namespace.lower() for fw in ['tensorrt', 'trt']):
+                return "TensorRT-Custom"
+            elif any(fw in namespace.lower() for fw in ['onnx', 'ort']):
+                return "ONNX-Custom"
+            elif any(fw in namespace.lower() for fw in ['deepspeed', 'ds']):
+                return "DeepSpeed-Custom"
+            elif any(fw in namespace.lower() for fw in ['megatron', 'mcore']):
+                return "Megatron-Custom"
+            elif any(fw in namespace.lower() for fw in ['fairscale', 'fair']):
+                return "FairScale-Custom"
         
         # Default: uncategorized
         return "Uncategorized"
+
+    @staticmethod
+    def detect_inference_phase(row, m_threshold=10, debug=False):
+        """
+        Detect whether an operation belongs to Prefill or Decode phase of inference.
+        
+        This method uses two approaches:
+        1. For GEMM operations: Uses the M parameter to distinguish phases
+           - Prefill: M > threshold (sequence length > 1)  
+           - Decode: M <= threshold (sequence length = 1)
+        2. For other operations: Uses kernel name patterns
+        
+        Args:
+            row (pd.Series or dict): Row containing operation information with columns:
+                - 'name': operation name
+                - 'kernel_details': list of kernel dictionaries (optional)
+                - GEMM parameters if available
+            m_threshold (int): Threshold for M parameter. Operations with M > threshold
+                              are considered Prefill, others are Decode. Default: 10
+            debug (bool): If True, print debugging information
+                              
+        Returns:
+            str: "Prefill", "Decode", or "Mixed" (if contains both types of kernels)
+        """
+        
+        # Check if we have GEMM parameter information available
+        has_gemm_params = False
+        m_values = []
+        
+        if debug:
+            print(f"DEBUG: Analyzing row: {type(row)}")
+            if isinstance(row, dict):
+                print(f"DEBUG: Row keys: {list(row.keys())}")
+            elif hasattr(row, 'index'):
+                print(f"DEBUG: Row index: {list(row.index) if hasattr(row.index, '__iter__') else row.index}")
+        
+        # Method 1: Try to extract M parameter from different possible sources
+        
+        # Check if this is a GEMM operation with direct M parameter
+        if isinstance(row, dict) and 'param: M' in row:
+            m_values.append(row['param: M'])
+            has_gemm_params = True
+            if debug:
+                print(f"DEBUG: Found direct M parameter: {row['param: M']}")
+        elif hasattr(row, 'get') and row.get('param: M') is not None:
+            m_values.append(row.get('param: M'))
+            has_gemm_params = True
+            if debug:
+                print(f"DEBUG: Found M parameter via get(): {row.get('param: M')}")
+        
+        # Check for Input Dims directly in the row (kernel launchers format)
+        input_dims = None
+        if isinstance(row, dict):
+            input_dims = row.get('Input Dims')
+        elif hasattr(row, 'get'):
+            input_dims = row.get('Input Dims')
+        elif hasattr(row, 'Input Dims'):
+            input_dims = getattr(row, 'Input Dims', None)
+            
+        # Extract M parameter from Input Dims if available
+        if input_dims and isinstance(input_dims, (list, tuple)) and len(input_dims) >= 2:
+            try:
+                # For most GEMM ops: A_shape[0] = M
+                A_shape = input_dims[0] if input_dims[0] else []
+                if isinstance(A_shape, (list, tuple)) and len(A_shape) >= 1:
+                    m_val = A_shape[0]
+                    if isinstance(m_val, (int, float)) and m_val > 0:
+                        m_values.append(int(m_val))
+                        has_gemm_params = True
+                        if debug:
+                            print(f"DEBUG: Found M parameter from Input Dims: {m_val}")
+            except (IndexError, TypeError, ValueError) as e:
+                if debug:
+                    print(f"DEBUG: Error extracting M from Input Dims: {e}")
+        
+        # Check kernel details for GEMM parameters (fallback)
+        kernel_details = None
+        if isinstance(row, dict):
+            kernel_details = row.get('kernel_details', [])
+        elif hasattr(row, 'get'):
+            kernel_details = row.get('kernel_details', [])
+        elif hasattr(row, 'kernel_details'):
+            kernel_details = row.kernel_details
+            
+        if kernel_details and isinstance(kernel_details, list):
+            for kernel in kernel_details:
+                if isinstance(kernel, dict) and 'args' in kernel:
+                    # Check for GEMM operations that might have M parameter
+                    args = kernel.get('args', {})
+                    if 'Input Dims' in args:
+                        input_dims_nested = args['Input Dims']
+                        if isinstance(input_dims_nested, list) and len(input_dims_nested) >= 2:
+                            # Try to extract M from matrix dimensions
+                            # For most GEMM ops: A_shape[0] = M
+                            try:
+                                A_shape = input_dims_nested[0] if input_dims_nested[0] else []
+                                if isinstance(A_shape, list) and len(A_shape) >= 1:
+                                    m_val = A_shape[0]
+                                    if isinstance(m_val, (int, float)) and m_val > 0:
+                                        m_values.append(int(m_val))
+                                        has_gemm_params = True
+                                        if debug:
+                                            print(f"DEBUG: Found M parameter from nested kernel details: {m_val}")
+                            except (IndexError, TypeError, ValueError) as e:
+                                if debug:
+                                    print(f"DEBUG: Error extracting M from nested kernel details: {e}")
+                                continue
+        
+        # Method 2: Use kernel name patterns for explicit prefill/decode detection
+        op_name = ""
+        if isinstance(row, dict):
+            op_name = row.get('name', '')
+        elif hasattr(row, 'get'):
+            op_name = row.get('name', '')
+        elif hasattr(row, 'name'):
+            op_name = row.name
+            
+        # Also check kernel names
+        kernel_names = []
+        if kernel_details:
+            for kernel in kernel_details:
+                if isinstance(kernel, dict) and 'name' in kernel:
+                    kernel_names.append(kernel['name'])
+                    
+        # Combine operation name and kernel names for pattern matching
+        all_names = [op_name] + kernel_names
+        name_text = ' '.join(all_names).lower()
+        
+        if debug:
+            print(f"DEBUG: Operation name: '{op_name}'")
+            print(f"DEBUG: Kernel names: {kernel_names}")
+            print(f"DEBUG: Combined text: '{name_text}'")
+            print(f"DEBUG: M values found: {m_values}, has_gemm_params: {has_gemm_params}")
+        
+        # Explicit prefill/decode pattern detection
+        prefill_patterns = ['prefill', 'chunked_prefill', 'batch_prefill', 'prefill_attention']
+        decode_patterns = ['decode', 'batch_decode', 'continuous_batch', 'decode_attention', 
+                          'paged_attention.*decode', 'decode_kernel']
+        
+        has_prefill_pattern = any(pattern in name_text for pattern in prefill_patterns)
+        has_decode_pattern = any(pattern in name_text for pattern in decode_patterns)
+        
+        # Decision logic
+        if has_prefill_pattern and has_decode_pattern:
+            return "Mixed"
+        elif has_prefill_pattern:
+            return "Prefill"  
+        elif has_decode_pattern:
+            return "Decode"
+            
+        # Use GEMM M parameter if available
+        if has_gemm_params and m_values:
+            # Check if we have mixed M values (both large and small)
+            large_m = [m for m in m_values if m > m_threshold]
+            small_m = [m for m in m_values if m <= m_threshold]
+            
+            if large_m and small_m:
+                return "Mixed"
+            elif large_m:
+                return "Prefill"
+            elif small_m:
+                return "Decode"
+                
+        # Default fallback: if no clear indicators, classify as Mixed
+        # This is conservative - in practice you might want to default to one phase
+        return "Mixed"
+
+    @staticmethod
+    def detect_inference_phase_advanced(df_operations, method='attention_patterns', m_threshold=10):
+        """
+        Advanced inference phase detection using multiple elegant approaches.
+        
+        Args:
+            df_operations (pd.DataFrame): DataFrame with operation information
+            method (str): Detection method:
+                - 'union': Comprehensive union-based approach (RECOMMENDED FOR MAXIMUM COVERAGE)
+                - 'kernel_names': Read directly from kernel names
+                - 'attention_patterns': Use attention operation characteristics
+                - 'framework_apis': Use framework-specific operation patterns  
+                - 'temporal_analysis': Use execution timing patterns
+                - 'operation_frequency': Use statistical operation patterns
+            m_threshold (int): GEMM M parameter threshold for union method
+                
+        Returns:
+            pd.Series: Phase labels for each operation
+        """
+        
+        if method == 'union':
+            return TreePerfAnalyzer.detect_inference_phase_union(df_operations, m_threshold)
+        elif method == 'kernel_names':
+            return TreePerfAnalyzer._detect_by_kernel_names(df_operations)
+        elif method == 'attention_patterns':
+            return TreePerfAnalyzer._detect_by_attention_patterns(df_operations)
+        elif method == 'framework_apis':
+            return TreePerfAnalyzer._detect_by_framework_apis(df_operations)
+        elif method == 'temporal_analysis':
+            return TreePerfAnalyzer._detect_by_temporal_patterns(df_operations)
+        elif method == 'operation_frequency':
+            return TreePerfAnalyzer._detect_by_operation_frequency(df_operations)
+        else:
+            # Fallback to hybrid approach
+            return TreePerfAnalyzer._detect_hybrid(df_operations)
+    
+    @staticmethod
+    def _detect_by_attention_patterns(df_ops):
+        """
+        Detect phases based on attention operation characteristics.
+        
+        Key insights:
+        - Prefill: Large sequence lengths in attention, no KV cache operations
+        - Decode: Small queries + KV cache operations (paged_attention, reshape_and_cache)
+        """
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        
+        # Framework-agnostic attention patterns
+        attention_ops = df_ops['name'].str.contains('attention|attn|sdpa', case=False, na=False)
+        
+        for idx in df_ops[attention_ops].index:
+            op_name = df_ops.loc[idx, 'name'].lower()
+            
+            # Strong Decode indicators (KV cache operations)
+            if any(pattern in op_name for pattern in [
+                'paged_attention', 'kv_cache', 'reshape_and_cache', 
+                'batch_decode', 'decode_attention'
+            ]):
+                phase_labels[idx] = 'Decode'
+                
+            # Strong Prefill indicators 
+            elif any(pattern in op_name for pattern in [
+                'prefill_attention', 'chunked_prefill', 'batch_prefill'
+            ]):
+                phase_labels[idx] = 'Prefill'
+                
+            # Analyze attention sequence dimensions if available
+            elif 'Input Dims' in df_ops.columns:
+                input_dims = df_ops.loc[idx, 'Input Dims']
+                if input_dims and len(input_dims) >= 3:
+                    # For attention: [batch, seq_len, hidden] or [batch, num_heads, seq_len, head_dim]
+                    seq_len = input_dims[1] if len(input_dims) == 3 else input_dims[2]
+                    if isinstance(seq_len, (int, float)) and seq_len > 10:
+                        phase_labels[idx] = 'Prefill'
+                    elif isinstance(seq_len, (int, float)) and seq_len <= 10:
+                        phase_labels[idx] = 'Decode'
+        
+        return phase_labels
+    
+    @staticmethod 
+    def _detect_by_framework_apis(df_ops):
+        """
+        Detect phases using framework-specific API patterns.
+        
+        Different inference engines have distinct operation naming:
+        - vLLM: Uses paged_attention_*, reshape_and_cache_*
+        - SGLang: Uses radix_attention_*, prefix_cache_*
+        - TGI: Uses decode_*, continuous_batch_*
+        """
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        
+        for idx, name in df_ops['name'].items():
+            name_lower = name.lower()
+            
+            # vLLM-specific patterns
+            if 'vllm::' in name or any(pattern in name_lower for pattern in [
+                'paged_attention', 'reshape_and_cache', 'batch_decode'
+            ]):
+                if any(pattern in name_lower for pattern in ['decode', 'cache']):
+                    phase_labels[idx] = 'Decode'
+                elif 'prefill' in name_lower:
+                    phase_labels[idx] = 'Prefill'
+                    
+            # SGLang-specific patterns
+            elif 'sglang::' in name or any(pattern in name_lower for pattern in [
+                'radix_attention', 'prefix_cache', 'tree_attention'
+            ]):
+                if 'decode' in name_lower or 'cache' in name_lower:
+                    phase_labels[idx] = 'Decode'
+                elif 'prefill' in name_lower:
+                    phase_labels[idx] = 'Prefill'
+                    
+            # TGI-specific patterns
+            elif 'tgi::' in name or any(pattern in name_lower for pattern in [
+                'continuous_batch', 'decode_kernel', 'token_generation'
+            ]):
+                if 'decode' in name_lower or 'generation' in name_lower:
+                    phase_labels[idx] = 'Decode'
+                elif 'prefill' in name_lower or 'encode' in name_lower:
+                    phase_labels[idx] = 'Prefill'
+                    
+            # TensorRT-LLM patterns
+            elif any(pattern in name_lower for pattern in [
+                'context_phase', 'generation_phase', 'mha_', 'mlp_'
+            ]):
+                if 'generation' in name_lower or 'decode' in name_lower:
+                    phase_labels[idx] = 'Decode'
+                elif 'context' in name_lower or 'prefill' in name_lower:
+                    phase_labels[idx] = 'Prefill'
+        
+        return phase_labels
+    
+    @staticmethod
+    def _detect_by_temporal_patterns(df_ops):
+        """
+        Detect phases based on temporal execution patterns.
+        
+        Insight: Prefill happens as dense burst, Decode as repeated sparse patterns.
+        """
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        
+        # This requires timestamp information - would need to be implemented
+        # based on the specific trace format and timing data available
+        # For now, return Mixed to indicate temporal analysis is not implemented
+        
+        return phase_labels
+    
+    @staticmethod
+    def _detect_by_operation_frequency(df_ops):
+        """
+        Detect phases based on operation frequency patterns.
+        
+        Insight: Decode operations repeat many times (once per token),
+                Prefill operations happen once per layer.
+        """
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        
+        # Count operation frequencies
+        op_counts = df_ops['name'].value_counts()
+        
+        # More aggressive thresholds to classify more operations
+        high_freq_threshold = op_counts.quantile(0.5)  # Top 50% by frequency -> Decode
+        low_freq_threshold = op_counts.quantile(0.15)  # Bottom 15% by frequency -> Prefill
+        
+        for idx, name in df_ops['name'].items():
+            count = op_counts[name]
+            
+            if count > high_freq_threshold:
+                # High frequency suggests Decode (repeated per token)
+                phase_labels[idx] = 'Decode'
+            elif count < low_freq_threshold:
+                # Low frequency suggests Prefill (once per layer)  
+                phase_labels[idx] = 'Prefill'
+            else:
+                # Medium frequency - check kernel names for hints
+                phase_labels[idx] = 'Decode'  # Default to Decode for medium frequency
+                
+        return phase_labels
+    
+    @staticmethod
+    def _detect_by_kernel_names(df_ops):
+        """
+        Most reliable method: Read phase information directly from kernel names.
+        
+        Many inference kernels embed phase information in their names:
+        - Explicit prefill/decode keywords
+        - Sequence length encoding (sl1 = decode, sl>1 = prefill)
+        - Context vs generation patterns
+        """
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        
+        for idx in df_ops.index:
+            op_name = str(df_ops.loc[idx, 'name']).lower()
+            
+            # Get kernel names if available
+            kernel_names = []
+            if 'kernel_details' in df_ops.columns:
+                kernel_details = df_ops.loc[idx, 'kernel_details']
+                if isinstance(kernel_details, list):
+                    kernel_names = [k.get('name', '') for k in kernel_details if isinstance(k, dict)]
+            
+            # Combine all names for analysis
+            all_names = ' '.join([op_name] + [str(k).lower() for k in kernel_names])
+            
+            # === Strong Prefill indicators ===
+            prefill_keywords = [
+                'prefill', 'context', 'prompt', 'chunked_prefill',
+                'batch_prefill', 'context_attention', 'prompt_attention',
+                'context_phase', 'initialization', 'first_token'
+            ]
+            
+            # === Strong Decode indicators ===
+            decode_keywords = [
+                'decode', 'generation', 'autoregressive', 'batch_decode',
+                'continuous_batch', 'paged_attention', 'kv_cache',
+                'reshape_and_cache', 'generation_phase', 'incremental',
+                'single_token', '_decode_', 'decode_kernel'
+            ]
+            
+            # === Sequence length patterns in kernel names ===
+            # Many kernels encode sequence length: sl1, sl512, seqlen_1, etc.
+            import re
+            seq_len_patterns = re.findall(r'sl(\d+)|seqlen[_\s]?(\d+)|seq(\d+)', all_names)
+            if seq_len_patterns:
+                seq_lens = []
+                for match in seq_len_patterns:
+                    # Extract the actual number from the match groups
+                    seq_len = next((int(x) for x in match if x), None)
+                    if seq_len:
+                        seq_lens.append(seq_len)
+                
+                if seq_lens:
+                    avg_seq_len = sum(seq_lens) / len(seq_lens)
+                    if avg_seq_len == 1:
+                        phase_labels[idx] = 'Decode'
+                        continue
+                    elif avg_seq_len > 10:
+                        phase_labels[idx] = 'Prefill'
+                        continue
+            
+            # Check for explicit keywords
+            if any(keyword in all_names for keyword in prefill_keywords):
+                phase_labels[idx] = 'Prefill'
+            elif any(keyword in all_names for keyword in decode_keywords):
+                phase_labels[idx] = 'Decode'
+            else:
+                # If no clear indicator, check operation patterns
+                # MLP/FFN GEMMs in decode are typically high-frequency
+                if any(pattern in op_name for pattern in ['mm', 'addmm', 'gemm', 'matmul']):
+                    # For GEMMs without clear indicators, use frequency as tie-breaker
+                    # This will be overridden by hybrid method if needed
+                    phase_labels[idx] = 'Mixed'
+                    
+        return phase_labels
+    
+    @staticmethod
+    def _detect_hybrid(df_ops):
+        """
+        Combine multiple detection methods for robust phase detection.
+        Priority: kernel_names > framework_apis > attention_patterns > frequency
+        """
+        # Get predictions from different methods (in order of reliability)
+        kernel_pred = TreePerfAnalyzer._detect_by_kernel_names(df_ops)
+        framework_pred = TreePerfAnalyzer._detect_by_framework_apis(df_ops)
+        attention_pred = TreePerfAnalyzer._detect_by_attention_patterns(df_ops)
+        frequency_pred = TreePerfAnalyzer._detect_by_operation_frequency(df_ops)
+        
+        # Hierarchical decision: use most reliable available method
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        
+        for idx in df_ops.index:
+            # Priority 1: Kernel name detection (most reliable if available)
+            if kernel_pred[idx] != 'Mixed':
+                phase_labels[idx] = kernel_pred[idx]
+            # Priority 2: Framework-specific APIs
+            elif framework_pred[idx] != 'Mixed':
+                phase_labels[idx] = framework_pred[idx]
+            # Priority 3: Attention patterns
+            elif attention_pred[idx] != 'Mixed':
+                phase_labels[idx] = attention_pred[idx]
+            # Priority 4: Statistical frequency
+            elif frequency_pred[idx] != 'Mixed':
+                phase_labels[idx] = frequency_pred[idx]
+            # Default: leave as Mixed
+                
+        return phase_labels
+
+    @staticmethod
+    def detect_inference_phase_union(df_ops, m_threshold=10, debug=False):
+        """
+        Comprehensive union-based inference phase detection combining all available criteria:
+        1. GEMM M dimension analysis
+        2. Timestamp/temporal patterns 
+        3. Operation frequency analysis
+        4. Request ID patterns (continuous batching in vLLM)
+        5. PagedAttention kernel patterns
+        6. Framework-specific API patterns
+        7. Kernel name explicit patterns
+        
+        Uses union criteria: If ANY method confidently detects a phase, classify it.
+        Only mark as 'Mixed' if truly ambiguous across all methods.
+        
+        Args:
+            df_ops (pd.DataFrame): Operations dataframe
+            m_threshold (int): GEMM M parameter threshold for Prefill/Decode
+            debug (bool): Print debugging information
+            
+        Returns:
+            pd.Series: Phase labels ('Prefill', 'Decode', 'Mixed')
+        """
+        
+        if debug:
+            print(f"DEBUG: Starting union-based detection for {len(df_ops)} operations")
+            print(f"DEBUG: Available columns: {list(df_ops.columns)}")
+        
+        # Initialize all as Mixed, then apply union logic
+        phase_labels = pd.Series(['Mixed'] * len(df_ops), index=df_ops.index)
+        confidence_scores = pd.Series([0.0] * len(df_ops), index=df_ops.index)
+        detection_methods = pd.Series([''] * len(df_ops), index=df_ops.index)
+        
+        for idx in df_ops.index:
+            row = df_ops.loc[idx]
+            prefill_votes = 0
+            decode_votes = 0
+            method_details = []
+            
+            # === 1. GEMM M Dimension Analysis ===
+            gemm_phase = TreePerfAnalyzer._analyze_gemm_dimensions(row, m_threshold, debug)
+            if gemm_phase == 'Prefill':
+                prefill_votes += 3  # Strong signal
+                method_details.append(f"GEMM_M>{m_threshold}")
+            elif gemm_phase == 'Decode':
+                decode_votes += 3  # Strong signal  
+                method_details.append(f"GEMM_M<={m_threshold}")
+            
+            # === 2. Kernel Name Explicit Patterns ===
+            name_phase = TreePerfAnalyzer._analyze_explicit_names(row, debug)
+            if name_phase == 'Prefill':
+                prefill_votes += 4  # Very strong signal
+                method_details.append("ExplicitName")
+            elif name_phase == 'Decode':
+                decode_votes += 4  # Very strong signal
+                method_details.append("ExplicitName")
+            
+            # === 3. PagedAttention Patterns ===
+            paged_phase = TreePerfAnalyzer._analyze_paged_attention(row, debug)
+            if paged_phase == 'Prefill':
+                prefill_votes += 2
+                method_details.append("PagedAttn")
+            elif paged_phase == 'Decode':
+                decode_votes += 2
+                method_details.append("PagedAttn")
+            
+            # === 4. Framework API Patterns ===
+            framework_phase = TreePerfAnalyzer._analyze_framework_apis(row, debug)
+            if framework_phase == 'Prefill':
+                prefill_votes += 2
+                method_details.append("FrameworkAPI")
+            elif framework_phase == 'Decode':
+                decode_votes += 2
+                method_details.append("FrameworkAPI")
+            
+            # === 5. Request ID / Batch Patterns ===
+            batch_phase = TreePerfAnalyzer._analyze_batch_patterns(row, debug)
+            if batch_phase == 'Prefill':
+                prefill_votes += 1
+                method_details.append("BatchPattern")
+            elif batch_phase == 'Decode':
+                decode_votes += 1
+                method_details.append("BatchPattern")
+            
+            # === Union Decision Logic ===
+            total_votes = prefill_votes + decode_votes
+            
+            if total_votes >= 2:  # Require at least moderate confidence
+                if prefill_votes > decode_votes:
+                    phase_labels[idx] = 'Prefill'
+                    confidence_scores[idx] = prefill_votes / max(total_votes, 1)
+                elif decode_votes > prefill_votes:
+                    phase_labels[idx] = 'Decode'  
+                    confidence_scores[idx] = decode_votes / max(total_votes, 1)
+                # If tied, leave as Mixed
+                
+            detection_methods[idx] = ','.join(method_details) if method_details else 'None'
+            
+            if debug and total_votes > 0:
+                op_name = row.get('name', 'Unknown')
+                print(f"DEBUG: {op_name[:50]:<50} | P:{prefill_votes} D:{decode_votes} -> {phase_labels[idx]} | Methods: {detection_methods[idx]}")
+        
+        # === 6. Temporal/Frequency Post-processing ===
+        phase_labels = TreePerfAnalyzer._apply_temporal_refinement(
+            df_ops, phase_labels, confidence_scores, debug
+        )
+        
+        if debug:
+            phase_counts = phase_labels.value_counts()
+            print(f"\nDEBUG: Final phase distribution: {dict(phase_counts)}")
+            print(f"DEBUG: Average confidence: {confidence_scores.mean():.3f}")
+            
+        return phase_labels
+    
+    @staticmethod
+    def _analyze_gemm_dimensions(row, m_threshold, debug=False):
+        """Extract and analyze GEMM M dimensions from various sources"""
+        m_values = []
+        
+        # Check direct M parameter
+        if 'param: M' in row and pd.notna(row['param: M']):
+            m_values.append(int(row['param: M']))
+            
+        # Check Input Dims
+        if 'Input Dims' in row and row['Input Dims']:
+            try:
+                input_dims = row['Input Dims']
+                if isinstance(input_dims, (list, tuple)) and len(input_dims) >= 2:
+                    A_shape = input_dims[0] if input_dims[0] else []
+                    if isinstance(A_shape, (list, tuple)) and len(A_shape) >= 1:
+                        m_val = A_shape[0]
+                        if isinstance(m_val, (int, float)) and m_val > 0:
+                            m_values.append(int(m_val))
+            except (IndexError, TypeError, ValueError):
+                pass
+        
+        # Check kernel details
+        if 'kernel_details' in row and isinstance(row['kernel_details'], list):
+            for kernel in row['kernel_details']:
+                if isinstance(kernel, dict) and 'args' in kernel:
+                    args = kernel.get('args', {})
+                    if 'Input Dims' in args:
+                        try:
+                            input_dims_nested = args['Input Dims']
+                            if isinstance(input_dims_nested, list) and len(input_dims_nested) >= 2:
+                                A_shape = input_dims_nested[0] if input_dims_nested[0] else []
+                                if isinstance(A_shape, list) and len(A_shape) >= 1:
+                                    m_val = A_shape[0]
+                                    if isinstance(m_val, (int, float)) and m_val > 0:
+                                        m_values.append(int(m_val))
+                        except (IndexError, TypeError, ValueError):
+                            continue
+        
+        if m_values:
+            avg_m = sum(m_values) / len(m_values)
+            if debug:
+                print(f"  GEMM M values: {m_values}, avg: {avg_m:.1f}")
+            return 'Prefill' if avg_m > m_threshold else 'Decode'
+        
+        return 'Mixed'
+    
+    @staticmethod  
+    def _analyze_explicit_names(row, debug=False):
+        """Analyze explicit prefill/decode patterns in operation and kernel names"""
+        op_name = str(row.get('name', '')).lower()
+        
+        # Get kernel names
+        kernel_names = []
+        if 'kernel_details' in row and isinstance(row['kernel_details'], list):
+            for kernel in row['kernel_details']:
+                if isinstance(kernel, dict) and 'name' in kernel:
+                    kernel_names.append(str(kernel['name']).lower())
+        
+        all_text = ' '.join([op_name] + kernel_names)
+        
+        # Strong explicit patterns
+        prefill_explicit = [
+            'prefill', 'chunked_prefill', 'batch_prefill', 'prefill_attention',
+            'context_attention', 'prompt_attention', 'context_phase', 
+            'first_token', 'initialization', 'prompt_processing'
+        ]
+        
+        decode_explicit = [
+            'decode', 'generation', 'batch_decode', 'continuous_batch',
+            'paged_attention', 'decode_attention', 'generation_phase',
+            'autoregressive', 'incremental', 'single_token', 'next_token'
+        ]
+        
+        # Sequence length patterns (sl1 = decode, sl>1 = prefill)
+        import re
+        seq_patterns = re.findall(r'sl(\d+)|seqlen[_\s]?(\d+)|seq(\d+)', all_text)
+        if seq_patterns:
+            seq_lens = []
+            for match in seq_patterns:
+                seq_len = next((int(x) for x in match if x), None)
+                if seq_len:
+                    seq_lens.append(seq_len)
+            
+            if seq_lens:
+                avg_seq_len = sum(seq_lens) / len(seq_lens)
+                if avg_seq_len == 1:
+                    return 'Decode'
+                elif avg_seq_len > 10:
+                    return 'Prefill'
+        
+        # Check explicit keywords
+        prefill_found = any(pattern in all_text for pattern in prefill_explicit)
+        decode_found = any(pattern in all_text for pattern in decode_explicit)
+        
+        if prefill_found and not decode_found:
+            return 'Prefill'
+        elif decode_found and not prefill_found:
+            return 'Decode'
+            
+        return 'Mixed'
+    
+    @staticmethod
+    def _analyze_paged_attention(row, debug=False):
+        """Analyze PagedAttention-specific patterns (vLLM, SGLang, etc.)"""
+        op_name = str(row.get('name', '')).lower()
+        
+        # Get kernel names
+        kernel_names = []
+        if 'kernel_details' in row and isinstance(row['kernel_details'], list):
+            for kernel in row['kernel_details']:
+                if isinstance(kernel, dict) and 'name' in kernel:
+                    kernel_names.append(str(kernel['name']).lower())
+        
+        all_text = ' '.join([op_name] + kernel_names)
+        
+        # PagedAttention patterns
+        paged_decode_patterns = [
+            'paged_attention.*decode', 'paged_attn_v2', 'kv_cache',
+            'reshape_and_cache', 'block_sparse_attention', 'page_attention'
+        ]
+        
+        paged_prefill_patterns = [
+            'paged_attention.*prefill', 'chunked_prefill', 'block_prefill'
+        ]
+        
+        # Flash attention patterns
+        flash_decode_patterns = [
+            'flash_attn.*decode', 'flash_decode', 'varlen.*decode'
+        ]
+        
+        flash_prefill_patterns = [
+            'flash_attn.*prefill', 'flash_prefill', 'varlen.*prefill'
+        ]
+        
+        if any(re.search(pattern, all_text) for pattern in paged_decode_patterns + flash_decode_patterns):
+            return 'Decode'
+        elif any(re.search(pattern, all_text) for pattern in paged_prefill_patterns + flash_prefill_patterns):
+            return 'Prefill'
+            
+        return 'Mixed'
+    
+    @staticmethod
+    def _analyze_framework_apis(row, debug=False):
+        """Analyze framework-specific API patterns"""
+        op_name = str(row.get('name', '')).lower()
+        
+        # vLLM patterns
+        if 'vllm::' in op_name:
+            if any(pattern in op_name for pattern in ['decode', 'cache', 'paged']):
+                return 'Decode'
+            elif 'prefill' in op_name:
+                return 'Prefill'
+                
+        # SGLang patterns  
+        if 'sglang::' in op_name:
+            if any(pattern in op_name for pattern in ['decode', 'cache', 'radix']):
+                return 'Decode'
+            elif 'prefill' in op_name:
+                return 'Prefill'
+                
+        # TGI patterns
+        if 'tgi::' in op_name:
+            if any(pattern in op_name for pattern in ['decode', 'generation', 'continuous']):
+                return 'Decode'
+            elif any(pattern in op_name for pattern in ['prefill', 'encode']):
+                return 'Prefill'
+                
+        return 'Mixed'
+    
+    @staticmethod
+    def _analyze_batch_patterns(row, debug=False):
+        """Analyze request ID and batching patterns"""
+        op_name = str(row.get('name', '')).lower()
+        
+        # Continuous batching typically indicates decode
+        continuous_patterns = [
+            'continuous_batch', 'dynamic_batch', 'batch_decode',
+            'multi_request', 'request_batch'
+        ]
+        
+        # Single request patterns typically indicate prefill
+        single_patterns = [
+            'single_request', 'request_init', 'batch_prefill'
+        ]
+        
+        if any(pattern in op_name for pattern in continuous_patterns):
+            return 'Decode'
+        elif any(pattern in op_name for pattern in single_patterns):
+            return 'Prefill'
+            
+        return 'Mixed'
+    
+    @staticmethod
+    def _apply_temporal_refinement(df_ops, phase_labels, confidence_scores, debug=False):
+        """Apply temporal patterns and frequency analysis to refine phase detection"""
+        
+        # Add timestamp-based refinement if available
+        if 'ts' in df_ops.columns or 'timestamp' in df_ops.columns:
+            ts_col = 'ts' if 'ts' in df_ops.columns else 'timestamp'
+            
+            # Sort by timestamp
+            df_sorted = df_ops.sort_values(by=ts_col)
+            
+            # Look for burst patterns (Prefill) vs repeated patterns (Decode)
+            # This is a simplified heuristic - could be enhanced
+            for i in range(1, len(df_sorted)):
+                current_idx = df_sorted.index[i]
+                prev_idx = df_sorted.index[i-1]
+                
+                # If current operation is Mixed but previous was confidently classified
+                if (phase_labels[current_idx] == 'Mixed' and 
+                    phase_labels[prev_idx] != 'Mixed' and
+                    confidence_scores[prev_idx] > 0.5):
+                    
+                    # Check if they have similar names (likely same operation type)
+                    current_name = str(df_ops.loc[current_idx, 'name']).lower()
+                    prev_name = str(df_ops.loc[prev_idx, 'name']).lower()
+                    
+                    # Simple similarity check
+                    if (current_name[:20] == prev_name[:20] or
+                        any(common in current_name and common in prev_name 
+                            for common in ['gemm', 'mm', 'attention', 'attn', 'norm'])):
+                        phase_labels[current_idx] = phase_labels[prev_idx]
+                        confidence_scores[current_idx] = 0.3  # Lower confidence for inherited
+        
+        # Apply frequency-based refinement
+        op_counts = df_ops['name'].value_counts()
+        
+        for idx in df_ops.index:
+            if phase_labels[idx] == 'Mixed':
+                op_name = df_ops.loc[idx, 'name']
+                count = op_counts[op_name]
+                
+                # High frequency operations are likely Decode (per-token)
+                # Low frequency operations are likely Prefill (per-layer)
+                if count > op_counts.quantile(0.7):  # Top 30% by frequency
+                    phase_labels[idx] = 'Decode'
+                    confidence_scores[idx] = 0.2  # Low confidence for frequency-based
+                elif count < op_counts.quantile(0.3):  # Bottom 30% by frequency
+                    phase_labels[idx] = 'Prefill'  
+                    confidence_scores[idx] = 0.2  # Low confidence for frequency-based
+        
+        return phase_labels
 
     def get_kernel_details(
         self,
@@ -1116,6 +2211,7 @@ class TreePerfAnalyzer:
         cpu_op_detail=True,
         nn_module_detail=False,
         kernel_categorization=True,
+        inference_phase_detection=True,
     ):
         """
         Extract detailed information for a given kernel event.
@@ -1262,6 +2358,29 @@ class TreePerfAnalyzer:
             else:
                 pct = kernel_event["dur"] / nn_module_event["gpu_busy_time"] * 100
             kernel_details["Percent of Parent nn.Module busy time (%)"] = pct
+        
+        # 4. Add inference phase detection (if enabled)
+        if inference_phase_detection:
+            # Create a temporary row-like object for the detect_inference_phase method
+            temp_row = {
+                'name': kernel_details.get('Parent cpu_op', ''),
+                'kernel_details': [{'name': kernel_event['name']}]
+            }
+            
+            # Add Input Dims and other args directly to temp_row (matching kernel launcher format)
+            if cpu_op and 'args' in cpu_op:
+                args = cpu_op['args']
+                # Copy the Input Dims directly to the temp_row (this is the main source for GEMM M parameter)
+                temp_row['Input Dims'] = args.get('Input Dims')
+                temp_row['Input type'] = args.get('Input type')
+                temp_row['Input Strides'] = args.get('Input Strides')
+                temp_row['Concrete Inputs'] = args.get('Concrete Inputs')
+            
+            # Use union-based detection for comprehensive phase detection
+            # Create a temporary single-row DataFrame for the union method
+            temp_df = pd.DataFrame([temp_row])
+            phase_result = TreePerfAnalyzer.detect_inference_phase_union(temp_df, m_threshold=10)
+            kernel_details["Inference phase"] = phase_result.iloc[0] if len(phase_result) > 0 else "Mixed"
         return kernel_details
 
     def get_df_kernels(
@@ -1269,7 +2388,8 @@ class TreePerfAnalyzer:
         launcher_detail=False, 
         cpu_op_detail=True, 
         nn_module_detail=False,
-        kernel_categorization=True
+        kernel_categorization=True,
+        inference_phase_detection=True
     ):
         """
         Build a DataFrame with kernel details augmented with
@@ -1282,12 +2402,15 @@ class TreePerfAnalyzer:
             nn_module_detail (bool): If True, include details of the parent nn.Module event.
             kernel_categorization (bool): If True, add detailed kernel-level categorization 
                                          based on kernel name patterns (GEMM, Attention, etc.).
+            inference_phase_detection (bool): If True, add inference phase detection 
+                                              (Prefill/Decode/Mixed) based on GEMM parameters and kernel patterns.
 
         Returns:
             pd.DataFrame: A DataFrame containing detailed kernel information with the following columns:
                 - UID: Unique identifier for the kernel
                 - Kernel name: Full name of the GPU kernel
                 - Kernel category: Detailed categorization (e.g., "GEMM-CK", "Attention-Forward", "Norm-RMS")
+                - Inference phase: Phase detection ("Prefill", "Decode", or "Mixed") (if inference_phase_detection=True)
                 - Kernel duration (µs): Duration in microseconds
                 - Kernel stream: CUDA/HIP stream ID
                 - Parent op category: Category of the parent PyTorch operation (if cpu_op_detail=True)
@@ -1311,6 +2434,7 @@ class TreePerfAnalyzer:
                 cpu_op_detail=cpu_op_detail,
                 nn_module_detail=nn_module_detail,
                 kernel_categorization=kernel_categorization,
+                inference_phase_detection=inference_phase_detection,
             )
             kernel_details_list.append(details)
 

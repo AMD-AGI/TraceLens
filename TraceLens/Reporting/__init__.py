@@ -6,3 +6,4 @@
 
 from .generate_perf_report_jax_analysis import *
 from .generate_perf_report_pytorch import *
+from .inference_phase_plots import plot_inference_phase_analysis, generate_inference_plots_from_report

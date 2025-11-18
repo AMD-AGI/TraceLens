@@ -248,6 +248,15 @@ def generate_perf_report_pytorch(
     # for gemmologist
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    # inference phase analysis
+    inference_phase_analysis: bool = False,
+    decode_threshold: int = 10,
+    phase_detection_method: str = "union",
+    # plotting options
+    generate_plots: bool = True,
+    disable_plots: bool = False,
+    plot_format: str = "png", 
+    plot_dpi: int = 300,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -294,6 +303,27 @@ def generate_perf_report_pytorch(
         source_col="kernel_details_summary",
         new_col_name="trunc_kernel_details",
     )
+    
+    # Generate inference phase kernel launcher summaries (if enabled)
+    if inference_phase_analysis:
+        print("Generating inference phase kernel launcher summaries...")
+        try:
+            df_launcher_phase_summaries = perf_analyzer.get_df_kernel_launchers_summary_by_inference_phase(
+                df_kernel_launchers, m_threshold=decode_threshold, detection_method=phase_detection_method
+            )
+            
+            for phase in ['Prefill', 'Decode']:
+                if not df_launcher_phase_summaries[phase].empty:
+                    print(f"✓ Generated {phase} launcher summary with {len(df_launcher_phase_summaries[phase])} operations")
+                else:
+                    print(f"⚠ No {phase} phase operations found in launchers")
+        except Exception as e:
+            print(f"⚠ Error generating inference phase launcher summaries: {e}")
+            df_launcher_phase_summaries = {'Prefill': pd.DataFrame(), 'Decode': pd.DataFrame()}
+    else:
+        # Create empty summaries if inference phase analysis is disabled
+        df_launcher_phase_summaries = {'Prefill': pd.DataFrame(), 'Decode': pd.DataFrame()}
+    
     # Dictionary to hold the op-specific DataFrames
     perf_metrics_dfs = {}
 
@@ -357,13 +387,16 @@ def generate_perf_report_pytorch(
             if not df_ops_bwd.empty:
                 perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
-    # Short kernel study
-    df_hist, df_short_kernels = get_dfs_short_kernels(
-        perf_analyzer,
-        short_kernel_threshold_us=short_kernel_threshold_us,
-        histogram_bins=short_kernel_histogram_bins,
-        topk=topk_short_kernels,
-    )
+    # Short kernel study (only if enabled)
+    if short_kernel_study:
+        df_hist, df_short_kernels = get_dfs_short_kernels(
+            perf_analyzer,
+            short_kernel_threshold_us=short_kernel_threshold_us,
+            histogram_bins=short_kernel_histogram_bins,
+            topk=topk_short_kernels,
+        )
+    else:
+        df_hist, df_short_kernels = pd.DataFrame(), pd.DataFrame()
 
     dict_name2df = {
         "gpu_timeline": df_gpu_timeline,
@@ -371,6 +404,13 @@ def generate_perf_report_pytorch(
         "ops_summary": df_kernel_launchers_summary,
         "ops_unique_args": df_kernel_launchers_unique_args,
     }
+    
+    # Add inference phase summaries only if enabled and data exists
+    if inference_phase_analysis:
+        if not df_launcher_phase_summaries['Prefill'].empty:
+            dict_name2df["ops_summary_prefill"] = df_launcher_phase_summaries['Prefill']
+        if not df_launcher_phase_summaries['Decode'].empty:
+            dict_name2df["ops_summary_decode"] = df_launcher_phase_summaries['Decode']
     # update this dict with the perf_metrics_dfs
     dict_name2df.update(perf_metrics_dfs)
 
@@ -383,7 +423,8 @@ def generate_perf_report_pytorch(
             print("Extracting kernel details from trace...")
             df_kernels = perf_analyzer.get_df_kernels(
                 launcher_detail=True,
-                kernel_categorization=True
+                kernel_categorization=True,
+                inference_phase_detection=inference_phase_analysis
             )
             print(f"✓ Extracted {len(df_kernels)} kernel events")
         except Exception as e:
@@ -482,6 +523,29 @@ def generate_perf_report_pytorch(
             df_kernel_summary.reset_index(drop=True, inplace=True)
             dict_name2df["kernel_summary"] = df_kernel_summary
             print(f"✓ Generated kernel summary with {len(df_kernel_summary)} unique kernel groups")
+            
+            # Generate inference phase summaries if inference phase analysis is enabled and column exists
+            if inference_phase_analysis and "Inference phase" in df_kernels.columns:
+                print("Generating inference phase kernel summaries...")
+                try:
+                    # Generate per-kernel summaries by inference phase
+                    phase_kernel_summaries = perf_analyzer.get_df_kernel_summary_by_inference_phase(
+                        df_kernels, m_threshold=decode_threshold
+                    )
+                    
+                    for phase in ['Prefill', 'Decode']:
+                        if not phase_kernel_summaries[phase].empty:
+                            dict_name2df[f"kernel_summary_{phase.lower()}"] = phase_kernel_summaries[phase]
+                            print(f"✓ Generated {phase} kernel summary with {len(phase_kernel_summaries[phase])} groups")
+                        else:
+                            print(f"⚠ No {phase} phase kernels found")
+                            
+                except Exception as e:
+                    print(f"⚠ Error generating inference phase summaries: {e}")
+            elif inference_phase_analysis:
+                print("⚠ Inference phase column not found in kernel data (check if kernel_summary is enabled)")
+            elif "Inference phase" in df_kernels.columns:
+                print("⚠ Inference phase data available but analysis disabled (use --inference_phase_analysis to enable)")
         else:
             if df_kernels.empty:
                 print("⚠ No kernel data available for summary")
@@ -498,6 +562,51 @@ def generate_perf_report_pytorch(
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
 
+    # Generate inference phase plots if enabled
+    if (inference_phase_analysis and generate_plots and not disable_plots and 
+        (not df_launcher_phase_summaries['Prefill'].empty or not df_launcher_phase_summaries['Decode'].empty)):
+        try:
+            # Import the plotting module
+            from TraceLens.Reporting.inference_phase_plots import generate_inference_plots_from_report
+            
+            # Determine output directory for plots
+            if output_csvs_dir:
+                plot_output_dir = os.path.join(output_csvs_dir, "inference_plots")
+            elif output_xlsx_path:
+                base_path = output_xlsx_path.rsplit(".", 1)[0]
+                plot_output_dir = base_path + "_inference_plots"
+            else:
+                base_path = profile_json_path.rsplit(".json", 1)[0]
+                plot_output_dir = base_path + "_inference_plots"
+            
+            # Extract trace name from path
+            trace_name = os.path.basename(profile_json_path).split('.')[0]
+            
+            print(f"\n📊 Generating inference phase visualization plots...")
+            plot_files = generate_inference_plots_from_report(
+                report_data=dict_name2df,
+                output_dir=plot_output_dir,
+                trace_name=trace_name,
+                show_plots=False,
+                save_plots=True,
+                plot_format=plot_format,
+                dpi=plot_dpi
+            )
+            
+            if plot_files:
+                print(f"✓ Generated {len(plot_files)} inference phase plots in: {plot_output_dir}/")
+                print("📈 Plots include: phase overview, time distributions, operation frequencies,")
+                print("   performance bottlenecks, and detailed breakdowns")
+                print(f"📄 View summary report: {os.path.join(plot_output_dir, f'{trace_name}_inference_analysis.html')}")
+            
+        except ImportError as e:
+            print(f"⚠ Could not import plotting module: {e}")
+            print("💡 Make sure matplotlib and seaborn are installed: pip install matplotlib seaborn")
+        except Exception as e:
+            print(f"⚠ Error generating inference phase plots: {e}")
+            import traceback
+            traceback.print_exc()
+    
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
         # Ensure the output directory exists
@@ -636,6 +745,73 @@ def main():
         default=None,
         help="Path to the GPU architecture JSON file",
     )
+    
+    parser.add_argument(
+        "--inference_phase_analysis",
+        action="store_true",
+        default=False,
+        help="Enable inference phase analysis to categorize operations and kernels into Prefill and Decode phases. "
+             "This generates separate summary sheets for each phase based on GEMM M parameter patterns and kernel names. "
+             "Useful for analyzing LLM inference workloads with vLLM, SGLang, TGI, and other inference engines.",
+    )
+    
+    parser.add_argument(
+        "--decode_threshold",
+        type=int,
+        default=10,
+        help="Threshold for GEMM M parameter to distinguish Prefill vs Decode phases. "
+             "Operations with M > threshold are classified as Prefill, others as Decode. "
+             "Default: 10 (works well for most LLM inference patterns).",
+    )
+    
+    parser.add_argument(
+        "--phase_detection_method",
+        type=str,
+        default="union",
+        choices=["union", "gemm_params", "kernel_names", "attention_patterns", "framework_apis", "operation_frequency", "hybrid"],
+        help="Method to use for inference phase detection. Options: "
+             "'union' (comprehensive union of ALL criteria - RECOMMENDED FOR MAXIMUM COVERAGE), "
+             "'hybrid' (combine multiple methods), "
+             "'kernel_names' (read from kernel names), "
+             "'operation_frequency' (statistical analysis), "
+             "'framework_apis' (use vLLM/SGLang/TGI patterns), "
+             "'attention_patterns' (analyze attention operations), "
+             "'gemm_params' (original M parameter method). "
+             "Default: 'union'.",
+    )
+    
+    parser.add_argument(
+        "--generate_plots",
+        action="store_true",
+        default=True,
+        help="Generate visualization plots for inference phase analysis. "
+             "Creates comprehensive plots showing phase distribution, time analysis, "
+             "operation frequencies, and performance bottlenecks. Enabled by default "
+             "when --inference_phase_analysis is used.",
+    )
+    
+    parser.add_argument(
+        "--disable_plots",
+        action="store_true", 
+        default=False,
+        help="Disable automatic plot generation for inference phase analysis. "
+             "Use this flag to skip plot creation if you only need the data tables.",
+    )
+    
+    parser.add_argument(
+        "--plot_format",
+        type=str,
+        default="png",
+        choices=["png", "pdf", "svg"],
+        help="Format for saved inference phase plots. Options: 'png' (default), 'pdf', 'svg'.",
+    )
+    
+    parser.add_argument(
+        "--plot_dpi",
+        type=int,
+        default=300,
+        help="DPI (resolution) for saved inference phase plots. Default: 300 (high quality).",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -655,6 +831,13 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        inference_phase_analysis=args.inference_phase_analysis,
+        decode_threshold=args.decode_threshold,
+        phase_detection_method=args.phase_detection_method,
+        generate_plots=args.generate_plots,
+        disable_plots=args.disable_plots,
+        plot_format=args.plot_format,
+        plot_dpi=args.plot_dpi,
     )
 
 
