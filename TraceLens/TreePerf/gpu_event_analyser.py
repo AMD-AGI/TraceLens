@@ -272,6 +272,86 @@ class GPUEventAnalyser:
         dict_metrics = self.compute_metrics(micro_idle_thresh_us=micro_idle_thresh_us)
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
+    def get_kernel_operations_report(self):
+        """
+        Generate a comprehensive report of all kernel operations.
+        Returns a dictionary with categorized DataFrames of kernel statistics.
+        """
+        dict_gpu_events = self.get_gpu_event_lists()
+        
+        # Process each category
+        reports = {}
+        
+        for category_key, events_list in dict_gpu_events.items():
+            if category_key == GPUEventAnalyser.all_gpu_key:
+                continue  # Skip the aggregate category
+            
+            # Aggregate kernel statistics by name
+            kernel_stats = {}
+            for event in events_list:
+                name = event.get('name', 'Unknown')
+                dur = event.get('dur', 0)
+                
+                if name not in kernel_stats:
+                    kernel_stats[name] = {
+                        'count': 0,
+                        'total_duration_us': 0,
+                        'durations': []
+                    }
+                
+                kernel_stats[name]['count'] += 1
+                kernel_stats[name]['total_duration_us'] += dur
+                kernel_stats[name]['durations'].append(dur)
+            
+            # Create DataFrame for this category
+            if kernel_stats:
+                rows = []
+                for name, stats in kernel_stats.items():
+                    durations = stats['durations']
+                    rows.append({
+                        'kernel_name': name,
+                        'count': stats['count'],
+                        'total_duration_us': stats['total_duration_us'],
+                        'avg_duration_us': stats['total_duration_us'] / stats['count'],
+                        'min_duration_us': min(durations),
+                        'max_duration_us': max(durations),
+                        'std_duration_us': pd.Series(durations).std() if len(durations) > 1 else 0
+                    })
+                
+                df = pd.DataFrame(rows)
+                df = df.sort_values('total_duration_us', ascending=False).reset_index(drop=True)
+                reports[category_key] = df
+            else:
+                reports[category_key] = pd.DataFrame()
+        
+        return reports
+
+    def get_kernel_summary_stats(self):
+        """
+        Generate summary statistics across all kernel categories.
+        """
+        dict_gpu_events = self.get_gpu_event_lists()
+        
+        summary = []
+        for category_key, events_list in dict_gpu_events.items():
+            if category_key == GPUEventAnalyser.all_gpu_key:
+                continue
+            
+            unique_kernels = len(set(event.get('name', 'Unknown') for event in events_list))
+            total_launches = len(events_list)
+            total_time_us = sum(event.get('dur', 0) for event in events_list)
+            
+            summary.append({
+                'category': category_key,
+                'unique_kernels': unique_kernels,
+                'total_launches': total_launches,
+                'total_time_us': total_time_us,
+                'total_time_ms': total_time_us / 1000,
+                'avg_time_per_launch_us': total_time_us / total_launches if total_launches > 0 else 0
+            })
+        
+        return pd.DataFrame(summary)
+
 
 # Pytorch GPU event analyser inherits everything from the base class
 class PytorchGPUEventAnalyser(GPUEventAnalyser):
