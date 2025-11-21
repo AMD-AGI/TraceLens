@@ -381,6 +381,7 @@ class JaxTraceToTree(BaseTraceToTree):
             self.label_non_gpu_paths()
 
         self._categorize_gpu_kernel_ops()
+        self._add_hlo_op_nodes()
 
     def _categorize_gpu_kernel_ops(self) -> None:
         """
