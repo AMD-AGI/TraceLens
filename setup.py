@@ -14,6 +14,8 @@ setup(
     install_requires=[
         "pandas",
         "tqdm",
+        "matplotlib",
+        "seaborn",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
         # 'openpyxl',
