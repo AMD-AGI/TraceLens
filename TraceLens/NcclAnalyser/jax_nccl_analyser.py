@@ -24,7 +24,7 @@ class JaxNcclAnalyser:
     Attributes:
         traces_dir (str): Directory containing trace files
         node_to_pb_file_mapping (dict): Mapping from node IDs to protobuf file paths
-        world_size (int): Total number of processes in the distributed setup (usually one process/gpu)
+        world_size (int): Total number of processes in the distributed setup (typically one process per GPU)
         node_to_xla_file_map (dict, optional): Mapping from node IDs to XLA dump files
         node_to_trace_data (dict): Internal storage for per-node trace data
         df_per_rank_coll (pd.DataFrame): DataFrame containing per-rank collective events
