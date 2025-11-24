@@ -372,9 +372,9 @@ class TraceEventUtils:
             "XLA Ops": XLAKeys,
             "Custom": CustomKeys
         }
-        C_GemmKeys=["matmul","cublas"]
-        C_FABwdKeys=["fused_attn_backward"]
-        C_FAFwdKeys=["fused_attn_forward"]
+        C_GemmKeys = ["matmul","cublas"]
+        C_FABwdKeys = ["fused_attn_backward"]
+        C_FAFwdKeys = ["fused_attn_forward"]
         CustomClassCategories = {
             "FA BWD": C_FABwdKeys,
             "FA FWD": C_FAFwdKeys,
