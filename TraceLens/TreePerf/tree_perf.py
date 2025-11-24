@@ -1199,7 +1199,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         if event["cat"] == "kernel":
             # Get the HLO parent node
             if "hlo_parent" not in event:
-                # No HLO parent, this is a standalone kernel (shouldn't happen in new branch)
+                # No HLO parent found for this kernel event. This is unexpected and may indicate a data or trace issue.
+                logger.warning(
+                    f"Kernel event with UID {event.get('uid', '<unknown>')} does not have an 'hlo_parent'. Returning standalone kernel."
+                )
                 return [event]
             hlo_parent_uid = event["hlo_parent"]
             hlo_parent_event = self.tree.events[hlo_parent_uid]
