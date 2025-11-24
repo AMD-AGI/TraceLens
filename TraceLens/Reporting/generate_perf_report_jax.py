@@ -80,11 +80,11 @@ def perf_analysis(
     df_xla_events = perf_analyzer.get_df_kernel_launchers(
         include_kernel_details=True,
         gpu_kernel_op_cats=[
-            "XLA Ops", 
+            "XLA Ops",
             "Uncategorized Events/XLA",
         ],
     )
-    
+
     # Handle case where there are no XLA events in the trace
     if not df_xla_events.empty:
         df_xla_perf = perf_analyzer.get_df_xla_perf(df_xla_events)
