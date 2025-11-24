@@ -633,7 +633,7 @@ class JaxTraceToTree(BaseTraceToTree):
                         hlo_cat = category
                         break
             if hlo_cat == TraceEventUtils.JaxHloKeys.UncategorizedEventKey:
-                print(f"did not find op category for {name}")
+                logger.warning(f"did not find op category for {name}")
             event["gpu_kernel_op_cat"] = hlo_cat
             gpu_events = [self.events[i] for i in event["gpu_events"]]
             for e in gpu_events:
