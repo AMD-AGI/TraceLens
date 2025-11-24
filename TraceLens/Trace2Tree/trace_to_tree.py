@@ -630,7 +630,7 @@ class JaxTraceToTree(BaseTraceToTree):
             event["gpu_kernel_op_cat"] = hlo_cat
             gpu_events = [self.events[i] for i in event['gpu_events']]
             for e in gpu_events:
-                if not(e["gpu_kernel_op_cat"] == hlo_cat):
+                if not (e["gpu_kernel_op_cat"] == hlo_cat):
                     #if not (hlo_cat=="XLA Ops"):
                     #    print(f'changing {e["gpu_kernel_op_cat"]} to {hlo_cat} for event {e["name"]} and {name}')
                     e["gpu_kernel_op_cat"] = hlo_cat
