@@ -359,26 +359,35 @@ class TraceEventUtils:
             "Communication rccl/nccl": CommunicationKeys,
         }
         UncategorizedEventKey = "Uncategorized Events"
+
     class JaxHloKeys:
-        ConvKeys = ["conv.","conv-","conv_"]
-        GemmKeys = ["gemm", "cublas","dot"]
-        CommunicationKeys = ["all-gather","all-reduce","reduce-scatter","all-to-all","alltoall","collective-permute","collectivepermute"]
-        CustomKeys=["custom"]
-        XLAKeys=["loop_","input_","wrapped_","fusion."]
+        ConvKeys = ["conv.", "conv-", "conv_"]
+        GemmKeys = ["gemm", "cublas", "dot"]
+        CommunicationKeys = [
+            "all-gather",
+            "all-reduce",
+            "reduce-scatter",
+            "all-to-all",
+            "alltoall",
+            "collective-permute",
+            "collectivepermute",
+        ]
+        CustomKeys = ["custom"]
+        XLAKeys = ["loop_", "input_", "wrapped_", "fusion."]
         ClassCategories = {
             "Conv": ConvKeys,
             "GEMM": GemmKeys,
             "Communication rccl/nccl": CommunicationKeys,
             "XLA Ops": XLAKeys,
-            "Custom": CustomKeys
+            "Custom": CustomKeys,
         }
-        C_GemmKeys = ["matmul","cublas"]
+        C_GemmKeys = ["matmul", "cublas"]
         C_FABwdKeys = ["fused_attn_backward"]
         C_FAFwdKeys = ["fused_attn_forward"]
         CustomClassCategories = {
             "FA BWD": C_FABwdKeys,
             "FA FWD": C_FAFwdKeys,
-            "GEMM": C_GemmKeys
+            "GEMM": C_GemmKeys,
         }
         UncategorizedEventKey = "Uncategorized Events"
 

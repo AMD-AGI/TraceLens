@@ -87,7 +87,9 @@ class JaxAnalyses:
 
     @staticmethod
     def default_gpu_event_filter(event: dict):
-        return event.get("tid", 200) < 100 and not(event.get("cat","NA")=="hlo_op")  # ignore of supplemental events
+        return event.get("tid", 200) < 100 and not (
+            event.get("cat", "NA") == "hlo_op"
+        )  # ignore of supplemental events
 
     @staticmethod
     def get_just_gpu_events(events):
