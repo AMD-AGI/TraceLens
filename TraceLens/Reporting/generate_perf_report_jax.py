@@ -112,7 +112,7 @@ def perf_analysis(
         df_kernel_launchers_summary_by_category
     )
     dict_name2df["kernel_launchers_unique_args"] = df_kernel_launchers_unique_args
-    dict_name2df["df_xla_perf"] = df_xla_perf
+    dict_name2df["xla_perf"] = df_xla_perf
     dict_name2df["xla_summary"] = df_xla_summary
 
     # Generate & store perf-model specific DataFrames
