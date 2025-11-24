@@ -605,35 +605,35 @@ class JaxTraceToTree(BaseTraceToTree):
                 )
             print(f'  |_{event_str}')
     def _fix_categories_hlo_op(self):
-        hlo_events=[i for i in self.events if i["cat"]=="hlo_op"]
+        hlo_events = [i for i in self.events if i["cat"] == "hlo_op"]
         for event in hlo_events:
-            name=event["name"]
-            metadata=event.get("metadata","NA")
-            hlo_cat=TraceEventUtils.JaxHloKeys.UncategorizedEventKey
+            name = event["name"]
+            metadata = event.get("metadata", "NA")
+            hlo_cat = TraceEventUtils.JaxHloKeys.UncategorizedEventKey
             for (
                 category,
                 filters,
                 ) in TraceEventUtils.JaxHloKeys.ClassCategories.items():
                 if any(f in name for f in filters):
-                    hlo_cat=category
+                    hlo_cat = category
                     break
-            if hlo_cat=="Custom":
+            if hlo_cat == "Custom":
                 for (
                 category,
                 filters,
                 ) in TraceEventUtils.JaxHloKeys.CustomClassCategories.items():
                     if any(f in metadata["custom_call_target"] for f in filters):
-                        hlo_cat=category
+                        hlo_cat = category
                         break
-            if hlo_cat==TraceEventUtils.JaxHloKeys.UncategorizedEventKey:
+            if hlo_cat == TraceEventUtils.JaxHloKeys.UncategorizedEventKey:
                 print(f'did not find op category for {name}')
-            event["gpu_kernel_op_cat"]=hlo_cat
-            gpu_events=[self.events[i] for i in event['gpu_events']]
+            event["gpu_kernel_op_cat"] = hlo_cat
+            gpu_events = [self.events[i] for i in event['gpu_events']]
             for e in gpu_events:
-                if not(e["gpu_kernel_op_cat"]==hlo_cat):
+                if not(e["gpu_kernel_op_cat"] == hlo_cat):
                     #if not (hlo_cat=="XLA Ops"):
                     #    print(f'changing {e["gpu_kernel_op_cat"]} to {hlo_cat} for event {e["name"]} and {name}')
-                    e["gpu_kernel_op_cat"]=hlo_cat
+                    e["gpu_kernel_op_cat"] = hlo_cat
 
 
 
