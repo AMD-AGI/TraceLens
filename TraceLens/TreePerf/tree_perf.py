@@ -1701,9 +1701,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         # Create intervals from kernel timestamps and merge overlaps
         busy_kernel_time = 0
         if len(list_kernels) > 0:
-            intervals = [(k["ts"], k["t_end"]) for k in list_kernels]
-            merged_intervals = GPUEventAnalyser.merge_intervals(intervals)
-            busy_kernel_time = sum(end - start for start, end in merged_intervals)
+            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()["busy_time"]
         
         # Store kernel details for debugging/analysis
         event["kernel_details"] = [
