@@ -87,7 +87,10 @@ class JaxAnalyses:
 
     @staticmethod
     def default_gpu_event_filter(event: dict):
-        return event.get("tid", 200) < 100  # ignore of supplemental events
+        # Keep events from actual GPU streams, filter out supplemental metadata threads
+        thread_info = event.get("thread", {})
+        thread_name = thread_info.get("thread_name", "")
+        return thread_name.startswith("Stream #")
 
     @staticmethod
     def get_just_gpu_events(events):
