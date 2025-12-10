@@ -11,6 +11,32 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Categorize kernels based on name patterns
+def _categorize_kernel(name: str) -> str:
+    name_lower = name.lower()
+    if "gemm" in name_lower or "matmul" in name_lower or "cijk" in name_lower:
+        return "GEMM"
+    elif "elementwise" in name_lower:
+        return "Elementwise"
+    elif "reduce" in name_lower or "sum" in name_lower:
+        return "Reduction"
+    elif "conv" in name_lower:
+        return "Convolution"
+    elif (
+        "norm" in name_lower
+        or "batch_norm" in name_lower
+        or "layer_norm" in name_lower
+    ):
+        return "Normalization"
+    elif "flash" in name_lower or "attn" in name_lower or "fmha" in name_lower:
+        return "Attention"
+    elif "copy" in name_lower or "memcpy" in name_lower:
+        return "Memory"
+    elif "nccl" in name_lower or "rccl" in name_lower:
+        return "COMM"
+    else:
+        return "Other"
+
 
 class RocprofAnalyzer:
     """Analyzer for rocprofv3 data - generates performance DataFrames"""
@@ -159,6 +185,9 @@ class RocprofAnalyzer:
             df_summary["Total Kernel Time (µs)"] / 1000.0
         )
 
+        # Add a category column for each kernel in the summary
+        df_summary["Category"] = df_summary["name"].apply(_categorize_kernel)
+
         return df_summary
 
     def get_df_kernel_summary_by_category(self) -> pd.DataFrame:
@@ -174,33 +203,9 @@ class RocprofAnalyzer:
                 ]
             )
 
-        # Categorize kernels based on name patterns
-        def categorize_kernel(name: str) -> str:
-            name_lower = name.lower()
-            if "gemm" in name_lower or "matmul" in name_lower or "cijk" in name_lower:
-                return "GEMM"
-            elif "elementwise" in name_lower:
-                return "Elementwise"
-            elif "reduce" in name_lower or "sum" in name_lower:
-                return "Reduction"
-            elif "conv" in name_lower:
-                return "Convolution"
-            elif (
-                "norm" in name_lower
-                or "batch_norm" in name_lower
-                or "layer_norm" in name_lower
-            ):
-                return "Normalization"
-            elif "flash" in name_lower or "attn" in name_lower or "fmha" in name_lower:
-                return "Attention"
-            elif "copy" in name_lower or "memcpy" in name_lower:
-                return "Memory"
-            else:
-                return "Other"
-
         # Add category to kernel events
         df_kernels = pd.DataFrame(self.kernel_events)
-        df_kernels["op category"] = df_kernels["name"].apply(categorize_kernel)
+        df_kernels["op category"] = df_kernels["name"].apply(_categorize_kernel)
 
         # Group by category
         df_summary = df_kernels.groupby("op category").agg({"dur": ["count", "sum"]})
