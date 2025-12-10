@@ -38,7 +38,11 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 (you can use compressed traces too such as .zip and .gz)
 
 ```bash
+# PyTorch profiler traces
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
+
+# rocprofv3 traces
+TraceLens_generate_perf_report_rocprof --profile_json_path path/to/results.json
 ```
 
 - **Compare Traces** Detailed docs [here](docs/compare_perf_reports_pytorch.md)
@@ -63,6 +67,37 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
 Refer to the individual module docs in the docs/ directory and the example notebooks under examples/ for further guidance.
 
 **📦 Custom Workflows**: Check out [examples/custom_workflows/](examples/custom_workflows/) for community-contributed utilities including **roofline_analyzer** and **traceMap** — powerful tools we're working on integrating more tightly into the core library.
+
+## Supported Profile Formats
+
+TraceLens supports multiple profiling formats:
+
+| Format | Tool | Documentation |
+|--------|------|---------------|
+| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
+| **JAX** | XPlane protobuf | [docs/generate_perf_report_jax.md](docs/generate_perf_report_jax.md) |
+| **rocprofv3** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
+
+### rocprofv3 Support
+
+TraceLens now supports AMD's rocprofv3 (rocprofiler-sdk) JSON format:
+
+```bash
+# Generate performance report from rocprofv3 trace
+TraceLens_generate_perf_report_rocprof \
+    --profile_json_path trace_results.json \
+    --short_kernel_study \
+    --kernel_details
+```
+
+Features:
+- GPU timeline breakdown (kernel, memory, idle time)
+- Kernel summary with statistical analysis
+- Automatic kernel categorization (GEMM, Attention, Elementwise, etc.)
+- Short kernel analysis
+- Grid/block dimension tracking
+
+See [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) for detailed usage.
 
 ## Contributing
 
