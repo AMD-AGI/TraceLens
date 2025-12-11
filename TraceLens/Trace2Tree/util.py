@@ -33,7 +33,8 @@ def set_bookkeeping_attr(tree, event: dict):
 
 
 def is_gemm_kernel(kernel_event: dict) -> bool:
-    assert kernel_event["cat"] == "kernel"
+    if kernel_event.get("cat") != "kernel":
+        return False # skip non-kernel events
     kernel_name = kernel_event["name"]
     pattern = r".*C.*_A.*_B.*"
     is_rocm_gemm = bool(re.match(pattern, kernel_name))
