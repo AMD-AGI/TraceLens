@@ -4,19 +4,19 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
 import argparse
-import json
-from typing import Optional, Dict, Tuple
-import pandas as pd
-import numpy as np
-from TraceLens import TraceToTree
-from TraceLens import TreePerfAnalyzer
-from TraceLens import NcclAnalyser
 import importlib.util
-import warnings
+import json
+import os
 import subprocess
 import sys
+import warnings
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
 
 
 def request_install(package_name):
@@ -475,6 +475,24 @@ def generate_perf_report_pytorch(
         df_nccl_summary = nccl_analyser.build_df_summary_long()
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
+
+    # Get additional DataFrames from extension if available
+    if extension_file:
+        extension_path = os.path.abspath(extension_file)
+        extension_name = os.path.splitext(os.path.basename(extension_path))[0]
+        spec = importlib.util.spec_from_file_location(extension_name, extension_path)
+        extension = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extension)
+
+        if hasattr(extension, "get_additional_dataframes_extension"):
+            print(f"Getting additional DataFrames from extension: {extension_path}")
+            get_additional_dfs = getattr(
+                extension, "get_additional_dataframes_extension"
+            )
+            additional_dfs = get_additional_dfs(perf_analyzer.tree)
+            if additional_dfs:
+                dict_name2df.update(additional_dfs)
+                print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
