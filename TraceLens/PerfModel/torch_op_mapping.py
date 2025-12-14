@@ -143,19 +143,19 @@ def categorize_torch_op(row):
         return "record_param_comms"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
-    else:
-        raise ValueError(
-            f"Row does not contain 'kernel_names' or 'kernel_details' with a valid name. Row: {row}"
-        )
-    if kernel_name.startswith("void at::native"):
-        if debug:
-            print("Found ATen native kernel:", kernel_name[:64])
-        if "elementwise" in kernel_name:
-            return "elementwise"
-        elif "reduce" in kernel_name:
-            return "reduce"
-        elif "multi_tensor_apply" in kernel_name:
-            return "multi_tensor_apply"
+        # else:
+        #     raise ValueError(
+        #         f"Row does not contain 'kernel_names' or 'kernel_details' with a valid name. Row: {row}"
+        #     )
+        if kernel_name.startswith("void at::native"):
+            if debug:
+                print("Found ATen native kernel:", kernel_name[:64])
+            if "elementwise" in kernel_name:
+                return "elementwise"
+            elif "reduce" in kernel_name:
+                return "reduce"
+            elif "multi_tensor_apply" in kernel_name:
+                return "multi_tensor_apply"
 
     # if none of the above cases match, return 'other'
     return "other"
