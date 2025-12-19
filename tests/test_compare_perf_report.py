@@ -123,6 +123,8 @@ def generate_perf_report(profile_path, report_path):
         profile_path,
         "--output_xlsx_path",
         report_path,
+        "--enable_kernel_summary",
+        "--short_kernel_study",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
