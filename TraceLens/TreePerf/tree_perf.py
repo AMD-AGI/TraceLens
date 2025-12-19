@@ -78,10 +78,17 @@ class TreePerfAnalyzer:
         self.with_python_stack = any(
             event.get("cat") == "python_func" for event in self.tree.events
         )
+        self.gpu_only = self.check_gpu_only()
         self.tree.build_tree(add_python_func=add_python_func)
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
+
+    def check_gpu_only(self):
+        for event in self.tree.events:
+            if event.get("cat") in {"python_func", "cpu_op"}:
+                return False
+        return True
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
