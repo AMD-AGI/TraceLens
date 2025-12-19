@@ -13,26 +13,33 @@ logger = logging.getLogger(__name__)
 
 # Categorize kernels based on name patterns
 def _categorize_kernel(name: str) -> str:
+    """
+    Categorize kernel by name pattern.
+
+    Args:
+        name: Kernel name to categorize
+
+    Returns:
+        Category string (GEMM, Elementwise, Reduction, etc.)
+    """
     name_lower = name.lower()
-    if "gemm" in name_lower or "matmul" in name_lower or "cijk" in name_lower:
+
+    # Use any() with lists for easier pattern maintenance and extensibility
+    if any(x in name_lower for x in ["gemm", "matmul", "cijk"]):
         return "GEMM"
-    elif "elementwise" in name_lower:
+    elif any(x in name_lower for x in ["elementwise"]):
         return "Elementwise"
-    elif "reduce" in name_lower or "sum" in name_lower:
+    elif any(x in name_lower for x in ["reduce", "sum"]):
         return "Reduction"
-    elif "conv" in name_lower:
+    elif any(x in name_lower for x in ["conv"]):
         return "Convolution"
-    elif (
-        "norm" in name_lower
-        or "batch_norm" in name_lower
-        or "layer_norm" in name_lower
-    ):
+    elif any(x in name_lower for x in ["norm", "batch_norm", "layer_norm"]):
         return "Normalization"
-    elif "flash" in name_lower or "attn" in name_lower or "fmha" in name_lower:
+    elif any(x in name_lower for x in ["flash", "attn", "fmha"]):
         return "Attention"
-    elif "copy" in name_lower or "memcpy" in name_lower:
+    elif any(x in name_lower for x in ["copy", "memcpy"]):
         return "Memory"
-    elif "nccl" in name_lower or "rccl" in name_lower:
+    elif any(x in name_lower for x in ["nccl", "rccl"]):
         return "COMM"
     else:
         return "Other"
@@ -53,8 +60,40 @@ class RocprofAnalyzer:
         self.api_events = api_events
         self.metadata = metadata
 
-        # Convert timestamps from nanoseconds to microseconds for consistency with PyTorch format
-        self._convert_timestamps_to_microseconds()
+    @staticmethod
+    def _merge_intervals(intervals: List[tuple]) -> List[tuple]:
+        """
+        Merge overlapping time intervals to calculate actual busy time.
+
+        Args:
+            intervals: List of (start, end) tuples representing time intervals
+
+        Returns:
+            List of merged non-overlapping intervals
+
+        Example:
+            >>> intervals = [(0, 10), (5, 15), (20, 30)]
+            >>> RocprofAnalyzer._merge_intervals(intervals)
+            [(0, 15), (20, 30)]
+        """
+        if not intervals:
+            return []
+
+        # Sort intervals by start time
+        intervals = sorted(intervals, key=lambda x: x[0])
+        merged = [intervals[0]]
+
+        for start, end in intervals[1:]:
+            last_start, last_end = merged[-1]
+            # Check if current interval overlaps with the last merged interval
+            if start <= last_end:
+                # Merge by extending the end time
+                merged[-1] = (last_start, max(last_end, end))
+            else:
+                # No overlap, add as new interval
+                merged.append((start, end))
+
+        return merged
 
     def _convert_timestamps_to_microseconds(self):
         """Convert all timestamps from nanoseconds to microseconds"""
@@ -74,9 +113,14 @@ class RocprofAnalyzer:
         """
         Generate GPU timeline showing:
         - Total time
-        - Kernel execution time
-        - Memory operation time
+        - Kernel execution time (accounting for overlaps)
+        - Memory operation time (accounting for overlaps)
         - Idle time
+
+        Note: This method calculates GPU busy time by merging overlapping
+        kernel and memory operation intervals, rather than simply summing
+        their durations. This provides an accurate view of actual GPU
+        utilization.
         """
         if not self.kernel_events:
             logger.warning("No kernel events found in rocprof data")
@@ -87,14 +131,33 @@ class RocprofAnalyzer:
         fini_time = self.metadata.get("fini_time", 0) / 1000.0  # ns to us
         total_time_us = fini_time - init_time
 
-        # Calculate kernel execution time
-        kernel_time_us = sum(event["dur"] for event in self.kernel_events)
+        # Create intervals for kernels: (start_time, end_time) in microseconds
+        kernel_intervals = [
+            (event["ts"] / 1000.0, (event["ts"] + event["dur"]) / 1000.0)
+            for event in self.kernel_events
+        ]
 
-        # Calculate memory operation time
-        memory_time_us = sum(event["dur"] for event in self.memory_events)
+        # Merge overlapping kernel intervals to get actual busy time
+        merged_kernel_intervals = self._merge_intervals(kernel_intervals)
+        kernel_time_us = sum(end - start for start, end in merged_kernel_intervals)
+
+        # Create intervals for memory operations
+        memory_intervals = [
+            (event["ts"] / 1000.0, (event["ts"] + event["dur"]) / 1000.0)
+            for event in self.memory_events
+        ]
+
+        # Merge overlapping memory intervals
+        merged_memory_intervals = self._merge_intervals(memory_intervals)
+        memory_time_us = sum(end - start for start, end in merged_memory_intervals)
+
+        # Merge all GPU activity (kernels + memory) to calculate total busy time
+        all_gpu_intervals = kernel_intervals + memory_intervals
+        merged_all_intervals = self._merge_intervals(all_gpu_intervals)
+        busy_time_us = sum(end - start for start, end in merged_all_intervals)
 
         # Calculate idle time
-        idle_time_us = max(0, total_time_us - kernel_time_us - memory_time_us)
+        idle_time_us = max(0, total_time_us - busy_time_us)
 
         # Create timeline DataFrame
         data = [
@@ -114,6 +177,13 @@ class RocprofAnalyzer:
                 ),
             },
             {
+                "type": "busy_time",
+                "time ms": busy_time_us / 1000.0,
+                "percent": (
+                    (busy_time_us / total_time_us * 100.0) if total_time_us > 0 else 0
+                ),
+            },
+            {
                 "type": "idle",
                 "time ms": idle_time_us / 1000.0,
                 "percent": (
@@ -127,24 +197,28 @@ class RocprofAnalyzer:
     def get_df_kernel_summary(self) -> pd.DataFrame:
         """
         Kernel summary with columns:
-        - Kernel name
-        - Count
-        - Total duration (us)
-        - Mean/median/std duration (us)
-        - Percentage of total time
+        - name: Kernel name
+        - Count: Number of kernel invocations
+        - Total Kernel Time (ms): Total execution time in milliseconds
+        - Mean/Median/Std/Min/Max Kernel Time (µs): Statistics in microseconds
+        - Percentage (%): Percentage of total kernel time
+        - Cumulative Percentage (%): Running total percentage
+        - Category: Kernel category (GEMM, Convolution, etc.)
         """
         if not self.kernel_events:
             return pd.DataFrame(
                 columns=[
                     "name",
                     "Count",
-                    "Total Kernel Time (µs)",
                     "Mean Kernel Time (µs)",
                     "Median Kernel Time (µs)",
                     "Std Kernel Time (µs)",
                     "Min Kernel Time (µs)",
                     "Max Kernel Time (µs)",
+                    "Total Kernel Time (ms)",
                     "Percentage (%)",
+                    "Cumulative Percentage (%)",
+                    "Category",
                 ]
             )
 
@@ -184,6 +258,9 @@ class RocprofAnalyzer:
         df_summary["Total Kernel Time (ms)"] = (
             df_summary["Total Kernel Time (µs)"] / 1000.0
         )
+
+        # Drop the microseconds column to avoid redundancy (keep only ms)
+        df_summary.drop(columns=["Total Kernel Time (µs)"], inplace=True)
 
         # Add a category column for each kernel in the summary
         df_summary["Category"] = df_summary["name"].apply(_categorize_kernel)

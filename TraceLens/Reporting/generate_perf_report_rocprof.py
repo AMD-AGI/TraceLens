@@ -7,33 +7,20 @@
 import os
 import argparse
 import sys
-import subprocess
 from typing import Optional, Dict
 import pandas as pd
+import logging
+
+# Configure logging
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 from TraceLens.util import RocprofParser
 from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
-
-
-def request_install(package_name):
-    choice = (
-        input(f"Do you want to install '{package_name}' via pip? [y/N]: ")
-        .strip()
-        .lower()
-    )
-    if choice == "y":
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", package_name]
-            )
-        except subprocess.CalledProcessError:
-            print(
-                f"Failed to install '{package_name}'. Please install it manually. Exiting."
-            )
-            sys.exit(1)
-    else:
-        print(f"Skipping installation of '{package_name}' and exiting.")
-        sys.exit(1)
 
 
 def generate_perf_report_rocprof(
@@ -50,6 +37,10 @@ def generate_perf_report_rocprof(
     """
     Process rocprofv3 JSON profile and generate performance reports
 
+    This function serves dual purposes:
+    1. CLI tool: Writes performance reports to Excel/CSV files
+    2. Library function: Returns DataFrames for programmatic access and testing
+
     Args:
         profile_json_path: Path to *_results.json file from rocprofv3
         output_xlsx_path: Output Excel file path (optional)
@@ -62,63 +53,72 @@ def generate_perf_report_rocprof(
         topk_kernels: Limit kernel details to top K kernels by time
 
     Returns:
-        Dictionary of DataFrames (sheet_name -> DataFrame)
+        Dictionary mapping sheet names to DataFrames. This allows programmatic
+        access to the generated data and is used for testing. When called from
+        CLI (via main()), this return value is typically ignored since the data
+        is already written to files.
 
     Example:
-        >>> dfs = generate_perf_report_rocprof(
-        ...     'trace_results.json',
-        ...     output_xlsx_path='report.xlsx',
-        ...     short_kernel_study=True
-        ... )
+        CLI usage (return value not used):
+            $ TraceLens_generate_perf_report_rocprof --profile_json_path trace.json
+
+        Library usage (return value used):
+            >>> dfs = generate_perf_report_rocprof(
+            ...     'trace_results.json',
+            ...     output_xlsx_path='report.xlsx',
+            ...     short_kernel_study=True
+            ... )
+            >>> print(dfs.keys())  # Access DataFrames programmatically
+            dict_keys(['gpu_timeline', 'kernel_summary', ...])
     """
 
-    print(f"Loading rocprofv3 data from: {profile_json_path}")
+    logger.info(f"Loading rocprofv3 data from: {profile_json_path}")
 
     # 1. Load and parse rocprof data
     try:
         rocprof_data = RocprofParser.load_rocprof_data(profile_json_path)
     except Exception as e:
-        print(f"Error loading rocprof data: {e}")
+        logger.error(f"Error loading rocprof data: {e}")
         raise
 
     # 2. Extract events
-    print("Extracting kernel events...")
+    logger.info("Extracting kernel events...")
     kernel_events = RocprofParser.extract_kernel_events(rocprof_data)
-    print(f"  Found {len(kernel_events)} kernel dispatches")
+    logger.info(f"  Found {len(kernel_events)} kernel dispatches")
 
-    print("Extracting memory events...")
+    logger.info("Extracting memory events...")
     memory_events = RocprofParser.extract_memory_events(rocprof_data)
-    print(f"  Found {len(memory_events)} memory operations")
+    logger.info(f"  Found {len(memory_events)} memory operations")
 
-    print("Extracting API events...")
+    logger.info("Extracting API events...")
     api_events = RocprofParser.extract_api_events(rocprof_data)
-    print(f"  Found {len(api_events)} API calls")
+    logger.info(f"  Found {len(api_events)} API calls")
 
     metadata = RocprofParser.get_metadata(rocprof_data)
-    print(f"  PID: {metadata.get('pid')}, Hostname: {metadata.get('hostname')}")
+    logger.info(f"  PID: {metadata.get('pid')}, Hostname: {metadata.get('hostname')}")
 
     # 3. Create analyzer
-    print("\nGenerating performance analysis...")
+    logger.info("Generating performance analysis...")
     analyzer = RocprofAnalyzer(kernel_events, memory_events, api_events, metadata)
 
     # 4. Generate DataFrames
     dict_name2df = {}
 
-    print("  - GPU timeline")
+    logger.info("  - GPU timeline")
     dict_name2df["gpu_timeline"] = analyzer.get_df_gpu_timeline()
 
     if kernel_summary:
-        print("  - Kernel summary")
+        logger.info("  - Kernel summary")
         dict_name2df["kernel_summary"] = analyzer.get_df_kernel_summary()
-        print("  - Kernel summary by category")
+        logger.info("  - Kernel summary by category")
         dict_name2df["kernel_summary_by_category"] = analyzer.get_df_kernel_summary_by_category()
 
     if kernel_details:
-        print("  - Kernel details")
+        logger.info("  - Kernel details")
         dict_name2df["kernel_details"] = analyzer.get_df_kernel_details(topk=topk_kernels)
 
     if short_kernel_study:
-        print(f"  - Short kernels (threshold: {short_kernel_threshold_us} µs)")
+        logger.info(f"  - Short kernels (threshold: {short_kernel_threshold_us} µs)")
         dict_name2df["short_kernels_summary"] = analyzer.get_df_short_kernels(short_kernel_threshold_us)
         dict_name2df["short_kernel_histogram"] = analyzer.get_df_short_kernel_histogram(
             short_kernel_threshold_us, short_kernel_histogram_bins
@@ -126,12 +126,12 @@ def generate_perf_report_rocprof(
 
     # 5. Write output
     if output_csvs_dir:
-        print(f"\nWriting CSV files to: {output_csvs_dir}")
+        logger.info(f"Writing CSV files to: {output_csvs_dir}")
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
             csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
             df.to_csv(csv_path, index=False)
-            print(f"  - {sheet_name}.csv ({len(df)} rows)")
+            logger.info(f"  - {sheet_name}.csv ({len(df)} rows)")
     else:
         if output_xlsx_path is None:
             # Auto-generate output filename
@@ -141,19 +141,19 @@ def generate_perf_report_rocprof(
                 base_path = profile_json_path.rsplit('.json', 1)[0]
                 output_xlsx_path = base_path + '_perf_report.xlsx'
 
-        print(f"\nWriting Excel file to: {output_xlsx_path}")
+        logger.info(f"Writing Excel file to: {output_xlsx_path}")
         try:
             import openpyxl
         except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
-            request_install("openpyxl")
+            logger.error(f"Error importing openpyxl: {e}. Please install it with: pip install openpyxl")
+            raise
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dict_name2df.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-                print(f"  - Sheet '{sheet_name}' ({len(df)} rows)")
+                logger.info(f"  - Sheet '{sheet_name}' ({len(df)} rows)")
 
-        print(f"\nSuccessfully written to {output_xlsx_path}")
+        logger.info(f"Successfully written to {output_xlsx_path}")
 
     return dict_name2df
 
@@ -244,7 +244,7 @@ Examples:
 
     # Validate input file exists
     if not os.path.exists(args.profile_json_path):
-        print(f"Error: Input file not found: {args.profile_json_path}")
+        logger.error(f"Input file not found: {args.profile_json_path}")
         sys.exit(1)
 
     # Generate report
@@ -261,9 +261,7 @@ Examples:
             topk_kernels=args.topk_kernels,
         )
     except Exception as e:
-        print(f"\nError generating report: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error generating report: {e}")
         sys.exit(1)
 
 
