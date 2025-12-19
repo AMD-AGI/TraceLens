@@ -65,26 +65,44 @@ def get_dfs_short_kernels(
     ]
 
     # 1. get histogram of these short kernels
-    vals = df_filtered["Kernel duration (µs)"].values
-    counts, bin_edges = np.histogram(vals, bins=histogram_bins)
-    df_hist = pd.DataFrame(
-        {"bin_start": bin_edges[:-1], "bin_end": bin_edges[1:], "count": counts}
-    )
+    if df_filtered.empty:
+        df_hist = pd.DataFrame(columns=["bin_start", "bin_end", "count"])
+    else:
+        vals = df_filtered["Kernel duration (µs)"].values
+        counts, bin_edges = np.histogram(vals, bins=histogram_bins)
+        df_hist = pd.DataFrame(
+            {"bin_start": bin_edges[:-1], "bin_end": bin_edges[1:], "count": counts}
+        )
 
     # 2. get df short kernels topk by total time
     agg_dict = {
         "Kernel duration (µs)": ["sum", "count", "mean"],
     }
-    df_grouped = df_filtered.groupby(
-        [
+    # For GPU-only traces, only group by Kernel name (CPU-related columns don't exist)
+    # For regular traces, group by all available columns
+    if perf_analyzer.gpu_only:
+        groupby_cols = ["Kernel name"]
+    else:
+        groupby_cols = [
             "Parent cpu_op",
             "Input dims",
             "Input strides",
             "Concrete Inputs",
             "Kernel name",
-        ],
-        sort=False,
-    ).agg(agg_dict)
+        ]
+
+    # If dataframe is empty, return empty dataframe
+    if df_filtered.empty:
+        df_grouped = pd.DataFrame()
+    else:
+        df_grouped = df_filtered.groupby(
+            groupby_cols,
+            sort=False,
+        ).agg(agg_dict)
+
+    # Handle empty dataframe case
+    if df_grouped.empty:
+        return df_hist, df_grouped
 
     # Flatten multi-level column names
     df_grouped.columns = ["_".join(col).strip() for col in df_grouped.columns]
@@ -267,7 +285,9 @@ def generate_perf_report_pytorch(
 
     # Detect GPU-only trace early and inform user
     if perf_analyzer.gpu_only:
-        print("Detected GPU-only trace. Skipping CPU-dependent analysis and generating only GPU timeline and kernel summary.")
+        print(
+            "Detected GPU-only trace. Skipping CPU-dependent analysis and generating only GPU timeline and kernel summary."
+        )
 
     agg_metrics = ["mean", "median", "std", "min", "max"]
 
@@ -298,10 +318,14 @@ def generate_perf_report_pytorch(
             df_kernel_launchers
         )
         df_kernel_launchers_summary_by_category = (
-            perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
+            perf_analyzer.get_df_kernel_launchers_summary_by_category(
+                df_kernel_launchers
+            )
         )
-        df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(
-            df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
+        df_kernel_launchers_unique_args = (
+            perf_analyzer.get_df_kernel_launchers_unique_args(
+                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
+            )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(
             df_kernel_launchers_unique_args,
@@ -314,7 +338,9 @@ def generate_perf_report_pytorch(
         for op_cat, op_names in perf_analyzer.dict_cat2names.items():
             # Filter events belonging to the current category
             op_events = [
-                event for event in perf_analyzer.tree.events if event["name"] in op_names
+                event
+                for event in perf_analyzer.tree.events
+                if event["name"] in op_names
             ]
 
             if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
@@ -382,11 +408,13 @@ def generate_perf_report_pytorch(
 
     # Build dict_name2df - only include sheets that have data
     dict_name2df = {"gpu_timeline": df_gpu_timeline}
-    
+
     # Add CPU-dependent sheets only if not GPU-only
     if not perf_analyzer.gpu_only:
         if not df_kernel_launchers_summary_by_category.empty:
-            dict_name2df["ops_summary_by_category"] = df_kernel_launchers_summary_by_category
+            dict_name2df["ops_summary_by_category"] = (
+                df_kernel_launchers_summary_by_category
+            )
         if not df_kernel_launchers_summary.empty:
             dict_name2df["ops_summary"] = df_kernel_launchers_summary
         if not df_kernel_launchers_unique_args.empty:
