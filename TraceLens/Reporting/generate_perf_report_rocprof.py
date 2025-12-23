@@ -111,15 +111,21 @@ def generate_perf_report_rocprof(
         logger.info("  - Kernel summary")
         dict_name2df["kernel_summary"] = analyzer.get_df_kernel_summary()
         logger.info("  - Kernel summary by category")
-        dict_name2df["kernel_summary_by_category"] = analyzer.get_df_kernel_summary_by_category()
+        dict_name2df["kernel_summary_by_category"] = (
+            analyzer.get_df_kernel_summary_by_category()
+        )
 
     if kernel_details:
         logger.info("  - Kernel details")
-        dict_name2df["kernel_details"] = analyzer.get_df_kernel_details(topk=topk_kernels)
+        dict_name2df["kernel_details"] = analyzer.get_df_kernel_details(
+            topk=topk_kernels
+        )
 
     if short_kernel_study:
         logger.info(f"  - Short kernels (threshold: {short_kernel_threshold_us} µs)")
-        dict_name2df["short_kernels_summary"] = analyzer.get_df_short_kernels(short_kernel_threshold_us)
+        dict_name2df["short_kernels_summary"] = analyzer.get_df_short_kernels(
+            short_kernel_threshold_us
+        )
         dict_name2df["short_kernel_histogram"] = analyzer.get_df_short_kernel_histogram(
             short_kernel_threshold_us, short_kernel_histogram_bins
         )
@@ -135,17 +141,21 @@ def generate_perf_report_rocprof(
     else:
         if output_xlsx_path is None:
             # Auto-generate output filename
-            if profile_json_path.endswith('_results.json'):
-                output_xlsx_path = profile_json_path.replace('_results.json', '_perf_report.xlsx')
+            if profile_json_path.endswith("_results.json"):
+                output_xlsx_path = profile_json_path.replace(
+                    "_results.json", "_perf_report.xlsx"
+                )
             else:
-                base_path = profile_json_path.rsplit('.json', 1)[0]
-                output_xlsx_path = base_path + '_perf_report.xlsx'
+                base_path = profile_json_path.rsplit(".json", 1)[0]
+                output_xlsx_path = base_path + "_perf_report.xlsx"
 
         logger.info(f"Writing Excel file to: {output_xlsx_path}")
         try:
             import openpyxl
         except (ImportError, ModuleNotFoundError) as e:
-            logger.error(f"Error importing openpyxl: {e}. Please install it with: pip install openpyxl")
+            logger.error(
+                f"Error importing openpyxl: {e}. Please install it with: pip install openpyxl"
+            )
             raise
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
@@ -178,7 +188,7 @@ Examples:
   # Custom output path with kernel details
   TraceLens_generate_perf_report_rocprof --profile_json_path trace.json \\
       --output_xlsx_path my_report.xlsx --kernel_details --topk_kernels 100
-        """
+        """,
     )
 
     # Required arguments
@@ -267,4 +277,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-
