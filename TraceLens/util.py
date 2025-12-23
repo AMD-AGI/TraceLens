@@ -589,3 +589,142 @@ class TraceEventUtils:
                 event[TraceEventUtils.TraceKeys.TimeStamp]
                 + event[TraceEventUtils.TraceKeys.Duration]
             )
+
+
+class RocprofParser:
+    """Parser for rocprofiler-sdk JSON format (rocprofv3)"""
+
+    @staticmethod
+    def load_rocprof_data(filepath: str) -> dict:
+        """Load and validate rocprofv3 JSON file"""
+        data = DataLoader.load_data(filepath)
+        if "rocprofiler-sdk-tool" not in data:
+            raise ValueError(
+                f"Not a valid rocprofv3 file: missing 'rocprofiler-sdk-tool' key"
+            )
+        return data
+
+    @staticmethod
+    def extract_kernel_events(rocprof_data: dict) -> List[dict]:
+        """
+        Extract kernel execution events from rocprof data
+        Returns list of standardized kernel events with:
+        - name: kernel name
+        - kernel_id: kernel ID from rocprof
+        - ts: timestamp (nanoseconds)
+        - dur: duration (nanoseconds)
+        - grid: grid dimensions (x, y, z)
+        - block: block/workgroup dimensions (x, y, z)
+        - stream: stream ID
+        - dispatch_id: dispatch identifier
+        - agent_id: agent/GPU identifier
+        """
+        tool_data = rocprof_data["rocprofiler-sdk-tool"][0]
+        kernel_dispatches = tool_data["buffer_records"].get("kernel_dispatch", [])
+        kernel_symbols = {
+            k["kernel_id"]: k for k in tool_data.get("kernel_symbols", [])
+        }
+
+        kernel_events = []
+        for dispatch in kernel_dispatches:
+            dispatch_info = dispatch.get("dispatch_info", {})
+            kernel_id = dispatch_info.get("kernel_id")
+
+            # Get kernel name from kernel_symbols
+            kernel_symbol = kernel_symbols.get(kernel_id, {})
+            kernel_name = (
+                kernel_symbol.get("truncated_kernel_name")
+                or kernel_symbol.get("formatted_kernel_name")
+                or kernel_symbol.get("kernel_name", f"unknown_kernel_{kernel_id}")
+            )
+
+            # Extract timing
+            start_ts = dispatch.get("start_timestamp", 0)
+            end_ts = dispatch.get("end_timestamp", 0)
+            duration = end_ts - start_ts
+
+            # Extract grid and workgroup dimensions
+            grid_size = dispatch_info.get("grid_size", {})
+            workgroup_size = dispatch_info.get("workgroup_size", {})
+
+            event = {
+                "name": kernel_name,
+                "kernel_id": kernel_id,
+                "ts": start_ts,  # nanoseconds
+                "dur": duration,  # nanoseconds
+                "grid": (
+                    grid_size.get("x", 1),
+                    grid_size.get("y", 1),
+                    grid_size.get("z", 1),
+                ),
+                "block": (
+                    workgroup_size.get("x", 1),
+                    workgroup_size.get("y", 1),
+                    workgroup_size.get("z", 1),
+                ),
+                "stream": dispatch.get("stream_id", {}).get("handle", 0),
+                "dispatch_id": dispatch_info.get("dispatch_id", 0),
+                "agent_id": dispatch_info.get("agent_id", {}).get("handle", 0),
+                "correlation_id": dispatch.get("correlation_id", {}),
+                "thread_id": dispatch.get("thread_id", 0),
+            }
+            kernel_events.append(event)
+
+        return kernel_events
+
+    @staticmethod
+    def extract_memory_events(rocprof_data: dict) -> List[dict]:
+        """Extract memory copy/set operations"""
+        tool_data = rocprof_data["rocprofiler-sdk-tool"][0]
+        memory_copies = tool_data["buffer_records"].get("memory_copy", [])
+
+        memory_events = []
+        for mem_op in memory_copies:
+            event = {
+                "ts": mem_op.get("start_timestamp", 0),
+                "dur": mem_op.get("end_timestamp", 0)
+                - mem_op.get("start_timestamp", 0),
+                "kind": mem_op.get("kind", "unknown"),
+                "operation": mem_op.get("operation", "unknown"),
+                "stream": mem_op.get("stream_id", {}).get("handle", 0),
+            }
+            memory_events.append(event)
+
+        return memory_events
+
+    @staticmethod
+    def extract_api_events(rocprof_data: dict) -> List[dict]:
+        """Extract HIP/HSA API calls if available"""
+        tool_data = rocprof_data["rocprofiler-sdk-tool"][0]
+
+        api_events = []
+        # Combine HIP and HSA API calls
+        for api_type in ["hip_api", "hsa_api"]:
+            api_calls = tool_data["buffer_records"].get(api_type, [])
+            for api_call in api_calls:
+                event = {
+                    "type": api_type,
+                    "ts": api_call.get("start_timestamp", 0),
+                    "dur": api_call.get("end_timestamp", 0)
+                    - api_call.get("start_timestamp", 0),
+                    "operation": api_call.get("operation", "unknown"),
+                    "thread_id": api_call.get("thread_id", 0),
+                }
+                api_events.append(event)
+
+        return api_events
+
+    @staticmethod
+    def get_metadata(rocprof_data: dict) -> dict:
+        """Extract run metadata (pid, timestamps, agents)"""
+        tool_data = rocprof_data["rocprofiler-sdk-tool"][0]
+        metadata = tool_data.get("metadata", {})
+
+        return {
+            "pid": metadata.get("pid", 0),
+            "init_time": metadata.get("init_time", 0),
+            "fini_time": metadata.get("fini_time", 0),
+            "hostname": metadata.get("node", {}).get("hostname", "unknown"),
+            "agents": tool_data.get("agents", []),
+            "command": metadata.get("command", []),
+        }
