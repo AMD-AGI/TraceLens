@@ -17,27 +17,7 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
-
-
-def request_install(package_name):
-    choice = (
-        input(f"Do you want to install '{package_name}' via pip? [y/N]: ")
-        .strip()
-        .lower()
-    )
-    if choice == "y":
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", package_name]
-            )
-        except subprocess.CalledProcessError:
-            print(
-                f"Failed to install '{package_name}'. Please install it manually. Exiting."
-            )
-            sys.exit(1)
-    else:
-        print(f"Skipping installation of '{package_name}' and exiting.")
-        sys.exit(1)
+from TraceLens.Reporting.reporting_utils import request_install
 
 
 def get_dfs_short_kernels(
