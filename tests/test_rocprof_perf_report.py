@@ -40,18 +40,6 @@ class TestRocprofParser:
         assert isinstance(data["rocprofiler-sdk-tool"], list)
         assert len(data["rocprofiler-sdk-tool"]) > 0
 
-    def test_load_invalid_file(self):
-        """Test that invalid files raise an error"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write('{"invalid": "data"}')
-            temp_file = f.name
-
-        try:
-            with pytest.raises(ValueError, match="Not a valid rocprofv3 file"):
-                RocprofParser.load_rocprof_data(temp_file)
-        finally:
-            os.unlink(temp_file)
-
     def test_extract_kernel_events(self, rocprof_file):
         """Test extracting kernel events"""
         data = RocprofParser.load_rocprof_data(rocprof_file)
@@ -105,6 +93,19 @@ class TestRocprofParser:
 
         # Verify times are reasonable
         assert metadata["fini_time"] > metadata["init_time"]
+
+
+def test_load_invalid_file():
+    """Test that invalid files raise an error"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        f.write('{"invalid": "data"}')
+        temp_file = f.name
+
+    try:
+        with pytest.raises(ValueError, match="Not a valid rocprofv3 file"):
+            RocprofParser.load_rocprof_data(temp_file)
+    finally:
+        os.unlink(temp_file)
 
 
 @pytest.mark.parametrize("rocprof_file", find_test_files("tests/rocprof"))

@@ -34,11 +34,16 @@ jobs:
           pip install pytest
           pytest tests/test_subtract_intervals.py tests/test_graph_mode.py
 
+      - name: Run pytest on rocprof based testcases
+        run: |
+          pip install pytest openpyxl pandas
+          pytest tests/test_rocprof_perf_report.py
+
       - name: Run pytest on report regression tests
         run: |
           pip install pytest openpyxl pandas
           pytest tests/test_compare_perf_report.py
-      
+
       - name: Run pytest on collective analysis tests
         run: |
           pip install pytest openpyxl pandas
