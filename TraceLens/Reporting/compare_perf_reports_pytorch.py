@@ -264,29 +264,77 @@ def generate_compare_perf_reports_pytorch(
 
     # ── Ops summary ───────────────────────────────────────────────────────────
     if "ops_summary" in sheets or "all" in sheets:
+        # Try to load ops_summary first, fall back to kernel_summary for rocprof
+        sheet_to_load = None
+        xls_first = pd.ExcelFile(reports[0])
+
+        if "ops_summary" in xls_first.sheet_names:
+            sheet_to_load = "ops_summary"
+            keys = ["name"]
+            diff_cols = ["total_direct_kernel_time_ms", "Count"]
+        elif "kernel_summary" in xls_first.sheet_names:
+            sheet_to_load = "kernel_summary"
+            keys = ["name"]
+            # kernel_summary uses different column names
+            diff_cols = ["Total Kernel Time (ms)", "Count"]
+
+        if sheet_to_load:
+            # Load the summary sheet from each report
+            dfs = [load_sheet(path, sheet_name=sheet_to_load) for path in reports]
+
+            # Delete columns that are not needed
+            for i, df in enumerate(dfs):
+                cols_to_delete = []
+                if sheet_to_load == "ops_summary":
+                    cols_to_delete = ["total_direct_kernel_time_sum"]
+                elif sheet_to_load == "kernel_summary":
+                    cols_to_delete = ["Total Kernel Time (µs)"]
+
+                if i > 0:
+                    cols_to_delete.append("Cumulative Percentage (%)")
+                df.drop(columns=cols_to_delete, inplace=True, errors="ignore")
+
+            ops = build_df_dff(
+                dfs=dfs, list_report_tags=tags, merge_keys=keys, diff_cols=diff_cols
+            )
+
+            # sort by baseline tag's time column
+            if sheet_to_load == "ops_summary":
+                sort_key = f"{baseline_tag}::total_direct_kernel_time_ms"
+            else:  # kernel_summary
+                sort_key = f"{baseline_tag}::Total Kernel Time (ms)"
+
+            ops = ops.sort_values(sort_key, ascending=False).reset_index(drop=True)
+
+            # Use a consistent output sheet name
+            output_sheet_name = "ops_summary" if sheet_to_load == "ops_summary" else "kernel_summary"
+            results[output_sheet_name] = ops
+
+    # ── Kernel summary (rocprof) ──────────────────────────────────────────────
+    if "kernel_summary" in sheets:
+        # Explicitly load kernel_summary when requested
         keys = ["name"]
-        diff_cols = ["total_direct_kernel_time_ms", "Count"]
-        cols_to_delete = ["total_direct_kernel_time_sum"]
-        # Load the Ops summary sheet from each report
-        dfs = [load_sheet(path, sheet_name="ops_summary") for path in reports]
+        diff_cols = ["Total Kernel Time (ms)", "Count"]
+
+        # Load the kernel summary sheet from each report
+        dfs = [load_sheet(path, sheet_name="kernel_summary") for path in reports]
 
         # Delete columns that are not needed
         for i, df in enumerate(dfs):
-            cols_to_delete = ["total_direct_kernel_time_sum"]
+            cols_to_delete = ["Total Kernel Time (µs)"]
             if i > 0:
                 cols_to_delete.append("Cumulative Percentage (%)")
             df.drop(columns=cols_to_delete, inplace=True, errors="ignore")
 
-        ops = build_df_dff(
+        kernel_sum = build_df_dff(
             dfs=dfs, list_report_tags=tags, merge_keys=keys, diff_cols=diff_cols
         )
 
-        # sort by baseline tag's total_direct_kernel_time_ms
-        sort_key = f"{baseline_tag}::total_direct_kernel_time_ms"
+        # sort by baseline tag's Total Kernel Time (ms)
+        sort_key = f"{baseline_tag}::Total Kernel Time (ms)"
+        kernel_sum = kernel_sum.sort_values(sort_key, ascending=False).reset_index(drop=True)
 
-        ops = ops.sort_values(sort_key, ascending=False).reset_index(drop=True)
-
-        results["ops_summary"] = ops
+        results["kernel_summary"] = kernel_sum
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
     alias = [
@@ -478,12 +526,13 @@ def main() -> None:
         choices=(
             "gpu_timeline",
             "ops_summary",
+            "kernel_summary",
             "ops_all",
             "roofline",
             "all",
         ),
         default=["all"],
-        help="Which sheet groups to process. Can be one or more.",
+        help="Which sheet groups to process. Can be one or more. 'kernel_summary' is for rocprof reports.",
     )
     args = parser.parse_args()
 
