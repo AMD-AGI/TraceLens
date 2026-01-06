@@ -44,11 +44,11 @@ TraceLens_compare_perf_reports_pytorch \
 
 Common flags:
 
-| Flag           | Default           | Purpose                                                                                          |
-| -------------- | ----------------- | ------------------------------------------------------------------------------------------------ |
-| `-o, --output` | `comparison.xlsx` | Name of the merged workbook.                                                                     |
-| `--names`      | `<file stem>`     | Custom tags (must match the number of reports).                                                  |
-| `--sheets`     | `all`             | Limit processing to a subset:<br>`gpu_timeline`, `ops_summary`, `ops_all`, `roofline`, or `all`. |
+| Flag           | Default           | Purpose                                                                                                                   |
+| -------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `-o, --output` | `comparison.xlsx` | Name of the merged workbook.                                                                                              |
+| `--names`      | `<file stem>`     | Custom tags (must match the number of reports).                                                                           |
+| `--sheets`     | `all`             | Limit processing to a subset:<br>`gpu_timeline`, `ops_summary`, `kernel_summary`, `ops_all`, `roofline`, or `all`. |
 
 ---
 
@@ -56,12 +56,13 @@ Common flags:
 
 The script writes **one workbook** (`comparison.xlsx` unless you override it) containing multiple sheets:
 
-| Sheet          | When You Get It                  | What It Shows                                                                                                                                                                                                                                                                                                      |
-| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `gpu_timeline` | `--sheets gpu_timeline` or `all` | End-to-end GPU activity by **type** (`compute`, `memcpy`, etc.) with per-report timings plus:<br>- `time ms__<tag>_diff`<br>- `time ms__<tag>_pct`                                                                                                                                                                 |
-| `ops_summary`  | `--sheets ops_summary` or `all`  | Per-op aggregates keyed on **`name`**. Sorted by the baseline’s `total_direct_kernel_time_ms`. Unhelpful columns (e.g., cumulative %) are stripped from non-baseline reports.                                                                                                                                      |
-| `ops_all_*`    | `--sheets ops_all` or `all`      | Three sheets **per variant tag**:<br>• `ops_all_intersect_<tag>` – op instances present in both baseline and variant.<br>• `ops_all_only_baseline_<tag>` – ops only the baseline ran.<br>• `ops_all_only_variant_<tag>` – ops only the variant ran.<br>Columns irrelevant to a given view are hidden, not deleted. |
-| `<roofline>_*` | `--sheets roofline` or `all`     | Same intersect / only\_\* breakdown for each roofline group:<br>`GEMM`, `SDPA_fwd`, `SDPA_bwd`, `CONV_fwd`, `CONV_bwd`, `UnaryElementwise`, `BinaryElementwise`.                                                                                                                                                   |
+| Sheet            | When You Get It                      | What It Shows                                                                                                                                                                                                                                                                                                      |
+| ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gpu_timeline`   | `--sheets gpu_timeline` or `all`     | End-to-end GPU activity by **type** (`compute`, `memcpy`, etc.) with per-report timings plus:<br>- `time ms__<tag>_diff`<br>- `time ms__<tag>_pct`                                                                                                                                                                 |
+| `ops_summary`    | `--sheets ops_summary` or `all`      | Per-op aggregates keyed on **`name`**. Sorted by the baseline's `total_direct_kernel_time_ms`. Unhelpful columns (e.g., cumulative %) are stripped from non-baseline reports. When comparing PyTorch traces, this sheet is generated. For rocprof traces without `ops_summary`, automatically falls back to `kernel_summary`.                                                                                                                                      |
+| `kernel_summary` | `--sheets kernel_summary` or `all`   | Kernel-level summary for rocprof reports, keyed on **`name`**. Similar to `ops_summary` but uses rocprof-specific columns like `Total Kernel Time (ms)` and `Count`. When `--sheets all` is used with rocprof reports, this is generated automatically if `ops_summary` is not available.                          |
+| `ops_all_*`      | `--sheets ops_all` or `all`          | Three sheets **per variant tag**:<br>• `ops_all_intersect_<tag>` – op instances present in both baseline and variant.<br>• `ops_all_only_baseline_<tag>` – ops only the baseline ran.<br>• `ops_all_only_variant_<tag>` – ops only the variant ran.<br>Columns irrelevant to a given view are hidden, not deleted. |
+| `<roofline>_*`   | `--sheets roofline` or `all`         | Same intersect / only\_\* breakdown for each roofline group:<br>`GEMM`, `SDPA_fwd`, `SDPA_bwd`, `CONV_fwd`, `CONV_bwd`, `UnaryElementwise`, `BinaryElementwise`.                                                                                                                                                   |
 
 Hidden columns stay in the file (for power users) but are invisible in Excel by default.
 
