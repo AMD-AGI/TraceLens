@@ -13,6 +13,9 @@ from pandas.api.types import is_float_dtype
 import numpy as np
 import ast
 import re
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
 
 
 def compare_cols(df_test, df_ref, cols, tol=1e-6):
@@ -190,5 +193,161 @@ def test_compare_perf_report(dirpath, gz, report_filename, tol=1e-6):
         # Cleanup: remove generated .json and report
         if os.path.exists(jsonfile):
             os.remove(jsonfile)
+        if os.path.exists(fn_root):
+            shutil.rmtree(fn_root)
+
+
+def test_compare_perf_reports_pytorch(tol=1e-6):
+    """
+    Test the compare_perf_reports_pytorch functionality.
+    Compares two performance reports (256thread vs 512thread) and validates
+    the generated comparison against a reference output.
+    """
+    import shutil
+
+    test_dir = "tests/traces/compare_test"
+    report1_path = os.path.join(test_dir, "256thread", "perf_56ch_rank7.xlsx")
+    report2_path = os.path.join(test_dir, "512thread", "perf_56ch_rank7.xlsx")
+    ref_comparison_path = os.path.join(
+        test_dir, "reference", "compare_56ch_rank7_across_threads.xlsx"
+    )
+
+    # Check if test files exist
+    if not os.path.exists(report1_path):
+        pytest.skip(f"Test file not found: {report1_path}")
+    if not os.path.exists(report2_path):
+        pytest.skip(f"Test file not found: {report2_path}")
+    if not os.path.exists(ref_comparison_path):
+        pytest.skip(f"Reference file not found: {ref_comparison_path}")
+
+    # Generate a temp output directory for this test
+    fn_root = os.path.join(test_dir, "pytest_output")
+    os.makedirs(fn_root, exist_ok=True)
+
+    try:
+        # Generate comparison report
+        fn_comparison_path = os.path.join(fn_root, "comparison_output.xlsx")
+        generate_compare_perf_reports_pytorch(
+            reports=[report1_path, report2_path],
+            output=fn_comparison_path,
+            names=["256thread", "512thread"],
+            sheets=["gpu_timeline", "kernel_summary"],
+        )
+
+        # Verify the output file was created
+        assert os.path.exists(
+            fn_comparison_path
+        ), f"Comparison output not created: {fn_comparison_path}"
+
+        # Compare the generated sheets with reference
+        sheets_to_compare = ["gpu_timeline", "kernel_summary"]
+
+        for sheet in sheets_to_compare:
+            # Load reference and generated sheets
+            try:
+                df_ref = pd.read_excel(ref_comparison_path, sheet_name=sheet)
+                df_fn = pd.read_excel(fn_comparison_path, sheet_name=sheet)
+            except ValueError as e:
+                pytest.fail(f"Sheet '{sheet}' not found: {e}")
+
+            # Skip if reference is empty
+            if df_ref.empty:
+                assert (
+                    df_fn.empty
+                ), f"Reference sheet '{sheet}' is empty but generated has {len(df_fn)} rows"
+                continue
+
+            # Verify same columns exist
+            assert set(df_ref.columns) == set(
+                df_fn.columns
+            ), f"Sheet '{sheet}' has different columns"
+
+            # Compare all columns using the existing helper
+            cols = df_ref.columns.tolist()
+            diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
+            assert (
+                not diff_cols
+            ), f"Sheet '{sheet}' has differences: {format_diff_details(diff_cols)}"
+
+    finally:
+        # Cleanup: remove generated comparison output
+        if os.path.exists(fn_root):
+            shutil.rmtree(fn_root)
+
+
+def test_compare_perf_reports_pytorch_ops_summary(tol=1e-6):
+    """
+    Test the compare_perf_reports_pytorch functionality with ops_summary sheet.
+    Compares two performance reports (256thread vs 512thread) focusing on
+    ops_summary metrics and validates the generated comparison against reference.
+    """
+    import shutil
+
+    test_dir = "tests/traces/compare_test_ops"
+    report1_path = os.path.join(test_dir, "256thread", "perf_28ch_rank0.xlsx")
+    report2_path = os.path.join(test_dir, "512thread", "perf_28ch_rank0.xlsx")
+    ref_comparison_path = os.path.join(
+        test_dir, "reference", "compare_28ch_rank0_across_threads.xlsx"
+    )
+
+    # Check if test files exist
+    if not os.path.exists(report1_path):
+        pytest.skip(f"Test file not found: {report1_path}")
+    if not os.path.exists(report2_path):
+        pytest.skip(f"Test file not found: {report2_path}")
+    if not os.path.exists(ref_comparison_path):
+        pytest.skip(f"Reference file not found: {ref_comparison_path}")
+
+    # Generate a temp output directory for this test
+    fn_root = os.path.join(test_dir, "pytest_output")
+    os.makedirs(fn_root, exist_ok=True)
+
+    try:
+        # Generate comparison report
+        fn_comparison_path = os.path.join(fn_root, "comparison_output.xlsx")
+        generate_compare_perf_reports_pytorch(
+            reports=[report1_path, report2_path],
+            output=fn_comparison_path,
+            names=["256thread", "512thread"],
+            sheets=["gpu_timeline", "ops_summary"],
+        )
+
+        # Verify the output file was created
+        assert os.path.exists(
+            fn_comparison_path
+        ), f"Comparison output not created: {fn_comparison_path}"
+
+        # Compare the generated sheets with reference
+        sheets_to_compare = ["gpu_timeline", "ops_summary"]
+
+        for sheet in sheets_to_compare:
+            # Load reference and generated sheets
+            try:
+                df_ref = pd.read_excel(ref_comparison_path, sheet_name=sheet)
+                df_fn = pd.read_excel(fn_comparison_path, sheet_name=sheet)
+            except ValueError as e:
+                pytest.fail(f"Sheet '{sheet}' not found: {e}")
+
+            # Skip if reference is empty
+            if df_ref.empty:
+                assert (
+                    df_fn.empty
+                ), f"Reference sheet '{sheet}' is empty but generated has {len(df_fn)} rows"
+                continue
+
+            # Verify same columns exist
+            assert set(df_ref.columns) == set(
+                df_fn.columns
+            ), f"Sheet '{sheet}' has different columns"
+
+            # Compare all columns using the existing helper
+            cols = df_ref.columns.tolist()
+            diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
+            assert (
+                not diff_cols
+            ), f"Sheet '{sheet}' has differences: {format_diff_details(diff_cols)}"
+
+    finally:
+        # Cleanup: remove generated comparison output
         if os.path.exists(fn_root):
             shutil.rmtree(fn_root)
