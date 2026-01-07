@@ -646,9 +646,12 @@ class vllm_gemm_with_dynamic_quant(GEMM):
                 "vllm::gemm_with_dynamic_quant missing 2D A,B shapes in Input Dims"
             )
 
+        # x: [M, K], weight: [N, K_packed] where K_packed = K // 2 (4-bit packing)
+        # GEMM: output[M, N] = x[M, K] @ weight[N, K].T
+        # ref: vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py
         M = A_shape[0]
         K = A_shape[1]
-        N = B_shape[1]
+        N = B_shape[0]
 
         # Dtypes
         dtype_list = event["args"].get("Input type", [])
