@@ -276,7 +276,7 @@ def generate_compare_perf_reports_pytorch(
             sheet_to_load = "kernel_summary"
             keys = ["name"]
             # kernel_summary uses different column names
-            diff_cols = ["Total Kernel Time (ms)", "Count"]
+            diff_cols = ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"]
 
         if sheet_to_load:
             # Load the summary sheet from each report
@@ -288,7 +288,14 @@ def generate_compare_perf_reports_pytorch(
                 if sheet_to_load == "ops_summary":
                     cols_to_delete = ["total_direct_kernel_time_sum"]
                 elif sheet_to_load == "kernel_summary":
-                    cols_to_delete = ["Total Kernel Time (µs)"]
+                    # Drop redundant and extra statistical columns for cleaner comparison
+                    cols_to_delete = [
+                        "Total Kernel Time (µs)",  # Keep only ms version
+                        "Median Kernel Time (µs)",  # Keep only mean
+                        "Std Kernel Time (µs)",     # Keep only mean
+                        "Min Kernel Time (µs)",     # Keep only mean
+                        "Max Kernel Time (µs)",     # Keep only mean
+                    ]
 
                 if i > 0:
                     cols_to_delete.append("Cumulative Percentage (%)")
@@ -314,14 +321,21 @@ def generate_compare_perf_reports_pytorch(
     if "kernel_summary" in sheets:
         # Explicitly load kernel_summary when requested
         keys = ["name"]
-        diff_cols = ["Total Kernel Time (ms)", "Count"]
+        diff_cols = ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"]
 
         # Load the kernel summary sheet from each report
         dfs = [load_sheet(path, sheet_name="kernel_summary") for path in reports]
 
         # Delete columns that are not needed
         for i, df in enumerate(dfs):
-            cols_to_delete = ["Total Kernel Time (µs)"]
+            # Drop redundant and extra statistical columns for cleaner comparison
+            cols_to_delete = [
+                "Total Kernel Time (µs)",  # Keep only ms version
+                "Median Kernel Time (µs)",  # Keep only mean
+                "Std Kernel Time (µs)",     # Keep only mean
+                "Min Kernel Time (µs)",     # Keep only mean
+                "Max Kernel Time (µs)",     # Keep only mean
+            ]
             if i > 0:
                 cols_to_delete.append("Cumulative Percentage (%)")
             df.drop(columns=cols_to_delete, inplace=True, errors="ignore")
