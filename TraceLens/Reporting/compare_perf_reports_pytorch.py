@@ -295,6 +295,7 @@ def generate_compare_perf_reports_pytorch(
                         "Std Kernel Time (µs)",     # Keep only mean
                         "Min Kernel Time (µs)",     # Keep only mean
                         "Max Kernel Time (µs)",     # Keep only mean
+                        "Category",                 # Remove category column
                     ]
 
                 if i > 0:
@@ -335,6 +336,7 @@ def generate_compare_perf_reports_pytorch(
                 "Std Kernel Time (µs)",     # Keep only mean
                 "Min Kernel Time (µs)",     # Keep only mean
                 "Max Kernel Time (µs)",     # Keep only mean
+                "Category",                 # Remove category column
             ]
             if i > 0:
                 cols_to_delete.append("Cumulative Percentage (%)")
