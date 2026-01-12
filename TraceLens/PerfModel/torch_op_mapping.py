@@ -37,6 +37,7 @@ op_to_perf_model_class_map = {
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
+    "vllm::rocm_aiter_fused_moe": perf_model.aiter_fused_moe,
 }
 
 unary_elemwise_ops = [
@@ -69,6 +70,7 @@ dict_base_class2category = {
     perf_model.GEMM: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
+    perf_model.MoE: "MoE",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
 }
@@ -137,6 +139,8 @@ def categorize_torch_op(row):
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
+    elif row["name"] in dict_cat2names["MoE"]:
+        return "MoE"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
