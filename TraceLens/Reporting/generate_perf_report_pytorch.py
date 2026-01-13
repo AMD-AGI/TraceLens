@@ -229,6 +229,7 @@ def generate_perf_report_pytorch(
     output_csvs_dir: Optional[str] = None,
     # include unlinked kernels in gpu timeline
     include_unlinked_kernels: bool = False,
+    disable_pseudo_ops: bool = False,  # pseudo-op generation
     # threshold in microseconds for micro idle time
     micro_idle_thresh_us: int = None,
     # collective analysis
@@ -258,6 +259,7 @@ def generate_perf_report_pytorch(
         arch=gpu_arch_json,
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
+        enable_pseudo_ops=not disable_pseudo_ops,
     )
 
     if extension_file:
@@ -624,7 +626,12 @@ def main():
         default=None,
         help="Rows to keep in the short-kernel table.",
     )
-
+    parser.add_argument(
+        "--disable_pseudo_ops",
+        action="store_true",
+        default=False,
+        help="Disable automatic pseudo-op generation. By default, pseudo-ops isolate specific kernels (e.g., FusedMoE).",
+    )
     parser.add_argument(
         "--topk_ops",
         type=int,
@@ -664,6 +671,7 @@ def main():
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
         include_unlinked_kernels=args.include_unlinked_kernels,
+        disable_pseudo_ops=args.disable_pseudo_ops,
         micro_idle_thresh_us=args.micro_idle_thresh_us,
         collective_analysis=args.collective_analysis,
         kernel_summary=args.kernel_summary,

@@ -2856,65 +2856,6 @@ class MoE:
         self.arch = arch
         self.python_path = python_path
 
-
-class aiter_fused_moe(MoE):
-    """
-    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage.
-
-    TO DO: Expand support for other AITER MoE operations.
-
-    """
-    
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
-        self.param_details = self.get_param_details(event)
-
-    
-    @staticmethod
-    def get_param_details(event):
-        """
-        Extract MoE dimensions and data types from event args.
-        
-        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
-        [[tokens, hidden_dim], [experts, inter_dim×2, hidden_dim], 
-         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
-        
-        Expected Input type format:
-        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
-        """
-        args = event.get('args', {})
-        
-        kernel_input_shape = args['Input Dims']
-        input_shape = kernel_input_shape[0]
-        w1_shape = kernel_input_shape[1]
-        w2_shape = kernel_input_shape[2]
-        topk_weights_shape = kernel_input_shape[3]
-        
-        num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
-        inter_dim = w2_shape[2]
-        num_experts = w1_shape[0]
-        topk = topk_weights_shape[1]
-        
-        # Check if MoE is using gated activation (SwiGLU)
-        gated = (w1_shape[1] == 2 * inter_dim)
-        
-        input_dtype = args['Input type'][0]
-        weight_dtype = args['Input type'][1]
-        
-        return {
-            'num_tokens': num_tokens,
-            'hidden_dim': hidden_dim,
-            'inter_dim': inter_dim,
-            'num_experts': num_experts,
-            'topk': topk,
-            'gated': gated,
-            'input_dtype': input_dtype,
-            'weight_dtype': weight_dtype,
-        }
-    
     @staticmethod
     def flops_func(num_tokens, hidden_dim, inter_dim, topk, gated):
         """
@@ -2993,9 +2934,67 @@ class aiter_fused_moe(MoE):
         total_bytes = input_bytes + fc1_weight_bytes + fc2_weight_bytes + output_bytes
         
         return total_bytes
+
+
+class fused_moe_1stage(MoE):
+    """
+    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
+
+    TO DO: Expand support for other AITER MoE kernels.
+    """
+    
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        """
+        Extract MoE dimensions and data types from event args.
+        
+        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
+        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim], 
+         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
+        
+        Expected Input type format:
+        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
+        """
+        args = event.get('args', {})
+        
+        kernel_input_shape = args['Input Dims']
+        input_shape = kernel_input_shape[0]
+        w1_shape = kernel_input_shape[1]
+        w2_shape = kernel_input_shape[2]
+        topk_weights_shape = kernel_input_shape[3]
+        
+        num_tokens = input_shape[0]
+        hidden_dim = input_shape[1]
+        inter_dim = w2_shape[2]
+        num_experts = w1_shape[0]
+        topk = topk_weights_shape[1]
+        
+        # Check if MoE is using gated activation (SwiGLU)
+        gated = (w1_shape[1] == 2 * inter_dim)
+        
+        input_dtype = args['Input type'][0]
+        weight_dtype = args['Input type'][1]
+        
+        return {
+            'num_tokens': num_tokens,
+            'hidden_dim': hidden_dim,
+            'inter_dim': inter_dim,
+            'num_experts': num_experts,
+            'topk': topk,
+            'gated': gated,
+            'input_dtype': input_dtype,
+            'weight_dtype': weight_dtype,
+        }
     
     def flops(self):
         """Calculate FLOPs using the static flops_func."""
+
         return self.flops_func(
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
