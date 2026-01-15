@@ -839,6 +839,632 @@ class TreePerfAnalyzer:
             ].cumsum()
         return df_unique_args
 
+    # =========================================================================
+    # Unified Perf Metrics Table Methods
+    # =========================================================================
+
+    def _has_perf_model(self, event):
+        """Check if an event has a perf model available."""
+        return event.get("name") in self.op_to_perf_model_class_map
+
+    def _is_leaf_cpu_op(self, event):
+        """
+        Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
+
+        A leaf cpu_op follows the pattern: cpu_op -> runtime -> kernel
+        This matches the definition used in get_kernel_launchers().
+        """
+        if self.event_to_category(event) != "cpu_op":
+            return False
+
+        # Check if any child's grandchild is a kernel (cpu_op -> runtime -> kernel pattern)
+        for child_uid in event.get("children", []):
+            child = self.tree.get_UID2event(child_uid)
+            for grandchild_uid in child.get("children", []):
+                grandchild = self.tree.get_UID2event(grandchild_uid)
+                if self.event_to_category(grandchild) in {
+                    "kernel",
+                    "gpu_memcpy",
+                    "gpu_memset",
+                }:
+                    return True
+        return False
+
+    def _launches_gpu_kernels(self, event):
+        """
+        Check if an event launches any GPU kernels.
+        Returns True if the event has gpu_events linked to it.
+        """
+        return len(event.get("gpu_events", [])) > 0
+
+    def _get_linked_fwd_event(self, event):
+        """
+        Get the linked forward event for a backward op, if it exists.
+
+        Traverses up to 5 ancestor levels looking for an autograd wrapper with
+        fwd_event link. This handles different tree structures where the link
+        can be at parent, grandparent, or other levels.
+
+        Returns (fwd_event, is_sole_bwd) tuple, or (None, False) if no link.
+        is_sole_bwd is True if this is the only backward op for that forward.
+        """
+        # Traverse up to 5 levels looking for fwd_event
+        current = event
+        autograd_wrapper = None
+        fwd_uid = None
+
+        for _ in range(5):
+            parent = self.tree.get_parent_event(current)
+            if not parent:
+                break
+            fwd_uid = parent.get("fwd_event")
+            if fwd_uid:
+                autograd_wrapper = parent
+                break
+            current = parent
+
+        if not fwd_uid or not autograd_wrapper:
+            return None, False
+
+        fwd_event = self.tree.get_UID2event(fwd_uid)
+        if not fwd_event or not self._has_perf_model(fwd_event):
+            return None, False
+
+        # Check if this is the only backward op for this forward (1:1 mapping)
+        # Count cpu_op descendants of autograd_wrapper that launch GPU kernels
+        # and match the main backward op name (exclude helper ops like aten::copy_)
+        wrapper_name = autograd_wrapper.get("name", "")
+        main_bwd_name = None
+        if ": " in wrapper_name:
+            main_bwd_name = wrapper_name.split(": ", 1)[1]
+
+        bwd_ops_in_wrapper = []
+
+        def find_main_bwd_ops(evt):
+            for child_uid in evt.get("children", []):
+                child = self.tree.get_UID2event(child_uid)
+                if not child:
+                    continue
+                child_name = child.get("name", "")
+                if (
+                    self.event_to_category(child) == "cpu_op"
+                    and self._launches_gpu_kernels(child)
+                    and (main_bwd_name is None or child_name == main_bwd_name)
+                ):
+                    bwd_ops_in_wrapper.append(child_uid)
+                if self.event_to_category(child) == "cpu_op":
+                    find_main_bwd_ops(child)
+
+        find_main_bwd_ops(autograd_wrapper)
+
+        is_sole_bwd = len(bwd_ops_in_wrapper) == 1
+        return fwd_event, is_sole_bwd
+
+    def _is_sole_bwd_with_fwd_perf_model(self, event):
+        """
+        Check if event is a backward op with 1:1 linking to a forward with perf model
+        that has backward metrics defined.
+
+        Returns True if:
+        - Event is linked to a forward event via autograd wrapper
+        - The forward event has a perf model with backward metrics defined
+        - This is the ONLY backward op for that forward (1:1 mapping)
+        """
+        fwd_event, is_sole_bwd = self._get_linked_fwd_event(event)
+        if not fwd_event or not is_sole_bwd:
+            return False
+
+        # Check if backward metrics are actually defined for this forward op
+        try:
+            self.compute_perf_metrics(fwd_event, bwd=True)
+            return True
+        except NotImplementedError:
+            return False
+        except Exception:
+            return False
+
+    def _is_nccl_event(self, event):
+        """Check if an event launches NCCL kernels."""
+        gpu_event_uids = event.get("gpu_events", [])
+        if not gpu_event_uids:
+            return False
+        # Check if any GPU kernel is an NCCL kernel
+        for gpu_uid in gpu_event_uids:
+            gpu_event = self.tree.get_UID2event(gpu_uid)
+            if gpu_event and "nccl" in gpu_event.get("name", "").lower():
+                return True
+        return False
+
+    def collect_unified_perf_events(self, include_nccl=False):
+        """
+        Traverse the trace tree and collect events for unified perf analysis.
+
+        Traverses from cpu_root_nodes and collects events where:
+        1. Event has GPU kernels in subtree (first check - skip CPU-only subtrees)
+        2. Event has a perf model -> collect and stop traversing subtree
+        3. Event is a 1:1 backward op with linked forward that has perf model -> collect and stop
+        4. Event is a leaf cpu_op (direct kernel launcher) -> collect
+
+        Args:
+            include_nccl (bool): If False, skip events that launch NCCL kernels.
+                Default is False to exclude collective communication ops.
+
+        Returns:
+            list: List of collected event dictionaries.
+        """
+        # First, link all forward events with perf models to their backward events
+        for event in self.tree.events:
+            if self._has_perf_model(event):
+                self.tree.link_bwd_events(event["UID"])
+
+        collected = []
+        visited = set()
+
+        def traverse(event_uid):
+            if event_uid in visited:
+                return
+            visited.add(event_uid)
+
+            event = self.tree.get_UID2event(event_uid)
+
+            # Skip non-cpu_op events
+            if self.event_to_category(event) != "cpu_op":
+                return
+
+            # First check: Does this subtree have any GPU kernels?
+            # gpu_events contains all GPU events from the entire subtree
+            if not self._launches_gpu_kernels(event):
+                return  # No GPU work in this subtree - skip entirely
+
+            # From here, we know there's GPU work in this subtree
+
+            # Exit condition 1: Has perf model - collect and stop
+            if self._has_perf_model(event):
+                collected.append(event)
+                return
+
+            # Exit condition 2: 1:1 backward op with linked forward that has perf model
+            # We can compute backward metrics via forward's perf model
+            if self._is_sole_bwd_with_fwd_perf_model(event):
+                collected.append(event)
+                return
+
+            # Exit condition 3: Leaf cpu_op (direct kernel launcher) with GPU kernels
+            if self._is_leaf_cpu_op(event):
+                # Before collecting, check if any cpu_op children have perf models
+                # (e.g., injected pseudo ops from extensions)
+                cpu_op_children_with_perf_model = []
+                for child_uid in event.get("children", []):
+                    child = self.tree.get_UID2event(child_uid)
+                    if (
+                        self.event_to_category(child) == "cpu_op"
+                        and self._has_perf_model(child)
+                        and self._launches_gpu_kernels(child)
+                    ):
+                        cpu_op_children_with_perf_model.append(child_uid)
+
+                if cpu_op_children_with_perf_model:
+                    # Traverse children with perf models instead of collecting this leaf
+                    for child_uid in cpu_op_children_with_perf_model:
+                        traverse(child_uid)
+                else:
+                    # No children with perf models - collect this leaf
+                    if not include_nccl and self._is_nccl_event(event):
+                        return
+                    collected.append(event)
+                return
+
+            # Non-leaf with GPU kernels in subtree but no perf model
+            # Traverse children to find more granular ops
+            for child_uid in event.get("children", []):
+                traverse(child_uid)
+
+        # Start from cpu_root_nodes
+        for root_uid in self.tree.cpu_root_nodes:
+            traverse(root_uid)
+
+        return collected
+
+    def build_df_unified_perf_table(
+        self,
+        events=None,
+        include_args=True,
+        include_perf_metrics=True,
+        include_kernel_details=True,
+        include_nccl=False,
+    ):
+        """
+        Build a DataFrame with op details and performance metrics for unified perf analysis.
+
+        Collects events that either have a perf model OR are leaf CPU ops that
+        launch GPU kernels. CPU-only ops are excluded.
+
+        Args:
+            events (list): List of events to include. If None, collects events
+                using collect_unified_perf_events().
+            include_args (bool): Include input arguments (dims, types, strides).
+            include_perf_metrics (bool): Compute and include perf metrics for
+                events with perf models.
+            include_kernel_details (bool): Include kernel details (name, duration, stream).
+            include_nccl (bool): If False, skip events that launch NCCL kernels.
+                Default is False to exclude collective communication ops.
+
+        Returns:
+            pd.DataFrame: DataFrame with columns:
+                - name, UID, pid, tid, External id
+                - Input Dims, Input type, Input Strides, Concrete Inputs (if include_args)
+                - duration_us, has_perf_model
+                - GFLOPS, Kernel Time (µs), TFLOPS/s, Data Moved (MB), FLOPS/Byte, TB/s
+                  (if include_perf_metrics and event has perf model)
+                - kernel_details (if include_kernel_details)
+        """
+
+        def list_to_tuple(obj):
+            """Recursively convert lists to tuples for consistent display."""
+            if isinstance(obj, list):
+                return tuple(list_to_tuple(item) for item in obj)
+            return obj
+
+        if events is None:
+            events = self.collect_unified_perf_events(include_nccl=include_nccl)
+
+        if len(events) == 0:
+            warnings.warn(
+                "No events collected for unified perf table. Returning empty DataFrame."
+            )
+            return pd.DataFrame()
+
+        rows = []
+        perf_metrics_failed = []
+
+        for event in events:
+            args = event.get("args", {})
+            has_own_perf_model = self._has_perf_model(event)
+            is_sole_bwd = self._is_sole_bwd_with_fwd_perf_model(event)
+
+            row = {
+                "name": event.get("name"),
+                "UID": event.get("UID"),
+                "pid": event.get("pid"),
+                "tid": event.get("tid"),
+                "External id": args.get("External id"),
+                "duration_us": event.get("dur"),
+                "has_perf_model": has_own_perf_model or is_sole_bwd,
+            }
+
+            if include_args:
+                row["Input Dims"] = list_to_tuple(args.get("Input Dims"))
+                row["Input type"] = list_to_tuple(args.get("Input type"))
+                row["Input Strides"] = list_to_tuple(args.get("Input Strides"))
+                row["Concrete Inputs"] = list_to_tuple(args.get("Concrete Inputs"))
+
+            # Add kernel details from gpu_events
+            if include_kernel_details:
+                gpu_event_uids = event.get("gpu_events", [])
+                kernel_details = []
+                for gpu_uid in gpu_event_uids:
+                    gpu_event = self.tree.get_UID2event(gpu_uid)
+                    if gpu_event and self.event_to_category(gpu_event) in {
+                        "kernel",
+                        "gpu_memcpy",
+                        "gpu_memset",
+                    }:
+                        kernel_details.append(
+                            {
+                                "name": gpu_event.get("name"),
+                                "dur": gpu_event.get("dur"),
+                                "stream": gpu_event.get("args", {}).get("stream"),
+                            }
+                        )
+                row["kernel_details"] = kernel_details if kernel_details else None
+
+            # Add perf metrics if available
+            perf_cols = [
+                "GFLOPS",
+                "Kernel Time (µs)",
+                "TFLOPS/s",
+                "Data Moved (MB)",
+                "FLOPS/Byte",
+                "TB/s",
+            ]
+
+            if include_perf_metrics and has_own_perf_model:
+                # Has own perf model - compute forward metrics
+                try:
+                    metrics = self.compute_perf_metrics(event, bwd=False)
+                    for col in perf_cols:
+                        row[col] = metrics.get(col)
+                    # Extract perf model params (e.g., M, N, K for GEMM)
+                    perf_params = {
+                        k.replace("param: ", ""): v
+                        for k, v in metrics.items()
+                        if k.startswith("param: ")
+                    }
+                    row["perf_params"] = perf_params if perf_params else None
+                except Exception:
+                    perf_metrics_failed.append(event)
+                    for col in perf_cols:
+                        row[col] = None
+                    row["perf_params"] = None
+            elif include_perf_metrics and is_sole_bwd:
+                # 1:1 backward op - use forward's backward metrics
+                fwd_event, _ = self._get_linked_fwd_event(event)
+                try:
+                    metrics = self.compute_perf_metrics(fwd_event, bwd=True)
+                    for col in perf_cols:
+                        row[col] = metrics.get(col)
+                    # Extract perf model params
+                    perf_params = {
+                        k.replace("param: ", ""): v
+                        for k, v in metrics.items()
+                        if k.startswith("param: ")
+                    }
+                    row["perf_params"] = perf_params if perf_params else None
+                except Exception:
+                    perf_metrics_failed.append(event)
+                    for col in perf_cols:
+                        row[col] = None
+                    row["perf_params"] = None
+            else:
+                # No perf model - compute kernel time using GPUEventAnalyser busy_time
+                for col in perf_cols:
+                    row[col] = None
+                row["perf_params"] = None
+
+                gpu_event_uids = event.get("gpu_events", [])
+                if gpu_event_uids:
+                    gpu_events = [
+                        self.tree.get_UID2event(uid)
+                        for uid in gpu_event_uids
+                        if self.tree.get_UID2event(uid)
+                    ]
+                    if gpu_events:
+                        busy_time = GPUEventAnalyser(gpu_events).compute_metrics()[
+                            "busy_time"
+                        ]
+                        row["Kernel Time (µs)"] = busy_time
+
+            rows.append(row)
+
+        if perf_metrics_failed:
+            warnings.warn(
+                f"Failed to compute perf metrics for {len(perf_metrics_failed)}/{len(events)} events."
+            )
+
+        df = pd.DataFrame(rows)
+
+        # Reorder columns
+        col_order = [
+            "name",
+            "UID",
+            "pid",
+            "tid",
+            "External id",
+        ]
+        if include_args:
+            col_order.extend(
+                ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
+            )
+        col_order.extend(["duration_us", "has_perf_model"])
+        if include_perf_metrics:
+            col_order.extend(perf_cols)
+            col_order.append("perf_params")
+        if include_kernel_details:
+            col_order.append("kernel_details")
+
+        col_order = [c for c in col_order if c in df.columns]
+        return df[col_order]
+
+    @staticmethod
+    def summarize_df_unified_perf_table(
+        df_unified_perf: pd.DataFrame,
+        agg_metrics=["mean", "std"],
+        include_pct=True,
+    ):
+        """
+        Summarize unified perf table by unique (name, Input Dims, Input type, etc.).
+
+        Aggregation behavior matches summarize_df_perf_metrics:
+        - Static metrics (GFLOPS, Data Moved, FLOPS/Byte): 'first' only
+        - Time-varying metrics (Kernel Time, TFLOPS/s, TB/s): mean/std
+
+        Args:
+            df_unified_perf (pd.DataFrame): DataFrame from build_df_unified_perf_table().
+            agg_metrics (list): Aggregation metrics for time-varying columns.
+            include_pct (bool): Include percentage and cumulative percentage columns.
+
+        Returns:
+            pd.DataFrame: Summarized DataFrame grouped by unique args.
+        """
+        if df_unified_perf.empty:
+            warnings.warn(
+                "Input DataFrame is empty. Returning an empty summary DataFrame."
+            )
+            return pd.DataFrame()
+
+        df_temp = df_unified_perf.copy()
+        grouping_cols = [
+            "name",
+            "Input Dims",
+            "Input type",
+            "Input Strides",
+            "Concrete Inputs",
+        ]
+
+        # Convert columns to string for grouping
+        str_col_names = []
+        actual_grouping_cols = []
+        for col in grouping_cols:
+            if col not in df_temp.columns:
+                continue
+            actual_grouping_cols.append(col)
+            str_col_name = f"{col}_str_repr_for_grouping"
+            df_temp[str_col_name] = df_temp[col].apply(str)
+            str_col_names.append(str_col_name)
+
+        if not str_col_names:
+            raise ValueError("No valid grouping columns found.")
+
+        # Define aggregations
+        agg_dict = {}
+
+        # UID: first and count
+        if "UID" in df_temp.columns:
+            agg_dict["UID"] = ["first", "count"]
+
+        # Duration: sum, mean, std
+        if "duration_us" in df_temp.columns:
+            agg_dict["duration_us"] = ["sum"] + agg_metrics
+
+        # Static metrics - 'first' only (same for all instances with same args)
+        static_cols = ["GFLOPS", "Data Moved (MB)", "FLOPS/Byte"]
+        for col in static_cols:
+            if col in df_temp.columns:
+                agg_dict[col] = "first"
+
+        # Time-varying metrics - mean/std (varies per instance)
+        time_varying_cols = ["TB/s", "TFLOPS/s"]
+        for col in time_varying_cols:
+            if col in df_temp.columns:
+                agg_dict[col] = agg_metrics
+
+        # Kernel Time gets mean/std + sum
+        if "Kernel Time (µs)" in df_temp.columns:
+            agg_dict["Kernel Time (µs)"] = agg_metrics + ["sum"]
+
+        # Kernel details - summarize using _summarize_kernel_stats
+        if "kernel_details" in df_temp.columns:
+            agg_dict["kernel_details"] = partial(
+                TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
+            )
+
+        # Perf params - static per unique args (e.g., M, N, K for GEMM)
+        if "perf_params" in df_temp.columns:
+            agg_dict["perf_params"] = "first"
+
+        # Keep original grouping columns
+        for col in actual_grouping_cols:
+            agg_dict[col] = "first"
+
+        if "has_perf_model" in df_temp.columns:
+            agg_dict["has_perf_model"] = "first"
+
+        # Group and aggregate
+        df_summary = df_temp.groupby(str_col_names, dropna=False, sort=False).agg(
+            agg_dict
+        )
+
+        # Flatten column names
+        df_summary.columns = [
+            "_".join(col).strip() if isinstance(col, tuple) and col[1] else col[0]
+            for col in df_summary.columns
+        ]
+        df_summary = df_summary.reset_index(drop=True)
+
+        # Rename columns for clarity
+        rename_map = {
+            "UID_first": "ex_UID",
+            "UID_count": "operation_count",
+            "duration_us_sum": "total_duration_us",
+            "duration_us_mean": "mean_duration_us",
+            "duration_us_std": "std_duration_us",
+            "has_perf_model_first": "has_perf_model",
+        }
+        for col in actual_grouping_cols:
+            rename_map[f"{col}_first"] = col
+        for col in static_cols:
+            if f"{col}_first" in df_summary.columns:
+                rename_map[f"{col}_first"] = col
+        # Rename perf_params aggregation column
+        if "perf_params_first" in df_summary.columns:
+            rename_map["perf_params_first"] = "perf_params"
+        # Rename kernel_details aggregation column
+        for col in df_summary.columns:
+            if col.startswith("kernel_details_"):
+                rename_map[col] = "kernel_details_summary"
+
+        df_summary = df_summary.rename(columns=rename_map)
+
+        # Sort by total kernel time (GPU), then by ex_UID for stability
+        # This matches the ops_unique_args sorting behavior
+        sort_cols = []
+        if "Kernel Time (µs)_sum" in df_summary.columns:
+            sort_cols.append("Kernel Time (µs)_sum")
+        elif "total_duration_us" in df_summary.columns:
+            sort_cols.append("total_duration_us")
+        if "ex_UID" in df_summary.columns:
+            sort_cols.append("ex_UID")
+        if sort_cols:
+            df_summary = df_summary.sort_values(
+                by=sort_cols, ascending=[False] + [True] * (len(sort_cols) - 1)
+            )
+
+        # Add percentage columns based on kernel time (GPU time)
+        if include_pct and "Kernel Time (µs)_sum" in df_summary.columns:
+            total = df_summary["Kernel Time (µs)_sum"].sum()
+            df_summary["Percentage (%)"] = (
+                df_summary["Kernel Time (µs)_sum"] / total
+            ) * 100
+            df_summary["Cumulative Percentage (%)"] = df_summary[
+                "Percentage (%)"
+            ].cumsum()
+
+        df_summary = df_summary.reset_index(drop=True)
+
+        # Reorder columns to match tree perf style
+        primary_cols = [col for col in grouping_cols if col in df_summary.columns]
+
+        metric_cols = [
+            col
+            for col in [
+                "ex_UID",
+                "operation_count",
+                "total_duration_us",
+                "mean_duration_us",
+                "std_duration_us",
+            ]
+            if col in df_summary.columns
+        ]
+
+        # Static perf metrics (no _mean/_std)
+        static_metric_cols = [col for col in static_cols if col in df_summary.columns]
+
+        # Time-varying perf metrics (with _mean/_std)
+        time_varying_metric_cols = []
+        for col in time_varying_cols + ["Kernel Time (µs)"]:
+            for suffix in ["", "_mean", "_std", "_sum"]:
+                col_name = f"{col}{suffix}" if suffix else col
+                if col_name in df_summary.columns:
+                    time_varying_metric_cols.append(col_name)
+
+        pct_cols = [
+            col
+            for col in ["Percentage (%)", "Cumulative Percentage (%)"]
+            if col in df_summary.columns
+        ]
+
+        other_cols = [
+            col
+            for col in df_summary.columns
+            if col
+            not in primary_cols
+            + metric_cols
+            + static_metric_cols
+            + time_varying_metric_cols
+            + pct_cols
+        ]
+
+        col_order = (
+            primary_cols
+            + metric_cols
+            + static_metric_cols
+            + time_varying_metric_cols
+            + other_cols
+            + pct_cols
+        )
+
+        return df_summary[col_order]
+
     @staticmethod
     def get_df_kernel_launchers_summary_by_category(
         df_kernel_launchers: pd.DataFrame,
