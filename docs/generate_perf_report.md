@@ -50,6 +50,8 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 
 Note: JAX outputs do not include `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
 
+📖 **For detailed column definitions and usage guide**, see [Performance Report Column Definitions](perf_report_columns.md).
+
 ---
 
 ## ⚙️ Optional Arguments  
