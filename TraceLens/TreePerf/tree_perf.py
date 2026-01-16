@@ -1706,11 +1706,11 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_metrics["TB/s"] = float("nan")
 
         # JaxGemm
-        if hasattr(perf_model, "gemmologist_time"):
-            dict_metrics["Gemmologist Time (µs)"] = perf_model.gemmologist_time
-            dict_metrics["Gemmologist TFLOPS/s"] = (
-                (gflops / 1e3) / (perf_model.gemmologist_time / 1e6)
-                if perf_model.gemmologist_time > 0
+        if hasattr(perf_model, "simulation_time"):
+            dict_metrics["Simulation Time (µs)"] = perf_model.simulation_time
+            dict_metrics["Simulation TFLOPS/s"] = (
+                (gflops / 1e3) / (perf_model.simulation_time / 1e6)
+                if perf_model.simulation_time > 0
                 else float("nan")
             )
 
