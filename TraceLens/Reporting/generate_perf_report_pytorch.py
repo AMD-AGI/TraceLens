@@ -429,6 +429,20 @@ def generate_perf_report_pytorch(
             dict_name2df["ops_summary"] = df_kernel_launchers_summary
         if not df_kernel_launchers_unique_args.empty:
             dict_name2df["ops_unique_args"] = df_kernel_launchers_unique_args
+            
+         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
+        df_unified_perf = perf_analyzer.build_df_unified_perf_table()
+        if not df_unified_perf.empty:
+            df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
+                df_unified_perf, agg_metrics=agg_metrics, include_pct=True
+            )
+            if not df_unified_perf_summary.empty:
+                df_unified_perf_summary = add_truncated_kernel_details(
+                    df_unified_perf_summary,
+                    source_col="kernel_details_summary",
+                    new_col_name="trunc_kernel_details",
+                )
+                dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
         if inference_phase_analysis:
             if not df_launcher_phase_summaries['Prefill'].empty:
