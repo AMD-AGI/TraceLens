@@ -37,8 +37,11 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    # MoE pseudo ops
-    "pseudo_op::fused_moe_1stage": perf_model.fused_moe_1stage,
+    # MoE pseudo ops - Fused
+    "pseudo_op::fused_AITER_moe_1stage": perf_model.aiter_moe_fused_1stage,
+    # MoE pseudo ops - Unfused Triton (2-stage: up and down)
+    "pseudo_op::unfused_triton_moe_up": perf_model.triton_moe_up,
+    "pseudo_op::unfused_triton_moe_down": perf_model.triton_moe_down,
     }
 
 unary_elemwise_ops = [
@@ -71,7 +74,9 @@ dict_base_class2category = {
     perf_model.GEMM: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
-    perf_model.MoE: "MoE",
+    perf_model.FusedMoE: "MoE_fused",
+    perf_model.UnfusedMoE_Up: "MoE_unfused",
+    perf_model.UnfusedMoE_Down: "MoE_unfused",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
 }
@@ -140,8 +145,10 @@ def categorize_torch_op(row):
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
-    elif row["name"] in dict_cat2names["MoE"]:
-        return "MoE"
+    elif row["name"] in dict_cat2names.get("MoE_fused", []):
+        return "MoE_fused"
+    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
+        return "MoE_unfused"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):

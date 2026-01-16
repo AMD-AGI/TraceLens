@@ -66,7 +66,7 @@ def _create_pseudo_moe_op(trace_tree, moe_op_event: dict):
     inject_pseudo_op(
         trace_tree,
         moe_kernel,
-        "pseudo_op::fused_moe_1stage",
+        "pseudo_op::fused_AITER_moe_1stage",
         seq_num,
         dims=moe_op_event["args"].get("Input Dims"),
         types=moe_op_event["args"].get("Input type"),
