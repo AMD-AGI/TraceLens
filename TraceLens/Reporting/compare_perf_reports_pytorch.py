@@ -334,17 +334,18 @@ def generate_compare_perf_reports_pytorch(
         )
         results["gpu_timeline"] = dtl
 
+
+    report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
+
     # ── Ops summary / Kernel summary ──────────────────────────────────────────
     if "ops_summary" in sheets or "kernel_summary" in sheets or "all" in sheets:
-        xls_first = pd.ExcelFile(reports[0])
-
         # Determine which sheet to load based on request and availability
         if "ops_summary" in sheets:
-            if "ops_summary" not in xls_first.sheet_names:
+            if "ops_summary" not in report_sheet_names:
                 raise ValueError(f"ops_summary sheet not found in {reports[0]}")
             sheet_to_load = "ops_summary"
         elif "kernel_summary" in sheets:
-            if "kernel_summary" not in xls_first.sheet_names:
+            if "kernel_summary" not in report_sheet_names:
                 raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
             sheet_to_load = "kernel_summary"
         else:
@@ -362,7 +363,7 @@ def generate_compare_perf_reports_pytorch(
     ]  # different names for different versions of perf reports
     if "ops_all" in sheets or "all" in sheets:
         for sheet_name in alias:
-            if sheet_name in pd.ExcelFile(reports[0]).sheet_names:
+            if sheet_name in report_sheet_names:
                 ops_all_sheet = sheet_name
                 break
         keys = [
