@@ -334,7 +334,6 @@ def generate_compare_perf_reports_pytorch(
         )
         results["gpu_timeline"] = dtl
 
-
     report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
 
     # ── Ops summary / Kernel summary ──────────────────────────────────────────
@@ -349,7 +348,9 @@ def generate_compare_perf_reports_pytorch(
                 raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
             sheet_to_load = "kernel_summary"
         else:
-            raise ValueError(f"Neither 'ops_summary' nor 'kernel_summary' sheet found in {reports[0]}")
+            raise ValueError(
+                f"Neither 'ops_summary' nor 'kernel_summary' sheet found in {reports[0]}"
+            )
 
         # Process the sheet using configuration
         config = SUMMARY_SHEET_CONFIG[sheet_to_load]
