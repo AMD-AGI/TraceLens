@@ -7,7 +7,6 @@
 from collections import defaultdict
 from typing import Dict, Any, Callable
 import TraceLens.util
-from .util import tev2_create_pseudo_host_mm_ops
 
 from ..util import TraceEventUtils, JaxProfileProcessor
 
@@ -782,8 +781,6 @@ class TraceToTree:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
-
-        tev2_create_pseudo_host_mm_ops(self)
 
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
