@@ -14,6 +14,32 @@ from openpyxl.utils import get_column_letter
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+SUMMARY_SHEET_CONFIG = {
+    "ops_summary": {
+        "keys": ["name"],
+        "diff_cols": ["total_direct_kernel_time_ms", "Count"],
+        "cols_to_delete": ["total_direct_kernel_time_sum"],
+        "sort_col": "total_direct_kernel_time_ms",
+    },
+    "kernel_summary": {
+        "keys": ["name"],
+        "diff_cols": ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"],
+        "cols_to_delete": [
+            "Total Kernel Time (µs)",
+            "Median Kernel Time (µs)",
+            "Std Kernel Time (µs)",
+            "Min Kernel Time (µs)",
+            "Max Kernel Time (µs)",
+            "Category",
+        ],
+        "sort_col": "Total Kernel Time (ms)",
+    },
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _ensure_list(obj) -> List[str]:
@@ -114,6 +140,52 @@ def build_df_dff(
     )
 
     return merged_df[ordered_cols]
+
+
+def process_summary_sheet(
+    reports: List[str],
+    sheet_name: str,
+    tags: List[str],
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Process a summary sheet (ops_summary or kernel_summary) with configuration.
+
+    Parameters:
+    - reports: List of report file paths
+    - sheet_name: Name of the sheet to process
+    - tags: List of report tags
+    - config: Configuration dict with keys, diff_cols, cols_to_delete, sort_col
+
+    Returns:
+    Processed DataFrame with differences and comparisons
+    """
+    baseline_tag = tags[0]
+    keys = config["keys"]
+    diff_cols = config["diff_cols"]
+    cols_to_delete = config["cols_to_delete"]
+    sort_col = config["sort_col"]
+
+    # Load the summary sheet from each report
+    dfs = [load_sheet(path, sheet_name=sheet_name) for path in reports]
+
+    # Delete columns that are not needed
+    for i, df in enumerate(dfs):
+        cols_to_drop = cols_to_delete.copy()
+        if i > 0:
+            cols_to_drop.append("Cumulative Percentage (%)")
+        df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
+
+    # Build comparison dataframe
+    result = build_df_dff(
+        dfs=dfs, list_report_tags=tags, merge_keys=keys, diff_cols=diff_cols
+    )
+
+    # Sort by baseline tag's sort column
+    sort_key = f"{baseline_tag}::{sort_col}"
+    result = result.sort_values(sort_key, ascending=False).reset_index(drop=True)
+
+    return result
 
 
 def split_df_diff(
@@ -262,95 +334,26 @@ def generate_compare_perf_reports_pytorch(
         )
         results["gpu_timeline"] = dtl
 
-    # ── Ops summary ───────────────────────────────────────────────────────────
-    if "ops_summary" in sheets or "all" in sheets:
-        # Try to load ops_summary first, fall back to kernel_summary for rocprof
-        sheet_to_load = None
+    # ── Ops summary / Kernel summary ──────────────────────────────────────────
+    if "ops_summary" in sheets or "kernel_summary" in sheets or "all" in sheets:
         xls_first = pd.ExcelFile(reports[0])
 
-        if "ops_summary" in xls_first.sheet_names:
+        # Determine which sheet to load based on request and availability
+        if "ops_summary" in sheets:
+            if "ops_summary" not in xls_first.sheet_names:
+                raise ValueError(f"ops_summary sheet not found in {reports[0]}")
             sheet_to_load = "ops_summary"
-            keys = ["name"]
-            diff_cols = ["total_direct_kernel_time_ms", "Count"]
-        elif "kernel_summary" in xls_first.sheet_names:
+        elif "kernel_summary" in sheets:
+            if "kernel_summary" not in xls_first.sheet_names:
+                raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
             sheet_to_load = "kernel_summary"
-            keys = ["name"]
-            # kernel_summary uses different column names
-            diff_cols = ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"]
+        else:
+            raise ValueError(f"Neither 'ops_summary' nor 'kernel_summary' sheet found in {reports[0]}")
 
-        if sheet_to_load:
-            # Load the summary sheet from each report
-            dfs = [load_sheet(path, sheet_name=sheet_to_load) for path in reports]
-
-            # Delete columns that are not needed
-            for i, df in enumerate(dfs):
-                cols_to_delete = []
-                if sheet_to_load == "ops_summary":
-                    cols_to_delete = ["total_direct_kernel_time_sum"]
-                elif sheet_to_load == "kernel_summary":
-                    # Drop redundant and extra statistical columns for cleaner comparison
-                    cols_to_delete = [
-                        "Total Kernel Time (µs)",  # Keep only ms version
-                        "Median Kernel Time (µs)",  # Keep only mean
-                        "Std Kernel Time (µs)",     # Keep only mean
-                        "Min Kernel Time (µs)",     # Keep only mean
-                        "Max Kernel Time (µs)",     # Keep only mean
-                        "Category",                 # Remove category column
-                    ]
-
-                if i > 0:
-                    cols_to_delete.append("Cumulative Percentage (%)")
-                df.drop(columns=cols_to_delete, inplace=True, errors="ignore")
-
-            ops = build_df_dff(
-                dfs=dfs, list_report_tags=tags, merge_keys=keys, diff_cols=diff_cols
-            )
-
-            # sort by baseline tag's time column
-            if sheet_to_load == "ops_summary":
-                sort_key = f"{baseline_tag}::total_direct_kernel_time_ms"
-            else:  # kernel_summary
-                sort_key = f"{baseline_tag}::Total Kernel Time (ms)"
-
-            ops = ops.sort_values(sort_key, ascending=False).reset_index(drop=True)
-
-            # Use a consistent output sheet name
-            output_sheet_name = "ops_summary" if sheet_to_load == "ops_summary" else "kernel_summary"
-            results[output_sheet_name] = ops
-
-    # ── Kernel summary (rocprof) ──────────────────────────────────────────────
-    if "kernel_summary" in sheets:
-        # Explicitly load kernel_summary when requested
-        keys = ["name"]
-        diff_cols = ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"]
-
-        # Load the kernel summary sheet from each report
-        dfs = [load_sheet(path, sheet_name="kernel_summary") for path in reports]
-
-        # Delete columns that are not needed
-        for i, df in enumerate(dfs):
-            # Drop redundant and extra statistical columns for cleaner comparison
-            cols_to_delete = [
-                "Total Kernel Time (µs)",  # Keep only ms version
-                "Median Kernel Time (µs)",  # Keep only mean
-                "Std Kernel Time (µs)",     # Keep only mean
-                "Min Kernel Time (µs)",     # Keep only mean
-                "Max Kernel Time (µs)",     # Keep only mean
-                "Category",                 # Remove category column
-            ]
-            if i > 0:
-                cols_to_delete.append("Cumulative Percentage (%)")
-            df.drop(columns=cols_to_delete, inplace=True, errors="ignore")
-
-        kernel_sum = build_df_dff(
-            dfs=dfs, list_report_tags=tags, merge_keys=keys, diff_cols=diff_cols
-        )
-
-        # sort by baseline tag's Total Kernel Time (ms)
-        sort_key = f"{baseline_tag}::Total Kernel Time (ms)"
-        kernel_sum = kernel_sum.sort_values(sort_key, ascending=False).reset_index(drop=True)
-
-        results["kernel_summary"] = kernel_sum
+        # Process the sheet using configuration
+        config = SUMMARY_SHEET_CONFIG[sheet_to_load]
+        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
+        results[sheet_to_load] = ops
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
     alias = [
