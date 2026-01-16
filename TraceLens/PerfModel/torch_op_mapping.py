@@ -37,6 +37,7 @@ op_to_perf_model_class_map = {
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
+    "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
 }
 
 unary_elemwise_ops = [
