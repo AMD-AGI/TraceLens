@@ -309,6 +309,14 @@ class GEMM:
                 dtype = dtype_map[dtype]
                 
                 hardware = OrigamiHelper.get_hardware(arch)
+                if num_cus is not None:
+                    hardware.N_CU = num_cus
+                if force_to_l1:
+                     # origami will have an FA model really soon
+                     # until it is available, just make the L1 and L2 really big
+                     hardware.lds_capacity = 1024*1024*1024*1024
+                     hardware.L2_capacity = 1024*1024*1024*1024
+
                 # todo - allow user to override num_cus and other properties
                 helper = OrigamiHelper(M, N, K, B, dtype, dtype, dtype, hardware)
                 
@@ -1441,32 +1449,24 @@ class SDPA:
     def get_simulation_time(self):
         simulated_time = None
         if self.arch is not None:
-            if os.environ.get("GEMM_SIMULATOR_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
-                    raise ValueError(
-                        f"GEMM_SIMULATOR_PATH does not exist: {os.environ.get('GEMM_SIMULATOR_PATH')}"
-                    )
-                dtype = self.param_details.get("simulation_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
-                fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.get_simulation_time_func(
-                    self.arch,
-                    dtype,
-                    self.python_path,
-                    self.param_details["dtype_A_B"][0],
-                    bytes,
-                    self.B,
-                    self.H_Q,
-                    self.N_Q,
-                    self.N_KV,
-                    self.d_h,
-                    fa,
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
+            fa = True if type(self).__name__ == "flash_attention" else False
+            simulated_time = SDPA.get_simulation_time_func(
+                self.arch,
+                dtype,
+                self.python_path,
+                self.param_details["dtype_A_B"][0],
+                bytes,
+                self.B,
+                self.H_Q,
+                self.N_Q,
+                self.N_KV,
+                self.d_h,
+                fa,
+            )
         return simulated_time
 
     @staticmethod
