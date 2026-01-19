@@ -220,7 +220,7 @@ class GEMM:
             assert (
                 not missing_inputs
             ), f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
-            # assume that gemmologist path is given in the environment variable GEMM_SIMULATOR_PATH
+            # assume that gemm simulator path is given in the environment variable GEMM_SIMULATOR_PATH
             GEMM_SIMULATOR_PATH = os.environ.get("GEMM_SIMULATOR_PATH")
             GEMM_SIMULATOR_PATH, gemm_executable = os.path.split(GEMM_SIMULATOR_PATH)
 
@@ -242,10 +242,10 @@ class GEMM:
                 arch["name"],
             ]
 
-            # Windows does need a python executable for running gemmologist
+            # Windows does need a python executable for running the gemm simulator
             if not python_path and os.name == "nt":
                 raise AssertionError(
-                    "Python executable path need to be specified in Windows for running Gemmologist."
+                    "Python executable path need to be specified in Windows for running the GEMM simulator."
                 )
             # Add the python executable path if it is given
             if python_path:
@@ -283,10 +283,10 @@ class GEMM:
             stderr = result.stderr
             log = re.findall(r"Time=\d+\.\d+", stdout)
             if len(log) > 0:
-                gemmologist_time = float(re.sub("Time=", "", str(log[0])))
+                simulation_time = float(re.sub("Time=", "", str(log[0])))
                 # Cache the result
-                GEMM.cache_gemm_results[cache_key] = gemmologist_time
-                return gemmologist_time, " ".join(cmd)
+                GEMM.cache_gemm_results[cache_key] = simulation_time
+                return simulation_time, " ".join(cmd)
             else:
                 raise AssertionError(
                     "Failed to simulate ", cmd, stdout, stderr
@@ -297,14 +297,14 @@ class GEMM:
                 # assumes this PR has completed
                 # https://github.com/ROCm/rocm-libraries/pull/3903
                 import origami
-                from .tracelens.TraceLens.PerfModel.origami_helper import OrigamiHelper
+                from .origami_helper import OrigamiHelper
                 
                 dtype_map = {
-                    "fp32": origami.datatype_t.Float,
-                    "fp16": origami.datatype_t.Half,
-                    "bf16": origami.datatype_t.BFloat16,
-                    "fp64": origami.datatype_t.Double,
-                    "fp8": origami.datatype_t.Float8_fnuz,
+                    "fp32": origami.data_type_t.Float,
+                    "fp16": origami.data_type_t.Half,
+                    "bf16": origami.data_type_t.BFloat16,
+                    "fp64": origami.data_type_t.Double,
+                    "fp8": origami.data_type_t.Float8_fnuz,
                 }
                 dtype = dtype_map[dtype]
                 
@@ -1519,9 +1519,6 @@ class SDPA:
             num_cus=1,
         )
         pv_fwd_time = num_waves * pv_fwd_time
-        # pv_fwd_time, _ =  math.ceil(self.N_Q / 512) * math.ceil(self.N_KV / 512) * GEMM.get_gemmologist_time(self.arch, M=512, K=512, N=self.d_h,
-        #                                       B=self.B * self.H_Q, dtype=dtype,
-        #                                       python_path=self.python_path, force_to_l1=force_to_l1)
 
         if fa:
             # In case of flash attention we have to recompute
@@ -1529,7 +1526,7 @@ class SDPA:
             qkt_time = qkt_fwd_time
             pv_time = pv_fwd_time
 
-        # We don't need to go to gemmologist to calculate these,
+        # We don't need to go to the gemm simulator to calculate these,
         # as we already have the times
         p_grad_time = qkt_fwd_time
         v_grad_time = pv_fwd_time
@@ -2604,20 +2601,20 @@ def jax_dtype2bpe(name):
 
 def jax_dtype_map(dtype):
     """
-    This function maps a Jax data type to a gemmologist data type.
+    This function maps a Jax data type to the gemm simulator data type.
     Args:
         dtype (str): The name of the Jax data type.
     Returns:
-        str: The name of the gemmologist data type.
+        str: The name of the gemm simulator data type.
     """
-    dict_jax_dtype2gemmologist = {
+    dict_jax_dtype2gemmsimulator = {
         "f32": "fp32",
         "f16": "fp16",
         "bf16": "bf16",
         "f8": "fp8",
         "fp8": "fp8",
     }
-    return dict_jax_dtype2gemmologist.get(dtype.lower(), None)
+    return dict_jax_dtype2gemmsimulator.get(dtype.lower(), None)
 
 
 def dtype_jax2torch(dtype):

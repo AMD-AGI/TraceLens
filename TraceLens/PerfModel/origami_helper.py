@@ -25,13 +25,13 @@ class OrigamiHelper:
         out_dtype: origami.data_type_t,
         harware: origami.hardware_t,
         mx_block_size=0,
-        # streamk=False,
+        streamk=False,
     ):
         self._m = m
         self._n = n
         self._k = k
         self._b = b
-        # self.streamk = streamk
+        self.streamk = streamk
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.out_dtype = out_dtype
@@ -350,6 +350,12 @@ class OrigamiHelper:
 
         return mi_dim
     
+    def get_simulation_time(self) -> float:
+        """
+        Returns the simulation time in microseconds.
+        """
+        return self._result.latency / (self._hardware.compute_clock_ghz * 1e3)
+    
     @staticmethod
     def get_hardware(arch: dict) -> origami.hardware_t:
         # find architecture name, look up
@@ -358,40 +364,41 @@ class OrigamiHelper:
         if arch_name is None:
             warnings.warn("No architecture name provided; Assuming MI300x")
             arch_name = "mi300x"
-        name = name.lower()
-        if (name.endswith("x")):
-            name = name[:-1]
-        # The origami python bindings only support the 3xx series
-        origami_arch_map = {
+        freq_mhz = arch.get("freq_mhz", None)
+        if freq_mhz is None:
+            warnings.warn("No frequency provided; Assuming 2200 MHz")
+            freq_mhz = 2200
+        arch_name = arch_name.lower()
+        if (arch_name.endswith("x")):
+            arch_name = arch_name[:-1]
+        name_to_arch = {
             "mi300": "gfx942",
             "mi325": "gfx942",
             "mi350": "gfx950",
             "mi355": "gfx950",
         }
-        name = origami_arch_map.get(name, name)
+        arch_name = name_to_arch.get(arch_name, arch_name)
         
-        # This map would be helpful to have in origami
-        NAME_TO_PROPS = {
+        # The origami python bindings only support the 3xx series
+        arch_to_props = {
             # Architecture strings
             'gfx942': {
                 'arch': origami.architecture_t.gfx942,
                 'N_CU': 304,
                 'lds_capacity': 64 * 1024,  # 64 KB
                 'L2_capacity': 4 * 1024 * 1024,  # 4 MB
-                'compute_clock_khz': 2100000  # 2.1 GHz
             },
             'gfx950': {
                 'arch': origami.architecture_t.gfx950,
                 'N_CU': 256,
                 'lds_capacity': 64 * 1024,  # 64 KB
                 'L2_capacity': 4 * 1024 * 1024,  # 4 MB
-                'compute_clock_khz': 2200000  # 2.2 GHz
             },
         }
         
-        props = NAME_TO_PROPS[name] # throw an error for unknown devices
+        props = arch_to_props[arch_name] # throw an error for unknown devices
         return origami.get_hardware_for_arch(arch = props['arch'],
                                                     N_CU = props['N_CU'],
                                                     lds_capacity = props['lds_capacity'],
                                                     L2_capacity = props['L2_capacity'],
-                                                         compute_clock_khz = props['compute_clock_khz'])
+                                                    compute_clock_khz = freq_mhz * 1000)
