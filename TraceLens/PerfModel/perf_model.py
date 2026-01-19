@@ -3018,7 +3018,7 @@ class FusedMoE:
         return total_bytes
 
 
-class aiter_moe_fused_1stage(FusedMoE):
+class moe_aiter_fused_1stage(FusedMoE):
     """
     Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
 
@@ -3043,6 +3043,7 @@ class aiter_moe_fused_1stage(FusedMoE):
         Expected Input type format:
         [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
         """
+
         args = event.get('args', {})
         
         kernel_input_shape = args['Input Dims']
@@ -3280,7 +3281,7 @@ class UnfusedMoE_Down:
         return total_bytes
 
 
-class triton_moe_up(UnfusedMoE_Up):
+class moe_triton_unfused_up(UnfusedMoE_Up):
     """
     Performance model for Triton-based unfused MoE up projection stage (Applicable to GPTOSS)
     
@@ -3432,7 +3433,7 @@ class triton_moe_up(UnfusedMoE_Up):
         raise NotImplementedError("Backward pass for unfused MoE is not defined.")
 
 
-class triton_moe_down(UnfusedMoE_Down):
+class moe_triton_unfused_down(UnfusedMoE_Down):
     """
     Performance model for Triton-based unfused MoE down projection stage (Applicable to GPTOSS)
     

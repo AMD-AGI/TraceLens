@@ -4,22 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""
-Pseudo op extension for unfused MoE operations (vllm::moe_forward).
-
-Creates separate pseudo ops for each matmul_ogs GEMM kernel in unfused MoE,
-typically:
-- pseudo_op::moe_unfused_gemm_0 (up_proj + gate_proj with SwiGLU)
-- pseudo_op::moe_unfused_gemm_1 (down_proj)
-"""
-
 import logging
 from .pseudo_ops_utils import inject_pseudo_op
 
 logger = logging.getLogger(__name__)
 
 
-def create_unfused_moe_pseudo_ops(trace_tree):
+def create_pseudo_ops_moe_unfused_triton(trace_tree):
     """
     Create pseudo ops for vllm::moe_forward unfused operations.
     Creates separate pseudo ops for each matmul_ogs GEMM kernel.
@@ -37,7 +28,7 @@ def create_unfused_moe_pseudo_ops(trace_tree):
     logger.info(f"Processing {len(moe_op_events)} unfused MoE operations")
     
     for moe_op_event in moe_op_events:
-        _create_unfused_moe_pseudo_ops(trace_tree, moe_op_event)
+        _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event)
 
 
 def is_matmul_ogs_kernel(kernel_event: dict) -> bool:
@@ -50,33 +41,29 @@ def is_matmul_ogs_kernel(kernel_event: dict) -> bool:
     Returns:
         True if kernel is a matmul_ogs kernel
     """
-    if kernel_event.get("cat") != "kernel":
-        return False
-    
-    kernel_name = kernel_event["name"]
-    return "matmul_ogs" in kernel_name.lower()
+
+    return kernel_event.get("cat") == "kernel" and "matmul_ogs" in kernel_event["name"].lower()
 
 
-def _get_gemm_type_from_kernel_name(kernel_name: str) -> tuple:
+def _is_gated_kernel(kernel_name: str) -> bool:
     """
-    Determine the GEMM type and gating status from the kernel name.
+    Check if kernel has gating activation (swiglu/glu).
     
     Args:
         kernel_name: Name of the matmul_ogs kernel
         
     Returns:
-        Tuple of (gemm_type, gated) where:
-        - gemm_type: 'up' or 'down'
-        - gated: True if kernel has swiglu activation, False otherwise
+        True if kernel has swiglu or glu activation, False otherwise
     """
-    if "_swiglu" in kernel_name.lower():
-        return ("up", True)
-    return ("down", False)
+    kernel_lower = kernel_name.lower()
+    return "_swiglu" in kernel_lower or "_glu" in kernel_lower
 
 
 def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
     """
     Extract topk (number of active experts per token) from TopK child operation.
+    
+    Uses TraceLens native TraceToTree methods for tree traversal.
     
     Args:
         trace_tree: TraceToTree instance
@@ -88,12 +75,12 @@ def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
     Note:
         Returns default value of 4 if TopK operation not found (e.g., when python_func layer is inserted)
     """
-    def search_for_topk(uid, depth=0, max_depth=3):
+    
+    def search_for_topk(event, depth=0, max_depth=3):
         """Recursively search for TopK operation through Python function wrappers."""
+        
         if depth > max_depth:
             return None
-            
-        event = trace_tree.get_UID2event(uid)
         
         # Check if this is a TopK operation
         if 'TopK' in event.get('name', ''):
@@ -106,29 +93,28 @@ def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
                     pass
         
         # Recursively search children (for Python function wrappers)
-        for child_uid in event.get('children', []):
-            result = search_for_topk(child_uid, depth + 1, max_depth)
+        # Use native get_children_events() method
+        for child_event in trace_tree.get_children_events(event):
+            result = search_for_topk(child_event, depth + 1, max_depth)
             if result is not None:
                 return result
         
         return None
     
     # Look for TopK child operation (with recursive search for Python wrappers)
-    for child_uid in moe_op_event.get('children', []):
-        topk_value = search_for_topk(child_uid)
+    # Use native get_children_events() method
+    for child_event in trace_tree.get_children_events(moe_op_event):
+        topk_value = search_for_topk(child_event)
         if topk_value is not None:
             return topk_value
     
     # TopK not found - return default value of 4 (common MoE configuration)
-    logger.warning(
-        f"TopK operation not found in children of vllm::moe_forward (UID={moe_op_event['UID']}). "
-        f"Using default topk=4. Children names: "
-        f"{[trace_tree.get_UID2event(uid).get('name') for uid in moe_op_event.get('children', [])]}"
-    )
+    logger.warning(f"TopK operation not found in children of vllm::moe_forward (UID={moe_op_event['UID']}).")
+
     return 4  # Default topk value
 
 
-def _create_unfused_moe_pseudo_ops(trace_tree, moe_op_event: dict):
+def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
     """
     Create pseudo ops for each matmul_ogs kernel in unfused MoE.
     
@@ -155,23 +141,21 @@ def _create_unfused_moe_pseudo_ops(trace_tree, moe_op_event: dict):
     
     # Extract topk from tree (raises ValueError if not found)
     topk = _extract_topk_from_moe(trace_tree, moe_op_event)
-    
-    # Sort kernels to ensure consistent ordering
-    # Kernels with _swiglu come first (up+gate), then down_proj
-    matmul_kernels_sorted = sorted(
-        matmul_kernels,
-        key=lambda k: (0 if "_swiglu" in k["name"].lower() else 1, k["UID"])
-    )
-    
+
     seq_num = moe_op_event["args"].get("Sequence number", moe_op_event["UID"])
     
+    # Sort by start time to ensure first GEMM is up, second is down
+    matmul_kernels_sorted = sorted(matmul_kernels, key=lambda k: k["ts"])
+
     # Create pseudo op for each GEMM
     for idx, kernel in enumerate(matmul_kernels_sorted):
-        gemm_type, gated = _get_gemm_type_from_kernel_name(kernel["name"])
-        # Use descriptive names: unfused_triton_moe_up or unfused_triton_moe_down
-        pseudo_op_name = f"pseudo_op::unfused_triton_moe_{gemm_type}"
         
-        # Prepare custom args for this pseudo-op
+        # First GEMM is up projection, second is down projection
+        gemm_type = "up" if idx == 0 else "down"
+        gated = _is_gated_kernel(kernel["name"])
+
+        pseudo_op_name = f"pseudo_op::moe_triton_unfused_{gemm_type}"
+        
         extra_args = {
             "MoE GEMM type": gemm_type,
             "MoE GEMM index": idx,
