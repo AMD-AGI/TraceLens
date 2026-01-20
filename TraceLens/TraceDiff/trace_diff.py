@@ -159,6 +159,26 @@ class TraceDiff:
             children = tree.get_children_events(current)
             stack.extend(children)
 
+    def _get_top_level_root(self, tree: TraceToTree, start_uid: int) -> int:
+        """
+        Find the top-level root node by traversing parent pointers upward from a starting UID.
+        The root is the node with no parent, which is typically a python_function event at the
+        top of the call stack.
+
+        Args:
+            tree (TraceToTree): The trace tree to traverse.
+            start_uid (int): The UID to start traversal from (typically a CPU root node).
+
+        Returns:
+            int: The UID of the top-level root node.
+        """
+        current = tree.get_UID2event(start_uid)
+        while True:
+            parent_uid = current.get("parent")
+            if parent_uid is None:
+                return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+            current = tree.get_UID2event(parent_uid)
+
     def calculate_diff_boundaries(self):
         """
         Compare two trees and identify the boundaries of differences between them using recursive Wagner-Fischer and DFS, matching the reference tree.py algorithm.
@@ -285,31 +305,21 @@ class TraceDiff:
                     add_to_pod(child2, self.pod2, tree2)
                     idx2 += 1
 
-        # Start DFS from the root nodes
+        # Start DFS from the top-level root node
+        # Find the root by traversing up parent pointers from any CPU root node
         if not tree1.cpu_root_nodes or not tree2.cpu_root_nodes:
             raise ValueError(
                 "Both trees must have at least one root node in cpu_root_nodes."
             )
-        roots1 = sorted(
-            tree1.cpu_root_nodes, key=lambda uid: tree1.get_UID2event(uid).get("ts", 0)
-        )
-        roots2 = sorted(
-            tree2.cpu_root_nodes, key=lambda uid: tree2.get_UID2event(uid).get("ts", 0)
-        )
-        ops = wagner_fischer(roots1, roots2)
-        for op, i, j in ops:
-            if op == "match":
-                node1 = tree1.get_UID2event(roots1[i])
-                node2 = tree2.get_UID2event(roots2[j])
-                dfs(node1, node2)
-            elif op == "delete":
-                node1 = tree1.get_UID2event(roots1[i])
-                self.db1.append(node1)
-                add_to_pod(node1, self.pod1, tree1)
-            elif op == "insert":
-                node2 = tree2.get_UID2event(roots2[j])
-                self.db2.append(node2)
-                add_to_pod(node2, self.pod2, tree2)
+        
+        # Get the top-level root for each tree
+        root_uid1 = self._get_top_level_root(tree1, tree1.cpu_root_nodes[0])
+        root_uid2 = self._get_top_level_root(tree2, tree2.cpu_root_nodes[0])
+        
+        # Perform DFS from the top-level roots
+        node1 = tree1.get_UID2event(root_uid1)
+        node2 = tree2.get_UID2event(root_uid2)
+        dfs(node1, node2)
         return self.db1, self.db2, self.pod1, self.pod2
 
     def merge_trees(self):
@@ -437,50 +447,13 @@ class TraceDiff:
             merged_events.append(event)
             return merged_id
 
-        # Find root UIDs
-        roots1 = list(self.baseline.cpu_root_nodes)
-        roots2 = list(self.variant.cpu_root_nodes)
-        merged_root_ids = []
-
-        # Sort roots by ts for deterministic order
-        roots1 = sorted(
-            roots1, key=lambda uid: baseline_uid2node.get(uid, {}).get("ts", 0)
-        )
-        roots2 = sorted(
-            roots2, key=lambda uid: variant_uid2node.get(uid, {}).get("ts", 0)
-        )
-
-        i, j = 0, 0
-        while i < len(roots1) and j < len(roots2):
-            uid1 = roots1[i]
-            uid2 = roots2[j]
-            in_pod1 = uid1 in self.pod1
-            in_pod2 = uid2 in self.pod2
-            if in_pod1 and not in_pod2:
-                merged_root_ids.append(merge_from_pod(uid1, None))
-                i += 1
-            elif in_pod2 and not in_pod1:
-                merged_root_ids.append(merge_from_pod(None, uid2))
-                j += 1
-            elif in_pod1 and in_pod2:
-                # Both are PODs, treat as separate
-                merged_root_ids.append(merge_from_pod(uid1, None))
-                merged_root_ids.append(merge_from_pod(None, uid2))
-                i += 1
-                j += 1
-            else:
-                # Both are not PODs, merge as combined
-                merged_root_ids.append(merge_from_pod(uid1, uid2))
-                i += 1
-                j += 1
-
-        # Handle remaining roots in either list
-        while i < len(roots1):
-            merged_root_ids.append(merge_from_pod(roots1[i], None))
-            i += 1
-        while j < len(roots2):
-            merged_root_ids.append(merge_from_pod(None, roots2[j]))
-            j += 1
+        # Find top-level root UIDs by traversing up from any CPU root node
+        root_uid1 = self._get_top_level_root(self.baseline, self.baseline.cpu_root_nodes[0])
+        root_uid2 = self._get_top_level_root(self.variant, self.variant.cpu_root_nodes[0])
+        
+        # Merge the single top-level root
+        merged_root_id = merge_from_pod(root_uid1, root_uid2)
+        merged_root_ids = [merged_root_id]
 
         self.merged_tree = (merged_events, merged_root_ids)
         return self.merged_tree
