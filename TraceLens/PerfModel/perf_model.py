@@ -298,7 +298,10 @@ class GEMM:
                 # https://github.com/ROCm/rocm-libraries/pull/3903
                 import origami
                 from .origami_helper import OrigamiHelper
-                
+                # origami simulation requires an architecture file including GPU name and clock speed
+                # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+                # for example: {"name": "MI300X", "freq_mhz": 1207}
+
                 dtype_map = {
                     "fp32": origami.data_type_t.Float,
                     "fp16": origami.data_type_t.Half,
