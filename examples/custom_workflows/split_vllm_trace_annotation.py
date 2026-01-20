@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+ 
 """
 Split a vLLM trace into per-iteration or per-dummy-run traces.
 
