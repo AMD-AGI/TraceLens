@@ -4,40 +4,20 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
 import argparse
-import json
-from typing import Optional, Dict, Tuple
-import pandas as pd
-import numpy as np
-from TraceLens import TraceToTree
-from TraceLens import TreePerfAnalyzer
-from TraceLens import NcclAnalyser
 import importlib.util
-import warnings
+import json
+import os
 import subprocess
 import sys
+import warnings
+from typing import Dict, Optional, Tuple
 
+import numpy as np
+import pandas as pd
 
-def request_install(package_name):
-    choice = (
-        input(f"Do you want to install '{package_name}' via pip? [y/N]: ")
-        .strip()
-        .lower()
-    )
-    if choice == "y":
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", package_name]
-            )
-        except subprocess.CalledProcessError:
-            print(
-                f"Failed to install '{package_name}'. Please install it manually. Exiting."
-            )
-            sys.exit(1)
-    else:
-        print(f"Skipping installation of '{package_name}' and exiting.")
-        sys.exit(1)
+from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
+from TraceLens.Reporting.reporting_utils import request_install
 
 
 def get_dfs_short_kernels(
@@ -65,26 +45,44 @@ def get_dfs_short_kernels(
     ]
 
     # 1. get histogram of these short kernels
-    vals = df_filtered["Kernel duration (µs)"].values
-    counts, bin_edges = np.histogram(vals, bins=histogram_bins)
-    df_hist = pd.DataFrame(
-        {"bin_start": bin_edges[:-1], "bin_end": bin_edges[1:], "count": counts}
-    )
+    if df_filtered.empty:
+        df_hist = pd.DataFrame(columns=["bin_start", "bin_end", "count"])
+    else:
+        vals = df_filtered["Kernel duration (µs)"].values
+        counts, bin_edges = np.histogram(vals, bins=histogram_bins)
+        df_hist = pd.DataFrame(
+            {"bin_start": bin_edges[:-1], "bin_end": bin_edges[1:], "count": counts}
+        )
 
     # 2. get df short kernels topk by total time
     agg_dict = {
         "Kernel duration (µs)": ["sum", "count", "mean"],
     }
-    df_grouped = df_filtered.groupby(
-        [
+    # For GPU-only traces, only group by Kernel name (CPU-related columns don't exist)
+    # For regular traces, group by all available columns
+    if perf_analyzer.gpu_only:
+        groupby_cols = ["Kernel name"]
+    else:
+        groupby_cols = [
             "Parent cpu_op",
             "Input dims",
             "Input strides",
             "Concrete Inputs",
             "Kernel name",
-        ],
-        sort=False,
-    ).agg(agg_dict)
+        ]
+
+    # If dataframe is empty, return empty dataframe
+    if df_filtered.empty:
+        df_grouped = pd.DataFrame()
+    else:
+        df_grouped = df_filtered.groupby(
+            groupby_cols,
+            sort=False,
+        ).agg(agg_dict)
+
+    # Handle empty dataframe case
+    if df_grouped.empty:
+        return df_hist, df_grouped
 
     # Flatten multi-level column names
     df_grouped.columns = ["_".join(col).strip() for col in df_grouped.columns]
@@ -265,6 +263,12 @@ def generate_perf_report_pytorch(
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
 
+    # Detect GPU-only trace early and inform user
+    if perf_analyzer.gpu_only:
+        print(
+            "Detected GPU-only trace. Skipping CPU-dependent analysis and generating only GPU timeline and kernel summary."
+        )
+
     agg_metrics = ["mean", "median", "std", "min", "max"]
 
     # Generate base DataFrames
@@ -277,102 +281,141 @@ def generate_perf_report_pytorch(
     total_time_ms = total_time_row["time ms"].values[0]
     perf_analyzer.total_time_ms = total_time_ms
 
-    df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
-        include_kernel_details=True
-    )
-    df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(
-        df_kernel_launchers
-    )
-    df_kernel_launchers_summary_by_category = (
-        perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
-    )
-    df_kernel_launchers_unique_args = perf_analyzer.get_df_kernel_launchers_unique_args(
-        df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
-    )
-    df_kernel_launchers_unique_args = add_truncated_kernel_details(
-        df_kernel_launchers_unique_args,
-        source_col="kernel_details_summary",
-        new_col_name="trunc_kernel_details",
-    )
-    # Dictionary to hold the op-specific DataFrames
+    # Initialize empty DataFrames for GPU-only traces to avoid NameError
+    df_kernel_launchers_summary = pd.DataFrame()
+    df_kernel_launchers_summary_by_category = pd.DataFrame()
+    df_kernel_launchers_unique_args = pd.DataFrame()
     perf_metrics_dfs = {}
+    df_hist = pd.DataFrame()
+    df_short_kernels = pd.DataFrame()
 
-    for op_cat, op_names in perf_analyzer.dict_cat2names.items():
-        # Filter events belonging to the current category
-        op_events = [
-            event for event in perf_analyzer.tree.events if event["name"] in op_names
-        ]
+    # Only process CPU-dependent analysis for non-GPU-only traces
+    if not perf_analyzer.gpu_only:
+        df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
+            include_kernel_details=True
+        )
+        df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(
+            df_kernel_launchers
+        )
+        df_kernel_launchers_summary_by_category = (
+            perf_analyzer.get_df_kernel_launchers_summary_by_category(
+                df_kernel_launchers
+            )
+        )
+        df_kernel_launchers_unique_args = (
+            perf_analyzer.get_df_kernel_launchers_unique_args(
+                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
+            )
+        )
+        df_kernel_launchers_unique_args = add_truncated_kernel_details(
+            df_kernel_launchers_unique_args,
+            source_col="kernel_details_summary",
+            new_col_name="trunc_kernel_details",
+        )
+        # Dictionary to hold the op-specific DataFrames
+        perf_metrics_dfs = {}
 
-        if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
-            # For GEMM: create a single table that covers both fwd and bwd.
-            df_ops = perf_analyzer.build_df_perf_metrics(
-                op_events, bwd=False, include_kernel_details=True, include_args=True
-            )
-            df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
-            df_ops = add_truncated_kernel_details(
-                df_ops,
-                source_col="kernel_details__summarize_kernel_stats",
-                new_col_name="trunc_kernel_details",
-            )
-            if not df_ops.empty:
-                perf_metrics_dfs[op_cat] = df_ops
-        else:
-            # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
-            df_ops_fwd = perf_analyzer.build_df_perf_metrics(
-                op_events, bwd=False, include_kernel_details=True, include_args=True
-            )
-            df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                df_ops_fwd, agg_metrics
-            )
-            df_ops_fwd = add_truncated_kernel_details(
-                df_ops_fwd,
-                source_col="kernel_details__summarize_kernel_stats",
-                new_col_name="trunc_kernel_details",
-            )
-            # For now, flash_attention_varlen_backward is processed with bwd=True, so we need
-            # to have a workaround to extract it from the fwd df and append it to the bwd df.
-            filtered_df_bwd_ops = None
-            if not df_ops_fwd.empty:
-                filtered_df_bwd_ops = df_ops_fwd[
-                    df_ops_fwd["name"] == "flash_attn::_flash_attn_varlen_backward"
-                ]
-                df_ops_fwd = df_ops_fwd[
-                    df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
-                ]
-            df_ops_bwd = perf_analyzer.build_df_perf_metrics(
-                op_events, bwd=True, include_kernel_details=True, include_args=True
-            )
-            df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                df_ops_bwd, agg_metrics
-            )
-            df_ops_bwd = add_truncated_kernel_details(
-                df_ops_bwd,
-                source_col="kernel_details__summarize_kernel_stats",
-                new_col_name="trunc_kernel_details",
-            )
-            if filtered_df_bwd_ops is not None:
-                df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
-            if not df_ops_fwd.empty:
-                perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-            if not df_ops_bwd.empty:
-                perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+        for op_cat, op_names in perf_analyzer.dict_cat2names.items():
+            # Filter events belonging to the current category
+            op_events = [
+                event
+                for event in perf_analyzer.tree.events
+                if event["name"] in op_names
+            ]
 
-    # Short kernel study
-    df_hist, df_short_kernels = get_dfs_short_kernels(
-        perf_analyzer,
-        short_kernel_threshold_us=short_kernel_threshold_us,
-        histogram_bins=short_kernel_histogram_bins,
-        topk=topk_short_kernels,
-    )
+            if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
+                # For GEMM: create a single table that covers both fwd and bwd.
+                df_ops = perf_analyzer.build_df_perf_metrics(
+                    op_events, bwd=False, include_kernel_details=True, include_args=True
+                )
+                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+                df_ops = add_truncated_kernel_details(
+                    df_ops,
+                    source_col="kernel_details__summarize_kernel_stats",
+                    new_col_name="trunc_kernel_details",
+                )
+                if not df_ops.empty:
+                    perf_metrics_dfs[op_cat] = df_ops
+            else:
+                # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
+                df_ops_fwd = perf_analyzer.build_df_perf_metrics(
+                    op_events, bwd=False, include_kernel_details=True, include_args=True
+                )
+                df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
+                    df_ops_fwd, agg_metrics
+                )
+                df_ops_fwd = add_truncated_kernel_details(
+                    df_ops_fwd,
+                    source_col="kernel_details__summarize_kernel_stats",
+                    new_col_name="trunc_kernel_details",
+                )
+                # For now, flash_attention_varlen_backward is processed with bwd=True, so we need
+                # to have a workaround to extract it from the fwd df and append it to the bwd df.
+                filtered_df_bwd_ops = None
+                if not df_ops_fwd.empty:
+                    filtered_df_bwd_ops = df_ops_fwd[
+                        df_ops_fwd["name"] == "flash_attn::_flash_attn_varlen_backward"
+                    ]
+                    df_ops_fwd = df_ops_fwd[
+                        df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
+                    ]
+                df_ops_bwd = perf_analyzer.build_df_perf_metrics(
+                    op_events, bwd=True, include_kernel_details=True, include_args=True
+                )
+                df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
+                    df_ops_bwd, agg_metrics
+                )
+                df_ops_bwd = add_truncated_kernel_details(
+                    df_ops_bwd,
+                    source_col="kernel_details__summarize_kernel_stats",
+                    new_col_name="trunc_kernel_details",
+                )
+                if filtered_df_bwd_ops is not None:
+                    df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
+                if not df_ops_fwd.empty:
+                    perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
+                if not df_ops_bwd.empty:
+                    perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
 
-    dict_name2df = {
-        "gpu_timeline": df_gpu_timeline,
-        "ops_summary_by_category": df_kernel_launchers_summary_by_category,
-        "ops_summary": df_kernel_launchers_summary,
-        "ops_unique_args": df_kernel_launchers_unique_args,
-    }
-    # update this dict with the perf_metrics_dfs
-    dict_name2df.update(perf_metrics_dfs)
+    # Short kernel study (works for both GPU-only and regular traces)
+    if short_kernel_study:
+        df_hist, df_short_kernels = get_dfs_short_kernels(
+            perf_analyzer,
+            short_kernel_threshold_us=short_kernel_threshold_us,
+            histogram_bins=short_kernel_histogram_bins,
+            topk=topk_short_kernels,
+        )
+
+    # Build dict_name2df - only include sheets that have data
+    dict_name2df = {"gpu_timeline": df_gpu_timeline}
+
+    # Add CPU-dependent sheets only if not GPU-only
+    if not perf_analyzer.gpu_only:
+        if not df_kernel_launchers_summary_by_category.empty:
+            dict_name2df["ops_summary_by_category"] = (
+                df_kernel_launchers_summary_by_category
+            )
+        if not df_kernel_launchers_summary.empty:
+            dict_name2df["ops_summary"] = df_kernel_launchers_summary
+        if not df_kernel_launchers_unique_args.empty:
+            dict_name2df["ops_unique_args"] = df_kernel_launchers_unique_args
+
+        # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
+        df_unified_perf = perf_analyzer.build_df_unified_perf_table()
+        if not df_unified_perf.empty:
+            df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
+                df_unified_perf, agg_metrics=agg_metrics, include_pct=True
+            )
+            if not df_unified_perf_summary.empty:
+                df_unified_perf_summary = add_truncated_kernel_details(
+                    df_unified_perf_summary,
+                    source_col="kernel_details_summary",
+                    new_col_name="trunc_kernel_details",
+                )
+                dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+
+        # update this dict with the perf_metrics_dfs
+        dict_name2df.update(perf_metrics_dfs)
 
     # Kernel summary: aggregate per-kernel durations and counts
     if kernel_summary:
@@ -470,11 +513,30 @@ def generate_perf_report_pytorch(
         dict_name2df["short_kernel_histogram"] = df_hist
         dict_name2df["short_kernels_summary"] = df_short_kernels
 
-    if collective_analysis:
+    # Skip collective analysis for GPU-only traces (no CPU ops means no collectives)
+    if collective_analysis and not perf_analyzer.gpu_only:
         nccl_analyser = NcclAnalyser([profile_json_path], None)
         df_nccl_summary = nccl_analyser.build_df_summary_long()
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
+
+    # Get additional DataFrames from extension if available
+    if extension_file:
+        extension_path = os.path.abspath(extension_file)
+        extension_name = os.path.splitext(os.path.basename(extension_path))[0]
+        spec = importlib.util.spec_from_file_location(extension_name, extension_path)
+        extension = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extension)
+
+        if hasattr(extension, "get_additional_dataframes_extension"):
+            print(f"Getting additional DataFrames from extension: {extension_path}")
+            get_additional_dfs = getattr(
+                extension, "get_additional_dataframes_extension"
+            )
+            additional_dfs = get_additional_dfs(perf_analyzer.tree)
+            if additional_dfs:
+                dict_name2df.update(additional_dfs)
+                print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:

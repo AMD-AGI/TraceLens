@@ -42,12 +42,15 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 | `gpu_timeline`             | End-to-end GPU activity summary, including compute, memory copies, communication, and idle time.                 |
 | `ops_summary_by_category`  | Summary of compute time grouped by operation category (e.g., GEMM, SDPA_fwd, elementwise).                       |
 | `ops_summary`              | Summary of compute time at the individual operation level; each row corresponds to a unique operation name.      |
-| `ops_all`                  | Detailed operation-level summary; each row corresponds to a unique (operation name, argument) combination.       |
+| `ops_unique_args`          | Detailed operation-level summary; each row corresponds to a unique (operation name, argument) combination.       |
+| `unified_perf_summary`     | Unified perf metrics for all ops with perf models OR leaf ops that launch GPU kernels. Includes GFLOPS, TFLOPS/s, Data Moved, FLOPS/Byte, TB/s metrics aggregated by unique args. |
 | `short_kernels_histogram`  | Histogram showing the distribution of kernel durations below the short-duration threshold.                   |
 | `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op.   |
-| Roofline Sheets            | Roofline analysis for each operation category, including TFLOPs, TB/s, and FLOPs/byte metrics.                |
+| Roofline Sheets            | Roofline analysis for each operation category (GEMM, CONV, etc.), including TFLOPs, TB/s, and FLOPs/byte metrics. |
 
 Note: JAX outputs do not include `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
+
+📖 **For detailed column definitions and usage guide**, see [Performance Report Column Definitions](perf_report_columns.md).
 
 ---
 
