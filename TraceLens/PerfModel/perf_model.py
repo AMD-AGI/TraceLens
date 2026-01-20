@@ -3198,6 +3198,15 @@ class moe_aiter_fused_1stage(FusedMoE):
     def bytes_bwd(self):
         """Backward pass bytes (not implemented for inference-only MoE)."""
         raise NotImplementedError("Backward pass for fused MoE is not defined.")
+    
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+    
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for MoE)."""
+        return "matrix"
 
 
 class UnfusedMoE_Up:
@@ -3499,6 +3508,15 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
     def bytes_bwd(self):
         """Backward pass bytes (not implemented for inference-only MoE)."""
         raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+    
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("weight_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+    
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for MoE)."""
+        return "matrix"
 
 
 class moe_triton_unfused_down(UnfusedMoE_Down):
@@ -3640,3 +3658,12 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     def bytes_bwd(self):
         """Backward pass bytes (not implemented for inference-only MoE)."""
         raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+    
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("weight_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+    
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for MoE)."""
+        return "matrix"
