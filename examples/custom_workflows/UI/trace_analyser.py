@@ -26,7 +26,6 @@ from TraceLens.UI.utils.reporting import (
     read_trace,
 )
 
-
 logging.basicConfig(level=logging.INFO)
 
 

@@ -10,7 +10,7 @@ from .pseudo_ops_utils import inject_pseudo_op
 logger = logging.getLogger(__name__)
 
 
-def create_moe_pseudo_ops(trace_tree):
+def create_pseudo_ops_moe_fused_aiter(trace_tree):
     """
     Create pseudo ops for vllm::rocm_aiter_fused_moe operations. Isolates MoE compute kernel from indexing/quantization kernels.
     """
@@ -21,10 +21,10 @@ def create_moe_pseudo_ops(trace_tree):
     moe_op_events = [trace_tree.get_UID2event(uid) for uid in trace_tree.name2event_uids["vllm::rocm_aiter_fused_moe"]]
     
     for moe_op_event in moe_op_events:
-        _create_pseudo_moe_op(trace_tree, moe_op_event)
+        _create_pseudo_op_moe_fused_aiter(trace_tree, moe_op_event)
 
 
-def is_moe_kernel(kernel_event: dict) -> bool:
+def is_aiter_fused_moe_kernel(kernel_event: dict) -> bool:
     """Check if kernel is MoE compute (not sorting/quantization)."""
 
     if kernel_event.get("cat") != "kernel":
@@ -41,7 +41,7 @@ def is_moe_kernel(kernel_event: dict) -> bool:
     return is_moe_kernel_match
 
 
-def _create_pseudo_moe_op(trace_tree, moe_op_event: dict):
+def _create_pseudo_op_moe_fused_aiter(trace_tree, moe_op_event: dict):
     """Create single pseudo op for one MoE operation."""
 
     if moe_op_event.get("name") != "vllm::rocm_aiter_fused_moe":
@@ -54,7 +54,7 @@ def _create_pseudo_moe_op(trace_tree, moe_op_event: dict):
         return
 
     gpu_events = [trace_tree.get_UID2event(uid) for uid in gpu_event_ids]
-    moe_kernels = [e for e in gpu_events if is_moe_kernel(e)]
+    moe_kernels = [e for e in gpu_events if is_aiter_fused_moe_kernel(e)]
 
     if len(moe_kernels) != 1:
         logger.warning(f"Expected 1 MoE kernel, found {len(moe_kernels)} for UID {moe_op_event['UID']}")
@@ -66,11 +66,11 @@ def _create_pseudo_moe_op(trace_tree, moe_op_event: dict):
     inject_pseudo_op(
         trace_tree,
         moe_kernel,
-        "pseudo_op::fused_AITER_moe_1stage",
+        "pseudo_op::moe_aiter_fused_1stage",
         seq_num,
         dims=moe_op_event["args"].get("Input Dims"),
         types=moe_op_event["args"].get("Input type"),
         strides=moe_op_event["args"].get("Input Strides"),
-        concrete_inputs=moe_op_event["args"].get("Concrete Inputs"),
+        concrete_inputs=moe_op_event["args"].get("Concrete Inputs")
     )
 

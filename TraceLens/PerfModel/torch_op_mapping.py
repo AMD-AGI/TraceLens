@@ -39,10 +39,10 @@ op_to_perf_model_class_map = {
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
     # MoE pseudo ops - Fused
-    "pseudo_op::fused_AITER_moe_1stage": perf_model.aiter_moe_fused_1stage,
+    "pseudo_op::moe_aiter_fused_1stage": perf_model.moe_aiter_fused_1stage,
     # MoE pseudo ops - Unfused Triton (2-stage: up and down)
-    "pseudo_op::unfused_triton_moe_up": perf_model.triton_moe_up,
-    "pseudo_op::unfused_triton_moe_down": perf_model.triton_moe_down,
+    "pseudo_op::moe_triton_unfused_up": perf_model.moe_triton_unfused_up,
+    "pseudo_op::moe_triton_unfused_down": perf_model.moe_triton_unfused_down
     }
 
 unary_elemwise_ops = [
