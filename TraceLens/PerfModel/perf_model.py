@@ -128,7 +128,6 @@ class GEMM:
                     arch, self.M, self.N, self.K, self.B, dtype, self.python_path
                 )
             )
-            
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
@@ -198,12 +197,10 @@ class GEMM:
         arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None
     ):
         if "GEMM_SIMULATOR_PATH" in os.environ:
-            
             if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
                 raise ValueError(
                     f"GEMM_SIMULATOR_PATH does not exist: {os.environ.get('GEMM_SIMULATOR_PATH')}"
                 )
-        
             missing_inputs = []
             if M is None:
                 missing_inputs.append("M")
@@ -309,7 +306,14 @@ class GEMM:
                     "fp64": origami.data_type_t.Double,
                     "fp8": origami.data_type_t.Float8_fnuz,
                 }
-                dtype = dtype_map[dtype]
+                origami_dtype = dtype_map.get(dtype)
+                if origami_dtype is None:
+                    warnings.warn(
+                        f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
+                        RuntimeWarning,
+                    )
+                    return None, None
+                dtype = origami_dtype
                 
                 hardware = OrigamiHelper.get_hardware(arch)
                 if num_cus is not None:

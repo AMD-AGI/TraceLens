@@ -23,7 +23,7 @@ class OrigamiHelper:
         a_dtype: origami.data_type_t,
         b_dtype: origami.data_type_t,
         out_dtype: origami.data_type_t,
-        harware: origami.hardware_t,
+        hardware: origami.hardware_t,
         mx_block_size=0,
         streamk=False,
     ):
@@ -35,7 +35,7 @@ class OrigamiHelper:
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.out_dtype = out_dtype
-        self._hardware = harware
+        self._hardware = hardware
         self._mx_block_size = mx_block_size
  
         #####
@@ -46,8 +46,8 @@ class OrigamiHelper:
             return origami.datatype_to_bits(dtype)
 
         self._a_dtype_bitsize = get_dtype_bits(a_dtype)
-        self._b_dtype_bitsize = get_dtype_bits(a_dtype)
-        self._out_dtype_bitsize = get_dtype_bits(a_dtype)
+        self._b_dtype_bitsize = get_dtype_bits(b_dtype)
+        self._out_dtype_bitsize = get_dtype_bits(out_dtype)
 
         # For matrix instruction latency lookup, use input dtype (not output dtype)
         # because the matrix instruction type is determined by input operand types
