@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import re
 from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
@@ -67,6 +68,30 @@ class TraceDiff:
     def _invalidate_merged_cache(self):
         """Invalidate merged tree cache when tree is rebuilt."""
         self._merged_id_to_event = None
+
+    @staticmethod
+    def _normalize_name_for_comparison(name):
+        """
+        Normalize node names by removing variable parts (hex memory addresses and line numbers)
+        to enable comparison of functionally identical nodes across traces.
+
+        Removes:
+        - Hex memory addresses: 0x7fe640752310 -> 0xXXXX
+        - Line numbers in Python stack: path/file.py(715): func -> path/file.py: func
+
+        Args:
+            name: The name string to normalize
+
+        Returns:
+            The normalized name, or the original name if it's None
+        """
+        if name is None:
+            return name
+        # Remove hex memory addresses but keep the "at 0x" part for context
+        normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+        # Remove line numbers from Python stack frames (filename.py(line_number): function)
+        normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+        return normalized
 
     def _get_op_name(self, uid, tree_num):
         """
@@ -197,7 +222,8 @@ class TraceDiff:
         wf_cache = {}
 
         def get_name(node):
-            return node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+            return self._normalize_name_for_comparison(name)
 
         def get_children(tree, node):
             return tree.get_children_events(node)
@@ -311,11 +337,11 @@ class TraceDiff:
             raise ValueError(
                 "Both trees must have at least one root node in cpu_root_nodes."
             )
-        
+
         # Get the top-level root for each tree
         root_uid1 = self._get_top_level_root(tree1, tree1.cpu_root_nodes[0])
         root_uid2 = self._get_top_level_root(tree2, tree2.cpu_root_nodes[0])
-        
+
         # Perform DFS from the top-level roots
         node1 = tree1.get_UID2event(root_uid1)
         node2 = tree2.get_UID2event(root_uid2)
@@ -364,11 +390,12 @@ class TraceDiff:
 
         def get_name_by_uid(tree, uid):
             node = tree.get(uid)
-            return (
+            name = (
                 node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
                 if node
                 else None
             )
+            return self._normalize_name_for_comparison(name)
 
         def merge_from_pod(uid1, uid2, parent_merged_id=None):
             key = (uid1, uid2)
@@ -448,9 +475,13 @@ class TraceDiff:
             return merged_id
 
         # Find top-level root UIDs by traversing up from any CPU root node
-        root_uid1 = self._get_top_level_root(self.baseline, self.baseline.cpu_root_nodes[0])
-        root_uid2 = self._get_top_level_root(self.variant, self.variant.cpu_root_nodes[0])
-        
+        root_uid1 = self._get_top_level_root(
+            self.baseline, self.baseline.cpu_root_nodes[0]
+        )
+        root_uid2 = self._get_top_level_root(
+            self.variant, self.variant.cpu_root_nodes[0]
+        )
+
         # Merge the single top-level root
         merged_root_id = merge_from_pod(root_uid1, root_uid2)
         merged_root_ids = [merged_root_id]
