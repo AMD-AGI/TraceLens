@@ -509,7 +509,7 @@ class TraceDiff:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
             )
-        (merged_events, merged_root_ids) = self.merged_tree
+        merged_events, merged_root_ids = self.merged_tree
         output_lines = []
         merged_id_to_event = {event["merged_id"]: event for event in merged_events}
 
@@ -618,7 +618,7 @@ class TraceDiff:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
             )
-        (merged_events, merged_root_ids) = self.merged_tree
+        merged_events, merged_root_ids = self.merged_tree
         merged_id_to_event = {event["merged_id"]: event for event in merged_events}
         baseline_uid2node = {
             event.get("UID"): event
