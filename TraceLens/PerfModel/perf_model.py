@@ -150,6 +150,15 @@ class GEMM:
     def flops(self):
         return self.flops_func(self.M, self.N, self.K, self.bias)
 
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for GEMM)."""
+        return "matrix"
+
     @staticmethod
     def bytes_func(M, N, K, bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
         # if any of the bpe is None, we will return None
@@ -937,6 +946,18 @@ class CONV:
             self.x_shape, self.w_shape, self.out_shape, self.bias, self.transposed_conv
         )
 
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        # Try dtype_input_weight first (used by aten_conv), then dtype
+        dtype = self.param_details.get("dtype_input_weight", [None])[0]
+        if dtype is None:
+            dtype = self.param_details.get("dtype", None)
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for CONV)."""
+        return "matrix"
+
     @staticmethod
     # we assume same bytes per element for all tensors
     # TODO: make it more general later
@@ -1236,6 +1257,15 @@ class SDPA:
             self.d_h_v,
             self.param_details["causal"],
         )
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for SDPA)."""
+        return "matrix"
 
     @staticmethod
     def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
@@ -2320,6 +2350,7 @@ class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
+        self.arch = arch
         self.param_details = self.get_param_details(event)
         self.nelems = prod(self.param_details["op_shape"])
         self.dtype_in_out = self.param_details["dtype_in_out"]
@@ -2339,6 +2370,15 @@ class UnaryElementwise:
 
     def flops(self):
         return self.flops_func(self.nelems)
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
 
     @staticmethod
     def bytes_func(nelems, bpe_in, bpe_out):
@@ -2376,6 +2416,7 @@ class BinaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
+        self.arch = arch
         self.param_details = self.get_param_details(event)
         broadcast_shape = self.get_broadcast_shape(
             self.param_details["shape_in1"], self.param_details["shape_in2"]
@@ -2410,6 +2451,16 @@ class BinaryElementwise:
 
     def flops(self):
         return self.flops_func(self.nelems_out)
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        # Use first input dtype as the compute precision
+        dtype = self.dtype_in1_in2_out[0] if self.dtype_in1_in2_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
 
     @staticmethod
     def bytes_func(nelems_in1, nelems_in2, nelems_out, bpe_in1, bpe_in2, bpe_out):
