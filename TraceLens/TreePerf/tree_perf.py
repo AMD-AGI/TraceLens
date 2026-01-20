@@ -172,7 +172,7 @@ class TreePerfAnalyzer:
         python_path=None,
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
-        enable_pseudo_ops=True,
+        enable_pseudo_ops=False,
         pseudo_op_extensions=None,
         tree_postprocess_extension=None
     ):
