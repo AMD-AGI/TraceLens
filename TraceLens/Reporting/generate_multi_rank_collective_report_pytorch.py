@@ -12,6 +12,10 @@ import sys
 from typing import List, Dict, Optional, Union
 import subprocess
 import warnings
+import re
+from dataclasses import dataclass
+import ast
+import time
 from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import request_install
 
@@ -34,9 +38,209 @@ def infer_world_size(trace_files: List[str]) -> int:
     return len(trace_files)
 
 
+@dataclass(frozen=True)
+class _RankedTraceFile:
+    rank: int
+    path: str
+
+
+def _fmt_seconds(s: float) -> str:
+    if s < 1:
+        return f"{s:.2f}s"
+    if s < 60:
+        return f"{s:.1f}s"
+    return f"{s/60:.1f}m"
+
+
+def _print_stage_start(msg: str) -> float:
+    print(f"[TraceLens] {msg}...", flush=True)
+    return time.perf_counter()
+
+
+def _print_stage_done(msg: str, t0: float) -> None:
+    dt = time.perf_counter() - t0
+    print(f"[TraceLens] {msg} done ({_fmt_seconds(dt)})", flush=True)
+
+
+def _try_int(v) -> Optional[int]:
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def _select_trace_files(
+    *,
+    trace_dir: Optional[str],
+    trace_pattern: Optional[str],
+    trace_glob: Optional[str],
+    world_size: int,
+    strict_world_size_check: bool,
+    rank_regex: str,
+) -> List[str]:
+    """
+    Resolve trace file paths in one of three modes:
+      - trace_pattern: exactly one '*' placeholder replaced with 0..world_size-1
+      - trace_dir: expects rank{i}_trace.json
+      - trace_glob: glob for arbitrary trace names; ranks extracted via regex
+    """
+    if sum(bool(x) for x in [trace_dir, trace_pattern, trace_glob]) != 1:
+        raise ValueError(
+            "Provide exactly one of trace_dir, trace_pattern, or trace_glob"
+        )
+
+    if trace_glob:
+        rx = re.compile(rank_regex)
+        matches = glob.glob(trace_glob, recursive=True)
+        if not matches:
+            raise FileNotFoundError(
+                f"No trace files matched --trace_glob: {trace_glob}"
+            )
+
+        ranked: List[_RankedTraceFile] = []
+        for p in matches:
+            m = rx.search(os.path.basename(p)) or rx.search(p)
+            if not m:
+                continue
+            rank_str = m.groupdict().get("rank") or m.group(1)
+            try:
+                rank = int(rank_str)
+            except ValueError:
+                continue
+            ranked.append(_RankedTraceFile(rank=rank, path=p))
+
+        if not ranked:
+            raise ValueError(
+                f"--trace_glob matched {len(matches)} files, but none matched --rank_regex={rank_regex}"
+            )
+
+        # Keep lowest path for any duplicate rank
+        by_rank: Dict[int, str] = {}
+        for rt in sorted(ranked, key=lambda x: (x.rank, x.path)):
+            by_rank.setdefault(rt.rank, rt.path)
+
+        expected = list(range(world_size))
+        missing = [r for r in expected if r not in by_rank]
+        if missing:
+            msg = (
+                f"Missing ranks in trace_glob selection: {missing}. "
+                "TraceLens NcclAnalyser assumes rank id == index in the provided trace-file list, "
+                "so partial rank sets will produce incorrect results."
+            )
+            if strict_world_size_check:
+                raise FileNotFoundError(msg)
+            raise ValueError(msg)
+
+        return [by_rank[r] for r in expected if r in by_rank]
+
+    if trace_pattern:
+        if trace_pattern.count("*") != 1:
+            raise ValueError(
+                "trace_pattern must contain exactly one '*' character as a placeholder for rank id"
+            )
+        list_trace_filepaths: List[str] = []
+        for i in range(world_size):
+            expected_file = trace_pattern.replace("*", str(i))
+            if not os.path.isfile(expected_file):
+                msg = (
+                    f"Expected trace file not found: {expected_file}. "
+                    "TraceLens NcclAnalyser requires a complete rank set for correct results."
+                )
+                if strict_world_size_check:
+                    raise FileNotFoundError(msg)
+                raise ValueError(msg)
+            list_trace_filepaths.append(expected_file)
+        return list_trace_filepaths
+
+    # trace_dir
+    assert trace_dir is not None
+    list_trace_filepaths = []
+    for i in range(world_size):
+        expected_file = os.path.join(trace_dir, f"rank{i}_trace.json")
+        if not os.path.isfile(expected_file):
+            msg = (
+                f"Expected trace file not found: {expected_file}. "
+                "TraceLens NcclAnalyser requires a complete rank set for correct results."
+            )
+            if strict_world_size_check:
+                raise FileNotFoundError(msg)
+            raise ValueError(msg)
+        list_trace_filepaths.append(expected_file)
+    return list_trace_filepaths
+
+
+def _parse_pg_ranks(v: Union[str, List[int], tuple]) -> List[int]:
+    if isinstance(v, list):
+        return [int(x) for x in v]
+    if isinstance(v, tuple):
+        return [int(x) for x in v]
+    if isinstance(v, str):
+        try:
+            parsed = ast.literal_eval(v)
+            if isinstance(parsed, (list, tuple)):
+                return [int(x) for x in parsed]
+        except Exception:
+            pass
+        # Fall back to extracting all integers from the string (common for "0,1,2,3" variants)
+        ranks = []
+        for s in re.findall(r"\d+", v):
+            r = _try_int(s)
+            if r is not None:
+                ranks.append(r)
+        return ranks
+    return []
+
+
+def _add_node_span_columns(df: pd.DataFrame, gpus_per_node: int) -> pd.DataFrame:
+    """
+    Adds:
+      - rank_node: inferred node id for the row's rank (rank // gpus_per_node)
+      - nodes_involved: number of nodes participating in the row's process group
+      - node_span: intra_node vs inter_node based on Process Group Ranks membership
+    """
+    if df is None or df.empty:
+        return df
+
+    rank_to_node: Dict[int, int] = {}
+    for r in df["rank"].unique():
+        if pd.isna(r):
+            continue
+        rr = _try_int(r)
+        if rr is None:
+            continue
+        rank_to_node[rr] = rr // int(gpus_per_node)
+    df = df.copy()
+    df["rank_node"] = df["rank"].map(rank_to_node)
+
+    def _nodes_set(pg_ranks_val) -> set:
+        ranks = _parse_pg_ranks(pg_ranks_val)
+        if not ranks:
+            return set()
+        return {rank_to_node.get(int(r), int(r) // int(gpus_per_node)) for r in ranks}
+
+    def _nodes_involved(pg_ranks_val) -> int:
+        nodes = _nodes_set(pg_ranks_val)
+        return int(len(nodes)) if nodes else 0
+
+    def _node_span(pg_ranks_val) -> str:
+        nodes = _nodes_set(pg_ranks_val)
+        if not nodes:
+            return "unknown"
+        return "intra_node" if len(nodes) <= 1 else "inter_node"
+
+    if "Process Group Ranks" in df.columns:
+        df["nodes_involved"] = df["Process Group Ranks"].apply(_nodes_involved)
+        df["node_span"] = df["Process Group Ranks"].apply(_node_span)
+    else:
+        df["nodes_involved"] = 0
+        df["node_span"] = "unknown"
+    return df
+
+
 def generate_collective_report(
     trace_dir: Optional[str] = None,
     trace_pattern: Optional[str] = None,
+    trace_glob: Optional[str] = None,
     world_size: Optional[int] = None,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
@@ -45,6 +249,8 @@ def generate_collective_report(
     strict_world_size_check: bool = True,
     use_multiprocessing: bool = False,
     max_workers: Optional[int] = None,
+    rank_regex: str = r"rank[\[\-_/]?(?P<rank>\d+)",
+    gpus_per_node: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Generate comprehensive NCCL communication analysis reports.
@@ -70,69 +276,174 @@ def generate_collective_report(
     if world_size is None:
         raise ValueError("world_size must be provided")
 
-    if not trace_dir and not trace_pattern:
-        raise ValueError("Either trace_dir or trace_pattern must be provided")
+    if not trace_dir and not trace_pattern and not trace_glob:
+        raise ValueError(
+            "One of trace_dir, trace_pattern, or trace_glob must be provided"
+        )
 
-    list_trace_filepaths = []
+    t0 = _print_stage_start("Resolving trace file paths")
+    list_trace_filepaths = _select_trace_files(
+        trace_dir=trace_dir,
+        trace_pattern=trace_pattern,
+        trace_glob=trace_glob,
+        world_size=world_size,
+        strict_world_size_check=strict_world_size_check,
+        rank_regex=rank_regex,
+    )
+    _print_stage_done(f"Resolved {len(list_trace_filepaths)} trace files", t0)
 
-    # Generate file paths based on input mode
-    if trace_pattern:
-        # Use trace_pattern with wildcard replacement
-        for i in range(world_size):
-            # ensure there is exactly one '*'
-            if trace_pattern.count("*") != 1:
-                raise ValueError(
-                    "trace_pattern must contain exactly one '*' character as a placeholder for rank id"
-                )
-            expected_file = trace_pattern.replace("*", str(i))
-            if not os.path.isfile(expected_file):
-                if strict_world_size_check:
-                    raise FileNotFoundError(
-                        f"Expected trace file not found: {expected_file}"
-                    )
-                else:
-                    warnings.warn(
-                        f"Expected trace file not found: {expected_file}. Skipping."
-                    )
-                    continue
-            list_trace_filepaths.append(expected_file)
+    # Minimal visibility into rank->file mapping without spamming for large world sizes.
+    if len(list_trace_filepaths) <= 16:
+        for r, p in enumerate(list_trace_filepaths):
+            print(f"[TraceLens] rank {r}: {p}", flush=True)
     else:
-        # Use trace_dir with standard naming pattern
-        for i in range(world_size):
-            expected_file = os.path.join(trace_dir, f"rank{i}_trace.json")
-            if not os.path.isfile(expected_file):
-                if strict_world_size_check:
-                    raise FileNotFoundError(
-                        f"Expected trace file not found: {expected_file}"
-                    )
-                else:
-                    warnings.warn(
-                        f"Expected trace file not found: {expected_file}. Skipping."
-                    )
-                    continue
-            list_trace_filepaths.append(expected_file)
+        for r, p in list(enumerate(list_trace_filepaths))[:8]:
+            print(f"[TraceLens] rank {r}: {p}", flush=True)
+        print(f"[TraceLens] ... ({len(list_trace_filepaths) - 16} ranks omitted) ...")
+        for r, p in list(enumerate(list_trace_filepaths))[-8:]:
+            print(f"[TraceLens] rank {r}: {p}", flush=True)
 
     # Initialize NCCL analyzer
+    t0 = _print_stage_start("Loading traces (NcclAnalyser)")
     nccl_analyser = NcclAnalyser(
         list_trace_filepaths,
         world_size,
         use_multiprocessing=use_multiprocessing,
         max_workers=max_workers,
     )
+    _print_stage_done("Loaded traces", t0)
 
     # Generate DataFrames
     report_dfs = {}
 
     # Add summary dataframes
-    print("Generating summary reports...")
+    print("Generating summary reports...", flush=True)
+    t0 = _print_stage_start("Building nccl_summary_implicit_sync")
     report_dfs["nccl_summary_implicit_sync"] = (
         nccl_analyser.build_df_summary_nccl_implicit_sync_cat(agg_metrics=agg_metrics)
     )
+    _print_stage_done("Built nccl_summary_implicit_sync", t0)
+
+    t0 = _print_stage_start("Building nccl_summary_long")
     report_dfs["nccl_summary_long"] = nccl_analyser.build_df_summary_long()
+    _print_stage_done("Built nccl_summary_long", t0)
+
+    # Optional: also produce summaries split by intra-node vs inter-node (inferred from rank id mapping)
+    if gpus_per_node is not None:
+        t0 = _print_stage_start(
+            "Building node-span summaries (intra_node vs inter_node)"
+        )
+        df_long = nccl_analyser.build_df_long()
+        df_long = _add_node_span_columns(df_long, gpus_per_node=int(gpus_per_node))
+
+        # Use NcclAnalyser's existing summary builder to avoid drift, but with extra grouping keys.
+        original_df_long = getattr(nccl_analyser, "df_per_rank_coll", None)
+        try:
+            nccl_analyser.df_per_rank_coll = df_long
+            group_by_cols = [
+                "rank",
+                "rank_node",
+                "nodes_involved",
+                "node_span",
+                "Process Group Name",
+                "Process Group Ranks",
+                "Collective name",
+                "Group size",
+                "dtype",
+                "In msg nelems",
+                "Out msg nelems",
+                "In split size",
+                "Out split size",
+                "stream",
+            ]
+            report_dfs["nccl_summary_long_node_span"] = (
+                nccl_analyser.build_df_summary_long(group_by_cols=group_by_cols)
+            )
+        finally:
+            if original_df_long is not None:
+                nccl_analyser.df_per_rank_coll = original_df_long
+
+        # Implicit sync summary split by node_span (grouping matches NcclAnalyser with an extra node_span)
+        df_implicit = nccl_analyser.build_df_nccl_implicit_sync_cat(detailed=False)
+        if df_implicit is not None and not df_implicit.empty:
+            df_implicit = df_implicit.copy()
+            # node_span from Process Group Ranks; rank_node doesn't exist in this wide df
+            rank_to_node = {r: int(r) // int(gpus_per_node) for r in range(world_size)}
+
+            def _nodes_set_implicit(pg_ranks_val) -> set:
+                ranks = _parse_pg_ranks(pg_ranks_val)
+                if not ranks:
+                    return set()
+                return {
+                    rank_to_node.get(int(r), int(r) // int(gpus_per_node))
+                    for r in ranks
+                }
+
+            def _nodes_involved_implicit(pg_ranks_val) -> int:
+                nodes = _nodes_set_implicit(pg_ranks_val)
+                return int(len(nodes)) if nodes else 0
+
+            def _node_span_implicit(pg_ranks_val) -> str:
+                nodes = _nodes_set_implicit(pg_ranks_val)
+                if not nodes:
+                    return "unknown"
+                return "intra_node" if len(nodes) <= 1 else "inter_node"
+
+            df_implicit["nodes_involved"] = df_implicit["Process Group Ranks"].apply(
+                _nodes_involved_implicit
+            )
+            df_implicit["node_span"] = df_implicit["Process Group Ranks"].apply(
+                _node_span_implicit
+            )
+
+            metadata_fields = ["Process Group Name", "Group size", "Full msg size (MB)"]
+            agg_logic = {
+                "comm_latency": agg_metrics + ["size", lambda x: x.sum() / 1000],
+                "skew in start time": agg_metrics,
+                "skew in end time": agg_metrics,
+                "algo bw (GB/s)": agg_metrics,
+                "bus bw (GB/s)": agg_metrics,
+            }
+            metric_fields = list(agg_logic.keys()).copy()
+            for col in metadata_fields:
+                agg_logic[col] = "first"
+
+            groupby_cols = [
+                "nodes_involved",
+                "node_span",
+                "Collective name",
+                "dtype",
+                "In msg nelems",
+            ]
+            agg_result = df_implicit.groupby(groupby_cols).agg(agg_logic)
+            agg_result.columns = [
+                f"{col[0]}_{col[1]}" if col[1] != "" else col[0]
+                for col in agg_result.columns
+            ]
+            column_renames = {
+                "comm_latency_<lambda_0>": "Total comm latency (ms)",
+                "comm_latency_size": "count",
+            }
+            for col in metadata_fields:
+                column_renames[col + "_first"] = col
+            agg_result.rename(columns=column_renames, inplace=True)
+            summary_df = agg_result.reset_index().sort_values(
+                by="Total comm latency (ms)", ascending=False
+            )
+            columns_order = groupby_cols + metadata_fields
+            for group in metric_fields:
+                for agg in agg_metrics:
+                    columns_order.append(f"{group}_{agg}")
+            columns_order.extend(["count", "Total comm latency (ms)"])
+            report_dfs["nccl_summary_implicit_node_span"] = summary_df[columns_order]
+        _print_stage_done("Built node-span summaries", t0)
 
     # Add detailed per-rank information if requested
     if detailed_analysis:
         print("Generating detailed per-rank analysis...")
+        t0 = _print_stage_start(
+            "Building detailed sheets (nccl_long / nccl_implicit_sync / nccl_all2allv)"
+        )
         report_dfs["nccl_long"] = nccl_analyser.build_df_long()
         report_dfs["nccl_implicit_sync"] = (
             nccl_analyser.build_df_nccl_implicit_sync_cat(detailed=True)
@@ -140,6 +451,7 @@ def generate_collective_report(
         df_all2allv = nccl_analyser.build_df_nccl_all2allv(detailed=True)
         if df_all2allv is not None and not df_all2allv.empty:
             report_dfs["nccl_all2allv"] = df_all2allv
+        _print_stage_done("Built detailed sheets", t0)
 
     # Export DataFrames
     if output_csvs_dir:
@@ -182,9 +494,26 @@ def main():
         type=str,
         help="Template path with a single * placeholder for rank. Example: /path/to/trace_rank_*_step_3.json",
     )
+    input_group.add_argument(
+        "--trace_glob",
+        type=str,
+        help="Glob for trace files with arbitrary names (supports **). Requires --world_size and uses --rank_regex to map files to ranks.",
+    )
 
     parser.add_argument(
         "--world_size", type=int, default=None, help="Number of ranks (required)"
+    )
+    parser.add_argument(
+        "--rank_regex",
+        type=str,
+        default=r"rank[\[\-_/]?(?P<rank>\d+)",
+        help="Regex used with --trace_glob to extract rank id. Must contain a named group 'rank' or a single capture group.",
+    )
+    parser.add_argument(
+        "--gpus_per_node",
+        type=int,
+        default=None,
+        help="If provided, adds node-aware intra_node vs inter_node breakdown sheets by inferring node_id = rank // gpus_per_node.",
     )
 
     # Output arguments
@@ -223,29 +552,28 @@ def main():
     # If no output specified, create default Excel output
     if args.output_xlsx_path is None and args.output_csvs_dir is None:
         if args.trace_dir:
-            default_output = os.path.join(args.trace_dir, "nccl_analysis_report.xlsx")
-            print(f"No output specified. Using default: {default_output}")
-            args.output_xlsx_path = default_output
-        elif args.trace_pattern:
-
-            def common_dir(pattern: str) -> str:
-                p0 = pattern.replace("*", "0")
-                p1 = pattern.replace("*", "1")
-                d0, d1 = os.path.dirname(p0), os.path.dirname(p1)
-                while d0 != d1:
-                    d0, d1 = os.path.dirname(d0), os.path.dirname(d1)
-                return d0
-
-            default_output = os.path.join(
-                common_dir(args.trace_pattern), "nccl_analysis_report.xlsx"
+            output_dir = args.trace_dir
+        else:
+            trace_files = _select_trace_files(
+                trace_dir=None,
+                trace_pattern=args.trace_pattern,
+                trace_glob=args.trace_glob,
+                world_size=args.world_size,
+                strict_world_size_check=True,
+                rank_regex=args.rank_regex,
             )
-            print(f"No output specified. Using default: {default_output}")
-            args.output_xlsx_path = default_output
+            common = os.path.commonpath([os.path.abspath(p) for p in trace_files])
+            output_dir = os.path.dirname(common) if os.path.isfile(common) else common
+
+        default_output = os.path.join(output_dir, "nccl_analysis_report.xlsx")
+        print(f"No output specified. Using default: {default_output}")
+        args.output_xlsx_path = default_output
 
     # Generate report
     generate_collective_report(
         trace_dir=args.trace_dir,
         trace_pattern=args.trace_pattern,
+        trace_glob=args.trace_glob,
         world_size=args.world_size,
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
@@ -253,6 +581,8 @@ def main():
         agg_metrics=args.agg_metrics,
         use_multiprocessing=args.use_multiprocessing,
         max_workers=args.max_workers,
+        rank_regex=args.rank_regex,
+        gpus_per_node=args.gpus_per_node,
     )
 
 
