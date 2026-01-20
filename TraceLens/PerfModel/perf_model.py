@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import warnings
+
 from .kernel_name_parser import gemm_name_parser
 
 
@@ -41,33 +42,33 @@ def name2bpe(name):
     return dict_dtype2bpe.get(name.lower(), None)
 
 
-def gemmologist_dtype_map(dtype):
+def simulation_dtype_map(dtype):
     """
-    This function maps a PyTorch data type to a gemmologist data type.
+    This function maps a PyTorch data type to a simulation data type.
     Args:
         dtype (str): The name of the pytorch data type.
     Returns:
         str: The name of the PyTorch data type.
     """
-    dict_dtype2gemmologist = {
+    dict_dtype2simulation = {
         "fp32": "float",
         "fp64": "double",
         "fp16": "c10::half",
         "bf16": "c10::bfloat16",
         "fp8": "c10::float8_e4m3fnuz",
     }
-    return dict_dtype2gemmologist.get(dtype.lower(), None)
+    return dict_dtype2simulation.get(dtype.lower(), None)
 
 
 def torch_dtype_map(dtype):
     """
-    This function maps a PyTorch data type to a gemmologist data type.
+    This function maps a PyTorch data type to a simulation data type.
     Args:
         dtype (str): The name of the PyTorch data type.
     Returns:
-        str: The name of the gemmologist data type.
+        str: The name of the simulation data type.
     """
-    dict_dtype2gemmologist = {
+    dict_dtype2simulation = {
         "float": "fp32",
         "double": "fp64",
         "c10::half": "fp16",
@@ -76,7 +77,7 @@ def torch_dtype_map(dtype):
         "unsigned char": "fp8",
         "fp8": "fp8",
     }
-    return dict_dtype2gemmologist.get(dtype.lower(), None)
+    return dict_dtype2simulation.get(dtype.lower(), None)
 
 
 # 1. GEMM
@@ -119,22 +120,12 @@ class GEMM:
         self.bias = self.param_details["bias"]
 
         if arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                self.gemmologist_time, self.gemmologist_cmd = (
-                    GEMM.get_simulation_time_func(
-                        arch, self.M, self.N, self.K, self.B, dtype, self.python_path
-                    )
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            self.simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
+                arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+            )
 
     @staticmethod
     def get_param_details(event):
@@ -213,110 +204,155 @@ class GEMM:
     def get_simulation_time_func(
         arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None
     ):
-        missing_inputs = []
-        if M is None:
-            missing_inputs.append("M")
-        if N is None:
-            missing_inputs.append("N")
-        if K is None:
-            missing_inputs.append("K")
-        if B is None:
-            B = 1
-        if dtype is None:
-            missing_inputs.append("dtype")
-        if "name" not in arch:
-            missing_inputs.append("arch['name']")
-        assert (
-            not missing_inputs
-        ), f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
-        # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
-        gemmologist_path = os.environ.get("GEMMOLOGIST_PATH")
+        if "GEMM_SIMULATOR_PATH" in os.environ:
+            if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
+                raise ValueError(
+                    f"GEMM_SIMULATOR_PATH does not exist: {os.environ.get('GEMM_SIMULATOR_PATH')}"
+                )
+            missing_inputs = []
+            if M is None:
+                missing_inputs.append("M")
+            if N is None:
+                missing_inputs.append("N")
+            if K is None:
+                missing_inputs.append("K")
+            if B is None:
+                B = 1
+            if dtype is None:
+                missing_inputs.append("dtype")
+            if "name" not in arch:
+                missing_inputs.append("arch['name']")
+            assert (
+                not missing_inputs
+            ), f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
+            # assume that gemm simulator path is given in the environment variable GEMM_SIMULATOR_PATH
+            GEMM_SIMULATOR_PATH = os.environ.get("GEMM_SIMULATOR_PATH")
+            GEMM_SIMULATOR_PATH, gemm_executable = os.path.split(GEMM_SIMULATOR_PATH)
 
-        cmd = [
-            "./bin/gemmologist.py",
-            "-b",
-            str(B),
-            "-m",
-            str(M),
-            "-n",
-            str(N),
-            "-k",
-            str(K),
-            "--dtype",
-            dtype,
-            "-d",
-            "1",
-            "-a",
-            arch["name"],
-        ]
+            cmd = [
+                gemm_executable,
+                "-b",
+                str(B),
+                "-m",
+                str(M),
+                "-n",
+                str(N),
+                "-k",
+                str(K),
+                "--dtype",
+                dtype,
+                "-d",
+                "1",
+                "-a",
+                arch["name"],
+            ]
 
-        # Windows does need a python executable for running gemmologist
-        if not python_path and os.name == "nt":
-            raise AssertionError(
-                "Python executable path need to be specified in Windows for running Gemmologist."
+            # Windows does need a python executable for running the gemm simulator
+            if not python_path and os.name == "nt":
+                raise AssertionError(
+                    "Python executable path need to be specified in Windows for running the GEMM simulator."
+                )
+            # Add the python executable path if it is given
+            if python_path:
+                cmd.insert(0, python_path)
+            else:
+                cmd.insert(0, "python")  # default to python3
+
+            if "freq_mhz" in arch:
+                cmd.append("--freq_mhz")
+                cmd.append(str(arch["freq_mhz"]))
+
+            if num_cus:
+                cmd.append("--cus")
+                cmd.append(str(num_cus))
+
+            if "mem_bw_gbps" in arch:
+                cmd.append("--hbm_bw")
+                # In case of flash attention when everything happens in cache, we change the
+                # memory bw to l1 bandwidth so as to simulate the same
+                mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
+                if num_cus and num_cus != arch["num_cus"]:
+                    mem_bw = round(mem_bw / arch["num_cus"] * num_cus)
+                cmd.append(str(mem_bw))
+
+            # Check if the result is already in the cache
+            cache_key = tuple(cmd)
+            if cache_key in GEMM.cache_gemm_results:
+                return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
+
+            # Run the command
+            result = subprocess.run(
+                cmd, cwd=GEMM_SIMULATOR_PATH, capture_output=True, text=True
             )
-        # Add the python executable path if it is given
-        if python_path:
-            cmd.insert(0, python_path)
+            stdout = result.stdout
+            stderr = result.stderr
+            log = re.findall(r"Time=\d+\.\d+", stdout)
+            if len(log) > 0:
+                simulation_time = float(re.sub("Time=", "", str(log[0])))
+                # Cache the result
+                GEMM.cache_gemm_results[cache_key] = simulation_time
+                return simulation_time, " ".join(cmd)
+            else:
+                raise AssertionError("Failed to simulate ", cmd, stdout, stderr)
         else:
-            cmd.insert(0, "python")  # default to python3
+            # try to use Origami for estimating performance
+            try:
+                # assumes this PR has completed
+                # https://github.com/ROCm/rocm-libraries/pull/3903
+                import origami
+                from .origami_helper import OrigamiHelper
 
-        if "freq_mhz" in arch:
-            cmd.append("--freq_mhz")
-            cmd.append(str(arch["freq_mhz"]))
+                # origami simulation requires an architecture file including GPU name and clock speed
+                # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+                # for example: {"name": "MI300X", "freq_mhz": 1207}
 
-        if num_cus:
-            cmd.append("--cus")
-            cmd.append(str(num_cus))
+                dtype_map = {
+                    "fp32": origami.data_type_t.Float,
+                    "fp16": origami.data_type_t.Half,
+                    "bf16": origami.data_type_t.BFloat16,
+                    "fp64": origami.data_type_t.Double,
+                    "fp8": origami.data_type_t.Float8_fnuz,
+                }
+                origami_dtype = dtype_map.get(dtype)
+                if origami_dtype is None:
+                    warnings.warn(
+                        f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
+                        RuntimeWarning,
+                    )
+                    return None, None
+                dtype = origami_dtype
 
-        if "mem_bw_gbps" in arch:
-            cmd.append("--hbm_bw")
-            # In case of flash attention when everything happens in cache, we change the
-            # memory bw to l1 bandwidth so as to simulate the same
-            mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
-            if num_cus and num_cus != arch["num_cus"]:
-                mem_bw = round(mem_bw / arch["num_cus"] * num_cus)
-            cmd.append(str(mem_bw))
+                hardware = OrigamiHelper.get_hardware(arch)
+                if num_cus is not None:
+                    hardware.N_CU = num_cus
+                if force_to_l1:
+                    # origami will have an FA model really soon
+                    # until it is available, just make the L1 and L2 really big
+                    hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
+                    hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
 
-        # Check if the result is already in the cache
-        cache_key = tuple(cmd)
-        if cache_key in GEMM.cache_gemm_results:
-            return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
+                # todo - allow user to override num_cus and other properties
+                helper = OrigamiHelper(M, N, K, B, dtype, dtype, dtype, hardware)
 
-        # Run the command
-        result = subprocess.run(
-            cmd, cwd=gemmologist_path, capture_output=True, text=True
-        )
-        stdout = result.stdout
-        stderr = result.stderr
-        log = re.findall(r"Time=\d+\.\d+", stdout)
-        if len(log) > 0:
-            gemmologist_time = float(re.sub("Time=", "", str(log[0])))
-            # Cache the result
-            GEMM.cache_gemm_results[cache_key] = gemmologist_time
-            return gemmologist_time, " ".join(cmd)
-        else:
-            raise AssertionError(
-                "Not able to simulate in gemmologist", cmd, stdout, stderr
-            )
+                simulation_time = helper.get_simulation_time()
+                return (
+                    simulation_time,
+                    f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
+                )
+
+            except ImportError:
+                # Todo: Naive simulation
+                return None, None
 
     def get_simulation_time(self):
         simulation_time = None
         if self.arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                simulation_time, self.gemmologist_cmd = GEMM.get_simulation_time_func(
-                    self.arch, self.M, self.N, self.K, self.B, dtype, self.python_path
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
+                self.arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+            )
         return simulation_time
 
 
@@ -1451,32 +1487,24 @@ class SDPA:
     def get_simulation_time(self):
         simulated_time = None
         if self.arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
-                fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.get_simulation_time_func(
-                    self.arch,
-                    dtype,
-                    self.python_path,
-                    self.param_details["dtype_A_B"][0],
-                    bytes,
-                    self.B,
-                    self.H_Q,
-                    self.N_Q,
-                    self.N_KV,
-                    self.d_h,
-                    fa,
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
+            fa = True if type(self).__name__ == "flash_attention" else False
+            simulated_time = SDPA.get_simulation_time_func(
+                self.arch,
+                dtype,
+                self.python_path,
+                self.param_details["dtype_A_B"][0],
+                bytes,
+                self.B,
+                self.H_Q,
+                self.N_Q,
+                self.N_KV,
+                self.d_h,
+                fa,
+            )
         return simulated_time
 
     @staticmethod
@@ -1529,9 +1557,6 @@ class SDPA:
             num_cus=1,
         )
         pv_fwd_time = num_waves * pv_fwd_time
-        # pv_fwd_time, _ =  math.ceil(self.N_Q / 512) * math.ceil(self.N_KV / 512) * GEMM.get_gemmologist_time(self.arch, M=512, K=512, N=self.d_h,
-        #                                       B=self.B * self.H_Q, dtype=dtype,
-        #                                       python_path=self.python_path, force_to_l1=force_to_l1)
 
         if fa:
             # In case of flash attention we have to recompute
@@ -1539,7 +1564,7 @@ class SDPA:
             qkt_time = qkt_fwd_time
             pv_time = pv_fwd_time
 
-        # We don't need to go to gemmologist to calculate these,
+        # We don't need to go to the gemm simulator to calculate these,
         # as we already have the times
         p_grad_time = qkt_fwd_time
         v_grad_time = pv_fwd_time
@@ -1619,33 +1644,25 @@ class SDPA:
     def get_simulation_time_bwd(self):
         simulated_time = None
         if self.arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
-                bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-                fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.get_simulation_time_bwd_func(
-                    self.arch,
-                    dtype,
-                    self.python_path,
-                    self.param_details["dtype_A_B"][0],
-                    bytes,
-                    self.B,
-                    self.H_Q,
-                    self.N_Q,
-                    self.N_KV,
-                    self.d_h,
-                    fa,
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
+            fa = True if type(self).__name__ == "flash_attention" else False
+            simulated_time = SDPA.get_simulation_time_bwd_func(
+                self.arch,
+                dtype,
+                self.python_path,
+                self.param_details["dtype_A_B"][0],
+                bytes,
+                self.B,
+                self.H_Q,
+                self.N_Q,
+                self.N_KV,
+                self.d_h,
+                fa,
+            )
         return simulated_time
 
 
@@ -2643,20 +2660,20 @@ def jax_dtype2bpe(name):
 
 def jax_dtype_map(dtype):
     """
-    This function maps a Jax data type to a gemmologist data type.
+    This function maps a Jax data type to the gemm simulator data type.
     Args:
         dtype (str): The name of the Jax data type.
     Returns:
-        str: The name of the gemmologist data type.
+        str: The name of the gemm simulator data type.
     """
-    dict_jax_dtype2gemmologist = {
+    dict_jax_dtype2gemmsimulator = {
         "f32": "fp32",
         "f16": "fp16",
         "bf16": "bf16",
         "f8": "fp8",
         "fp8": "fp8",
     }
-    return dict_jax_dtype2gemmologist.get(dtype.lower(), None)
+    return dict_jax_dtype2gemmsimulator.get(dtype.lower(), None)
 
 
 def dtype_jax2torch(dtype):
@@ -2706,7 +2723,7 @@ class jax_gemm(GEMM):
             "K": event["args"]["K"],
             "bias": event["args"]["Beta"] != 0,
             "dtype_A_B": (event["args"]["Type"], event["args"]["Type"]),
-            "gemmologist_dtype": jax_dtype_map(event["args"]["Type"]),
+            "simulation_dtype": jax_dtype_map(event["args"]["Type"]),
         }
 
     # ---------------------- FLOPs / Bytes ----------------------
