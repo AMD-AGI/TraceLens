@@ -576,7 +576,7 @@ class TreePerfAnalyzer:
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby(["name","op category"]).agg(
+        df_agg = df_temp.groupby(["name", "op category"]).agg(
             {"total_direct_kernel_time": ["sum", "count"]}
         )
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
@@ -1955,10 +1955,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
