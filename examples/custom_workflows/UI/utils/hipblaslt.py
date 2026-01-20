@@ -21,7 +21,6 @@ import torch
 
 from TraceLens.UI.utils.reporting import TraceLensColumns
 
-
 logging.basicConfig(level=logging.INFO)
 LOGS_DIR = f"{os.getcwd()}/logs"
 

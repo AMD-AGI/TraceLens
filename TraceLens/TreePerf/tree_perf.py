@@ -1951,10 +1951,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
@@ -2332,11 +2330,11 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_metrics["TB/s"] = float("nan")
 
         # JaxGemm
-        if hasattr(perf_model, "gemmologist_time"):
-            dict_metrics["Gemmologist Time (µs)"] = perf_model.gemmologist_time
-            dict_metrics["Gemmologist TFLOPS/s"] = (
-                (gflops / 1e3) / (perf_model.gemmologist_time / 1e6)
-                if perf_model.gemmologist_time > 0
+        if hasattr(perf_model, "simulation_time"):
+            dict_metrics["Simulation Time (µs)"] = perf_model.simulation_time
+            dict_metrics["Simulation TFLOPS/s"] = (
+                (gflops / 1e3) / (perf_model.simulation_time / 1e6)
+                if perf_model.simulation_time > 0
                 else float("nan")
             )
 
