@@ -2356,8 +2356,8 @@ class vllm_unified_attention_with_output(SDPA):
         #prefill part
         if self.param_details["sum_ctx_tokens"]==0:
             raise NotImplementedError("Roofline for pure generation phase is not defined")
-        ctx_flops_qk = self.H_Q * (2 * 1024 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk)
-        ctx_flops_pv = self.H_Q * (2 * 1024 * self.param_details["sum_ctx_squared_tokens"]* self.d_h_v )
+        ctx_flops_qk = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk)
+        ctx_flops_pv = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"]* self.d_h_v )
         #Generation tokens
         ## ToDo: Add seqlen for KV
         gen_flops_qk = self.H_Q * (2 * self.param_details["sum_gen_tokens"] * self.d_h_qk)
