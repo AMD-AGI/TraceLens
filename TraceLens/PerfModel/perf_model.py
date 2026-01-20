@@ -123,11 +123,10 @@ class GEMM:
             dtype = self.param_details.get("simulation_dtype")
             if dtype is None:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-            self.simulation_time, self.simulation_cmd = (
-                GEMM.get_simulation_time_func(
-                    arch, self.M, self.N, self.K, self.B, dtype, self.python_path
-                )
+            self.simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
+                arch, self.M, self.N, self.K, self.B, dtype, self.python_path
             )
+
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
@@ -285,9 +284,7 @@ class GEMM:
                 GEMM.cache_gemm_results[cache_key] = simulation_time
                 return simulation_time, " ".join(cmd)
             else:
-                raise AssertionError(
-                    "Failed to simulate ", cmd, stdout, stderr
-                )
+                raise AssertionError("Failed to simulate ", cmd, stdout, stderr)
         else:
             # try to use Origami for estimating performance
             try:
@@ -295,6 +292,7 @@ class GEMM:
                 # https://github.com/ROCm/rocm-libraries/pull/3903
                 import origami
                 from .origami_helper import OrigamiHelper
+
                 # origami simulation requires an architecture file including GPU name and clock speed
                 # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
                 # for example: {"name": "MI300X", "freq_mhz": 1207}
@@ -314,22 +312,25 @@ class GEMM:
                     )
                     return None, None
                 dtype = origami_dtype
-                
+
                 hardware = OrigamiHelper.get_hardware(arch)
                 if num_cus is not None:
                     hardware.N_CU = num_cus
                 if force_to_l1:
-                     # origami will have an FA model really soon
-                     # until it is available, just make the L1 and L2 really big
-                     hardware.lds_capacity = 1024*1024*1024*1024
-                     hardware.L2_capacity = 1024*1024*1024*1024
+                    # origami will have an FA model really soon
+                    # until it is available, just make the L1 and L2 really big
+                    hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
+                    hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
 
                 # todo - allow user to override num_cus and other properties
                 helper = OrigamiHelper(M, N, K, B, dtype, dtype, dtype, hardware)
-                
+
                 simulation_time = helper.get_simulation_time()
-                return simulation_time, f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}"
-                
+                return (
+                    simulation_time,
+                    f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
+                )
+
             except ImportError:
                 # Todo: Naive simulation
                 return None, None
