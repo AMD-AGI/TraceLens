@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
- 
+
 """
 Split a vLLM trace into per-iteration or per-dummy-run traces.
 
