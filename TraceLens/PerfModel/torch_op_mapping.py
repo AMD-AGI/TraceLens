@@ -32,6 +32,7 @@ op_to_perf_model_class_map = {
     "aten::_scaled_dot_product_efficient_attention": perf_model.aten__scaled_dot_product_efficient_attention,
     "aten::_scaled_dot_product_flash_attention": perf_model.aten__scaled_dot_product_flash_attention,
     "aten::convolution": perf_model.aten_conv,
+    "aten::convolution_backward": perf_model.aten_conv_bwd,
     "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
