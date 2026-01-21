@@ -34,9 +34,9 @@ jobs:
 
     - name: Run Black
       # only run black on changed files based on this example:
-      # https://stackoverflow.com/questions/65584855/github-actions-black-lint-only-changed
+      # https://stackoverflow.com/questions/72061054/only-run-black-on-changed-files
       run: |
-        changed_files=$(git diff --diff-filter=d --name-only $(git merge-base HEAD origin/main) HEAD | grep '\.py$' || true)
+        changed_files=$(git diff --diff-filter=d --name-only $(git merge-base HEAD main) HEAD | grep '\.py$' || true)
         if [ -n "$changed_files" ]; then
           echo "Running black on changed files: $changed_files"
           echo "$changed_files" | xargs black --check
