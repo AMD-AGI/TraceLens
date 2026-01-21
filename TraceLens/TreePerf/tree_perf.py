@@ -576,12 +576,18 @@ class TreePerfAnalyzer:
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby(["name", "op category"]).agg(
-            {"total_direct_kernel_time": ["sum", "count"]}
+        df_agg = df_temp.groupby(["name"]).agg(
+            {"total_direct_kernel_time": ["sum", "count"], "op category": set},
         )
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
-        df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
+        df_agg.rename(
+            columns={
+                "total_direct_kernel_time_count": "Count",
+                "op category_set": "Categories",
+            },
+            inplace=True,
+        )
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
