@@ -674,7 +674,7 @@ class TreePerfAnalyzer:
             kernel_launchers.append(runtime_evt)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False):
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False, include_call_stack=False):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -684,6 +684,7 @@ class TreePerfAnalyzer:
         kernel_launchers = self.get_kernel_launchers()
         rows = []
         for event in kernel_launchers:
+            call_stack=self.tree.traverse_parents_and_get_callstack(event,filter=("nn.Module",))
             metrics_event = {
                 "name": event["name"],
                 "op category": event["op category"],
@@ -704,16 +705,23 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+            if include_call_stack:
+                metrics_event["call_stack"] = call_stack
+                metrics_event["parent_module"] = re.sub(r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]).strip("")
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
 
     @staticmethod
-    def get_df_kernel_launchers_summary(df_kernel_launchers):
+    def get_df_kernel_launchers_summary(df_kernel_launchers, group_by_parent_module=False):
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby("name").agg(
-            {"total_direct_kernel_time": ["sum", "count"]}
-        )
+        groupby_cols = ["name"]
+        if group_by_parent_module and "parent_module" in df_temp.columns:
+            groupby_cols.append("parent_module")
+        agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
+        if "call_stack" in df_temp.columns:
+            agg_dict["call_stack"] = "first"
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
@@ -729,7 +737,6 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-
         return df_agg
 
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
@@ -854,6 +861,7 @@ class TreePerfAnalyzer:
         event_name=None,
         agg_metrics=["mean"],
         include_pct=False,
+        group_by_parent_module=False,
     ) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -874,6 +882,8 @@ class TreePerfAnalyzer:
             "Input Strides",
             "Concrete Inputs",
         ]
+        if group_by_parent_module and "parent_module" in df_kernel_launchers.columns:
+            grouping_cols_original.append("parent_module")
 
         # 0. Filter the DataFrame based on the event name if provided
         if event_name is not None:
@@ -1607,7 +1617,7 @@ class TreePerfAnalyzer:
 
     @staticmethod
     def get_df_kernel_launchers_summary_by_category(
-        df_kernel_launchers: pd.DataFrame,
+        df_kernel_launchers: pd.DataFrame, group_by_parent_module=False
     ) -> pd.DataFrame:
         """
         Generate a DataFrame with breakdown of kernel launchers by category.
@@ -1617,9 +1627,15 @@ class TreePerfAnalyzer:
             pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
         """
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby("op category").agg(
-            {"total_direct_kernel_time": ["sum", "count"]}
-        )
+        if group_by_parent_module and "parent_module" in df_temp.columns:
+            df_agg = df_temp.groupby("parent_module").agg(
+                {"total_direct_kernel_time": ["sum", "count"]}
+            )
+        else:
+            df_agg = df_temp.groupby("op category").agg(
+                {"total_direct_kernel_time": ["sum", "count"]}
+            )
+        
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
