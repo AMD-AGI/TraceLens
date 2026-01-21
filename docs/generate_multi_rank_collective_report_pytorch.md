@@ -24,6 +24,14 @@ python generate_multi_rank_collective_report_pytorch.py   --trace_dir /path/to/t
 python generate_multi_rank_collective_report_pytorch.py   --trace_pattern "/logs/job123/rank*/trace.json"   --world_size 8
 ```
 
+### Glob mode (tensorboard-style filenames)
+If your traces are produced by `torch.profiler.tensorboard_trace_handler`, the emitted filenames are often not `rank{i}_trace.json`.
+In that case, use `--trace_glob` and provide a regex to extract the rank id from the filename:
+
+```bash
+python generate_multi_rank_collective_report_pytorch.py   --trace_glob "/path/to/tensorboard/**/**.pt.trace.json*"   --rank_regex "rank\\[(?P<rank>\\d+)\\]"   --world_size 8
+```
+
 ### Parallel mode (for faster processing)
 ```bash
 python generate_multi_rank_collective_report_pytorch.py   --trace_dir /path/to/traces   --world_size 8   --use_multiprocessing
@@ -51,12 +59,14 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 
 ## ⚙️ Command-Line Options
 
-> Provide **either** `--trace_dir` **or** `--trace_pattern`.
+> Provide **exactly one** of `--trace_dir`, `--trace_pattern`, or `--trace_glob`.
 
 | Argument | Default | Description |
 |---|---|---|
 | `--trace_dir` | `None` | Directory containing trace files (expects names like `rank*_trace.json`). |
 | `--trace_pattern` | `None` | Template path with a **single** `*` placeholder for the rank id (strict substitution: `* → 0..world_size-1`). |
+| `--trace_glob` | `None` | Glob for trace files with arbitrary names (supports `**`). Requires `--world_size` and uses `--rank_regex` to map files to ranks. |
+| `--rank_regex` | `rank[\\[\\-_/]?(?P<rank>\\d+)` | Regex used with `--trace_glob` to extract rank id. Must contain a named group `rank` or a single capture group. |
 | `--world_size` | `Required` | Number of ranks in the distributed run.  |
 | `--output_xlsx_path` | _auto-inferred_ | Path to save the Excel workbook. If omitted, a sensible default is created (see Output Behavior). |
 | `--output_csvs_dir` | `None` | If provided, writes each sheet as an individual `.csv` under this directory. |
@@ -64,6 +74,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 | `--agg_metrics` | `mean median min max` | Aggregations to compute in summaries. Allowed: `mean`, `median`, `min`, `max` (space-separated). |
 | `--use_multiprocessing` | `False` | Enable parallel trace loading using multiprocessing. Can provide speedup (system-dependent) but uses more CPU resources. |
 | `--max_workers` | `os.cpu_count()` | Maximum number of worker processes for parallel loading (requires `--use_multiprocessing`). Override to limit resource usage if needed. |
+| `--gpus_per_node` | `None` | If set, adds node-aware breakdown sheets that label each op as `intra_node` vs `inter_node` by inferring `node_id = rank // gpus_per_node`. |
 
 
 ---
@@ -74,6 +85,8 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 |---|---|
 | `nccl_summary_implicit_sync` | Aggregated view of collectives that incurred implicit sync (AllReduce, AllGather, ReduceScatter, AllToAll balanced). Provides latency, skew, and aggregated bandwidth metrics (algorithm and bus). |
 | `nccl_summary_long` | Aggregated NCCL operation stats per (rank, process group, collective, dtype, size). Includes counts and duration aggregates (sum/mean/std/min/max). |
+| `nccl_summary_long_node_span` | Same as `nccl_summary_long`, but grouped with an extra `node_span` dimension (`intra_node` vs `inter_node`) when `--gpus_per_node` is provided. |
+| `nccl_summary_implicit_node_span` | Same as `nccl_summary_implicit_sync`, but grouped with an extra `node_span` dimension (`intra_node` vs `inter_node`) when `--gpus_per_node` is provided. |
 | `nccl_long` | Per-event, per-rank NCCL records with timestamps, durations, stream, message sizes, and other attributes. Useful for drilling into specific slow ops. |
 | `nccl_implicit_sync` | Per-collective implicit synchronization breakdown. Includes per-rank wait_time columns indicating time lost to implicit sync, plus timing/skew and bandwidth metrics. |
 | `nccl_all2allv` | Detailed All2AllV analysis: variable send/recv sizes and splits per rank, with timing and skew columns per rank. |
@@ -87,7 +100,7 @@ _Notes:_
 
 - If **neither** `--output_xlsx_path` nor `--output_csvs_dir` is specified, the tool writes an Excel file to:
   - the provided `--trace_dir`, or
-  - the **lowest common directory** of the expanded `--trace_pattern` file paths.
+  - the **lowest common directory** of the resolved trace files (from `--trace_pattern` or `--trace_glob`).
 - If `--output_csvs_dir` is set, all sheets are written as individual CSV files under that directory.
 - If `--output_xlsx_path` is set, a single Excel workbook containing all sheets is created.
 - `openpyxl` is required for Excel; the tool will attempt to install it when missing.
