@@ -88,9 +88,7 @@ def get_compute_spec(perf_model):
         str: Compute spec like "matrix_fp16", "vector_bf16", or None if not available.
     """
     maf_type = (
-        perf_model.get_maf_type()
-        if hasattr(perf_model, "get_maf_type")
-        else None
+        perf_model.get_maf_type() if hasattr(perf_model, "get_maf_type") else None
     )
     precision = (
         perf_model.get_compute_precision()
@@ -2091,8 +2089,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
