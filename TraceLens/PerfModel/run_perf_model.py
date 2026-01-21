@@ -8,7 +8,7 @@ import argparse
 import os
 import sys
 
-from TraceLens.PerfModel.perf_model import GEMM, SDPA, gemmologist_dtype_map
+from TraceLens.PerfModel.perf_model import GEMM, SDPA, simulation_dtype_map
 
 
 def main():
@@ -80,13 +80,6 @@ def main():
         if None in {args.M, args.N, args.K}:
             raise ValueError(f"For GEMM, m, n and k values are required.")
 
-        # check if GEMMOLOGIST_PATH is set, otherwise give error message
-        if (not os.environ.get("GEMMOLOGIST_PATH")) or (
-            not os.path.exists(os.environ.get("GEMMOLOGIST_PATH"))
-        ):
-            raise ValueError(
-                f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-            )
         # print("Calling GEMM.get_simulation_time_func...")
         time, cmd = GEMM.get_simulation_time_func(
             arch=arch,
@@ -108,14 +101,8 @@ def main():
     elif args.op == "sdpa":
         if None in {args.H_Q, args.N_Q, args.N_KV, args.d_h}:
             raise ValueError("For SDPA, --H_Q, --N_Q, --N_KV, and --d_h are required.")
-        # check if GEMMOLOGIST_PATH is set, otherwise give error message
-        if (not os.environ.get("GEMMOLOGIST_PATH")) or (
-            not os.path.exists(os.environ.get("GEMMOLOGIST_PATH"))
-        ):
-            raise ValueError(
-                f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-            )
-        dtype_A_B = gemmologist_dtype_map(args.dtype)
+
+        dtype_A_B = simulation_dtype_map(args.dtype)
         if args.backward:
             bytes = SDPA.bytes_bwd_func(
                 args.B,

@@ -243,7 +243,7 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     extension_file: Optional[str] = None,
-    # for gemmologist
+    # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
@@ -664,7 +664,7 @@ def main():
         "--python_path",
         type=str,
         default=None,
-        help="Path to the python executable for gemmologist",
+        help="Path to the python executable for gemm simulator",
     )
     parser.add_argument(
         "--gpu_arch_json_path",

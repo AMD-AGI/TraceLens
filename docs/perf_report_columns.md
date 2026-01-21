@@ -749,6 +749,11 @@ Performance metrics sheets are generated for operations with available performan
 Each sheet contains:
 - All columns from `ops_unique_args` (operation name, arguments, occurrences, etc.)
 - **Static metrics**: GFLOPS, Data Moved (MB), FLOPS/Byte (calculated once from parameters)
+- **Compute Spec**: Combined compute type and precision (e.g., `matrix_bf16`, `vector_fp32`). This indicates:
+  - `matrix_*`: Operations using matrix compute units (GEMM, CONV, SDPA)
+  - `vector_*`: Operations using vector compute units (elementwise)
+  - Precision: `fp8`, `fp16`, `bf16`, `fp32`, `fp64`
+- **Roofline metrics** (when `--gpu_arch_json_path` provided): Roofline Time (µs), Pct Roofline - compares achieved time to theoretical roofline bound
 - **Runtime metrics**: Kernel Time (µs), TFLOPS/s, TB/s (statistics across all occurrences)
   - `mean`, `median`: Central tendency - use median if variance is high
   - `std_dev`: Variability - high std_dev (>10% of mean) suggests inconsistent performance

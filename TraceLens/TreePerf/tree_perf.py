@@ -4,33 +4,125 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import json
-import gzip
-import os, re, sys
-from functools import partial
 import copy
-from collections import defaultdict
-from typing import Dict, Any, Callable
+import gzip
+import json
+import logging
+import os, re, sys
+import pprint
 
 # TODO: warning should show the stack as well
 import warnings
-import pprint
-import pandas as pd
+from collections import defaultdict
+from functools import partial
+from typing import Any, Callable, Dict
+
 import numpy as np
-import logging
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
-    op_to_perf_model_class_map,
     categorize_torch_op,
     dict_cat2names,
+    op_to_perf_model_class_map,
 )
-from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
+from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.trace_to_tree import TraceToTree, JaxTraceToTree
-from ..util import DataLoader, TraceEventUtils, JaxProfileProcessor
+
+
+def normalize_dtype_to_precision(dtype_str):
+    """
+    Normalize a dtype string to a standard precision identifier.
+
+    Args:
+        dtype_str: A dtype string like "c10::half", "c10::bfloat16", "float", etc.
+
+    Returns:
+        Normalized precision string like "fp16", "bf16", "fp32", "fp64", "fp8"
+        or None if no mapping is found.
+    """
+    if dtype_str is None:
+        return None
+
+    dtype_lower = str(dtype_str).lower()
+
+    # Mapping based on actual PyTorch/c10 dtype strings
+    dtype_mapping = {
+        # Float16 (half precision)
+        "c10::half": "fp16",
+        "half": "fp16",
+        # BFloat16
+        "c10::bfloat16": "bf16",
+        "bfloat16": "bf16",
+        # Float32
+        "float": "fp32",
+        "c10::float": "fp32",
+        # Float64
+        "double": "fp64",
+        "c10::double": "fp64",
+        # FP8 variants
+        "c10::float8_e4m3fnuz": "fp8",
+        "c10::float8_e4m3fn": "fp8",
+        "c10::float8_e5m2": "fp8",
+        "fp8": "fp8",
+        "unsigned char": "fp8",
+        # Int8
+        "signed char": "int8",
+        "int8": "int8",
+    }
+
+    return dtype_mapping.get(dtype_lower, None)
+
+
+def get_compute_spec(perf_model):
+    """
+    Get the compute spec (maf_type + precision) for a perf model.
+
+    Args:
+        perf_model: A perf model instance with get_maf_type() and get_compute_precision() methods.
+
+    Returns:
+        str: Compute spec like "matrix_fp16", "vector_bf16", or None if not available.
+    """
+    maf_type = (
+        perf_model.get_maf_type() if hasattr(perf_model, "get_maf_type") else None
+    )
+    precision = (
+        perf_model.get_compute_precision()
+        if hasattr(perf_model, "get_compute_precision")
+        else None
+    )
+    if maf_type is None or precision is None:
+        return None
+    return f"{maf_type}_{precision}"
+
+
+def get_max_achievable_tflops(perf_model, arch):
+    """
+    Get the max achievable TFLOPS for a perf model based on arch specs.
+
+    Args:
+        perf_model: A perf model instance with get_maf_type() and get_compute_precision() methods.
+        arch: GPU architecture specs dict with max_achievable_tflops.
+
+    Returns:
+        float: Max achievable TFLOPS, or None if not available.
+    """
+    if arch is None:
+        return None
+    maf_specs = arch.get("max_achievable_tflops")
+    if maf_specs is None:
+        return None
+
+    compute_spec = get_compute_spec(perf_model)
+    if compute_spec is None:
+        return None
+
+    return maf_specs.get(compute_spec)
 
 
 class TreePerfAnalyzer:
@@ -212,6 +304,33 @@ class TreePerfAnalyzer:
             dict_metrics["FLOPS/Byte"] = float("nan")
             dict_metrics["TB/s"] = float("nan")
 
+        # Add compute spec column (e.g., "matrix_fp16", "vector_bf16")
+        compute_spec = get_compute_spec(perf_model)
+        dict_metrics["Compute Spec"] = compute_spec if compute_spec else ""
+
+        # Compute roofline time and pct_roofline (only if arch is provided)
+        if self.arch is not None:
+            peak_tflops = get_max_achievable_tflops(perf_model, self.arch)
+            mem_bw_gbps = self.arch.get("mem_bw_gbps")
+
+            if (
+                peak_tflops is not None
+                and mem_bw_gbps is not None
+                and bytes_moved is not None
+                and gflops > 0
+            ):
+                # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
+                compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
+                # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
+                memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
+                roofline_time_us = max(compute_time_us, memory_time_us)
+                dict_metrics["Roofline Time (µs)"] = roofline_time_us
+                dict_metrics["Pct Roofline"] = (
+                    (roofline_time_us / busy_kernel_time) * 100
+                    if busy_kernel_time > 0
+                    else float("nan")
+                )
+
         if hasattr(perf_model, "get_simulation_time") and not bwd:
             # This is for the case where we have a simulated time
             # for the forward pass, but not for the backward pass
@@ -374,6 +493,14 @@ class TreePerfAnalyzer:
         dict_agg["FLOPS/Byte"] = "first"
         dict_agg["TB/s"] = agg_metrics
         dict_agg["TFLOPS/s"] = agg_metrics
+        # Compute Spec - static for same args
+        if "Compute Spec" in df_perf_metrics.columns:
+            dict_agg["Compute Spec"] = "first"
+        # Roofline metrics - first since they should be same for the group
+        if "Roofline Time (µs)" in df_perf_metrics.columns:
+            dict_agg["Roofline Time (µs)"] = "first"
+        if "Pct Roofline" in df_perf_metrics.columns:
+            dict_agg["Pct Roofline"] = agg_metrics
         if "Simulated Time (µs)" in df_perf_metrics.columns:
             # first since it should be same for the group
             dict_agg["Simulated Time (µs)"] = "first"
@@ -413,6 +540,13 @@ class TreePerfAnalyzer:
             "_".join(col).strip() for col in df_perf_metrics_summary.columns.values
         ]
         df_perf_metrics_summary.reset_index(inplace=True)
+
+        # Rename columns for cleaner output
+        rename_map = {}
+        if "Compute Spec_first" in df_perf_metrics_summary.columns:
+            rename_map["Compute Spec_first"] = "Compute Spec"
+        if rename_map:
+            df_perf_metrics_summary.rename(columns=rename_map, inplace=True)
 
         df_perf_metrics_summary.sort_values(
             by=["Kernel Time (µs)_sum", "UID_first"],
@@ -1174,6 +1308,9 @@ class TreePerfAnalyzer:
                 "Data Moved (MB)",
                 "FLOPS/Byte",
                 "TB/s",
+                "Compute Spec",
+                "Roofline Time (µs)",
+                "Pct Roofline",
             ]
 
             if include_perf_metrics and has_own_perf_model:
@@ -1181,7 +1318,8 @@ class TreePerfAnalyzer:
                 try:
                     metrics = self.compute_perf_metrics(event, bwd=False)
                     for col in perf_cols:
-                        row[col] = metrics.get(col)
+                        if col in metrics:
+                            row[col] = metrics[col]
                     # Extract perf model params (e.g., M, N, K for GEMM)
                     perf_params = {
                         k.replace("param: ", ""): v
@@ -1191,8 +1329,6 @@ class TreePerfAnalyzer:
                     row["perf_params"] = perf_params if perf_params else None
                 except Exception:
                     perf_metrics_failed.append(event)
-                    for col in perf_cols:
-                        row[col] = None
                     row["perf_params"] = None
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
@@ -1200,7 +1336,8 @@ class TreePerfAnalyzer:
                 try:
                     metrics = self.compute_perf_metrics(fwd_event, bwd=True)
                     for col in perf_cols:
-                        row[col] = metrics.get(col)
+                        if col in metrics:
+                            row[col] = metrics[col]
                     # Extract perf model params
                     perf_params = {
                         k.replace("param: ", ""): v
@@ -1210,13 +1347,9 @@ class TreePerfAnalyzer:
                     row["perf_params"] = perf_params if perf_params else None
                 except Exception:
                     perf_metrics_failed.append(event)
-                    for col in perf_cols:
-                        row[col] = None
                     row["perf_params"] = None
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
-                for col in perf_cols:
-                    row[col] = None
                 row["perf_params"] = None
 
                 gpu_event_uids = event.get("gpu_events", [])
@@ -1327,7 +1460,7 @@ class TreePerfAnalyzer:
             agg_dict["duration_us"] = ["sum"] + agg_metrics
 
         # Static metrics - 'first' only (same for all instances with same args)
-        static_cols = ["GFLOPS", "Data Moved (MB)", "FLOPS/Byte"]
+        static_cols = ["GFLOPS", "Data Moved (MB)", "FLOPS/Byte", "Compute Spec"]
         for col in static_cols:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
@@ -1337,6 +1470,12 @@ class TreePerfAnalyzer:
         for col in time_varying_cols:
             if col in df_temp.columns:
                 agg_dict[col] = agg_metrics
+
+        # Roofline metrics
+        if "Roofline Time (µs)" in df_temp.columns:
+            agg_dict["Roofline Time (µs)"] = "first"  # Static for same args
+        if "Pct Roofline" in df_temp.columns:
+            agg_dict["Pct Roofline"] = agg_metrics  # Varies per instance
 
         # Kernel Time gets mean/std + sum
         if "Kernel Time (µs)" in df_temp.columns:
@@ -2340,11 +2479,11 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_metrics["TB/s"] = float("nan")
 
         # JaxGemm
-        if hasattr(perf_model, "gemmologist_time"):
-            dict_metrics["Gemmologist Time (µs)"] = perf_model.gemmologist_time
-            dict_metrics["Gemmologist TFLOPS/s"] = (
-                (gflops / 1e3) / (perf_model.gemmologist_time / 1e6)
-                if perf_model.gemmologist_time > 0
+        if hasattr(perf_model, "simulation_time"):
+            dict_metrics["Simulation Time (µs)"] = perf_model.simulation_time
+            dict_metrics["Simulation TFLOPS/s"] = (
+                (gflops / 1e3) / (perf_model.simulation_time / 1e6)
+                if perf_model.simulation_time > 0
                 else float("nan")
             )
 

@@ -437,7 +437,7 @@ class JaxAnalyses:
         @staticmethod
         def get_param_details(event):
             hlo_args = event[TraceEventUtils.JaxKernelEventArgs.hlo_op]
-            dict_dtype2gemmologist = {
+            dict_dtype2simulation = {
                 "f32": "fp32",
                 "f16": "fp16",
                 "bf16": "bf16",
@@ -453,7 +453,7 @@ class JaxAnalyses:
                 "stride_B": None,
                 "dtype_A_B": (hlo_args["Type"], hlo_args["Type"]),
                 "Op B": hlo_args["Batch"],
-                "gemmologist_dtype": dict_dtype2gemmologist.get(hlo_args["Type"]),
+                "simulation_dtype": dict_dtype2simulation.get(hlo_args["Type"]),
             }
 
         def flops(self):
