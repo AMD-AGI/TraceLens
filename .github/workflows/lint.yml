@@ -37,7 +37,7 @@ jobs:
       # https://stackoverflow.com/questions/65584855/github-actions-black-lint-only-changed
       run: |
         changed_files=$(git diff --diff-filter=d --name-only $(git merge-base HEAD origin/main) HEAD | grep '\.py$')
-        if [ ! -z "$changed_files" ]; then
+        if [ -n "$changed_files" ]; then
           echo "Running black on changed files: $changed_files"
           black --check "$changed_files"
         fi
