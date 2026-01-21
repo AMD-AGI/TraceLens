@@ -9,6 +9,7 @@ from typing import Dict, Any, Callable
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
+import time
 
 
 from abc import ABC, abstractmethod
@@ -784,6 +785,15 @@ class TraceToTree:
 
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
+        # print('hi')
+        # Track nn.Module calls with CPU operations
+        if add_python_func:
+            start_time = time.time()
+            print('Caching nn.Module stack')
+            self._annotate_events_with_nn_module_stack()
+            end_time = time.time()
+            total_time = end_time - start_time
+            print(f'\nTime taken to cache stack: {total_time} seconds')
 
     # TODO base class includes this, remove
     def get_UID2event(self, UID):
@@ -800,6 +810,20 @@ class TraceToTree:
         if "children" not in event:
             return []
         return [self.get_UID2event(child_UID) for child_UID in event["children"]]
+
+    def get_cpu_op_children(self, event):
+        """
+        Return the list of immediate cpu_op children for the given event.
+        If a direct child is not a cpu_op, recursively search its children until cpu_op events are found.
+        Returns a flat list of all cpu_op events that appear as descendants directly below this event.
+        """
+        cpu_op_children = []
+        for child in self.get_children_events(event):
+            if self.event_to_category(child) == "cpu_op":
+                cpu_op_children.append(child)
+            else:
+                cpu_op_children.extend(self.get_cpu_op_children(child))
+        return cpu_op_children
 
     def get_gpu_events(self, event):
         """
@@ -1080,6 +1104,33 @@ class TraceToTree:
             parent_UID = parent.get("parent")
         # if no parent is found, return None
         return None
+
+    def _annotate_events_with_nn_module_stack(self) -> None:
+        """
+        Annotate each event with its parent nn.Module call stack.
+        Adds 'nn_module_stack' field to each event containing UIDs of parent nn.Modules,
+        ordered from nearest parent to farthest (root).
+        """
+        # iterate only through root cpu nodes
+        for root_node_UID in self.cpu_root_nodes:
+            nn_module_stack = []
+            
+            # Walk up the parent chain
+            event = self.get_UID2event(root_node_UID)
+            current_uid = event.get("parent")
+            while current_uid is not None:
+                parent_event = self.get_UID2event(current_uid)
+                
+                # If this parent is an nn.Module, add it to the stack
+                if self._is_nn_module_event(parent_event):
+                    nn_module_stack.insert(0, self.get_UID2event(current_uid).get(TraceLens.util.TraceEventUtils.TraceKeys.Name))
+                
+                # Move to next parent
+                current_uid = parent_event.get("parent")
+            
+            # Store the stack in the event (nearest to farthest)
+            event["nn_module_stack"] = nn_module_stack
+
 
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
         return self.event_to_category(event) == "python_function" and event.get(
