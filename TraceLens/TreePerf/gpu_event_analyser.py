@@ -115,7 +115,8 @@ class GPUEventAnalyser:
                 else:
                     raise ValueError(f"Unknown event category: {category}")
         return {
-            GPUEventAnalyser.all_gpu_key: gpu_events, GPUEventAnalyser.computation_key: comp_events,
+            GPUEventAnalyser.all_gpu_key: gpu_events,
+            GPUEventAnalyser.computation_key: comp_events,
             GPUEventAnalyser.communication_key: comm_events,
             GPUEventAnalyser.memcpy_key: memcpy_events,
         }
