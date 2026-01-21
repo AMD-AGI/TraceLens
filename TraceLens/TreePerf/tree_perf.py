@@ -4,33 +4,34 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import json
-import gzip
-import os, re, sys
-from functools import partial
 import copy
-from collections import defaultdict
-from typing import Dict, Any, Callable
+import gzip
+import json
+import logging
+import os, re, sys
+import pprint
 
 # TODO: warning should show the stack as well
 import warnings
-import pprint
-import pandas as pd
+from collections import defaultdict
+from functools import partial
+from typing import Any, Callable, Dict
+
 import numpy as np
-import logging
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
-    op_to_perf_model_class_map,
     categorize_torch_op,
     dict_cat2names,
+    op_to_perf_model_class_map,
 )
-from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
+from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.trace_to_tree import TraceToTree, JaxTraceToTree
-from ..util import DataLoader, TraceEventUtils, JaxProfileProcessor
 
 
 def normalize_dtype_to_precision(dtype_str):
