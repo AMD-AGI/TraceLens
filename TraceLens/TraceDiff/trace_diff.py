@@ -99,7 +99,7 @@ class TraceDiff:
             return node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
 
         def get_children(tree, node):
-            return tree.get_cpu_op_children(node)
+            return tree.get_non_py_func_children(node)
 
         def add_to_pod(node, pod, tree):
             # Add node and all its descendants to pod
@@ -272,11 +272,11 @@ class TraceDiff:
                 return []
             return node.get("children", [])
         
-        def safe_cpu_op_children(tree_obj, tree_dict, uid):
+        def safe_non_py_func_children(tree_obj, tree_dict, uid):
             """
-            Get CPU operation children for a given UID.
-            If direct children are not CPU ops (e.g., python_function), recursively traverse
-            down until CPU ops are found.
+            Get non python function operation children for a given UID.
+            If direct children are not non python function operations, recursively traverse
+            down until non python function operations are found.
             
             Args:
                 tree_obj: The TraceToTree object (self.baseline or self.variant)
@@ -290,7 +290,7 @@ class TraceDiff:
             if node is None or not isinstance(node, dict):
                 return []
             
-            cpu_op_children = []
+            non_py_func_children = []
             children_uids = node.get("children", [])
             
             for child_uid in children_uids:
@@ -300,13 +300,13 @@ class TraceDiff:
                 
                 # Check if this child is a CPU op
                 child_cat = tree_obj.event_to_category(child_node)
-                if child_cat == "cpu_op":
-                    cpu_op_children.append(child_uid)
+                if child_cat != "python_function":
+                    non_py_func_children.append(child_uid)
                 else:
                     # Recursively search this child's descendants for CPU ops
-                    cpu_op_children.extend(safe_cpu_op_children(tree_obj, tree_dict, child_uid))
+                    non_py_func_children.extend(safe_non_py_func_children(tree_obj, tree_dict, child_uid))
         
-            return cpu_op_children
+            return non_py_func_children
 
         def get_name_by_uid(tree, uid):
             node = tree.get(uid)
@@ -339,8 +339,8 @@ class TraceDiff:
                 merged_type = "trace2"
                 self.merged_uid_map[(2, uid2)] = -1
                 nn_module_stack = self.variant.get_UID2event(uid2).get("nn_module_stack", [])
-            children1 = safe_cpu_op_children(self.baseline, baseline_uid2node, uid1)
-            children2 = safe_cpu_op_children(self.variant, variant_uid2node, uid2)
+            children1 = safe_non_py_func_children(self.baseline, baseline_uid2node, uid1)
+            children2 = safe_non_py_func_children(self.variant, variant_uid2node, uid2)
             # Wagner-Fischer to align children
             ops = []
             if children1 or children2:
@@ -966,6 +966,7 @@ class TraceDiff:
         # Option 1: Keep df_merged and df_unmerged separate but concatenated
         # This works if you're okay with having different column structures
         df_final = pd.concat([df_merged, df_unmerged], axis=0, ignore_index=True, sort=False)
+        df_final = df_final.drop(columns=['index_trace1', 'index_trace2', 'nn_module_stack'])
         self.diff_stats_paired_df = df_final
         return df_final
 
