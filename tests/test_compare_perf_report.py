@@ -305,8 +305,7 @@ def test_compare_perf_reports_pytorch_ops_summary(tol=1e-6):
     try:
         # Generate comparison report
         fn_comparison_path = os.path.join(fn_root, "comparison_output.xlsx")
-        generate_compare_perf_reports_pytorch(
-            reports=[report1_path, report2_path],
+        generate_compare_perf_reports_pytorch(reports=[report1_path, report2_path],
             output=fn_comparison_path,
             names=["256thread", "512thread"],
             sheets=["gpu_timeline", "ops_summary"],
