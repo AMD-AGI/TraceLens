@@ -644,7 +644,7 @@ class TraceDiff:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
             )
-        (merged_events, merged_root_ids) = self.merged_tree
+        merged_events, merged_root_ids = self.merged_tree
         merged_id_to_event = self._get_merged_id_to_event()
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
