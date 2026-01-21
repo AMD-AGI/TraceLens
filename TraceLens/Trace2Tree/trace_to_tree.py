@@ -50,6 +50,7 @@ class BaseTraceToTree(ABC):
             self.event_to_category = self.default_categorizer()
 
         self.cpu_root_nodes = []
+        self.all_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
         self.name2event_uids = defaultdict(list)
 
@@ -811,19 +812,19 @@ class TraceToTree:
             return []
         return [self.get_UID2event(child_UID) for child_UID in event["children"]]
 
-    def get_cpu_op_children(self, event):
+    def get_non_py_func_children(self, event):
         """
         Return the list of immediate cpu_op children for the given event.
         If a direct child is not a cpu_op, recursively search its children until cpu_op events are found.
         Returns a flat list of all cpu_op events that appear as descendants directly below this event.
         """
-        cpu_op_children = []
+        non_py_func_children = []
         for child in self.get_children_events(event):
-            if self.event_to_category(child) == "cpu_op":
-                cpu_op_children.append(child)
+            if self.event_to_category(child) != "python_function":
+                non_py_func_children.append(child)
             else:
-                cpu_op_children.extend(self.get_cpu_op_children(child))
-        return cpu_op_children
+                non_py_func_children.extend(self.get_non_py_func_children(child))
+        return non_py_func_children
 
     def get_gpu_events(self, event):
         """
@@ -1123,7 +1124,7 @@ class TraceToTree:
                 
                 # If this parent is an nn.Module, add it to the stack
                 if self._is_nn_module_event(parent_event):
-                    nn_module_stack.insert(0, self.get_UID2event(current_uid).get(TraceLens.util.TraceEventUtils.TraceKeys.Name))
+                    nn_module_stack.insert(0, self.get_UID2event(current_uid).get("name"))
                 
                 # Move to next parent
                 current_uid = parent_event.get("parent")
