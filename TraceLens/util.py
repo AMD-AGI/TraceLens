@@ -30,7 +30,7 @@ class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
         if filename_path.endswith("pb"):
-            from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+            from xprof.convert import raw_to_tool_data as convert
 
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
             data = data.decode("utf-8")  # we get bytes back from the call above
@@ -78,7 +78,7 @@ class JaxProfileProcessor:
 
     @staticmethod
     def process_protobuf_file(protobuf_file_name, module_name):
-        from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+        from xprof.convert import raw_to_tool_data as convert
 
         # look to see if the protobuf file has already been extracted
         dir_name = os.path.dirname(protobuf_file_name) + "/"
