@@ -50,6 +50,16 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 
 Note: JAX outputs do not include `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
 
+### 🎯 GPU Architecture for Roofline Analysis
+
+When `--gpu_arch_json_path` is provided, the report includes additional roofline metrics:
+
+- **Compute Spec**: Combined compute type and precision (e.g., `matrix_bf16`, `vector_fp32`)
+- **Roofline Time (µs)**: Theoretical minimum time based on GPU peak capabilities
+- **Pct Roofline**: Percentage of roofline achieved (higher is better)
+
+The GPU arch file specifies Max Achievable FLOPS (MAF) for different compute types and precisions. See [GPU Architecture Example](../examples/gpu_arch_example.md) for format details and [AMD MAF measurements](https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html#amd-maf-results) for reference values.
+
 📖 **For detailed column definitions and usage guide**, see [Performance Report Column Definitions](perf_report_columns.md).
 
 ---
@@ -60,6 +70,7 @@ The script supports several optional arguments to customize the output report. B
 
 | Argument                          | Default           | Description                                                                 |
 |-----------------------------------|-------------------|-----------------------------------------------------------------------------|
+| `--gpu_arch_json_path PATH`       | `None`            | Path to GPU architecture JSON file for roofline analysis. See [GPU Architecture Example](../examples/gpu_arch_example.md) for format details. |
 | `--topk_ops N`                    | `None`            | Limit the number of rows in the unique-args launcher table.               |
 | `--topk_short_kernels N`          | `None`            | Limit the number of rows in the short-kernel table.                          |
 | `--topk_roofline_ops N`           | `None`            | Limit the number of rows in the roofline sheet.                             |
