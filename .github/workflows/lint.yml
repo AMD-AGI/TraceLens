@@ -40,6 +40,6 @@ jobs:
       run: |
         changed_files=$(git diff --diff-filter=d --name-only $(git merge-base HEAD origin/main) HEAD | grep '\.py$' || true)
         if [ -n "$changed_files" ]; then
-          echo "Running black on changed files: $changed_files"
+          echo "$changed_files" | xargs echo "Running black on changed files: "
           echo "$changed_files" | xargs black --check
         fi
