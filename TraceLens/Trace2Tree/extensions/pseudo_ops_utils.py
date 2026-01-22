@@ -105,7 +105,7 @@ def apply_pseudo_op_extensions(
             extensions.append(("MoE_Fused", create_pseudo_ops_moe_fused_aiter))
             if verbose:
                 logger.info("Auto-detected fused MoE operations")
-    
+
         # MoE: Triton Fused Implementation
         # TO DO: Update kernel detection approach (Look for gpt_oss_triton_kernels_moe.py)
         else:
@@ -124,7 +124,6 @@ def apply_pseudo_op_extensions(
     
     # Apply extensions onto tree
     for ext_info in extensions:
-
         # ext_info tuple of (extension_name, extension_function)
         ext_name, ext_func = ext_info
         
