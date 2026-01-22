@@ -691,6 +691,8 @@ class TraceDiff:
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
 
+        combined_idx = None
+
         def get_input_shape(node):
             args = node.get("args", {})
             shape = args.get("Input Dims")
@@ -880,6 +882,68 @@ class TraceDiff:
         df = pd.DataFrame(rows)
         self.diff_stats_df = df
         return df
+
+            
+    def pair_ops(
+        self
+    ) -> pd.DataFrame:
+        """
+        Pair ops by prev_combined and nn_module_stack.
+        """
+        df_diff_stats = self.diff_stats_df.copy()
+        df_diff_stats['trace'] = None
+        df_diff_stats.loc[(df_diff_stats['input_shape_trace1'] != '') & (df_diff_stats['input_shape_trace2'] == ''), 'trace'] = 1
+        df_diff_stats.loc[(df_diff_stats['input_shape_trace1'] == '') & (df_diff_stats['input_shape_trace2'] != ''), 'trace'] = 2
+        df_trace1 = df_diff_stats[df_diff_stats['trace'] == 1].copy()
+        df_trace1 = df_trace1.drop(columns=['input_shape_trace2', 'concrete_inputs_trace2', 'input_strides_trace2', 'input_type_trace2', 'kernel_time_trace2', 'kernel_names_trace2', 'trace'])
+        df_trace2 = df_diff_stats[df_diff_stats['trace'] == 2].copy()
+        df_trace2 = df_trace2.drop(columns=['input_shape_trace1', 'concrete_inputs_trace1', 'input_strides_trace1', 'input_type_trace1', 'kernel_time_trace1', 'kernel_names_trace1', 'trace'])
+
+        # Store old indices as columns before resetting
+        df_trace1 = df_trace1.reset_index().rename(columns={'index': 'index_trace1'})
+        df_trace2 = df_trace2.reset_index().rename(columns={'index': 'index_trace2'})
+
+        df_trace1['nn_module_stack'] = df_trace1['nn_module_stack'].apply(str)
+        df_trace2['nn_module_stack'] = df_trace2['nn_module_stack'].apply(str)
+        # Merge on prev_combined
+        df_merged = df_trace1.merge(
+            df_trace2,
+            on=['prev_combined', 'nn_module_stack'],
+            how='inner'
+        )
+        df_merged['name'] = df_merged['name_x'] + ' | ' + df_merged['name_y']
+        df_merged = df_merged.drop(columns=['name_x', 'name_y'])
+
+        # Optionally, you can reorganize columns to put name_combined first
+        cols = ['name', 'prev_combined', 'index_trace1', 'index_trace2'] + [col for col in df_merged.columns if col not in ['name', 'prev_combined', 'index_trace1', 'index_trace2']]
+        df_merged = df_merged[cols]
+
+        # Order df_merged columns to match the order in df_diff_stats (excluding dropped/duplicate columns)
+        cols_in_diff_stats = [col for col in df_diff_stats.columns if col in df_merged.columns]
+        final_cols = ['name', 'prev_combined', 'index_trace1', 'index_trace2'] + [col for col in cols_in_diff_stats if col not in ['name', 'prev_combined', 'index_trace1', 'index_trace2']]
+        df_merged = df_merged[final_cols]
+        merged_indices_trace1 = df_merged['index_trace1'].values
+        merged_indices_trace2 = df_merged['index_trace2'].values
+
+        # Combine all merged indices
+        all_merged_indices = set(merged_indices_trace1) | set(merged_indices_trace2)
+
+        # Get rows from df_diff_stats that were NOT merged
+        df_unmerged = df_diff_stats[~df_diff_stats.index.isin(all_merged_indices)].copy()
+
+        # Add a flag to distinguish merged vs unmerged rows
+        df_merged['is_merged'] = True
+        df_unmerged['is_merged'] = False
+
+        # For consistency, add empty columns to df_unmerged that exist in df_merged
+        # (or you can select specific columns from df_merged to match df_unmerged structure)
+
+        # Option 1: Keep df_merged and df_unmerged separate but concatenated
+        # This works if you're okay with having different column structures
+        df_final = pd.concat([df_merged, df_unmerged], axis=0, ignore_index=True, sort=False)
+        df_final = df_final.drop(columns=['index_trace1', 'index_trace2', 'nn_module_stack'])
+        self.diff_stats_paired_df = df_final
+        return df_final
 
     def get_df_diff_stats_unique_args(
         self, op_name: str | None = None, agg_metrics: list[str] = ["mean"]
