@@ -118,6 +118,7 @@ class BaseTraceToTree(ABC):
         )
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
+        dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
             event["tree"] = True
@@ -129,6 +130,7 @@ class BaseTraceToTree(ABC):
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
             stack_key = (pid, tid)
             stack = dict_pidtid2stack[stack_key]
+            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
             while (
                 stack
@@ -138,6 +140,9 @@ class BaseTraceToTree(ABC):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+                # Pop from nn_module_stack if this was an nn.Module event
+                if self._is_nn_module_event(popped_event):
+                    nn_module_stack.pop()
 
             if (
                 stack
@@ -148,6 +153,9 @@ class BaseTraceToTree(ABC):
                 # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
                 continue
 
+            # Set nn_module_stack for the current event (copy to avoid reference issues)
+            event["nn_module_stack"] = list(nn_module_stack)
+
             if stack:
                 parent = stack[-1]
                 parent.setdefault("children", []).append(
@@ -156,6 +164,11 @@ class BaseTraceToTree(ABC):
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
             stack.append(event)
+            
+            # Push onto nn_module_stack if this is an nn.Module event
+            if self._is_nn_module_event(event):
+                nn_module_stack.append(event[TraceLens.util.TraceEventUtils.TraceKeys.Name])
+            
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -575,6 +588,7 @@ class TraceToTree:
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
+        self.all_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
         self.name2event_uids = defaultdict(list)
 
@@ -685,6 +699,7 @@ class TraceToTree:
         )
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
+        dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
             event["tree"] = True
@@ -696,6 +711,7 @@ class TraceToTree:
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
             stack_key = (pid, tid)
             stack = dict_pidtid2stack[stack_key]
+            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
             while (
                 stack
@@ -705,6 +721,9 @@ class TraceToTree:
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+                # Pop from nn_module_stack if this was an nn.Module event
+                if self._is_nn_module_event(popped_event):
+                    nn_module_stack.pop()
 
             if (
                 stack
@@ -715,14 +734,27 @@ class TraceToTree:
                 # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
                 continue
 
+            # Set nn_module_stack for the current event (copy to avoid reference issues)
+            event["nn_module_stack"] = list(nn_module_stack)
+
             if stack:
                 parent = stack[-1]
                 parent.setdefault("children", []).append(
                     event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                 )
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+            else:
+                # Stack is empty - this is a root node!
+                self.all_root_nodes.append(
+                    event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+                )
 
             stack.append(event)
+            
+            # Push onto nn_module_stack if this is an nn.Module event
+            if self._is_nn_module_event(event):
+                nn_module_stack.append(event[TraceLens.util.TraceEventUtils.TraceKeys.Name])
+            
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -786,15 +818,6 @@ class TraceToTree:
 
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
-        # print('hi')
-        # Track nn.Module calls with CPU operations
-        if add_python_func:
-            start_time = time.time()
-            print('Caching nn.Module stack')
-            self._annotate_events_with_nn_module_stack()
-            end_time = time.time()
-            total_time = end_time - start_time
-            print(f'\nTime taken to cache stack: {total_time} seconds')
 
     # TODO base class includes this, remove
     def get_UID2event(self, UID):
@@ -1105,33 +1128,6 @@ class TraceToTree:
             parent_UID = parent.get("parent")
         # if no parent is found, return None
         return None
-
-    def _annotate_events_with_nn_module_stack(self) -> None:
-        """
-        Annotate each event with its parent nn.Module call stack.
-        Adds 'nn_module_stack' field to each event containing UIDs of parent nn.Modules,
-        ordered from nearest parent to farthest (root).
-        """
-        # iterate only through root cpu nodes
-        for root_node_UID in self.cpu_root_nodes:
-            nn_module_stack = []
-            
-            # Walk up the parent chain
-            event = self.get_UID2event(root_node_UID)
-            current_uid = event.get("parent")
-            while current_uid is not None:
-                parent_event = self.get_UID2event(current_uid)
-                
-                # If this parent is an nn.Module, add it to the stack
-                if self._is_nn_module_event(parent_event):
-                    nn_module_stack.insert(0, self.get_UID2event(current_uid).get("name"))
-                
-                # Move to next parent
-                current_uid = parent_event.get("parent")
-            
-            # Store the stack in the event (nearest to farthest)
-            event["nn_module_stack"] = nn_module_stack
-
 
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
         return self.event_to_category(event) == "python_function" and event.get(
