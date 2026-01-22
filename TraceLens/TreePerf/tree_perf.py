@@ -132,8 +132,7 @@ class TreePerfAnalyzer:
     def from_file(
         profile_filepath, 
         jax: bool = False,
-        enable_pseudo_ops: bool = True,
-        pseudo_op_extensions=None,
+        enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
         *args, 
         **kwargs
@@ -157,7 +156,6 @@ class TreePerfAnalyzer:
             jax=jax, 
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
-            pseudo_op_extensions=pseudo_op_extensions,
             tree_postprocess_extension=tree_postprocess_extension,
             *args, 
             **kwargs
@@ -173,7 +171,6 @@ class TreePerfAnalyzer:
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
-        pseudo_op_extensions=None,
         tree_postprocess_extension=None
     ):
         self.jax = jax
@@ -193,7 +190,7 @@ class TreePerfAnalyzer:
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
             try:
-                apply_pseudo_op_extensions(self.tree, extensions=pseudo_op_extensions)
+                apply_pseudo_op_extensions(self.tree)
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
         

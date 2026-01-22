@@ -87,45 +87,40 @@ def inject_pseudo_op(
 
 def apply_pseudo_op_extensions(
     tree, 
-    extensions: Optional[List[Callable]] = None,
     verbose: bool = False
 ):
     """
-    Apply pseudo-op extensions to trace tree.
-    Extensions auto-detected if not provided.
+    Apply all available pseudo-op extensions to trace tree.
+    Extensions are automatically detected and applied.
     """
     
-    # Default: Add all known pseudo-op extensions
-    if extensions is None:
-        extensions = []
-        
-        if "vllm::moe_forward" in tree.name2event_uids:
+    # Auto-detect and add all known pseudo-op extensions
+    extensions = []
+    
+    if "vllm::moe_forward" in tree.name2event_uids:
 
-            # MoE: AITER Fused Implementation
-            if "vllm::rocm_aiter_fused_moe" in tree.name2event_uids:
-                from .moe_aiter_pseudo_ops import create_pseudo_ops_moe_fused_aiter
-                extensions.append(("MoE_Fused", create_pseudo_ops_moe_fused_aiter))
+        # MoE: AITER Fused Implementation
+        if "vllm::rocm_aiter_fused_moe" in tree.name2event_uids:
+            from .moe_aiter_pseudo_ops import create_pseudo_ops_moe_fused_aiter
+            extensions.append(("MoE_Fused", create_pseudo_ops_moe_fused_aiter))
+            if verbose:
+                logger.info("Auto-detected fused MoE operations")
+    
+        # MoE: Triton Fused Implementation
+        # TO DO: Update kernel detection approach (Look for gpt_oss_triton_kernels_moe.py)
+        else:
+            # Check if any kernel events contain matmul_ogs: Triton MoE kernel
+            has_matmul_ogs = any(
+                "matmul_ogs" in event.get("name", "").lower()
+                for event in tree.events
+                if event.get("cat") == "kernel"
+            )
+
+            if has_matmul_ogs:
+                from .moe_unfused_triton_pseudo_ops import create_pseudo_ops_moe_unfused_triton
+                extensions.append(("MoE_Unfused_Triton", create_pseudo_ops_moe_unfused_triton))
                 if verbose:
-                    logger.info("Auto-detected fused MoE operations")
-        
-            # MoE: Triton Fused Implementation
-            # TO DO: Update kernel detection approach (Look for gpt_oss_triton_kernels_moe.py)
-            else:
-                # Check if any kernel events contain matmul_ogs: Triton MoE kernel
-                has_matmul_ogs = any(
-                    "matmul_ogs" in event.get("name", "").lower()
-                    for event in tree.events
-                    if event.get("cat") == "kernel"
-                )
-
-                if has_matmul_ogs:
-                    from .moe_unfused_triton_pseudo_ops import create_pseudo_ops_moe_unfused_triton
-                    extensions.append(("MoE_Unfused_Triton", create_pseudo_ops_moe_unfused_triton))
-                    if verbose:
-                        logger.info("Auto-detected GPT_OSS unfused MoE operations with Triton kernels")
-
-    else:
-        extensions = [("Custom", ext) if callable(ext) else ext for ext in extensions]
+                    logger.info("Auto-detected GPT_OSS unfused MoE operations with Triton kernels")
     
     # Apply extensions onto tree
     for ext_info in extensions:
