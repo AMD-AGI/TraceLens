@@ -356,13 +356,19 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details__summarize_kernel_stats",
                     new_col_name="trunc_kernel_details",
                 )
-                # For now, flash_attention_varlen_backward is processed with bwd=True, so we need
-                # to have a workaround to extract it from the fwd df and append it to the bwd df.
+                # For now, flash_attention_varlen_backward and aten::convolution_backward are processed with bwd=True,
+                # so we need a workaround to extract them from the fwd df and append them to the bwd df.
                 filtered_df_bwd_ops = None
                 if not df_ops_fwd.empty:
-                    filtered_df_bwd_ops = df_ops_fwd[
-                        df_ops_fwd["name"] == "flash_attn::_flash_attn_varlen_backward"
+                    # Filter out backward operations that were incorrectly included in forward
+                    bwd_op_names = [
+                        "flash_attn::_flash_attn_varlen_backward",
+                        "aten::convolution_backward",
                     ]
+                    filtered_df_bwd_ops = df_ops_fwd[
+                        df_ops_fwd["name"].isin(bwd_op_names)
+                    ]
+                    df_ops_fwd = df_ops_fwd[~df_ops_fwd["name"].isin(bwd_op_names)]
                     df_ops_fwd = df_ops_fwd[
                         df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
                     ]

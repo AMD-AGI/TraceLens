@@ -4,34 +4,36 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import json
-import gzip
-import os, re, sys
-from functools import partial
 import copy
-from collections import defaultdict
-from typing import Dict, Any, Callable
+import gzip
+import json
+import logging
+import os, re, sys
+import pprint
 
 # TODO: warning should show the stack as well
 import warnings
-import pprint
-import pandas as pd
+from collections import defaultdict
+from functools import partial
+from typing import Any, Callable, Dict
+
 import numpy as np
-import logging
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
-    op_to_perf_model_class_map,
     categorize_torch_op,
     dict_cat2names,
+    op_to_perf_model_class_map,
 )
-from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
+from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.trace_to_tree import TraceToTree, JaxTraceToTree
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
-from ..util import DataLoader, TraceEventUtils, JaxProfileProcessor
+
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -89,9 +91,7 @@ def get_compute_spec(perf_model):
         str: Compute spec like "matrix_fp16", "vector_bf16", or None if not available.
     """
     maf_type = (
-        perf_model.get_maf_type()
-        if hasattr(perf_model, "get_maf_type")
-        else None
+        perf_model.get_maf_type() if hasattr(perf_model, "get_maf_type") else None
     )
     precision = (
         perf_model.get_compute_precision()
@@ -739,12 +739,18 @@ class TreePerfAnalyzer:
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby("name").agg(
-            {"total_direct_kernel_time": ["sum", "count"]}
+        df_agg = df_temp.groupby(["name"]).agg(
+            {"total_direct_kernel_time": ["sum", "count"], "op category": set},
         )
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
-        df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
+        df_agg.rename(
+            columns={
+                "total_direct_kernel_time_count": "Count",
+                "op category_set": "Categories",
+            },
+            inplace=True,
+        )
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
@@ -897,6 +903,7 @@ class TreePerfAnalyzer:
         """
         grouping_cols_original = [
             "name",
+            "op category",
             "Input Dims",
             "Input type",
             "Input Strides",
@@ -1254,7 +1261,7 @@ class TreePerfAnalyzer:
 
         Returns:
             pd.DataFrame: DataFrame with columns:
-                - name, UID, pid, tid, External id
+                - name, op category, UID, pid, tid, External id
                 - Input Dims, Input type, Input Strides, Concrete Inputs (if include_args)
                 - duration_us, has_perf_model
                 - GFLOPS, Kernel Time (µs), TFLOPS/s, Data Moved (MB), FLOPS/Byte, TB/s
@@ -1287,6 +1294,7 @@ class TreePerfAnalyzer:
 
             row = {
                 "name": event.get("name"),
+                "op category": self.op_categorizer(event),
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
@@ -1398,6 +1406,7 @@ class TreePerfAnalyzer:
         # Reorder columns
         col_order = [
             "name",
+            "op category",
             "UID",
             "pid",
             "tid",
@@ -1447,6 +1456,7 @@ class TreePerfAnalyzer:
         df_temp = df_unified_perf.copy()
         grouping_cols = [
             "name",
+            "op category",
             "Input Dims",
             "Input type",
             "Input Strides",
@@ -2119,8 +2129,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )

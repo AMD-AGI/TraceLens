@@ -1169,15 +1169,106 @@ class aten_conv(CONV):
         return super().bytes_bwd(self.bpe)
 
 
-class aten_conv_bwd(aten_conv):
-    def __init__(self, event):
-        super().__init__(event)
+class aten_conv_bwd(CONV):
+    @staticmethod
+    def get_param_details(event):
+        # convolution_backward signature:
+        # 0: grad_output tensor
+        # 1: input tensor
+        # 2: weight tensor
+        # 3: bias_sizes (optional)
+        # 4: stride
+        # 5: padding
+        # 6: dilation
+        # 7: transposed (boolean)
+        # 8: output_padding
+        # 9: groups
+        # 10: output_mask (which gradients to compute)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # For backward, input shape is at index 1, weight at index 2
+        input_shape = tuple(input_dims[1])
+        ndims = len(input_shape) - 2
+        filter_shape = tuple(input_dims[2])
+
+        # Check if bias gradient is computed (from output_mask)
+        bias = len(input_dims) > 3 and input_dims[3] and len(input_dims[3]) > 0
+
+        stride_arg = concrete_inputs[4]
+        stride = (
+            aten_conv.str_to_tuple(stride_arg) if stride_arg != "" else (1,) * ndims
+        )
+        padding_arg = concrete_inputs[5]
+        padding = (
+            aten_conv.str_to_tuple(padding_arg) if padding_arg != "" else (0,) * ndims
+        )
+        dilation_arg = concrete_inputs[6]
+        dilation = (
+            aten_conv.str_to_tuple(dilation_arg) if dilation_arg != "" else (1,) * ndims
+        )
+        transposed_conv = eval(concrete_inputs[7])
+        output_padding_arg = concrete_inputs[8]
+        output_padding = (
+            aten_conv.str_to_tuple(output_padding_arg)
+            if output_padding_arg != ""
+            else (0,) * ndims
+        )
+        groups = int(concrete_inputs[9])
+
+        # broadcast if length 1 tuple
+        stride, padding, dilation, output_padding = [
+            param * ndims if len(param) == 1 else param
+            for param in [stride, padding, dilation, output_padding]
+        ]
+
+        dtype_input_weight = tuple(event["args"]["Input type"][1:3])
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][1])
+            weight_stride = tuple(event["args"]["Input Strides"][2])
+        except KeyError:
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
 
     def flops(self):
-        return self.flops_bwd()
+        return super().flops_bwd()
 
-    def bytes(self, bytes_per_element):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
 
 
 # 3. Softmax
