@@ -6,6 +6,7 @@
 
 from . import perf_model
 from collections import defaultdict
+from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
 
 op_to_perf_model_class_map = {
     "aten::mm": perf_model.aten_mm,
@@ -39,12 +40,10 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    # MoE pseudo ops - Fused
-    "pseudo_op::moe_aiter_fused_1stage": perf_model.moe_aiter_fused_1stage,
-    # MoE pseudo ops - Unfused Triton (2-stage: up and down)
-    "pseudo_op::moe_triton_unfused_up": perf_model.moe_triton_unfused_up,
-    "pseudo_op::moe_triton_unfused_down": perf_model.moe_triton_unfused_down
     }
+
+# Add pseudo-op extension mappings
+op_to_perf_model_class_map.update(get_pseudo_op_mappings())
 
 unary_elemwise_ops = [
     "aten::copy",
@@ -76,12 +75,13 @@ dict_base_class2category = {
     perf_model.GEMM: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
-    perf_model.FusedMoE: "MoE_fused",
-    perf_model.UnfusedMoE_Up: "MoE_unfused",
-    perf_model.UnfusedMoE_Down: "MoE_unfused",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
 }
+
+# Add pseudo-op extension categories
+dict_base_class2category.update(get_pseudo_op_categories())
+
 dict_cat2names = defaultdict(list)
 for op_name, perf_model_class in op_to_perf_model_class_map.items():
     base_classes = perf_model_class.__bases__
