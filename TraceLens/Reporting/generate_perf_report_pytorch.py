@@ -229,6 +229,7 @@ def generate_perf_report_pytorch(
     output_csvs_dir: Optional[str] = None,
     # include unlinked kernels in gpu timeline
     include_unlinked_kernels: bool = False,
+    enable_pseudo_ops: bool = False,  # pseudo-op generation
     # threshold in microseconds for micro idle time
     micro_idle_thresh_us: int = None,
     # collective analysis
@@ -258,8 +259,14 @@ def generate_perf_report_pytorch(
         arch=gpu_arch_json,
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
+        enable_pseudo_ops=enable_pseudo_ops,
     )
+    
 
+    ## Apply annotation for vLLM eager and replay phase
+    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output"])
+    
+    
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
 
@@ -362,6 +369,11 @@ def generate_perf_report_pytorch(
                         df_ops_fwd["name"].isin(bwd_op_names)
                     ]
                     df_ops_fwd = df_ops_fwd[~df_ops_fwd["name"].isin(bwd_op_names)]
+                    df_ops_fwd = df_ops_fwd[
+                        df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
+                    ]
+                
+                op_events=[event for event in op_events if event["name"]!="vllm::unified_attention_with_output"]
                 df_ops_bwd = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
@@ -642,7 +654,12 @@ def main():
         default=None,
         help="Rows to keep in the short-kernel table.",
     )
-
+    parser.add_argument(
+        "--enable_pseudo_ops",
+        action="store_true",
+        default=False,
+        help="Enable automatic pseudo-op augmentation to tree to isolate specific kernels (e.g., FusedMoE).",
+    )
     parser.add_argument(
         "--topk_ops",
         type=int,
@@ -682,6 +699,7 @@ def main():
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
         include_unlinked_kernels=args.include_unlinked_kernels,
+        enable_pseudo_ops=args.enable_pseudo_ops,
         micro_idle_thresh_us=args.micro_idle_thresh_us,
         collective_analysis=args.collective_analysis,
         kernel_summary=args.kernel_summary,
