@@ -3,3 +3,4 @@
 **.ipynb_checkpoints/
 **/build/
 **.egg-info/
+examples/*
