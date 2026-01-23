@@ -967,27 +967,28 @@ class TraceDiff:
                         kernel_names1, kernel_time1 = get_kernel_info_subtree(
                             cpu_op_uid, baseline_uid2node
                         )
-                        rows.append(
-                            {
-                                "lowest_common_ancestor_name": name,
-                                "merged_id": merged_id,
-                                "cpu_op_name_trace1": name,
-                                "cpu_op_name_trace2": "",
-                                "nn_module_stack": node.get("nn_module_stack", []),
-                                "input_shape_trace1": input_shape1,
-                                "input_shape_trace2": "",
-                                "concrete_inputs_trace1": concrete_inputs1,
-                                "concrete_inputs_trace2": "",
-                                "input_strides_trace1": input_strides1,
-                                "input_strides_trace2": "",
-                                "input_type_trace1": input_type1,
-                                "input_type_trace2": "",
-                                "kernel_time_trace1": kernel_time1,
-                                "kernel_time_trace2": 0,
-                                "kernel_names_trace1": kernel_names1,
-                                "kernel_names_trace2": "",
-                            }
-                        )
+                        if kernel_names1:
+                            rows.append(
+                                {
+                                    "lowest_common_ancestor_name": name,
+                                    "merged_id": merged_id,
+                                    "cpu_op_name_trace1": name,
+                                    "cpu_op_name_trace2": "",
+                                    "nn_module_stack": node.get("nn_module_stack", []),
+                                    "input_shape_trace1": input_shape1,
+                                    "input_shape_trace2": "",
+                                    "concrete_inputs_trace1": concrete_inputs1,
+                                    "concrete_inputs_trace2": "",
+                                    "input_strides_trace1": input_strides1,
+                                    "input_strides_trace2": "",
+                                    "input_type_trace1": input_type1,
+                                    "input_type_trace2": "",
+                                    "kernel_time_trace1": kernel_time1,
+                                    "kernel_time_trace2": 0,
+                                    "kernel_names_trace1": kernel_names1,
+                                    "kernel_names_trace2": "",
+                                }
+                            )
                 visited_stats_nodes.add(merged_id)
                 return
                 # Continue traversing children
@@ -1011,27 +1012,28 @@ class TraceDiff:
                         kernel_names2, kernel_time2 = get_kernel_info_subtree(
                             cpu_op_uid, variant_uid2node
                         )
-                        rows.append(
-                            {
-                                "lowest_common_ancestor_name": name,
-                                "merged_id": merged_id,
-                                "cpu_op_name_trace1": "",
-                                "cpu_op_name_trace2": name,
-                                "nn_module_stack": node.get("nn_module_stack", []),
-                                "input_shape_trace1": "",
-                                "input_shape_trace2": input_shape2,
-                                "concrete_inputs_trace1": "",
-                                "concrete_inputs_trace2": concrete_inputs2,
-                                "input_strides_trace1": "",
-                                "input_strides_trace2": input_strides2,
-                                "input_type_trace1": "",
-                                "input_type_trace2": input_type2,
-                                "kernel_time_trace1": 0,
-                                "kernel_time_trace2": kernel_time2,
-                                "kernel_names_trace1": "",
-                                "kernel_names_trace2": kernel_names2,
-                            }
-                        )
+                        if kernel_names2:
+                            rows.append(
+                                {
+                                    "lowest_common_ancestor_name": name,
+                                    "merged_id": merged_id,
+                                    "cpu_op_name_trace1": "",
+                                    "cpu_op_name_trace2": name,
+                                    "nn_module_stack": node.get("nn_module_stack", []),
+                                    "input_shape_trace1": "",
+                                    "input_shape_trace2": input_shape2,
+                                    "concrete_inputs_trace1": "",
+                                    "concrete_inputs_trace2": concrete_inputs2,
+                                    "input_strides_trace1": "",
+                                    "input_strides_trace2": input_strides2,
+                                    "input_type_trace1": "",
+                                    "input_type_trace2": input_type2,
+                                    "kernel_time_trace1": 0,
+                                    "kernel_time_trace2": kernel_time2,
+                                    "kernel_names_trace1": "",
+                                    "kernel_names_trace2": kernel_names2,
+                                }
+                            )
                 visited_stats_nodes.add(merged_id)
                 return
                 # Continue traversing children
