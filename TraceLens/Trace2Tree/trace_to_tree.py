@@ -10,7 +10,7 @@ import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
 import time
-
+import re
 
 from abc import ABC, abstractmethod
 import logging
@@ -753,7 +753,9 @@ class TraceToTree:
             
             # Push onto nn_module_stack if this is an nn.Module event
             if self._is_nn_module_event(event):
-                nn_module_stack.append(event[TraceLens.util.TraceEventUtils.TraceKeys.Name])
+                name = event['name']
+                name = re.sub(r'_\d+$', '', name)
+                nn_module_stack.append(name)
             
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
