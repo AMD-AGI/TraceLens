@@ -1054,6 +1054,7 @@ class TraceDiff:
             combined_idx = traverse(root_id, combined_idx)
 
         df = pd.DataFrame(rows)
+        df = df.drop(columns=['merged_id'])
         self.diff_stats_df = df
         return df
 
