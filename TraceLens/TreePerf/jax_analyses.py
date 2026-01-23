@@ -21,7 +21,7 @@ except ImportError:
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
-from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
+from TraceLens import TraceEventUtils, DataLoader, JaxProfileProcessor
 
 
 class JaxAnalyses:

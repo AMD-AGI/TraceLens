@@ -9,7 +9,7 @@ from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
 
-import TraceLens.util
+from TraceLens import TraceEventUtils
 from TraceLens import TraceToTree
 from ..TreePerf import GPUEventAnalyser
 
@@ -122,7 +122,7 @@ class TraceDiff:
         name = node.get("name") if "name" in node else node.get("Name")
         if name is None:
             try:
-                name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+                name = node.get(TraceEventUtils.TraceKeys.Name)
             except Exception:
                 pass
 
@@ -176,7 +176,7 @@ class TraceDiff:
                 continue
 
             # Add current node's UID to pod
-            uid = current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+            uid = current.get(TraceEventUtils.TraceKeys.UID)
             if uid is not None:
                 pod.add(uid)
 
@@ -201,7 +201,7 @@ class TraceDiff:
         while True:
             parent_uid = current.get("parent")
             if parent_uid is None:
-                return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                return current.get(TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
 
     def calculate_diff_boundaries(self):
@@ -222,7 +222,7 @@ class TraceDiff:
         wf_cache = {}
 
         def get_name(node):
-            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+            name = node.get(TraceEventUtils.TraceKeys.Name)
             return self._normalize_name_for_comparison(name)
 
         def get_children(tree, node):
@@ -230,7 +230,7 @@ class TraceDiff:
 
         def add_to_pod(node, pod, tree):
             # Add node and all its descendants to pod
-            pod.add(node.get(TraceLens.util.TraceEventUtils.TraceKeys.UID))
+            pod.add(node.get(TraceEventUtils.TraceKeys.UID))
             for child in get_children(tree, node):
                 add_to_pod(child, pod, tree)
 
@@ -283,8 +283,8 @@ class TraceDiff:
 
         def dfs(node1, node2):
             # If either node is already a POD, skip
-            uid1 = node1.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-            uid2 = node2.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+            uid1 = node1.get(TraceEventUtils.TraceKeys.UID)
+            uid2 = node2.get(TraceEventUtils.TraceKeys.UID)
             if uid1 in self.pod1 or uid2 in self.pod2:
                 return
 
@@ -304,11 +304,11 @@ class TraceDiff:
                 get_children(tree2, node2), key=lambda child: child.get("ts", 0)
             )
             seq1 = [
-                child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                child.get(TraceEventUtils.TraceKeys.UID)
                 for child in children1
             ]
             seq2 = [
-                child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                child.get(TraceEventUtils.TraceKeys.UID)
                 for child in children2
             ]
             ops = wagner_fischer(seq1, seq2)
@@ -391,7 +391,7 @@ class TraceDiff:
         def get_name_by_uid(tree, uid):
             node = tree.get(uid)
             name = (
-                node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+                node.get(TraceEventUtils.TraceKeys.Name)
                 if node
                 else None
             )
@@ -682,7 +682,7 @@ class TraceDiff:
             if dur is not None:
                 return dur
             try:
-                dur = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
+                dur = node.get(TraceEventUtils.TraceKeys.Duration)
             except Exception:
                 pass
             return dur
@@ -694,7 +694,7 @@ class TraceDiff:
             cat = node.get("cat") or node.get("category")
             if cat is None:
                 try:
-                    cat = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+                    cat = node.get(TraceEventUtils.TraceKeys.Category)
                 except Exception:
                     pass
             return cat in ("kernel", "gpu_memcpy")

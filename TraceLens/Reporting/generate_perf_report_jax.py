@@ -17,10 +17,9 @@ logging.basicConfig(
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 
-from TraceLens.PerfModel import jax_op_mapping
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
+from TraceLens.TreePerf import JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
-from TraceLens.util import TraceEventUtils
+from TraceLens import TraceEventUtils
 
 
 def perf_analysis(

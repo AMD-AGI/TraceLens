@@ -11,7 +11,7 @@ from collections import defaultdict
 import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from ..util import DataLoader
+from TraceLens import DataLoader
 
 
 def _default_filter_fn(event, include_pyfunc=False):

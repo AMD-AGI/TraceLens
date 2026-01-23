@@ -13,7 +13,7 @@ import gzip
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from ..util import DataLoader
+from .. import DataLoader
 
 
 def list_to_tuple(obj):
