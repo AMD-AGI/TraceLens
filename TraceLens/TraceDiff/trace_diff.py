@@ -581,73 +581,7 @@ class TraceDiff:
         """
         return self.merged_uid_map.get((tree_num, uid), -1)
 
-    def _build_parent_map(self, uid1, uid2):
-        """
-        Given uid1 from baseline and uid2 from variant, trace up their respective parent chains
-        and find their lowest common ancestor (LCA) merged_id in the merged tree.
-        Returns: merged_id of the LCA, or None if no LCA is found.
-        """
-        if self.merged_tree is None:
-            raise ValueError("merged_tree is not initialized. Call merge_trees() first.")
-
-        # Get the UID to merged_id mappings
-        uid1_to_merged_id, uid2_to_merged_id = self._get_uid_to_merged_id_maps()
-
-        # Traverse the ancestors for uid1 (baseline)
-        ancestors1 = []
-        curr_uid1 = uid1
-        while curr_uid1 is not None:
-            event = self.baseline.get_UID2event(curr_uid1)
-            ancestors1.append(event.get("name"))
-            curr_uid1 = event.get("parent")
-
-        # Traverse the ancestors for uid2 (variant)
-        ancestors2 = []
-        curr_uid2 = uid2
-        while curr_uid2 is not None:
-            event = self.variant.get_UID2event(curr_uid2)
-            ancestors2.append(event.get("name"))
-            curr_uid2 = event.get("parent")
-
-        # Find the first common merged_id in the ancestor chains
-        set_ancestors1 = set(ancestors1)
-        for merged_id in ancestors2:
-            if merged_id in set_ancestors1:
-                return merged_id  # The lowest common ancestor in merged tree
-
-        return None  # No LCA found
-
-    def _get_name_from_merged_event(self, merged_event):
-        """
-        Get the name from a merged event by looking up the actual node from the tree.
-        Prefers trace1 (baseline) if available, otherwise uses trace2 (variant).
-        
-        Args:
-            merged_event (dict): Merged event with uid1 and/or uid2
-            
-        Returns:
-            str: Name of the node, or None if not found
-        """
-        uid1 = merged_event.get("uid1")
-        uid2 = merged_event.get("uid2")
-        
-        # Try to get name from trace1 first
-        if uid1 is not None:
-            node = self.baseline.get_UID2event(uid1)
-            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-            if name:
-                return name
-        
-        # Otherwise try trace2
-        if uid2 is not None:
-            node = self.variant.get_UID2event(uid2)
-            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-            if name:
-                return name
-        
-        return None
-
-    def find_lowest_common_ancestor(self, name_x: str, name_y: str):
+    def find_lowest_common_ancestor(self, merged_id_x: str, merged_id_y: str):
         """
         Find the lowest common ancestor (LCA) between two nodes.
         name_x corresponds to a node from trace1 (baseline).
@@ -664,76 +598,31 @@ class TraceDiff:
         if self.merged_tree is None:
             raise ValueError("merged_tree is not initialized. Call merge_trees() first.")
         
-        # Get mappings
-        baseline_uid2node = self._get_baseline_uid2node()
-        variant_uid2node = self._get_variant_uid2node()
-        uid1_to_merged_id, uid2_to_merged_id = self._get_uid_to_merged_id_maps()
         merged_id_to_event = self._get_merged_id_to_event()
-        
-        # Find UIDs matching the given names
-        uid_x = None
-        uid_y = None
-        
-        # Search for name_x in trace1 (baseline)
-        for uid, node in baseline_uid2node.items():
-            node_name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-            if node_name == name_x:
-                uid_x = uid
-                break
-        
-        # Search for name_y in trace2 (variant)
-        for uid, node in variant_uid2node.items():
-            node_name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-            if node_name == name_y:
-                uid_y = uid
-                break
-        
-        if uid_x is None:
-            raise ValueError(f"Node with name '{name_x}' not found in trace1")
-        if uid_y is None:
-            raise ValueError(f"Node with name '{name_y}' not found in trace2")
-        
-        # Get merged_ids for both nodes
-        merged_id_x = uid1_to_merged_id.get(uid_x)
-        merged_id_y = uid2_to_merged_id.get(uid_y)
-        
-        if merged_id_x is None:
-            raise ValueError(f"No merged_id found for UID {uid_x} from trace1")
-        if merged_id_y is None:
-            raise ValueError(f"No merged_id found for UID {uid_y} from trace2")
-        
-        # Build parent map
-        lca_merged_id = self._build_parent_map(uid_x, uid_y)
-        
-        # Find path from merged_id_x to root
-        path_x = []
-        current = self._get_merged_id_to_event().get(merged_id_x)['uid1']
-        while current is not None:
-            path_x.append(self._get_op_name(current, 1))
-            current = parent_map.get(current)
-        
-        # Find path from merged_id_y to root
-        path_y = []
-        current = self._get_merged_id_to_event().get(merged_id_y)['uid2']
-        while current is not None:
-            path_y.append(self._get_op_name(current, 2))
-            current = parent_map.get(current)
-        
-        # Convert to sets for efficient lookup
-        path_x_set = set(path_x)
-        
-        # Find first common ancestor in path_y (starting from node going to root)
-        for ancestor_id in path_y:
-            if ancestor_id in path_x_set:
-                # Found the LCA
-                lca_event = merged_id_to_event.get(ancestor_id)
-                # Add name to the event
-                lca_event_with_name = lca_event.copy()
-                lca_event_with_name['name'] = self._get_name_from_merged_event(lca_event)
-                return ancestor_id, lca_event_with_name
-        
-        # No common ancestor found
-        return None, None
+        uid_x, uid_y = merged_id_to_event.get(merged_id_x)['uid1'], merged_id_to_event.get(merged_id_y)['uid2']
+
+        # Traverse the ancestors for uid1 (baseline)
+        ancestors1 = []
+        curr_uid_x = uid_x
+        while curr_uid_x is not None:
+            event = self.baseline.get_UID2event(curr_uid_x)
+            ancestors1.append(event.get("name"))
+            curr_uid_x = event.get("parent")
+
+        # Traverse the ancestors for uid2 (variant)
+        ancestors2 = []
+        curr_uid_y = uid_y
+        while curr_uid_y is not None:
+            event = self.variant.get_UID2event(curr_uid_y)
+            ancestors2.append(event.get("name"))
+            curr_uid_y = event.get("parent")
+
+        # Find the first common merged_id in the ancestor chains
+        set_ancestors1 = set(ancestors1)
+        for parent in ancestors2:
+            if parent in set_ancestors1:
+                return parent
+        return None
 
     def print_merged_subtree(self, uid_tree1=None, uid_tree2=None):
         if uid_tree1 is None and uid_tree2 is None:
@@ -986,6 +875,7 @@ class TraceDiff:
                         rows.append(
                             {
                                 "name": name,
+                                "merged_id": merged_id,
                                 "prev_combined": None,
                                 "nn_module_stack": node.get("nn_module_stack", []),
                                 "input_shape_trace1": input_shape1,
@@ -1019,6 +909,7 @@ class TraceDiff:
                     rows.append(
                         {
                             "name": name,
+                            "merged_id": merged_id,
                             "prev_combined": rows[combined_idx]["name"] if combined_idx is not None else None,
                             "nn_module_stack": node.get("nn_module_stack", []),
                             "input_shape_trace1": input_shape1,
@@ -1051,6 +942,7 @@ class TraceDiff:
                     rows.append(
                         {
                             "name": name,
+                            "merged_id": merged_id,
                             "prev_combined": rows[combined_idx]["name"] if combined_idx is not None else None,
                             "nn_module_stack": node.get("nn_module_stack", []),
                             "input_shape_trace1": "",
@@ -1102,26 +994,23 @@ class TraceDiff:
 
         df_trace1['nn_module_stack'] = df_trace1['nn_module_stack'].apply(str)
         df_trace2['nn_module_stack'] = df_trace2['nn_module_stack'].apply(str)
+
         # Merge on prev_combined
         df_merged = df_trace1.merge(
             df_trace2,
             on=['prev_combined', 'nn_module_stack'],
             how='inner'
         )
-        for name_x, name_y in zip(df_merged['name_x'].values, df_merged['name_y'].values):
-            lca_id, lca_event = self.find_lowest_common_ancestor(name_x, name_y)
-            df_merged.loc[df_merged['name_x'] == name_x, 'name'] = lca_event['name']
-            df_merged.loc[df_merged['name_y'] == name_y, 'name'] = lca_event['name']
-        # df_merged['name'] = df_merged['name_x'] + ' | ' + df_merged['name_y']
-        df_merged = df_merged.drop(columns=['name_x', 'name_y'])
 
-        # Optionally, you can reorganize columns to put name_combined first
-        cols = ['name', 'prev_combined', 'index_trace1', 'index_trace2'] + [col for col in df_merged.columns if col not in ['name', 'prev_combined', 'index_trace1', 'index_trace2']]
-        df_merged = df_merged[cols]
+        for merged_id_x, merged_id_y in zip(df_merged['merged_id_x'].values, df_merged['merged_id_y'].values):
+            lca_name = self.find_lowest_common_ancestor(merged_id_x, merged_id_y)
+            df_merged.loc[df_merged['merged_id_x'] == merged_id_x, 'name'] = lca_name
+            df_merged.loc[df_merged['merged_id_y'] == merged_id_y, 'name'] = lca_name
+
+        df_merged = df_merged.drop(columns=['merged_id_x', 'merged_id_y'])
 
         # Order df_merged columns to match the order in df_diff_stats (excluding dropped/duplicate columns)
-        cols_in_diff_stats = [col for col in df_diff_stats.columns if col in df_merged.columns]
-        final_cols = ['name', 'prev_combined', 'index_trace1', 'index_trace2'] + [col for col in cols_in_diff_stats if col not in ['name', 'prev_combined', 'index_trace1', 'index_trace2']]
+        final_cols = ['name', 'name_x', 'name_y', 'prev_combined', 'index_trace1', 'index_trace2'] + [col for col in df_diff_stats.columns if col not in ['name', 'name_x', 'name_y', 'prev_combined', 'merged_id', 'trace']]
         df_merged = df_merged[final_cols]
         merged_indices_trace1 = df_merged['index_trace1'].values
         merged_indices_trace2 = df_merged['index_trace2'].values
@@ -1132,17 +1021,15 @@ class TraceDiff:
         # Get rows from df_diff_stats that were NOT merged
         df_unmerged = df_diff_stats[~df_diff_stats.index.isin(all_merged_indices)].copy()
 
-        # Add a flag to distinguish merged vs unmerged rows
+        # Fill in the name columns for the unmerged rows
         df_merged['is_merged'] = True
         df_unmerged['is_merged'] = False
+        mask_input1_blank = df_unmerged['input_shape_trace1'] == ''
+        df_unmerged.loc[mask_input1_blank, 'name_y'] = df_unmerged.loc[mask_input1_blank, 'name']
+        df_unmerged.loc[~mask_input1_blank, 'name_x'] = df_unmerged.loc[~mask_input1_blank, 'name']
 
-        # For consistency, add empty columns to df_unmerged that exist in df_merged
-        # (or you can select specific columns from df_merged to match df_unmerged structure)
-
-        # Option 1: Keep df_merged and df_unmerged separate but concatenated
-        # This works if you're okay with having different column structures
         df_final = pd.concat([df_merged, df_unmerged], axis=0, ignore_index=True, sort=False)
-        df_final = df_final.drop(columns=['index_trace1', 'index_trace2', 'nn_module_stack'])
+        df_final = df_final.drop(columns=['index_trace1', 'index_trace2', 'merged_id', 'trace', 'prev_combined', 'is_merged'])
         self.diff_stats_paired_df = df_final
         return df_final
 
@@ -1344,6 +1231,7 @@ class TraceDiff:
             os.makedirs(output_folder)
         merged_tree_file = os.path.join(output_folder, "merged_tree_output.txt")
         diff_stats_file = os.path.join(output_folder, "diff_stats.csv")
+        diff_stats_paired_file = os.path.join(output_folder, "diff_stats_paired.csv")
         # diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
         diff_stats_unique_args_summary_file = os.path.join(
             output_folder, "diff_stats_unique_args_summary.csv"
@@ -1359,6 +1247,12 @@ class TraceDiff:
         else:
             print(
                 f"[TraceDiff] diff_stats_df is empty. Run generate_tracediff_report() first."
+            )
+        if self.diff_stats_paired_df is not None and not self.diff_stats_paired_df.empty:
+            self.diff_stats_paired_df.to_csv(diff_stats_paired_file, index=False)
+        else:
+            print(
+                f"[TraceDiff] diff_stats_paired_df is empty. Run generate_tracediff_report() first."
             )
         if (
             self.diff_stats_unique_args_summary_df is not None
