@@ -388,42 +388,6 @@ class TraceDiff:
             if node is None or not isinstance(node, dict):
                 return []
             return node.get("children", [])
-        
-        def safe_non_py_func_children(tree_obj, tree_dict, uid):
-            """
-            Get non python function operation children for a given UID.
-            If direct children are not non python function operations, recursively traverse
-            down until non python function operations are found.
-            
-            Args:
-                tree_obj: The TraceToTree object (self.baseline or self.variant)
-                tree_dict: The uid2node dictionary (baseline_uid2node or variant_uid2node)
-                uid: The UID of the parent node
-            
-            Returns:
-                List of UIDs that are CPU operations
-            """
-            node = tree_dict.get(uid, None)
-            if node is None or not isinstance(node, dict):
-                return []
-            
-            non_py_func_children = []
-            children_uids = node.get("children", [])
-            
-            for child_uid in children_uids:
-                child_node = tree_dict.get(child_uid)
-                if child_node is None:
-                    continue
-                
-                # Check if this child is a CPU op
-                child_cat = tree_obj.event_to_category(child_node)
-                if child_cat != "python_function":
-                    non_py_func_children.append(child_uid)
-                else:
-                    # Recursively search this child's descendants for CPU ops
-                    non_py_func_children.extend(safe_non_py_func_children(tree_obj, tree_dict, child_uid))
-        
-            return non_py_func_children
 
         def get_name_by_uid(tree, uid):
             node = tree.get(uid)
@@ -1233,9 +1197,7 @@ class TraceDiff:
         This does NOT write any files. Use print_tracediff_report_files to save outputs.
         """
         self.generate_diff_stats()
-        # self.pair_ops()
         self.get_df_diff_stats_unique_args()
-        # self.get_df_diff_stats_by_name()
 
     def print_tracediff_report_files(
         self, output_folder="rprt_diff", prune_non_gpu=False
