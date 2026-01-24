@@ -830,9 +830,9 @@ class TraceDiff:
         visited_stats_nodes = set()
         skip_row_nodes = set()  # Nodes to skip row creation but still traverse
 
-        def traverse(merged_id, combined_idx):
+        def traverse(merged_id):
             if merged_id in visited_stats_nodes:
-                return combined_idx
+                return
             node = merged_id_to_event[merged_id]
             print(self._get_op_name(node["uid1"], 1), self._get_op_name(node["uid2"], 2), node["merged_type"])
             # print(node)
@@ -907,7 +907,6 @@ class TraceDiff:
                             }
                         )
                         
-                        combined_idx = len(rows) - 1
                         visited_stats_nodes.add(merged_id)
                         return
                     # Continue traversing all children regardless
@@ -1012,10 +1011,10 @@ class TraceDiff:
             # print("node", node)
             if should_traverse_children:
                 for cid in node["children"]:
-                    combined_idx = traverse(cid, combined_idx)
-            return combined_idx
+                    traverse(cid)
+            return
         for root_id in merged_root_ids:
-            combined_idx = traverse(root_id, combined_idx)
+            traverse(root_id)
 
         df = pd.DataFrame(rows)
         df = df.drop(columns=['merged_id'])
