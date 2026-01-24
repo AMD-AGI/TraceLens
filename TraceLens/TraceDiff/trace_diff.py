@@ -1145,7 +1145,7 @@ class TraceDiff:
         df_filtered = self.diff_stats_df
         if op_name:
             df_filtered = df_filtered[df_filtered["name"] == op_name]
-
+        
         # 2. Compute difference and absolute difference between traces using assign for efficiency
         df_filtered = df_filtered.assign(
             diff=lambda x: x["kernel_time_trace2"] - x["kernel_time_trace1"],
@@ -1176,6 +1176,8 @@ class TraceDiff:
             df_agg = df_filtered.groupby(grouping_cols_original, dropna=False).agg(
                 agg_dict
             )
+            # Add row_count column (number of grouped rows per unique group)
+            df_agg["row_count"] = df_filtered.groupby(grouping_cols_original, dropna=False).size()
         except TypeError:
             # Fallback for unhashable types (lists/dicts): convert to strings
             str_cols = [f"{col}_str_repr" for col in grouping_cols_original]
@@ -1183,6 +1185,8 @@ class TraceDiff:
             for col, str_col in zip(grouping_cols_original, str_cols):
                 df_temp[str_col] = df_temp[col].astype(str)
             df_agg = df_temp.groupby(str_cols, dropna=False).agg(agg_dict)
+            # Add row_count column for stringified grouping columns
+            df_agg["row_count"] = df_temp.groupby(str_cols, dropna=False).size()
 
         # 7. Flatten the multi‑index column labels
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
@@ -1209,6 +1213,11 @@ class TraceDiff:
             col for col in df_agg.columns if col not in primary_cols + metric_cols
         ]
         df_agg = df_agg[primary_cols + metric_cols + other_cols]
+        df_agg = df_agg.rename(columns={"row_count_": "row_count"})
+        cols = list(df_agg.columns)
+        cols.remove("row_count")
+        cols.insert(1, "row_count")
+        df_agg = df_agg[cols]
 
         # 10. Sort by the trace1 kernel time sum
         sort_col = "kernel_time_trace1_sum"
@@ -1218,80 +1227,6 @@ class TraceDiff:
         self.diff_stats_unique_args_summary_df = df_agg
         return df_agg
 
-    def get_df_diff_stats_by_name(self, sort_desc: bool = True) -> pd.DataFrame:
-        """
-        Summarize diff stats by op name only, using sum for aggregation.
-
-        Expects columns:
-        - 'name'
-        - 'kernel_time_trace1'
-        - 'kernel_time_trace2'
-        Computes:
-        - diff = trace2 - trace1
-        - abs_diff = |diff|
-        Aggregates per name and sorts by kernel_time_trace1_sum_ms.
-        """
-        if self.diff_stats_df is None or self.diff_stats_df.empty:
-            print(
-                "[TraceDiff] diff_stats_df is empty. Please run generate_diff_stats() first."
-            )
-            return pd.DataFrame()
-        df = self.diff_stats_df.copy()
-        required = {"lowest_common_ancestor_name", "kernel_time_trace1", "kernel_time_trace2"}
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing columns: {sorted(missing)}")
-
-        d = df.copy()
-        # Use vectorized operations instead of sequential operations
-        d[["kernel_time_trace1", "kernel_time_trace2"]] = d[
-            ["kernel_time_trace1", "kernel_time_trace2"]
-        ].apply(lambda x: pd.to_numeric(x, errors="coerce").fillna(0))
-        d["diff"] = d["kernel_time_trace2"] - d["kernel_time_trace1"]
-        d["abs_diff"] = d["diff"].abs()
-
-        agg_fns = ["sum"]
-
-        grouped = d.groupby("lowest_common_ancestor_name", dropna=False).agg(
-            {
-                "kernel_time_trace1": agg_fns,
-                "kernel_time_trace2": agg_fns,
-                "diff": agg_fns,
-                "abs_diff": agg_fns,
-            }
-        )
-
-        # flatten columns
-        grouped.columns = [
-            "_".join(col).strip() for col in grouped.columns.to_flat_index()
-        ]
-        grouped = grouped.reset_index()
-
-        # add count of rows per name
-        counts = d.groupby("lowest_common_ancestor_name", dropna=False).size().reset_index(name="row_count")
-        out = counts.merge(grouped, on="lowest_common_ancestor_name", how="left")
-
-        # convert sum columns to ms and rename them by replacing the old columns
-        for col in [
-            "kernel_time_trace1_sum",
-            "kernel_time_trace2_sum",
-            "diff_sum",
-            "abs_diff_sum",
-        ]:
-            if col in out.columns:
-                out[col + "_ms"] = out[col] / 1000.0
-                out.drop(columns=[col], inplace=True)
-
-        # sort by kernel_time_trace1_sum_ms
-        sort_col = "kernel_time_trace1_sum_ms"
-        if sort_col in out.columns:
-            out = out.sort_values(
-                by=sort_col, ascending=not sort_desc, ignore_index=True
-            )
-
-        self.diff_stats_names_summary_df = out
-        return out
-
     def generate_tracediff_report(self):
         """
         Generate all TraceDiff output DataFrames and update the object variables.
@@ -1300,7 +1235,7 @@ class TraceDiff:
         self.generate_diff_stats()
         # self.pair_ops()
         self.get_df_diff_stats_unique_args()
-        self.get_df_diff_stats_by_name()
+        # self.get_df_diff_stats_by_name()
 
     def print_tracediff_report_files(
         self, output_folder="rprt_diff", prune_non_gpu=False
@@ -1344,15 +1279,4 @@ class TraceDiff:
         else:
             print(
                 f"[TraceDiff] diff_stats_unique_args_summary_df is empty. Run generate_tracediff_report() first."
-            )
-        if (
-            self.diff_stats_names_summary_df is not None
-            and not self.diff_stats_names_summary_df.empty
-        ):
-            self.diff_stats_names_summary_df.to_csv(
-                diff_stats_names_summary_file, index=False
-            )
-        else:
-            print(
-                f"[TraceDiff] diff_stats_names_summary_df is empty. Run generate_tracediff_report() first."
             )
