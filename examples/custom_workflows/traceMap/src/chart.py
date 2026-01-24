@@ -169,8 +169,12 @@ class CallbackManager:
         """Create callback for window size changes."""
         return CustomJS(
             args=dict(**sources, **controls, **gpu_names),
+<<<<<<< HEAD
             code=CallbackManager.create_sorted_data_js()
             + """
+=======
+            code=CallbackManager.create_sorted_data_js() + """
+>>>>>>> parent of 41076e9 (stop tracking ipynb files)
             const window_size = spinner.value;
             
             // Update slider properties
@@ -218,8 +222,12 @@ class CallbackManager:
         """Create callback for slider changes."""
         return CustomJS(
             args=dict(**sources, **controls),
+<<<<<<< HEAD
             code=CallbackManager.create_sorted_data_js()
             + """
+=======
+            code=CallbackManager.create_sorted_data_js() + """
+>>>>>>> parent of 41076e9 (stop tracking ipynb files)
             const start = slider.value;
             const window_size = spinner.value;
             const end = Math.min(start + window_size, source.data['Kernel Index'].length);

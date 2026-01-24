@@ -1,0 +1,34 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+import os
+from TraceLens import TraceFuse
+
+profiles_root_dir = "path/to/your/profiles"
+world_size = 8
+output_file = os.path.join(profiles_root_dir, "merged_trace.json")
+list_profile_filepaths = [
+    os.path.join(profiles_root_dir, f"rank_{i}.json") for i in range(world_size)
+]
+
+# Initialize TraceFusion
+# Sequential (default, safe and predictable)
+fuser = TraceFuse(list_profile_filepaths)
+
+# Or use multiprocessing for significant speedup (system-dependent)
+# fuser = TraceFuse(list_profile_filepaths, use_multiprocessing=True)
+
+# Control number of workers (defaults to os.cpu_count())
+# fuser = TraceFuse(list_profile_filepaths, use_multiprocessing=True, max_workers=32)
+
+# # Custom filter for NCCL kernels
+# def filter_nccl_kernels(event):
+#     cond0 = event.get('cat') in ['kernel', 'gpu_user_annotation']
+#     cond1 = 'nccl' in event.get('name', '').lower()
+#     return cond0 and cond1
+
+# fuser.merge_and_save(output_file, filter_fn=filter_nccl_kernels)
+fuser.merge_and_save(output_file)
