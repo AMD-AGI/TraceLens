@@ -5,6 +5,7 @@
 ###############################################################################
 
 import re
+from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
 
@@ -27,6 +28,7 @@ class TraceDiff:
         self.diff_stats_df = pd.DataFrame()  # DataFrame for diff stats
         self.diff_stats_paired_df = pd.DataFrame()  # DataFrame for diff stats paired
         self.diff_stats_summary_df = pd.DataFrame()  # DataFrame for diff stats summary
+
         # Cache for merged tree mapping only (baseline/variant dicts are already in tree objects)
         self._merged_id_to_event = None
 
@@ -155,10 +157,10 @@ class TraceDiff:
             return None
         return self.diff_stats_summary_df
 
-
-    def add_to_pod(self, node: dict, pod: set, tree: TraceToTree) -> None:
+    def add_to_pod(self, node: Dict[str, Any], pod: set, tree: TraceToTree) -> None:
         """
-        Recursively adds the subtree rooted at the given node to the set of points of differences (PODs).
+        Iteratively adds the subtree rooted at the given node to the set of points of differences (PODs).
+        Uses an iterative approach instead of recursion for better performance on deep trees.
 
         Args:
             node (Dict[str, Any]): The current node in the trace tree.
@@ -167,7 +169,8 @@ class TraceDiff:
         """
         if not isinstance(node, dict):
             return
-               # Iterative approach using a stack instead of recursion
+
+        # Iterative approach using a stack instead of recursion
         stack = [node]
         while stack:
             current = stack.pop()
@@ -202,7 +205,6 @@ class TraceDiff:
             if parent_uid is None:
                 return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
-
 
     def calculate_diff_boundaries(self):
         """
@@ -357,7 +359,7 @@ class TraceDiff:
 
         # Set the PODs and diff_boundaries
         self.calculate_diff_boundaries()
-        
+
         print("[TraceDiff] Creating a merged tree...")
 
         # Invalidate merged tree cache since we're rebuilding it
@@ -522,6 +524,7 @@ class TraceDiff:
             merged_id = uid1_to_merged_id.get(uid_tree1)
         elif uid_tree2 is not None:
             merged_id = uid2_to_merged_id.get(uid_tree2)
+
         if merged_id is None:
             raise ValueError("Could not find merged node for the given UID.")
 
@@ -650,12 +653,10 @@ class TraceDiff:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
             )
-        (merged_events, merged_root_ids) = self.merged_tree
+        merged_events, merged_root_ids = self.merged_tree
         merged_id_to_event = self._get_merged_id_to_event()
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
-
-        combined_idx = None
 
         def get_input_shape(node):
             args = node.get("args", {})
@@ -823,7 +824,6 @@ class TraceDiff:
             gpu_events = [tree_uid2node.get(uid) for uid in gpu_event_uids]
             kernel_names = [gpu_event["name"] for gpu_event in gpu_events]
             kernel_time = GPUEventAnalyser(gpu_events).compute_metrics()["busy_time"]
-
             return kernel_names, kernel_time
 
         rows = []
@@ -1109,7 +1109,7 @@ class TraceDiff:
         df_filtered = self.diff_stats_df
         if op_name:
             df_filtered = df_filtered[df_filtered["name"] == op_name]
-        
+
         # 2. Compute difference and absolute difference between traces using assign for efficiency
         df_filtered = df_filtered.assign(
             diff=lambda x: x["kernel_time_trace2"] - x["kernel_time_trace1"],

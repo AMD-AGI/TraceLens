@@ -877,7 +877,23 @@ class TraceToTree:
             ):
                 return event
         return None
-
+    def apply_annotation(
+        self,
+        name_filters =[]    
+    ) -> None:
+        events=self.events
+        annotation_events=[e for e in events if "user_annotation" in e.get("cat","")]
+        annotation_events.sort(key=lambda x: x.get("ts",0))
+        filtered_events=[]
+        for i in name_filters:
+            filtered_events+=[e for e in events if e.get("name","").startswith(i)]
+        for e in filtered_events:
+            annotation="NA"
+            for ann in annotation_events:
+                if ann["ts"]<=e["ts"] and (e["ts"]+e["dur"])<ann["ts"]+ann["dur"]:
+                    annotation=ann.get("name")
+                    break
+            self.events[e[TraceLens.util.TraceEventUtils.TraceKeys.UID]]["annotation"]=annotation
     def traverse_subtree_and_print(
         self,
         node: Dict[str, Any],

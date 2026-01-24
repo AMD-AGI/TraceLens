@@ -142,8 +142,8 @@ def test_df_kernel_launchers():
         perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
     )
 
-    assert df_kernel_launchers.shape == (25, 11)
-    assert df_kernel_launchers_summary.shape == (5, 7)
+    assert df_kernel_launchers.shape == (25, 12)
+    assert df_kernel_launchers_summary.shape == (5, 8)
     assert df_kernel_launchers_summary_by_category.shape == (2, 6)
 
 
