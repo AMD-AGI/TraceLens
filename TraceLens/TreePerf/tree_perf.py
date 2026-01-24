@@ -142,6 +142,7 @@ class TreePerfAnalyzer:
 
         data = DataLoader.load_data(profile_filepath)
         data = data["traceEvents"]
+
         categorizer = (
             TraceToTree.default_categorizer
             if not jax
