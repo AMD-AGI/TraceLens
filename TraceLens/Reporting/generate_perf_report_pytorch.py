@@ -247,20 +247,18 @@ def generate_perf_report_pytorch(
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
-    group_by_parent_module: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-    add_python_func=True if group_by_parent_module else False
+
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
         arch=gpu_arch_json,
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
-        add_python_func=add_python_func,
         enable_pseudo_ops=enable_pseudo_ops,
     )
     
@@ -301,19 +299,19 @@ def generate_perf_report_pytorch(
     # Only process CPU-dependent analysis for non-GPU-only traces
     if not perf_analyzer.gpu_only:
         df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
-            include_kernel_details=True, include_call_stack=group_by_parent_module,
+            include_kernel_details=True
         )
         df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(
-            df_kernel_launchers, group_by_parent_module=group_by_parent_module
+            df_kernel_launchers
         )
         df_kernel_launchers_summary_by_category = (
             perf_analyzer.get_df_kernel_launchers_summary_by_category(
-                df_kernel_launchers, group_by_parent_module=group_by_parent_module
+                df_kernel_launchers
             )
         )
         df_kernel_launchers_unique_args = (
             perf_analyzer.get_df_kernel_launchers_unique_args(
-                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True, group_by_parent_module=group_by_parent_module, 
+                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
             )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(
@@ -633,14 +631,6 @@ def main():
         default=False,
         help="Enable kernel summary sheet in the report. Disabled by default.",
     )
-
-    parser.add_argument(
-        "--group_by_parent_module",
-        action="store_true",
-        dest="group_by_parent_module",
-        default=False,
-        help="Group kernel launcher summaries by parent module in addition to operation name.",
-    )
     parser.add_argument(
         "--short_kernel_study",
         action="store_true",
@@ -722,7 +712,6 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
-        group_by_parent_module=args.group_by_parent_module,
     )
 
 
