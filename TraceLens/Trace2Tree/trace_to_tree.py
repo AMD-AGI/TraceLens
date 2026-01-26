@@ -152,10 +152,10 @@ class BaseTraceToTree(ABC):
                 continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
-            if nn_module_stack.empty():
-                event["nn_module_stack"] = ""
-            else:
+            if nn_module_stack:
                 event["nn_module_stack"] = list(nn_module_stack)
+            else:
+                event["nn_module_stack"] = ""
 
             if stack:
                 parent = stack[-1]
