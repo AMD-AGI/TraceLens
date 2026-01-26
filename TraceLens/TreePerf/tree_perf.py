@@ -699,7 +699,7 @@ class TreePerfAnalyzer:
             kernel_launchers.append(runtime_evt)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False):
+    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False, include_call_stack=False):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -729,6 +729,10 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                if include_call_stack:
+                    call_stack=self.tree.traverse_parents_and_get_callstack(event,filter=("nn.Module",))
+                    metrics_event["call_stack"] = call_stack
+                    metrics_event["parent_module"] = re.sub(r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]).strip("")
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -763,6 +767,40 @@ class TreePerfAnalyzer:
 
         return df_agg
 
+    @staticmethod
+    def get_df_kernel_launchers_summary_module(df_kernel_launchers):
+        df_temp = df_kernel_launchers.copy()
+        groupby_cols = ["name"]
+        if "parent_module" in df_temp.columns:
+            groupby_cols.append("parent_module")
+        agg_dict = {"total_direct_kernel_time": ["sum", "count"], "op category": set}
+        if "call_stack" in df_temp.columns:
+            agg_dict["call_stack"] = "first"
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
+        
+        df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
+        df_agg.reset_index(inplace=True)
+        df_agg.rename(
+            columns={
+                "total_direct_kernel_time_count": "Count",
+                "op category_set": "Categories",
+            },
+            inplace=True,
+        )
+        df_agg.sort_values(
+            by="total_direct_kernel_time_sum", ascending=False, inplace=True
+        )
+        df_agg["total_direct_kernel_time_ms"] = (
+            df_agg["total_direct_kernel_time_sum"] / 1000
+        )
+        total_duration_ms = df_agg["total_direct_kernel_time_ms"].sum()
+        df_agg["Percentage (%)"] = (
+            df_agg["total_direct_kernel_time_ms"] / total_duration_ms
+        ) * 100
+        df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
+        df_agg.reset_index(drop=True, inplace=True)
+
+        return df_agg
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
     @staticmethod
     def get_df_kernel_launchers_summary_by_shape(df_kernel_launchers, name):
@@ -942,6 +980,9 @@ class TreePerfAnalyzer:
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
             columns_to_keep_first.append("kernel_details")
+        if "parent_module" in df_filtered.columns:
+            agg_dict["parent_module"] = "first"
+            columns_to_keep_first.append("parent_module")
         for col in actual_grouping_cols:
             agg_dict[col] = "first"
             columns_to_keep_first.append(col)
@@ -1675,6 +1716,46 @@ class TreePerfAnalyzer:
 
         return df_agg
 
+    @staticmethod
+    def get_df_kernel_launchers_summary_by_category_module(
+        df_kernel_launchers: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Generate a DataFrame with breakdown of kernel launchers by category.
+        Args:
+            df_kernel_launchers (pd.DataFrame): DataFrame containing kernel launchers.
+        Returns:
+            pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
+        """
+        df_temp = df_kernel_launchers.copy()
+        groupby_cols = ["op category"]
+        if "parent_module" in df_temp.columns:
+            groupby_cols.append("parent_module")
+        agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
+        if "call_stack" in df_temp.columns:
+            agg_dict["call_stack"] = "first"
+
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
+        df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
+        df_agg.reset_index(inplace=True)
+        df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
+        df_agg.sort_values(
+            by="total_direct_kernel_time_sum", ascending=False, inplace=True
+        )
+        df_agg["total_direct_kernel_time_ms"] = (
+            df_agg["total_direct_kernel_time_sum"] / 1000
+        )
+        # remove the us col as we will use ms col
+        df_agg.drop(columns=["total_direct_kernel_time_sum"], inplace=True)
+        total_duration_ms = df_agg["total_direct_kernel_time_ms"].sum()
+        df_agg["Percentage (%)"] = (
+            df_agg["total_direct_kernel_time_ms"] / total_duration_ms
+        ) * 100
+        df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
+        df_agg.reset_index(drop=True, inplace=True)
+
+        return df_agg
+    
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
             event

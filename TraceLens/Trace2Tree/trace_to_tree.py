@@ -916,6 +916,25 @@ class TraceToTree:
                 _prefix=new_prefix,
                 is_last=(i == child_count - 1),
             )
+    def traverse_parents_and_get_callstack(self, node: Dict[str, Any], filter: tuple[str, ...] = ()):
+        depth = 0
+        print_str=node["name"]+" => "
+        while True:
+            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
+            max_len = 256
+            if len(name) > max_len:
+                name = name[:max_len] + ".."
+            if filter is None:
+                print_str+= f"{name} => "
+            else:
+                if any(filter_str in name for filter_str in filter):
+                    print_str+= f"{name} => "
+            # Move to the parent node
+            parent_node = self.get_parent_event(node)
+            if parent_node is None:
+                return print_str.strip(" => ").strip(" ")
+            node = parent_node
+            depth += 1
 
     def traverse_parents_and_print(
         self, node: Dict[str, Any], cpu_op_fields: tuple[str, ...] = ()
