@@ -164,11 +164,13 @@ class BaseTraceToTree(ABC):
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
             stack.append(event)
-            
+
             # Push onto nn_module_stack if this is an nn.Module event
             if self._is_nn_module_event(event):
-                nn_module_stack.append(event[TraceLens.util.TraceEventUtils.TraceKeys.Name])
-            
+                nn_module_stack.append(
+                    event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
+                )
+
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -750,13 +752,13 @@ class TraceToTree:
                 )
 
             stack.append(event)
-            
+
             # Push onto nn_module_stack if this is an nn.Module event
             if self._is_nn_module_event(event):
-                name = event['name']
-                name = re.sub(r'_\d+$', '', name)
+                name = event["name"]
+                name = re.sub(r"_\d+$", "", name)
                 nn_module_stack.append(name)
-            
+
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -877,23 +879,27 @@ class TraceToTree:
             ):
                 return event
         return None
-    def apply_annotation(
-        self,
-        name_filters =[]    
-    ) -> None:
-        events=self.events
-        annotation_events=[e for e in events if "user_annotation" in e.get("cat","")]
-        annotation_events.sort(key=lambda x: x.get("ts",0))
-        filtered_events=[]
+
+    def apply_annotation(self, name_filters=[]) -> None:
+        events = self.events
+        annotation_events = [e for e in events if "user_annotation" in e.get("cat", "")]
+        annotation_events.sort(key=lambda x: x.get("ts", 0))
+        filtered_events = []
         for i in name_filters:
-            filtered_events+=[e for e in events if e.get("name","").startswith(i)]
+            filtered_events += [e for e in events if e.get("name", "").startswith(i)]
         for e in filtered_events:
-            annotation="NA"
+            annotation = "NA"
             for ann in annotation_events:
-                if ann["ts"]<=e["ts"] and (e["ts"]+e["dur"])<ann["ts"]+ann["dur"]:
-                    annotation=ann.get("name")
+                if (
+                    ann["ts"] <= e["ts"]
+                    and (e["ts"] + e["dur"]) < ann["ts"] + ann["dur"]
+                ):
+                    annotation = ann.get("name")
                     break
-            self.events[e[TraceLens.util.TraceEventUtils.TraceKeys.UID]]["annotation"]=annotation
+            self.events[e[TraceLens.util.TraceEventUtils.TraceKeys.UID]][
+                "annotation"
+            ] = annotation
+
     def traverse_subtree_and_print(
         self,
         node: Dict[str, Any],
