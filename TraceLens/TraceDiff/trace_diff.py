@@ -11,7 +11,6 @@ import pandas as pd
 
 import TraceLens.util
 from TraceLens import TraceToTree
-import json
 from ..TreePerf import GPUEventAnalyser
 
 
@@ -26,7 +25,6 @@ class TraceDiff:
         self.merged_tree = None  # Will hold the merged tree structure
         self.merged_uid_map = {}  # (tree_num, uid) -> corresponding_uid or -1
         self.diff_stats_df = pd.DataFrame()  # DataFrame for diff stats
-        self.diff_stats_paired_df = pd.DataFrame()  # DataFrame for diff stats paired
         self.diff_stats_summary_df = pd.DataFrame()  # DataFrame for diff stats summary
 
         # Cache for merged tree mapping only (baseline/variant dicts are already in tree objects)
@@ -415,22 +413,20 @@ class TraceDiff:
                 self.merged_uid_map[(1, uid1)] = uid2
                 self.merged_uid_map[(2, uid2)] = uid1
                 nn_module_stack = self.baseline.get_UID2event(uid1).get(
-                    "nn_module_stack", []
+                    "nn_module_stack", ""
                 )
             elif uid1:
                 merged_type = "trace1"
                 self.merged_uid_map[(1, uid1)] = -1
                 nn_module_stack = self.baseline.get_UID2event(uid1).get(
-                    "nn_module_stack", []
+                    "nn_module_stack", ""
                 )
             else:
                 merged_type = "trace2"
                 self.merged_uid_map[(2, uid2)] = -1
                 nn_module_stack = self.variant.get_UID2event(uid2).get(
-                    "nn_module_stack", []
+                    "nn_module_stack", ""
                 )
-            # children1 = safe_non_py_func_children(self.baseline, baseline_uid2node, uid1)
-            # children2 = safe_non_py_func_children(self.variant, variant_uid2node, uid2)
             children1 = safe_children(baseline_uid2node, uid1)
             children2 = safe_children(variant_uid2node, uid2)
             # Wagner-Fischer to align children
@@ -549,16 +545,15 @@ class TraceDiff:
             connector = "└── " if is_last else "├── "
             if merge_type == "combined":
                 if name1 == name2 and name1 is not None:
-                    line = f"{prefix}{connector}{name1} {merged_id}"
+                    line = f"{prefix}{connector}{name1}"
                 else:
-                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2} {merged_id}"
+                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
             elif merge_type == "trace1":
-                line = f"{prefix}{connector}>> {merge_type}: {name1} {merged_id}"
+                line = f"{prefix}{connector}>> {merge_type}: {name1}"
             elif merge_type == "trace2":
-                line = f"{prefix}{connector}<< {merge_type}: {name2} {merged_id}"
+                line = f"{prefix}{connector}<< {merge_type}: {name2}"
             else:
-                line = f"{prefix}{connector}{merge_type}: {name1} | {name2} {merged_id}"
-            print(line)
+                line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
             # Sort children by merge_type order: combined, trace1, trace2
             children = [merged_id_to_event[cid] for cid in node["children"]]
             combined = [
@@ -614,15 +609,15 @@ class TraceDiff:
             connector = "└── " if is_last else "├── "
             if merge_type == "combined":
                 if name1 == name2 and name1 is not None:
-                    line = f"{prefix}{connector}{name1} {merged_id}"
+                    line = f"{prefix}{connector}{name1}"
                 else:
-                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2} {merged_id}"
+                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
             elif merge_type == "trace1":
-                line = f"{prefix}{connector}>> {merge_type}: {name1} {merged_id}"
+                line = f"{prefix}{connector}>> {merge_type}: {name1}"
             elif merge_type == "trace2":
-                line = f"{prefix}{connector}<< {merge_type}: {name2} {merged_id}"
+                line = f"{prefix}{connector}<< {merge_type}: {name2}"
             else:
-                line = f"{prefix}{connector}{merge_type}: {name1} | {name2} {merged_id}"
+                line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
             output_lines.append(line)
             # Sort children by merge_type order: combined, trace1, trace2
             children = [merged_id_to_event[cid] for cid in node["children"]]
@@ -844,25 +839,15 @@ class TraceDiff:
 
         rows = []
         visited_stats_nodes = set()
-        skip_row_nodes = set()  # Nodes to skip row creation but still traverse
 
         def traverse(merged_id):
             if merged_id in visited_stats_nodes:
                 return
             node = merged_id_to_event[merged_id]
-            print(
-                self._get_op_name(node["uid1"], 1),
-                self._get_op_name(node["uid2"], 2),
-                node["merged_type"],
-            )
-            # print(node)
-            # print('hi')
             mt = node["merged_type"]
             if mt == "combined":
                 event1 = baseline_uid2node.get(node["uid1"])
                 event2 = variant_uid2node.get(node["uid2"])
-                # print(event1)
-                # print(event2)
                 if event1 and event2 and is_gpu_path(event1) and is_gpu_path(event2):
                     children = [merged_id_to_event[cid] for cid in node["children"]]
                     non_combined_children = [
@@ -927,10 +912,10 @@ class TraceDiff:
                                 "cpu_op_name_trace1": child_name_trace1,
                                 "cpu_op_name_trace2": child_name_trace2,
                                 "nn_module_stack_trace1": child_node1.get(
-                                    "nn_module_stack", []
+                                    "nn_module_stack", ""
                                 ),
                                 "nn_module_stack_trace2": child_node2.get(
-                                    "nn_module_stack", []
+                                    "nn_module_stack", ""
                                 ),
                                 "input_shape_trace1": input_shape1,
                                 "input_shape_trace2": input_shape2,
@@ -948,11 +933,11 @@ class TraceDiff:
                         )
 
                         visited_stats_nodes.add(merged_id)
-                        return
-                    # Continue traversing all children regardless
+                        return  # Do not traverse children further
+
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
-                if event1 and is_gpu_path(event1) and merged_id not in skip_row_nodes:
+                if event1 and is_gpu_path(event1):
                     # Find all last CPU ops on GPU paths in this subtree
                     cpu_op_uids = find_all_last_cpu_ops_on_gpu_path(
                         node, self.baseline, baseline_uid2node, "uid1"
@@ -980,7 +965,7 @@ class TraceDiff:
                                     "cpu_op_name_trace1": name,
                                     "cpu_op_name_trace2": "",
                                     "nn_module_stack_trace1": cpu_op_node.get(
-                                        "nn_module_stack", []
+                                        "nn_module_stack", ""
                                     ),
                                     "nn_module_stack_trace2": "",
                                     "input_shape_trace1": input_shape1,
@@ -1002,7 +987,7 @@ class TraceDiff:
                 # Continue traversing children
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
-                if event2 and is_gpu_path(event2) and merged_id not in skip_row_nodes:
+                if event2 and is_gpu_path(event2):
                     # Find all last CPU ops on GPU paths in this subtree
                     cpu_op_uids = find_all_last_cpu_ops_on_gpu_path(
                         node, self.variant, variant_uid2node, "uid2"
@@ -1031,7 +1016,7 @@ class TraceDiff:
                                     "cpu_op_name_trace2": name,
                                     "nn_module_stack_trace1": "",
                                     "nn_module_stack_trace2": cpu_op_node.get(
-                                        "nn_module_stack", []
+                                        "nn_module_stack", ""
                                     ),
                                     "input_shape_trace1": "",
                                     "input_shape_trace2": input_shape2,
@@ -1049,11 +1034,7 @@ class TraceDiff:
                             )
                 visited_stats_nodes.add(merged_id)
                 return
-                # Continue traversing children
-            # print("node", node)
-            # print("node children", node["children"])
 
-            # print(json.dumps(rows, indent=2))
             # Only traverse children if both events are on GPU path
             should_traverse_children = False
             if is_gpu_path(event1) or is_gpu_path(event2):
@@ -1068,7 +1049,6 @@ class TraceDiff:
             traverse(root_id)
 
         df = pd.DataFrame(rows)
-        df = df.drop(columns=["merged_id"])
         self.diff_stats_df = df
         return df
 
@@ -1090,7 +1070,7 @@ class TraceDiff:
         """
         if self.diff_stats_df is None or self.diff_stats_df.empty:
             print(
-                "[TraceDiff] diff_stats_paired_df is empty. Please run generate_diff_stats() first."
+                "[TraceDiff] diff_stats_df is empty. Please run generate_diff_stats() first."
             )
             return None
         # Avoid unnecessary copies - use views when filtering

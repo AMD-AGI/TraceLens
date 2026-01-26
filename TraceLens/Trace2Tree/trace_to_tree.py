@@ -9,7 +9,6 @@ from typing import Dict, Any, Callable
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
-import time
 import re
 
 from abc import ABC, abstractmethod
@@ -50,7 +49,6 @@ class BaseTraceToTree(ABC):
             self.event_to_category = self.default_categorizer()
 
         self.cpu_root_nodes = []
-        self.all_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
         self.name2event_uids = defaultdict(list)
 
@@ -154,7 +152,10 @@ class BaseTraceToTree(ABC):
                 continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
-            event["nn_module_stack"] = list(nn_module_stack)
+            if nn_module_stack.empty():
+                event["nn_module_stack"] = ""
+            else:
+                event["nn_module_stack"] = list(nn_module_stack)
 
             if stack:
                 parent = stack[-1]
@@ -590,7 +591,6 @@ class TraceToTree:
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
         self.cpu_root_nodes = []
-        self.all_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
         self.name2event_uids = defaultdict(list)
 
@@ -737,7 +737,10 @@ class TraceToTree:
                 continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
-            event["nn_module_stack"] = list(nn_module_stack)
+            if nn_module_stack:
+                event["nn_module_stack"] = list(nn_module_stack)
+            else:
+                event["nn_module_stack"] = ""
 
             if stack:
                 parent = stack[-1]
@@ -745,11 +748,6 @@ class TraceToTree:
                     event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                 )
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-            else:
-                # Stack is empty - this is a root node!
-                self.all_root_nodes.append(
-                    event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
 
             stack.append(event)
 
@@ -838,20 +836,6 @@ class TraceToTree:
         if "children" not in event:
             return []
         return [self.get_UID2event(child_UID) for child_UID in event["children"]]
-
-    def get_non_py_func_children(self, event):
-        """
-        Return the list of immediate cpu_op children for the given event.
-        If a direct child is not a cpu_op, recursively search its children until cpu_op events are found.
-        Returns a flat list of all cpu_op events that appear as descendants directly below this event.
-        """
-        non_py_func_children = []
-        for child in self.get_children_events(event):
-            if self.event_to_category(child) != "python_function":
-                non_py_func_children.append(child)
-            else:
-                non_py_func_children.extend(self.get_non_py_func_children(child))
-        return non_py_func_children
 
     def get_gpu_events(self, event):
         """
