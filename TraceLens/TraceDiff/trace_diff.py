@@ -935,9 +935,11 @@ class TraceDiff:
                         for child in non_combined_children
                     ):
                         # Store the LCA name from this combined node
-                        lca_name = self._get_op_name(
-                            node["uid1"], 1
-                        ) or self._get_op_name(node["uid2"], 2)
+                        lca_name = (
+                            self._get_op_name(node["uid1"], 1)
+                            or self._get_op_name(node["uid2"], 2)
+                        )
+                        lca_name = lca_name.replace('(number)', '').strip()
 
                         # Get kernel clusters grouped by Input Dims for both traces
                         clusters1 = get_kernel_clusters_by_input_dims(
