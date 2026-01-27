@@ -35,7 +35,6 @@ from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 
 
-
 def normalize_dtype_to_precision(dtype_str):
     """
     Normalize a dtype string to a standard precision identifier.
@@ -130,12 +129,12 @@ def get_max_achievable_tflops(perf_model, arch):
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
-        profile_filepath, 
+        profile_filepath,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
-        *args, 
-        **kwargs
+        *args,
+        **kwargs,
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
@@ -150,15 +149,15 @@ class TreePerfAnalyzer:
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
         tree = TraceToTree(data, event_to_category=categorizer)
-        
+
         return TreePerfAnalyzer(
-            tree, 
-            jax=jax, 
+            tree,
+            jax=jax,
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
-            *args, 
-            **kwargs
+            *args,
+            **kwargs,
         )
 
     def __init__(
@@ -171,7 +170,7 @@ class TreePerfAnalyzer:
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
-        tree_postprocess_extension=None
+        tree_postprocess_extension=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -186,18 +185,18 @@ class TreePerfAnalyzer:
         )
         self.gpu_only = self.check_gpu_only()
         self.tree.build_tree(add_python_func=add_python_func)
-        
+
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
             try:
                 apply_pseudo_op_extensions(self.tree)
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
-        
+
         # Backward compatibility for custom tree postprocessing
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
-        
+
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
@@ -590,116 +589,91 @@ class TreePerfAnalyzer:
         # In the ideal case, ops are routed through torch dispatcher to create a clear hierarchy
         # where a "leaf" CPU operation is the caller for runtime events that launch kernels. These CPU ops are
         # valuable for analysis as they contain rich argument information (e.g., input dimensions, strides, dtypes).
-        # The method identifies these as the primary kernel launchers.
         #
         # However, some edge cases exist where the calling CPU context is hidden, and a runtime event appears
-        # unlinked to a parent CPU op. While not ideal for a detailed breakdown (as argument info is missing),
-        # these unlinked events still launch kernels and must be captured for a complete analysis. This method
-        # processes them separately to ensure all kernel launchers are included in the output.
+        # unlinked to a parent CPU op. In these cases, the runtime event itself is used as the launcher.
         #
-        # Special handling for 'execute' operations for a special customer case
+        # Implementation note: This method works backwards from kernels to find the launcher.
+        # It walks up from each kernel's runtime parent, skipping python_function nodes, to find
+        # the first cpu_op ancestor. If no cpu_op is found, the runtime event is used as the launcher.
+        # This approach gives consistent results regardless of whether add_python_func=True or False.
 
-        kernel_launchers = []
-        cpu_ops = [
-            evt for evt in self.tree.events if self.event_to_category(evt) == "cpu_op"
-        ]
-        for event in cpu_ops:
-
-            if event["name"] == "execute":
-                parent = self.tree.get_parent_event(event)
-                list_kernel_uids = parent.get("gpu_events", [])
-                list_kernels = [
-                    self.tree.get_UID2event(uid) for uid in list_kernel_uids
-                ]
-                parent["total_direct_kernel_time"] = GPUEventAnalyser(
-                    list_kernels
-                ).compute_metrics()["busy_time"]
-                parent["direct_kernel_count"] = len(list_kernels)
-                parent["kernel_details"] = [
-                    {
-                        "name": kernel["name"],
-                        "dur": kernel["dur"],
-                        "stream": kernel.get("args", {}).get("stream", None),
-                    }
-                    for kernel in list_kernels
-                ]
-                parent["op category"] = self.op_categorizer(parent)
-                kernel_launchers.append(parent)
-                continue  # no need to check children of this event
-
-            kernel_launcher = False
-            # total_direct_kernel_time = 0
-            # direct_kernel_count = 0
-            list_kernels = []
-            for child_UID in event.get("children", []):
-                child = self.tree.events_by_uid[child_UID]
-                for grand_child_UID in child.get("children", []):
-                    grand_child = self.tree.events_by_uid[grand_child_UID]
-                    is_kernel = self.event_to_category(grand_child) in {
-                        "kernel",
-                        "gpu_memcpy",
-                        "gpu_memset",
-                    }
-                    is_nccl = "nccl" in grand_child["name"]
-                    should_include = is_kernel and (include_nccl or not is_nccl)
-                    if should_include:
-                        kernel_launcher = True
-                        list_kernels.append(grand_child)
-            if kernel_launcher:
-                for kernel_evt in list_kernels:
-                    kernel_evt["args"]["leaf_op"] = event["UID"]
-                    runtime_evt = self.tree.get_parent_event(kernel_evt)
-                    runtime_evt["args"]["leaf_op"] = event["UID"]
-                event["total_direct_kernel_time"] = GPUEventAnalyser(
-                    list_kernels
-                ).compute_metrics()["busy_time"]
-                event["direct_kernel_count"] = len(list_kernels)
-                event["kernel_details"] = [
-                    {
-                        "name": kernel["name"],
-                        "dur": kernel["dur"],
-                        "stream": kernel.get("args", {}).get("stream", None),
-                    }
-                    for kernel in list_kernels
-                ]
-                event["op category"] = self.op_categorizer(event)
-                kernel_launchers.append(event)
-
-        # Now handle the case where runtime events are not linked to any cpu_op
-        runtime_evts = [
+        # Step 1: Find all kernel events
+        kernel_events = [
             evt
             for evt in self.tree.events
-            if self.event_to_category(evt) in {"cuda_runtime", "cuda_driver"}
+            if self.event_to_category(evt) in {"kernel", "gpu_memcpy", "gpu_memset"}
         ]
-        for runtime_evt in runtime_evts:
-            if "leaf_op" in runtime_evt.get("args", {}):
-                continue  # already processed as part of a cpu_op
-            list_kernel_uids = runtime_evt.get("gpu_events", [])
-            if len(list_kernel_uids) == 0:
-                continue  # no kernels launched
-            # for non graph runtime events, we skip nccl kernels unless include_nccl is True
-            elif len(list_kernel_uids) == 1:
-                is_nccl = "nccl" in self.tree.get_UID2event(list_kernel_uids[0])["name"]
-                if is_nccl and not include_nccl:
-                    continue  # skip nccl kernels
-            list_kernels = [self.tree.get_UID2event(uid) for uid in list_kernel_uids]
-            runtime_evt["total_direct_kernel_time"] = GPUEventAnalyser(
-                list_kernels
+
+        # Step 2: Map each kernel to its launcher (cpu_op if found, else runtime event)
+        launcher_to_kernels = defaultdict(list)
+
+        for kernel in kernel_events:
+            # Skip nccl if not included
+            is_nccl = "nccl" in kernel.get("name", "").lower()
+            if is_nccl and not include_nccl:
+                continue
+
+            # Walk up to find runtime event (immediate parent should be runtime)
+            runtime_evt = self.tree.get_parent_event(kernel)
+            if runtime_evt is None:
+                continue
+
+            # Walk up from runtime to find first cpu_op (skip python_functions)
+            current = self.tree.get_parent_event(runtime_evt)
+            leaf_cpu_op = None
+
+            while current is not None:
+                cat = self.event_to_category(current)
+                if cat == "cpu_op":
+                    leaf_cpu_op = current
+                    break
+                elif cat == "python_function":
+                    # Skip python functions, keep going up
+                    current = self.tree.get_parent_event(current)
+                else:
+                    # Some other category, stop
+                    break
+
+            # Use cpu_op if found, otherwise use runtime event as launcher
+            if leaf_cpu_op is not None:
+                launcher_to_kernels[leaf_cpu_op["UID"]].append(kernel)
+            else:
+                launcher_to_kernels[runtime_evt["UID"]].append(kernel)
+
+        # Step 3: Build kernel_launchers list (sorted by start time for consistent ordering)
+        kernel_launchers = []
+
+        # Sort launcher UIDs by the start time of their events
+        sorted_launcher_uids = sorted(
+            launcher_to_kernels.keys(),
+            key=lambda uid: self.tree.get_UID2event(uid).get("ts", 0),
+        )
+
+        for launcher_uid in sorted_launcher_uids:
+            kernels = launcher_to_kernels[launcher_uid]
+            event = self.tree.get_UID2event(launcher_uid)
+
+            event["total_direct_kernel_time"] = self.GPUEventAnalyser(
+                kernels
             ).compute_metrics()["busy_time"]
-            runtime_evt["direct_kernel_count"] = len(list_kernels)
-            runtime_evt["kernel_details"] = [
+            event["direct_kernel_count"] = len(kernels)
+            event["kernel_details"] = [
                 {
                     "name": kernel["name"],
                     "dur": kernel["dur"],
                     "stream": kernel.get("args", {}).get("stream", None),
                 }
-                for kernel in list_kernels
+                for kernel in kernels
             ]
-            runtime_evt["op category"] = self.op_categorizer(runtime_evt)
-            kernel_launchers.append(runtime_evt)
+            event["op category"] = self.op_categorizer(event)
+            kernel_launchers.append(event)
+
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False, include_call_stack=False):
+    def get_df_kernel_launchers(
+        self, id_cols=False, include_kernel_details=False, include_call_stack=False
+    ):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -730,9 +704,13 @@ class TreePerfAnalyzer:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
                 if include_call_stack:
-                    call_stack=self.tree.traverse_parents_and_get_callstack(event,filter=("nn.Module",))
+                    call_stack = self.tree.traverse_parents_and_get_callstack(
+                        event, filter=("nn.Module",)
+                    )
                     metrics_event["call_stack"] = call_stack
-                    metrics_event["parent_module"] = re.sub(r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]).strip("")
+                    metrics_event["parent_module"] = re.sub(
+                        r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
+                    ).strip("")
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -777,7 +755,7 @@ class TreePerfAnalyzer:
         if "call_stack" in df_temp.columns:
             agg_dict["call_stack"] = "first"
         df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
-        
+
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(
@@ -801,6 +779,7 @@ class TreePerfAnalyzer:
         df_agg.reset_index(drop=True, inplace=True)
 
         return df_agg
+
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
     @staticmethod
     def get_df_kernel_launchers_summary_by_shape(df_kernel_launchers, name):
@@ -1755,7 +1734,7 @@ class TreePerfAnalyzer:
         df_agg.reset_index(drop=True, inplace=True)
 
         return df_agg
-    
+
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
             event
