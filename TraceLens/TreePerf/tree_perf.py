@@ -959,9 +959,6 @@ class TreePerfAnalyzer:
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
             columns_to_keep_first.append("kernel_details")
-        if "parent_module" in df_filtered.columns:
-            agg_dict["parent_module"] = "first"
-            columns_to_keep_first.append("parent_module")
         for col in actual_grouping_cols:
             agg_dict[col] = "first"
             columns_to_keep_first.append(col)
@@ -1026,6 +1023,133 @@ class TreePerfAnalyzer:
             ].cumsum()
         return df_unique_args
 
+    @staticmethod
+    def get_df_kernel_launchers_unique_args_module(
+        df_kernel_launchers: pd.DataFrame,
+        event_name=None,
+        agg_metrics=["mean"],
+        include_pct=False,
+    ) -> pd.DataFrame:
+        """
+        Generate a DataFrame with unique arguments for each operation in the input DataFrame.
+
+        Args:
+            df_kernel_launchers (pd.DataFrame): DataFrame containing kernel launchers.
+            event_name (str): Optional name of the event to filter the DataFrame.
+            agg_metrics (list): List of aggregation metrics to apply. ex: ['mean', 'std', 'median']
+            include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
+
+        Returns:
+            pd.DataFrame: DataFrame with unique arguments for each operation.
+        """
+        grouping_cols_original = [
+            "name",
+            "op category",
+            "parent_module",
+            "Input Dims",
+            "Input type",
+            "Input Strides",
+            "Concrete Inputs",
+        ]
+
+        # 0. Filter the DataFrame based on the event name if provided
+        if event_name is not None:
+            df_filtered = df_kernel_launchers[
+                df_kernel_launchers["name"] == event_name
+            ].copy()
+        else:
+            df_filtered = df_kernel_launchers.copy()
+
+        # 1. Create string representations of the grouping columns - so we can group by them
+        str_col_names, actual_grouping_cols = [], []
+        for col in grouping_cols_original:
+            if col not in df_filtered.columns:
+                continue
+            actual_grouping_cols.append(col)
+            str_col_name = f"{col}_str_repr_for_grouping"
+            df_filtered[str_col_name] = df_filtered[col].apply(str)
+            str_col_names.append(str_col_name)
+        if not str_col_names:
+            raise ValueError("No valid columns found to group by.")
+
+        # 2. Aggregate the DataFrame by the string representations of the grouping columns
+        agg_dict = {}
+        if "total_direct_kernel_time" in df_filtered.columns:
+            agg_dict["total_direct_kernel_time"] = agg_metrics + (
+                ["sum"] if "sum" not in agg_metrics else []
+            )
+        columns_to_keep_first = []
+        if "UID" in df_filtered.columns:
+            agg_dict["UID"] = ["first", "count"]
+            columns_to_keep_first.append("UID")
+        if "kernel_details" in df_filtered.columns:
+            agg_dict["kernel_details"] = partial(
+                TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
+            )
+            columns_to_keep_first.append("kernel_details")
+        for col in actual_grouping_cols:
+            agg_dict[col] = "first"
+            columns_to_keep_first.append(col)
+        df_unique_args = df_filtered.groupby(
+            str_col_names, dropna=False, sort=False
+        ).agg(agg_dict)
+        df_unique_args.columns = [
+            "_".join(col).strip() for col in df_unique_args.columns.values
+        ]
+        df_unique_args.reset_index(inplace=True)
+
+        # 3. Rename columns for clarity
+        rename_map = {"UID_count": "operation_count"}
+        for col in columns_to_keep_first:
+            col_first = f"{col}_first"
+            if col_first in df_unique_args.columns:
+                rename_map[col_first] = col
+        # uid needs to be mapped to ex_UID
+        if "UID_first" in df_unique_args.columns:
+            rename_map["UID_first"] = "ex_UID"
+        for col in df_unique_args.columns:
+            if col.startswith("kernel_details_"):
+                rename_map[col] = "kernel_details_summary"
+        df_unique_args.rename(columns=rename_map, inplace=True)
+
+        # 4. Reorder columns: start with grouping + key metrics, then rest
+        primary_cols = [
+            col for col in grouping_cols_original if col in df_unique_args.columns
+        ]
+        metric_cols = [
+            col
+            for col in [
+                "UID",
+                "operation_count",
+                "kernel_names",
+                "total_direct_kernel_time_mean",
+            ]
+            if col in df_unique_args.columns
+        ]
+        other_cols = [
+            col
+            for col in df_unique_args.columns
+            if col not in primary_cols + metric_cols
+            and not col.endswith("_str_repr_for_grouping")
+        ]
+        df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
+
+        # 5. Sort the DataFrame by the sum of total_direct_kernel_time and then by ex_uid for stability
+        if "total_direct_kernel_time_sum" in df_unique_args.columns:
+            df_unique_args = df_unique_args.sort_values(
+                by=["total_direct_kernel_time_sum", "ex_UID"], ascending=[False, True]
+            ).reset_index(drop=True)
+
+        # 6. Calculate percentage of total time and cumulative percentage if requested
+        if include_pct and "total_direct_kernel_time_sum" in df_unique_args.columns:
+            total_duration_ms = df_unique_args["total_direct_kernel_time_sum"].sum()
+            df_unique_args["Percentage (%)"] = (
+                df_unique_args["total_direct_kernel_time_sum"] / total_duration_ms
+            ) * 100
+            df_unique_args["Cumulative Percentage (%)"] = df_unique_args[
+                "Percentage (%)"
+            ].cumsum()
+        return df_unique_args
     # =========================================================================
     # Unified Perf Metrics Table Methods
     # =========================================================================

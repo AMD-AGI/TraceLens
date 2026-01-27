@@ -312,7 +312,7 @@ def generate_perf_report_pytorch(
             )
         )
         df_kernel_launchers_unique_args = (
-            perf_analyzer.get_df_kernel_launchers_unique_args(
+            perf_analyzer.get_df_kernel_launchers_unique_args_module(
                 df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True, 
             )
         )
