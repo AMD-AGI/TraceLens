@@ -155,7 +155,7 @@ class BaseTraceToTree(ABC):
             if nn_module_stack:
                 event["nn_module_stack"] = list(nn_module_stack)
             else:
-                event["nn_module_stack"] = ""
+                event["nn_module_stack"] = ['root']
 
             if stack:
                 parent = stack[-1]
@@ -740,7 +740,7 @@ class TraceToTree:
             if nn_module_stack:
                 event["nn_module_stack"] = list(nn_module_stack)
             else:
-                event["nn_module_stack"] = ""
+                event["nn_module_stack"] = ['root']
 
             if stack:
                 parent = stack[-1]
