@@ -8,6 +8,7 @@ import re
 from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
+from collections import defaultdict
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -837,7 +838,7 @@ class TraceDiff:
             kernel_time = GPUEventAnalyser(gpu_events).compute_metrics()["busy_time"]
             return kernel_names, kernel_time
 
-        def get_kernel_clusters_by_input_dims(root_uid, tree_uid2node, tree_obj):
+        def get_kernel_clusters_by_cpu_op(root_uid, tree_uid2node, tree_obj):
             """
             Get all GPU events under a node and cluster them by their parent CPU op's Input Dims.
             Returns a list of clusters, where each cluster is a dict with:
@@ -859,7 +860,6 @@ class TraceDiff:
                 return []
             
             # For each GPU event, find its parent CPU operation and group by Input Dims
-            from collections import defaultdict
             clusters_dict = defaultdict(list)  # key: (cpu_op_uid, input_dims), value: list of gpu_event UIDs
             
             for gpu_uid in gpu_event_uids:
@@ -882,29 +882,27 @@ class TraceDiff:
                 if parent_node is None:
                     continue
                 
-                # Get the Input Dims from the parent CPU op
-                input_dims = get_input_shape(parent_node)
-                
-                # Create cluster key
-                cluster_key = (parent_uid, input_dims)
-                clusters_dict[cluster_key].append(gpu_uid)
+                # # Get the Input Dims from the parent CPU op
+                # input_dims = get_input_shape(parent_node)
+                clusters_dict[parent_uid].append(gpu_uid)
             
             # Convert to list of cluster dicts
             clusters = []
-            for (cpu_op_uid, input_dims), gpu_uids in clusters_dict.items():
+            for cpu_op_uid, gpu_uids in clusters_dict.items():
                 cpu_op_node = tree_uid2node.get(cpu_op_uid)
                 gpu_events = [tree_uid2node.get(uid) for uid in gpu_uids]
                 kernel_names = [gpu_event["name"] for gpu_event in gpu_events if gpu_event]
                 kernel_time = GPUEventAnalyser([e for e in gpu_events if e]).compute_metrics()["busy_time"]
-                
+                input_dims = get_input_shape(cpu_op_node)
                 # Get the smallest timestamp from all GPU kernels in this cluster
                 gpu_timestamps = [gpu_event.get("ts", 0) for gpu_event in gpu_events if gpu_event]
                 min_timestamp = min(gpu_timestamps) if gpu_timestamps else cpu_op_node.get("ts", 0)
+
                 
                 clusters.append({
-                    "input_dims": input_dims,
                     "cpu_op_node": cpu_op_node,
                     "cpu_op_uid": cpu_op_uid,
+                    "input_dims": input_dims,
                     "gpu_events": gpu_events,
                     "kernel_names": kernel_names,
                     "kernel_time": kernel_time,
@@ -942,10 +940,10 @@ class TraceDiff:
                         lca_name = lca_name.replace('(number)', '').strip()
 
                         # Get kernel clusters grouped by Input Dims for both traces
-                        clusters1 = get_kernel_clusters_by_input_dims(
+                        clusters1 = get_kernel_clusters_by_cpu_op(
                             node["uid1"], baseline_uid2node, self.baseline
                         )
-                        clusters2 = get_kernel_clusters_by_input_dims(
+                        clusters2 = get_kernel_clusters_by_cpu_op(
                             node["uid2"], variant_uid2node, self.variant
                         )
 
@@ -1148,35 +1146,31 @@ class TraceDiff:
                                 added_dims.add(c["input_dims"])
                             
                             # Process each pair of consecutive common dims
-                            for i in range(len(common_dims)):
-                                current_dim = common_dims[i]
-                                
-                                # Create row for the common dim
-                                if current_dim not in added_dims:
-                                    create_row(
-                                        clusters1_by_dims[current_dim],
-                                        clusters2_by_dims[current_dim]
-                                    )
-                                    added_dims.add(current_dim)
-                                
+                            for i, current_dim in enumerate(common_dims):
+                                create_row(
+                                    clusters1_by_dims[current_dim],
+                                    clusters2_by_dims[current_dim]
+                                )
                                 # Handle CPU ops between this common dim and the next
                                 if i < len(common_dims) - 1:
                                     next_dim = common_dims[i + 1]
-                                    current_ts1 = clusters1_by_dims[current_dim]["timestamp"]
-                                    next_ts1 = clusters1_by_dims[next_dim]["timestamp"]
-                                    current_ts2 = clusters2_by_dims[current_dim]["timestamp"]
-                                    next_ts2 = clusters2_by_dims[next_dim]["timestamp"]
+                                    current_cluster1 = clusters1_by_dims[current_dim]
+                                    current_cluster2 = clusters2_by_dims[current_dim]
+                                    next_cluster1 = clusters1_by_dims[next_dim]
+                                    next_cluster2 = clusters2_by_dims[next_dim]
+                                    current_ts1 = current_cluster1["timestamp"]
+                                    next_ts1 = next_cluster1["timestamp"]
+                                    current_ts2 = current_cluster2["timestamp"]
+                                    next_ts2 = next_cluster2["timestamp"]
                                     
                                     # Collect CPU ops in the gap
                                     gap_clusters1 = [
-                                        c1 for c1 in clusters1
-                                        if (current_ts1 < c1["timestamp"] < next_ts1 and 
-                                            c1["input_dims"] not in added_dims)
+                                        c1 for c1 in current_cluster1["gpu_events"]
+                                        if (current_ts1 < c1["timestamp"] < next_ts1)
                                     ]
                                     gap_clusters2 = [
-                                        c2 for c2 in clusters2
-                                        if (current_ts2 < c2["timestamp"] < next_ts2 and 
-                                            c2["input_dims"] not in added_dims)
+                                        c2 for c2 in current_cluster2["gpu_events"]
+                                        if (current_ts2 < c2["timestamp"] < next_ts2)
                                     ]
                                     
                                     # Create single row for all CPU ops in the gap
@@ -1201,8 +1195,6 @@ class TraceDiff:
                             
                             # Create single row for all CPU ops in the gap
                             create_gap_row(gap_clusters1, gap_clusters2)
-                            for c in gap_clusters1 + gap_clusters2:
-                                added_dims.add(c["input_dims"])
                         else:
                             # No common dims - create single row with all clusters
                             create_gap_row(clusters1, clusters2)
