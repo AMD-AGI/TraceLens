@@ -847,6 +847,7 @@ class TraceDiff:
                 - gpu_events: list of GPU event nodes in this cluster
                 - kernel_names: list of kernel names
                 - kernel_time: total time for these kernels
+                - timestamp: start time of the CPU op (for chronological ordering)
             """
             node = tree_uid2node.get(root_uid)
             if node is None:
@@ -896,13 +897,18 @@ class TraceDiff:
                 kernel_names = [gpu_event["name"] for gpu_event in gpu_events if gpu_event]
                 kernel_time = GPUEventAnalyser([e for e in gpu_events if e]).compute_metrics()["busy_time"]
                 
+                # Get the smallest timestamp from all GPU kernels in this cluster
+                gpu_timestamps = [gpu_event.get("ts", 0) for gpu_event in gpu_events if gpu_event]
+                min_timestamp = min(gpu_timestamps) if gpu_timestamps else cpu_op_node.get("ts", 0)
+                
                 clusters.append({
                     "input_dims": input_dims,
                     "cpu_op_node": cpu_op_node,
                     "cpu_op_uid": cpu_op_uid,
                     "gpu_events": gpu_events,
                     "kernel_names": kernel_names,
-                    "kernel_time": kernel_time
+                    "kernel_time": kernel_time,
+                    "timestamp": min_timestamp  # Use minimum GPU kernel timestamp for ordering
                 })
             
             return clusters
@@ -941,19 +947,23 @@ class TraceDiff:
                             node["uid2"], variant_uid2node, self.variant
                         )
 
-                        # Create a mapping from input_dims to clusters
+                        # Sort clusters by timestamp (chronological order)
+                        clusters1 = sorted(clusters1, key=lambda c: c["timestamp"])
+                        clusters2 = sorted(clusters2, key=lambda c: c["timestamp"])
+                        
+                        # Create mappings from input_dims to clusters
                         clusters1_by_dims = {c["input_dims"]: c for c in clusters1}
                         clusters2_by_dims = {c["input_dims"]: c for c in clusters2}
-
-                        # Get all unique input_dims from both traces
-                        all_dims = set(clusters1_by_dims.keys()) | set(clusters2_by_dims.keys())
-
-                        # Create a row for each unique input_dims (each cluster pair)
-                        for input_dim in all_dims:
-                            cluster1 = clusters1_by_dims.get(input_dim)
-                            cluster2 = clusters2_by_dims.get(input_dim)
-
-                            # Get info from cluster1 if it exists, otherwise use empty values
+                        
+                        # Find common input_dims (in chronological order from trace1)
+                        common_dims = []
+                        for c1 in clusters1:
+                            if c1["input_dims"] in clusters2_by_dims:
+                                common_dims.append(c1["input_dims"])
+                        
+                        # Helper function to create a row
+                        def create_row(cluster1, cluster2):
+                            # Get info from cluster1 if it exists
                             if cluster1:
                                 child_node1 = cluster1["cpu_op_node"]
                                 child_name_trace1 = self._get_op_name(cluster1["cpu_op_uid"], 1)
@@ -974,7 +984,7 @@ class TraceDiff:
                                 input_type1 = ""
                                 nn_module_stack1 = ""
 
-                            # Get info from cluster2 if it exists, otherwise use empty values
+                            # Get info from cluster2 if it exists
                             if cluster2:
                                 child_node2 = cluster2["cpu_op_node"]
                                 child_name_trace2 = self._get_op_name(cluster2["cpu_op_uid"], 2)
@@ -995,28 +1005,205 @@ class TraceDiff:
                                 input_type2 = ""
                                 nn_module_stack2 = ""
 
-                            rows.append(
-                                {
-                                    "lowest_common_ancestor_name": lca_name,
-                                    "merged_id": merged_id,
-                                    "cpu_op_name_trace1": child_name_trace1,
-                                    "cpu_op_name_trace2": child_name_trace2,
-                                    "nn_module_stack_trace1": nn_module_stack1,
-                                    "nn_module_stack_trace2": nn_module_stack2,
-                                    "input_shape_trace1": input_shape1,
-                                    "input_shape_trace2": input_shape2,
-                                    "concrete_inputs_trace1": concrete_inputs1,
-                                    "concrete_inputs_trace2": concrete_inputs2,
-                                    "input_strides_trace1": input_strides1,
-                                    "input_strides_trace2": input_strides2,
-                                    "input_type_trace1": input_type1,
-                                    "input_type_trace2": input_type2,
-                                    "kernel_time_trace1": kernel_time1,
-                                    "kernel_time_trace2": kernel_time2,
-                                    "kernel_names_trace1": kernel_names1,
-                                    "kernel_names_trace2": kernel_names2,
-                                }
-                            )
+                            rows.append({
+                                "lowest_common_ancestor_name": lca_name,
+                                "merged_id": merged_id,
+                                "cpu_op_name_trace1": child_name_trace1,
+                                "cpu_op_name_trace2": child_name_trace2,
+                                "nn_module_stack_trace1": nn_module_stack1,
+                                "nn_module_stack_trace2": nn_module_stack2,
+                                "input_shape_trace1": input_shape1,
+                                "input_shape_trace2": input_shape2,
+                                "concrete_inputs_trace1": concrete_inputs1,
+                                "concrete_inputs_trace2": concrete_inputs2,
+                                "input_strides_trace1": input_strides1,
+                                "input_strides_trace2": input_strides2,
+                                "input_type_trace1": input_type1,
+                                "input_type_trace2": input_type2,
+                                "kernel_time_trace1": kernel_time1,
+                                "kernel_time_trace2": kernel_time2,
+                                "kernel_names_trace1": kernel_names1,
+                                "kernel_names_trace2": kernel_names2,
+                            })
+                        
+                        # Helper function to create a single row for all CPU ops in a gap
+                        def create_gap_row(gap_clusters1, gap_clusters2):
+                            """
+                            Create a single row for all CPU ops in a gap.
+                            Aggregates all CPU ops from both traces into one row.
+                            """
+                            if not gap_clusters1 and not gap_clusters2:
+                                return
+                            
+                            # Aggregate all CPU ops from trace1
+                            if gap_clusters1:
+                                all_kernel_names1 = []
+                                total_kernel_time1 = 0
+                                # Use the first cluster's metadata for the row
+                                first_cluster1 = gap_clusters1[0]
+                                child_node1 = first_cluster1["cpu_op_node"]
+                                
+                                # Create comma-separated list of all CPU op names
+                                cpu_op_names1 = [self._get_op_name(cluster["cpu_op_uid"], 1) for cluster in gap_clusters1]
+                                child_name_trace1 = ", ".join(cpu_op_names1)
+                                
+                                input_shape1 = get_input_shape(child_node1)
+                                concrete_inputs1 = get_concrete_inputs(child_node1)
+                                input_strides1 = get_input_strides(child_node1)
+                                input_type1 = get_input_type(child_node1)
+                                nn_module_stack1 = child_node1.get("nn_module_stack", "")
+                                
+                                # Collect all kernels from all clusters
+                                for cluster in gap_clusters1:
+                                    all_kernel_names1.extend(cluster["kernel_names"])
+                                    total_kernel_time1 += cluster["kernel_time"]
+                            else:
+                                child_name_trace1 = ""
+                                all_kernel_names1 = []
+                                total_kernel_time1 = 0
+                                input_shape1 = ""
+                                concrete_inputs1 = ""
+                                input_strides1 = ""
+                                input_type1 = ""
+                                nn_module_stack1 = ""
+                            
+                            # Aggregate all CPU ops from trace2
+                            if gap_clusters2:
+                                all_kernel_names2 = []
+                                total_kernel_time2 = 0
+                                # Use the first cluster's metadata for the row
+                                first_cluster2 = gap_clusters2[0]
+                                child_node2 = first_cluster2["cpu_op_node"]
+                                
+                                # Create comma-separated list of all CPU op names
+                                cpu_op_names2 = [self._get_op_name(cluster["cpu_op_uid"], 2) for cluster in gap_clusters2]
+                                child_name_trace2 = ", ".join(cpu_op_names2)
+                                
+                                input_shape2 = get_input_shape(child_node2)
+                                concrete_inputs2 = get_concrete_inputs(child_node2)
+                                input_strides2 = get_input_strides(child_node2)
+                                input_type2 = get_input_type(child_node2)
+                                nn_module_stack2 = child_node2.get("nn_module_stack", "")
+                                
+                                # Collect all kernels from all clusters
+                                for cluster in gap_clusters2:
+                                    all_kernel_names2.extend(cluster["kernel_names"])
+                                    total_kernel_time2 += cluster["kernel_time"]
+                            else:
+                                child_name_trace2 = ""
+                                all_kernel_names2 = []
+                                total_kernel_time2 = 0
+                                input_shape2 = ""
+                                concrete_inputs2 = ""
+                                input_strides2 = ""
+                                input_type2 = ""
+                                nn_module_stack2 = ""
+                            
+                            rows.append({
+                                "lowest_common_ancestor_name": lca_name,
+                                "merged_id": merged_id,
+                                "cpu_op_name_trace1": child_name_trace1,
+                                "cpu_op_name_trace2": child_name_trace2,
+                                "nn_module_stack_trace1": nn_module_stack1,
+                                "nn_module_stack_trace2": nn_module_stack2,
+                                "input_shape_trace1": input_shape1,
+                                "input_shape_trace2": input_shape2,
+                                "concrete_inputs_trace1": concrete_inputs1,
+                                "concrete_inputs_trace2": concrete_inputs2,
+                                "input_strides_trace1": input_strides1,
+                                "input_strides_trace2": input_strides2,
+                                "input_type_trace1": input_type1,
+                                "input_type_trace2": input_type2,
+                                "kernel_time_trace1": total_kernel_time1,
+                                "kernel_time_trace2": total_kernel_time2,
+                                "kernel_names_trace1": all_kernel_names1,
+                                "kernel_names_trace2": all_kernel_names2,
+                            })
+                        
+                        # Track which clusters we've already added
+                        added_dims = set()
+                        
+                        # Process common dims and CPU ops in between
+                        if common_dims:
+                            # Handle CPU ops before the first common dim
+                            first_common_dim = common_dims[0]
+                            first_ts1 = clusters1_by_dims[first_common_dim]["timestamp"]
+                            first_ts2 = clusters2_by_dims[first_common_dim]["timestamp"]
+                            
+                            # Collect CPU ops before first common dim
+                            gap_clusters1 = [
+                                c1 for c1 in clusters1
+                                if c1["timestamp"] < first_ts1 and c1["input_dims"] not in added_dims
+                            ]
+                            gap_clusters2 = [
+                                c2 for c2 in clusters2
+                                if c2["timestamp"] < first_ts2 and c2["input_dims"] not in added_dims
+                            ]
+                            
+                            # Create single row for all CPU ops in the gap
+                            create_gap_row(gap_clusters1, gap_clusters2)
+                            for c in gap_clusters1 + gap_clusters2:
+                                added_dims.add(c["input_dims"])
+                            
+                            # Process each pair of consecutive common dims
+                            for i in range(len(common_dims)):
+                                current_dim = common_dims[i]
+                                
+                                # Create row for the common dim
+                                if current_dim not in added_dims:
+                                    create_row(
+                                        clusters1_by_dims[current_dim],
+                                        clusters2_by_dims[current_dim]
+                                    )
+                                    added_dims.add(current_dim)
+                                
+                                # Handle CPU ops between this common dim and the next
+                                if i < len(common_dims) - 1:
+                                    next_dim = common_dims[i + 1]
+                                    current_ts1 = clusters1_by_dims[current_dim]["timestamp"]
+                                    next_ts1 = clusters1_by_dims[next_dim]["timestamp"]
+                                    current_ts2 = clusters2_by_dims[current_dim]["timestamp"]
+                                    next_ts2 = clusters2_by_dims[next_dim]["timestamp"]
+                                    
+                                    # Collect CPU ops in the gap
+                                    gap_clusters1 = [
+                                        c1 for c1 in clusters1
+                                        if (current_ts1 < c1["timestamp"] < next_ts1 and 
+                                            c1["input_dims"] not in added_dims)
+                                    ]
+                                    gap_clusters2 = [
+                                        c2 for c2 in clusters2
+                                        if (current_ts2 < c2["timestamp"] < next_ts2 and 
+                                            c2["input_dims"] not in added_dims)
+                                    ]
+                                    
+                                    # Create single row for all CPU ops in the gap
+                                    create_gap_row(gap_clusters1, gap_clusters2)
+                                    for c in gap_clusters1 + gap_clusters2:
+                                        added_dims.add(c["input_dims"])
+                            
+                            # Handle CPU ops after the last common dim
+                            last_common_dim = common_dims[-1]
+                            last_ts1 = clusters1_by_dims[last_common_dim]["timestamp"]
+                            last_ts2 = clusters2_by_dims[last_common_dim]["timestamp"]
+                            
+                            # Collect CPU ops after last common dim
+                            gap_clusters1 = [
+                                c1 for c1 in clusters1
+                                if c1["timestamp"] > last_ts1 and c1["input_dims"] not in added_dims
+                            ]
+                            gap_clusters2 = [
+                                c2 for c2 in clusters2
+                                if c2["timestamp"] > last_ts2 and c2["input_dims"] not in added_dims
+                            ]
+                            
+                            # Create single row for all CPU ops in the gap
+                            create_gap_row(gap_clusters1, gap_clusters2)
+                            for c in gap_clusters1 + gap_clusters2:
+                                added_dims.add(c["input_dims"])
+                        else:
+                            # No common dims - create single row with all clusters
+                            create_gap_row(clusters1, clusters2)
 
                         visited_stats_nodes.add(merged_id)
                         return  # Do not traverse children further
