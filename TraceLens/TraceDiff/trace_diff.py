@@ -201,6 +201,12 @@ class TraceDiff:
         while True:
             parent_uid = current.get("parent")
             if parent_uid is None:
+                while True:
+                    children = current.get("children", [])
+                    if len(children) == 1:
+                        current = tree.get_UID2event(children[0])
+                    else:
+                        break
                 return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
 
@@ -1226,7 +1232,6 @@ class TraceDiff:
             os.makedirs(output_folder)
         merged_tree_file = os.path.join(output_folder, "merged_tree_output.txt")
         diff_stats_file = os.path.join(output_folder, "diff_stats.csv")
-        # diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
         diff_stats_unique_args_summary_file = os.path.join(
             output_folder, "diff_stats_unique_args_summary.csv"
         )
