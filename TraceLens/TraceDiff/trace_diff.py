@@ -858,18 +858,22 @@ class TraceDiff:
                     non_combined_children = [
                         c for c in children if c["merged_type"] != "combined"
                     ]
-                    if any(
-                        is_gpu_path(baseline_uid2node.get(child.get("uid1")))
-                        or is_gpu_path(variant_uid2node.get(child.get("uid2")))
-                        for child in non_combined_children
-                    ):
+                    non_combined_children_trace1_gpu_paths = [
+                        child for child in non_combined_children if is_gpu_path(baseline_uid2node.get(child.get("uid1")))
+                    ]
+                    non_combined_children_trace2_gpu_paths = [
+                        child for child in non_combined_children if is_gpu_path(variant_uid2node.get(child.get("uid2")))
+                    ]
+                    if non_combined_children_trace1_gpu_paths or non_combined_children_trace2_gpu_paths:
+
                         # Store the LCA name from this combined node
                         lca_name = self._get_op_name(
                             node["uid1"], 1
                         ) or self._get_op_name(node["uid2"], 2)
 
+                        gpu_event_uids1 = [child.get("gpu_events") for child in non_combined_children_trace1_gpu_paths]
+                        gpu_event_uids2 = [child.get("gpu_events") for child in non_combined_children_trace2_gpu_paths]
                         # Get all GPU kernels from trace1's branch
-                        gpu_event_uids1 = event1.get("gpu_events", [])
                         kernel_infos1 = []
                         for gpu_uid in gpu_event_uids1:
                             gpu_event = baseline_uid2node.get(gpu_uid)
@@ -901,7 +905,6 @@ class TraceDiff:
                             })
                         
                         # Get all GPU kernels from trace2's branch
-                        gpu_event_uids2 = event2.get("gpu_events", [])
                         kernel_infos2 = []
                         for gpu_uid in gpu_event_uids2:
                             gpu_event = variant_uid2node.get(gpu_uid)
@@ -973,7 +976,7 @@ class TraceDiff:
                             })
 
                         visited_stats_nodes.add(merged_id)
-                        return  # Do not traverse children further
+                        visited_stats_nodes.update([child.get("merged_id") for child in non_combined_children_trace1_gpu_paths + non_combined_children_trace2_gpu_paths])
 
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
