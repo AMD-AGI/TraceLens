@@ -3040,7 +3040,7 @@ class BatchNorm:
 
     def flops(self):
         # at inference time, batchnorm multiplies by gamma and adds beta
-        return 2 * nelems
+        return 2 * self.nelems
 
 
     def get_compute_precision(self):
