@@ -871,8 +871,24 @@ class TraceDiff:
                             node["uid1"], 1
                         ) or self._get_op_name(node["uid2"], 2)
 
-                        gpu_event_uids1 = [child.get("gpu_events") for child in non_combined_children_trace1_gpu_paths]
-                        gpu_event_uids2 = [child.get("gpu_events") for child in non_combined_children_trace2_gpu_paths]
+                        gpu_event_uids1 = []
+                        for child in non_combined_children_trace1_gpu_paths:
+                            child_node = baseline_uid2node.get(child.get("uid1"))
+                            if child_node and "gpu_events" in child_node:
+                                events = child_node["gpu_events"]
+                                if isinstance(events, list):
+                                    gpu_event_uids1.extend(events)
+                                else:
+                                    gpu_event_uids1.append(events)
+                        gpu_event_uids2 = []
+                        for child in non_combined_children_trace2_gpu_paths:
+                            child_node = variant_uid2node.get(child.get("uid2"))
+                            if child_node and "gpu_events" in child_node:
+                                events = child_node["gpu_events"]
+                                if isinstance(events, list):
+                                    gpu_event_uids2.extend(events)
+                                else:
+                                    gpu_event_uids2.append(events)
                         # Get all GPU kernels from trace1's branch
                         kernel_infos1 = []
                         for gpu_uid in gpu_event_uids1:
@@ -1213,9 +1229,6 @@ class TraceDiff:
         # diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
         diff_stats_unique_args_summary_file = os.path.join(
             output_folder, "diff_stats_unique_args_summary.csv"
-        )
-        diff_stats_names_summary_file = os.path.join(
-            output_folder, "diff_stats_names_summary.csv"
         )
         self.print_merged_tree(
             output_file=merged_tree_file, prune_non_gpu=prune_non_gpu
