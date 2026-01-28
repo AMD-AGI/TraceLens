@@ -3014,3 +3014,45 @@ class jax_conv:
             self.bias,
             bytes_per_element=self.bytes_per_element,
         )
+
+class BatchNorm:
+    """
+    Batch Normalization
+    Forward pass is almost identical to a unary op
+    but flops is a multiply-add and bytes also loads scale and bias
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.nelems = prod(self.param_details["op_shape"])
+        self.dtype_in_out = self.param_details["dtype_in_out"]
+        self.stride_input = self.param_details["stride_input"]
+        self.stride_output = self.param_details["stride_output"]
+
+        self.bpe_in = name2bpe(self.dtype_in_out[0])
+        if self.dtype_in_out[1] is not None:
+            self.bpe_out = name2bpe(self.dtype_in_out[1])
+        else:
+            # same as input
+            self.bpe_out = self.bpe_in
+
+    def flops(self):
+        # at inference time, batchnorm multiplies by gamma and adds beta
+        return 2 * nelems
+
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
+
+    def bytes(self):
+        activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
+        weight_bytes = 2 * self.param_details["C"] * self.bpe_in
+        return activation_bytes + weight_bytes
