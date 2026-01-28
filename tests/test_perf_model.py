@@ -11,7 +11,7 @@ import torch.nn
 import TraceLens
 # Normalization layers
 
-default_normalization_layer_trace_file = "traces/mi210/normalization/normalization_layer_test.json.gz"
+default_normalization_layer_trace_file = "traces/normalization/normalization_layer_test.json.gz"
 
 @pytest.mark.parameterize("trace_file", [default_normalization_layer_trace_file])
 def test_normalization_layers(trace_file: str):
