@@ -40,6 +40,8 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # normalization
+    "aten::batch_norm": perf_model.BatchNorm,
     }
 
 # Add pseudo-op extension mappings
@@ -77,6 +79,7 @@ dict_base_class2category = {
     perf_model.SDPA: "SDPA",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
+    perf_model.Normalization: "Normalization",
 }
 
 # Add pseudo-op extension categories
@@ -103,7 +106,7 @@ def categorize_torch_op(row):
     Args:
         row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'BN_fwd', 'BN_bwd',
+        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
              'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
     """
 
@@ -124,13 +127,13 @@ def categorize_torch_op(row):
         "aten::miopen_batch_norm",
         "aten::cudnn_batch_norm",
     ]:
-        return "BN_fwd"
+        return "NORM_fwd"
     elif row["name"] in [
         "aten::native_batch_norm_backward",
         "aten::miopen_batch_norm_backward",
         "aten::cudnn_batch_norm_backward",
     ]:
-        return "BN_bwd"
+        return "NORM_bwd"
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",

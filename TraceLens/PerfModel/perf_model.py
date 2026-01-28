@@ -3015,13 +3015,7 @@ class jax_conv:
             bytes_per_element=self.bytes_per_element,
         )
 
-class BatchNorm:
-    """
-    Batch Normalization
-    Forward pass is almost identical to a unary op
-    but flops is a multiply-add and bytes also loads scale and bias
-    """
-
+class Normalization:
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
@@ -3038,6 +3032,14 @@ class BatchNorm:
             # same as input
             self.bpe_out = self.bpe_in
 
+    
+    
+class BatchNorm(Normalization):
+    """
+    Batch Normalization
+    Forward pass is almost identical to a unary op
+    but flops is a multiply-add and bytes also loads scale and bias
+    """
     def flops(self):
         # at inference time, batchnorm multiplies by gamma and adds beta
         return 2 * self.nelems
@@ -3053,6 +3055,7 @@ class BatchNorm:
         return "vector"
 
     def bytes(self):
-        activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
-        weight_bytes = 2 * self.param_details["C"] * self.bpe_in
-        return activation_bytes + weight_bytes
+        # activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
+        # weight_bytes = 2 * self.param_details["C"] * self.bpe_in
+        # return activation_bytes + weight_bytes
+        return 0

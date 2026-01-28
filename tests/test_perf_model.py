@@ -11,7 +11,7 @@ import torch.nn
 import TraceLens
 # Normalization layers
 
-default_normalization_layer_trace_file = "traces/normalization/normalization_layer_test.json.gz"
+default_normalization_layer_trace_file = "traces/perf_model/normalization/normalization_layer_test.json.gz"
 
 @pytest.mark.parameterize("trace_file", [default_normalization_layer_trace_file])
 def test_normalization_layers(trace_file: str):
@@ -50,11 +50,13 @@ def create_normalization_layer_trace(outfile: str):
         with_stack=True,
         profile_memory=True,
         with_flops=True,
+        acc_events=True,
     ) as p:
         for _ in range(10):
             outputs = net(x)
             loss = criterion(outputs, torch.randn(input_shape))
             loss.backward()
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
     p.export_chrome_trace(outfile)
 
 def main():
