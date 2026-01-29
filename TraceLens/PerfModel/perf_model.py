@@ -3079,3 +3079,51 @@ class BatchNorm(Normalization):
             "stride_output": stride_output,
             "num_channels": op_shape[-3], # BatchNorm requires channels first
         }
+
+class LayerNorm(Normalization):
+    """
+    Layer Normalization
+    Forward pass is almost identical to a unary op
+    but flops is a multiply-add and bytes also loads scale and bias
+    https://arxiv.org/abs/1607.06450
+    """
+    def flops(self):
+        # at inference time, batchnorm multiplies by gamma and adds beta
+        return 2 * self.nelems
+
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
+
+    def bytes(self):
+        activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
+        weight_bytes = 2 * self.num_channels * self.bpe_in
+        return activation_bytes + weight_bytes
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        if len(args_input_dims) > 1 and args_input_dims[1]:
+            dtype_out = event["args"]["Input type"][1]
+            stride_output = tuple(event["args"]["Input Strides"][1])
+        else:
+            dtype_out = None
+            stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[-3], # BatchNorm requires channels first
+        }
+
+        

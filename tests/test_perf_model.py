@@ -63,17 +63,20 @@ def main():
     parser = argparse.ArgumentParser(
         description="Tests for the perf model. Can run this to generate traces."
     )
-    parser.add_argument("--create_normalization_trace", action="store_true")
+    parser.add_argument("--create-normalization-trace", action="store_true")
     parser.add_argument(
-        "--normalization_trace_file",
+        "--normalization-trace-file",
         type=str,
-        default=default_normalization_layer_trace_file,
         help="Output file for the normalzation model trace",
     )
     if len(os.sys.argv) == 1:
         parser.print_help()
         os.sys.exit(1)
     args = parser.parse_args()
+    if args.normalization_trace_file is None:
+        args.normalization_trace_file = default_normalization_layer_trace_file
+    else:
+        args.create_normalization_trace = True
     if args.create_normalization_trace:
         print(f"Creating normalization layer trace at {args.normalization_trace_file}")
         create_normalization_layer_trace(args.normalization_trace_file)

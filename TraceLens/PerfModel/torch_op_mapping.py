@@ -42,6 +42,7 @@ op_to_perf_model_class_map = {
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
     # normalization
     "aten::batch_norm": perf_model.BatchNorm,
+    "aten::layer_norm": perf_model.LayerNorm,
     }
 
 # Add pseudo-op extension mappings
