@@ -249,34 +249,246 @@ class TraceDiff:
             for child in get_children(tree, node):
                 add_to_pod(child, pod, tree)
 
-        def wagner_fischer(seq1, seq2):
-            # Pre-compute name comparisons to avoid redundant lookups
-            names1 = [get_name(tree1.get_UID2event(uid)) for uid in seq1]
-            names2 = [get_name(tree2.get_UID2event(uid)) for uid in seq2]
-
-            # Create cache key from node NAMES (not UIDs) since the same operation sequences
-            # may appear with different UIDs in different parts of the tree
-            cache_key = (tuple(names1), tuple(names2))
-            if cache_key in wf_cache:
-                return wf_cache[cache_key]
-
+        def ukkonen_with_progressive_doubling(seq1, seq2, names1, names2):
+            """
+            Ukkonen's algorithm with progressive doubling.
+            Starts with k = length difference, then doubles until success.
+            Falls back to Wagner-Fischer for very different sequences.
+            """
             m, n = len(seq1), len(seq2)
-
+            
+            # Handle edge cases: empty sequences
+            if m == 0 and n == 0:
+                print("No children, returning empty list")
+                return []  # Both empty - no operations needed
+            if m == 0:
+                # All inserts
+                return [("insert", None, j) for j in range(n)]
+            if n == 0:
+                # All deletes
+                return [("delete", i, None) for i in range(m)]
+            
+            # Start with lower bound: length difference
+            k = abs(m - n)
+            if k == 0:
+                k = 1  # Start with at least k=1
+            
+            max_k = min(m, n)  # Upper bound on edit distance
+            k_tried = []  # Track which k values we tried
+            
+            # Persistent DP table - reuse across iterations
+            dp = {}
+            
+            # Initialize base row/column once (only needs max_k width)
+            for i in range(min(max_k + 1, m + 1)):
+                dp[(i, 0)] = i
+            for j in range(min(max_k + 1, n + 1)):
+                dp[(0, j)] = j
+            
+            # Try progressively larger k values
+            prev_k = 0  # Track previous k to only compute new cells
+            while k <= max_k:
+                k_tried.append(k)
+                print(f"Trying k={k}, m={m}, n={n}")
+                result = ukkonen_with_k_incremental(seq1, seq2, names1, names2, k, prev_k, dp)
+                if result is not None:
+                    # Success! Log if we saved significant work
+                    full_cells = m * n
+                    band_cells = sum(min(n, i + k) - max(0, i - k) for i in range(m))
+                    if full_cells > 10000 and band_cells < full_cells * 0.5:
+                        print(f"[TraceDiff] Ukkonen saved work: {m}×{n} = {full_cells} cells "
+                              f"→ band with k={k} = {band_cells} cells "
+                              f"({100*band_cells/full_cells:.1f}% of full table)")
+                    return result
+                
+                # Double k for next iteration
+                prev_k = k  # Remember current k for next iteration
+                old_k = k
+                k = min(k * 2, max_k)
+                
+                # If doubling doesn't increase k, we've hit the limit
+                if k == old_k:
+                    break
+            
+            # If we get here, sequences are very different
+            # Fall back to full Wagner-Fischer
+            print(f"[TraceDiff] Sequences very different ({m}×{n}), tried k={k_tried}, "
+                  f"using full Wagner-Fischer")
+            return wagner_fischer_full(seq1, seq2, names1, names2)
+        
+        def ukkonen_with_k_incremental(seq1, seq2, names1, names2, k, prev_k, dp):
+            """
+            Incremental Ukkonen: only compute NEW cells in expanded band.
+            Reuses cells from previous iteration (prev_k) that are already in dp.
+            """
+            m, n = len(seq1), len(seq2)
+            
+            # Fill cells in diagonal band: prev_k < |i - j| ≤ k
+            # These are the NEW cells not computed in previous iteration
+            for i in range(1, m + 1):
+                j_start = max(1, i - k)
+                j_end = min(n + 1, i + k + 1)
+                
+                for j in range(j_start, j_end):
+                    # Skip if already computed in previous iteration
+                    if (i, j) in dp and abs(i - j) <= prev_k:
+                        continue
+                    
+                    cost = 0 if names1[i - 1] == names2[j - 1] else 1
+                    
+                    candidates = []
+                    
+                    # Check if previous cells exist
+                    if (i - 1, j) in dp:
+                        candidates.append(dp[(i - 1, j)] + 1)  # DELETE
+                    if (i, j - 1) in dp:
+                        candidates.append(dp[(i, j - 1)] + 1)  # INSERT
+                    if (i - 1, j - 1) in dp:
+                        candidates.append(dp[(i - 1, j - 1)] + cost)  # MATCH/SUBSTITUTE
+                    
+                    if candidates:
+                        dp[(i, j)] = min(candidates)
+            
+            # Check if we reached the goal
+            if (m, n) not in dp or dp[(m, n)] > k:
+                return None  # k is too small, need to try larger k
+            
+            # Backtrack to get operations
+            i, j = m, n
+            ops = []
+            
+            while i > 0 or j > 0:
+                if i > 0 and j > 0 and names1[i - 1] == names2[j - 1]:
+                    # Check if this was a match
+                    if (i - 1, j - 1) in dp and dp.get((i, j), float('inf')) == dp[(i - 1, j - 1)]:
+                        ops.append(("match", i - 1, j - 1))
+                        i -= 1
+                        j -= 1
+                        continue
+                
+                # Check which direction we came from
+                came_from_above = (i - 1, j) in dp and dp.get((i, j), float('inf')) == dp[(i - 1, j)] + 1
+                came_from_left = (i, j - 1) in dp and dp.get((i, j), float('inf')) == dp[(i, j - 1)] + 1
+                
+                if i > 0 and (j == 0 or came_from_above):
+                    ops.append(("delete", i - 1, None))
+                    i -= 1
+                elif j > 0 and (i == 0 or came_from_left):
+                    ops.append(("insert", None, j - 1))
+                    j -= 1
+                else:
+                    # Shouldn't reach here, but handle gracefully
+                    if i > 0:
+                        ops.append(("delete", i - 1, None))
+                        i -= 1
+                    elif j > 0:
+                        ops.append(("insert", None, j - 1))
+                        j -= 1
+            
+            ops.reverse()
+            return ops
+        
+        def ukkonen_with_k(seq1, seq2, names1, names2, k):
+            """
+            Compute alignment with Ukkonen's algorithm for a specific k.
+            Only computes cells in diagonal band |i-j| ≤ k.
+            Returns operations if successful, None if k is too small.
+            """
+            m, n = len(seq1), len(seq2)
+            
+            # Use sparse dictionary for DP table
+            dp = {}
+            
+            # Initialize first row/column within band
+            for i in range(min(k + 1, m + 1)):
+                dp[(i, 0)] = i
+            for j in range(min(k + 1, n + 1)):
+                dp[(0, j)] = j
+            
+            # Fill cells in diagonal band: |i - j| ≤ k
+            for i in range(1, m + 1):
+                # Only compute columns within band
+                j_start = max(1, i - k)
+                j_end = min(n + 1, i + k + 1)
+                for j in range(j_start, j_end):
+                    cost = 0 if names1[i - 1] == names2[j - 1] else 1
+                    
+                    candidates = []
+                    
+                    # Check if previous cells are in band
+                    if (i - 1, j) in dp:
+                        candidates.append(dp[(i - 1, j)] + 1)  # DELETE
+                    if (i, j - 1) in dp:
+                        candidates.append(dp[(i, j - 1)] + 1)  # INSERT
+                    if (i - 1, j - 1) in dp:
+                        candidates.append(dp[(i - 1, j - 1)] + cost)  # MATCH/SUBSTITUTE
+                    
+                    if candidates:
+                        dp[(i, j)] = min(candidates)
+            
+            # Check if we reached the goal
+            if (m, n) not in dp or dp[(m, n)] > k:
+                return None  # k is too small, need to try larger k
+            
+            # Backtrack to get operations
+            i, j = m, n
+            ops = []
+            
+            while i > 0 or j > 0:
+                if i > 0 and j > 0 and names1[i - 1] == names2[j - 1]:
+                    # Check if this was a match
+                    if (i - 1, j - 1) in dp and dp.get((i, j), float('inf')) == dp[(i - 1, j - 1)]:
+                        ops.append(("match", i - 1, j - 1))
+                        i -= 1
+                        j -= 1
+                        continue
+                
+                # Check which direction we came from
+                came_from_above = (i - 1, j) in dp and dp.get((i, j), float('inf')) == dp[(i - 1, j)] + 1
+                came_from_left = (i, j - 1) in dp and dp.get((i, j), float('inf')) == dp[(i, j - 1)] + 1
+                
+                if i > 0 and (j == 0 or came_from_above):
+                    ops.append(("delete", i - 1, None))
+                    i -= 1
+                elif j > 0 and (i == 0 or came_from_left):
+                    ops.append(("insert", None, j - 1))
+                    j -= 1
+                else:
+                    # Shouldn't reach here, but handle gracefully
+                    if i > 0:
+                        ops.append(("delete", i - 1, None))
+                        i -= 1
+                    elif j > 0:
+                        ops.append(("insert", None, j - 1))
+                        j -= 1
+            
+            ops.reverse()
+            return ops
+        
+        def wagner_fischer_full(seq1, seq2, names1, names2):
+            """
+            Full Wagner-Fischer algorithm (fallback for very different sequences).
+            """
+            m, n = len(seq1), len(seq2)
+            
+            # Create full DP table
             dp = [[0] * (n + 1) for _ in range(m + 1)]
+            
             for i in range(m + 1):
                 dp[i][0] = i
             for j in range(n + 1):
                 dp[0][j] = j
+            
             for i in range(1, m + 1):
                 for j in range(1, n + 1):
-                    # Use pre-computed names instead of looking up nodes again
                     cost = 0 if names1[i - 1] == names2[j - 1] else 1
                     dp[i][j] = min(
                         dp[i - 1][j] + 1,
                         dp[i][j - 1] + 1,
                         dp[i - 1][j - 1] + cost,
                     )
-            # Backtrack to get the operations using pre-computed names
+            
+            # Backtrack
             i, j = m, n
             ops = []
             while i > 0 or j > 0:
@@ -291,6 +503,23 @@ class TraceDiff:
                     ops.append(("insert", None, j - 1))
                     j -= 1
             ops.reverse()
+            return ops
+        
+        def wagner_fischer(seq1, seq2):
+            """
+            Main entry point: uses Ukkonen with progressive doubling.
+            """
+            # Pre-compute name comparisons to avoid redundant lookups
+            names1 = [get_name(tree1.get_UID2event(uid)) for uid in seq1]
+            names2 = [get_name(tree2.get_UID2event(uid)) for uid in seq2]
+
+            # Create cache key from node NAMES
+            cache_key = (tuple(names1), tuple(names2))
+            if cache_key in wf_cache:
+                return wf_cache[cache_key]
+
+            # Use Ukkonen with progressive doubling
+            ops = ukkonen_with_progressive_doubling(seq1, seq2, names1, names2)
 
             # Store result in cache before returning
             wf_cache[cache_key] = ops
