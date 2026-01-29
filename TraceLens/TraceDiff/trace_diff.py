@@ -201,11 +201,20 @@ class TraceDiff:
         while True:
             parent_uid = current.get("parent")
             if parent_uid is None:
+                root = current
                 while True:
                     children = current.get("children", [])
                     if len(children) == 1:
                         current = tree.get_UID2event(children[0])
                     else:
+                        children = current.get("children", [])
+                        root["children"] = children
+                        for child_uid in children:
+                            child_event = tree.get_UID2event(child_uid)
+                            child_event["parent"] = root.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                        current = root
+                        print(f"New top-level root node: {current.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)}")
+                        print(f"Root's children: {[tree.get_UID2event(child).get(TraceLens.util.TraceEventUtils.TraceKeys.Name) for child in children]}")
                         break
                 return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
