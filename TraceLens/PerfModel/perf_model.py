@@ -3024,6 +3024,7 @@ class Normalization:
         self.dtype_in_out = self.param_details["dtype_in_out"]
         self.stride_input = self.param_details["stride_input"]
         self.stride_output = self.param_details["stride_output"]
+        self.num_channels = self.param_details["num_channels"]
 
         self.bpe_in = name2bpe(self.dtype_in_out[0])
         if self.dtype_in_out[1] is not None:
@@ -3055,7 +3056,26 @@ class BatchNorm(Normalization):
         return "vector"
 
     def bytes(self):
-        # activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
-        # weight_bytes = 2 * self.param_details["C"] * self.bpe_in
-        # return activation_bytes + weight_bytes
-        return 0
+        activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
+        weight_bytes = 2 * self.num_channels * self.bpe_in
+        return activation_bytes + weight_bytes
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        if len(args_input_dims) > 1 and args_input_dims[1]:
+            dtype_out = event["args"]["Input type"][1]
+            stride_output = tuple(event["args"]["Input Strides"][1])
+        else:
+            dtype_out = None
+            stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[-3], # BatchNorm requires channels first
+        }
