@@ -3025,6 +3025,8 @@ class Normalization:
         self.stride_input = self.param_details["stride_input"]
         self.stride_output = self.param_details["stride_output"]
         self.num_channels = self.param_details["num_channels"]
+        # only layernorm can disable this but leaving it out totally breaks the NORM tab
+        self.has_bias = self.param_details["has_bias"]
 
         self.bpe_in = name2bpe(self.dtype_in_out[0])
         if self.dtype_in_out[1] is not None:
@@ -3040,10 +3042,11 @@ class BatchNorm(Normalization):
     Batch Normalization
     Forward pass is almost identical to a unary op
     but flops is a multiply-add and bytes also loads scale and bias
+    https://arxiv.org/abs/1502.03167
     """
     def flops(self):
         # at inference time, batchnorm multiplies by gamma and adds beta
-        return 2 * self.nelems
+        return (2 if self.has_bias else 1) * self.nelems
 
 
     def get_compute_precision(self):
@@ -3057,7 +3060,7 @@ class BatchNorm(Normalization):
 
     def bytes(self):
         activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
-        weight_bytes = 2 * self.num_channels * self.bpe_in
+        weight_bytes = (2 if self.has_bias else 1) * self.num_channels * self.bpe_in
         return activation_bytes + weight_bytes
 
     @staticmethod
@@ -3078,6 +3081,7 @@ class BatchNorm(Normalization):
             "stride_input": stride_input,
             "stride_output": stride_output,
             "num_channels": op_shape[-3], # BatchNorm requires channels first
+            "has_bias": True,
         }
 
 class LayerNorm(Normalization):
@@ -3089,7 +3093,7 @@ class LayerNorm(Normalization):
     """
     def flops(self):
         # at inference time, batchnorm multiplies by gamma and adds beta
-        return 2 * self.nelems
+        return (2 if self.has_bias else 1) * self.nelems
 
 
     def get_compute_precision(self):
@@ -3103,13 +3107,15 @@ class LayerNorm(Normalization):
 
     def bytes(self):
         activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
-        weight_bytes = 2 * self.num_channels * self.bpe_in
+        weight_bytes = (2 if self.has_bias else 1) * self.num_channels * self.bpe_in
         return activation_bytes + weight_bytes
 
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         op_shape = tuple(args_input_dims[0])
+        num_channels = prod(args_input_dims[2])
+        has_bias = len(args_input_dims[3]) != 0
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
         if len(args_input_dims) > 1 and args_input_dims[1]:
@@ -3123,7 +3129,8 @@ class LayerNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[-3], # BatchNorm requires channels first
+            "num_channels": num_channels,
+            "has_bias": has_bias,
         }
 
         
