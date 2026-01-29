@@ -23,7 +23,7 @@ def create_normalization_layer_trace(outfile: str):
         def __init__(self, input_shape):
             super(Net, self).__init__()
             self.bn = torch.nn.BatchNorm2d(input_shape[-3])
-            self.ln = torch.nn.LayerNorm(input_shape)
+            self.ln = torch.nn.LayerNorm(input_shape[1:])
             self.gn = torch.nn.GroupNorm(4, input_shape[-3])
             self.rmsn = torch.nn.RMSNorm(input_shape)
             self.inn = torch.nn.InstanceNorm2d(input_shape[-3])
@@ -70,6 +70,9 @@ def main():
         default=default_normalization_layer_trace_file,
         help="Output file for the normalzation model trace",
     )
+    if len(os.sys.argv) == 1:
+        parser.print_help()
+        os.sys.exit(1)
     args = parser.parse_args()
     if args.create_normalization_trace:
         print(f"Creating normalization layer trace at {args.normalization_trace_file}")
