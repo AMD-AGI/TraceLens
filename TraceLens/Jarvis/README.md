@@ -1,6 +1,6 @@
-# TraceLens Jarvis - Modular Analysis Framework
+# TraceLens Jarvis - Agentic Analysis Framework
 
-Jarvis is a modular performance analysis framework for TraceLens that breaks down complex trace analysis into isolated, reusable components.
+JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations.
 
 ---
 
