@@ -1082,6 +1082,10 @@ class TreePerfAnalyzer:
         if "UID" in df_filtered.columns:
             agg_dict["UID"] = ["first", "count"]
             columns_to_keep_first.append("UID")
+
+        if "call_stack" in df_filtered.columns:
+            agg_dict["call_stack"] = ["first"]
+            columns_to_keep_first.append("call_stack")
         if "kernel_details" in df_filtered.columns:
             agg_dict["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
