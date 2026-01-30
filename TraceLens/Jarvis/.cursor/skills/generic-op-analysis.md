@@ -88,7 +88,7 @@ Create `<output_dir>/category_findings/other_findings.md`
 ### Communication (DDP/Multi-GPU)
 - **Single rank limitation:** Can only observe collective types, message sizes, total time from one rank
 - **Cannot diagnose:** Straggler vs communication time split without all ranks
-- **If communication overhead high:** Note collective types/sizes, recommend checking topology/configuration
+- **If communication overhead high:** Note collective types/sizes, recommend checking topology/configuration. Use vendor neutral terminology.
 - **Same collective types + message sizes across platforms:** Same collectives being used
 
 ### Graph Operations
