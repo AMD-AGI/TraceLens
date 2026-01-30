@@ -3035,19 +3035,11 @@ class Normalization:
             # same as input
             self.bpe_out = self.bpe_in
 
-    
-    
-class BatchNorm(Normalization):
-    """
-    Batch Normalization
-    Forward pass is almost identical to a unary op
-    but flops is a multiply-add and bytes also loads scale and bias
-    https://arxiv.org/abs/1502.03167
-    """
+    # Many of the norm implementations need the same flops and bytes calculations
+    # so we put them here in the base class
     def flops(self):
         # at inference time, batchnorm multiplies by gamma and adds beta
         return (2 if self.has_bias else 1) * self.nelems
-
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
@@ -3062,6 +3054,14 @@ class BatchNorm(Normalization):
         activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
         weight_bytes = (2 if self.has_bias else 1) * self.num_channels * self.bpe_in
         return activation_bytes + weight_bytes
+
+class BatchNorm(Normalization):
+    """
+    Batch Normalization
+    Forward pass is almost identical to a unary op
+    but flops is a multiply-add and bytes also loads scale and bias
+    https://arxiv.org/abs/1502.03167
+    """
 
     @staticmethod
     def get_param_details(event):
@@ -3091,24 +3091,6 @@ class LayerNorm(Normalization):
     but flops is a multiply-add and bytes also loads scale and bias
     https://arxiv.org/abs/1607.06450
     """
-    def flops(self):
-        # at inference time, batchnorm multiplies by gamma and adds beta
-        return (2 if self.has_bias else 1) * self.nelems
-
-
-    def get_compute_precision(self):
-        """Return the compute precision for this operation."""
-        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
-        return torch_dtype_map(dtype) if dtype else None
-
-    def get_maf_type(self):
-        """Return the MAF type for this operation (vector for elementwise)."""
-        return "vector"
-
-    def bytes(self):
-        activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
-        weight_bytes = (2 if self.has_bias else 1) * self.num_channels * self.bpe_in
-        return activation_bytes + weight_bytes
 
     @staticmethod
     def get_param_details(event):
@@ -3133,4 +3115,92 @@ class LayerNorm(Normalization):
             "has_bias": has_bias,
         }
 
-        
+class GroupNorm(Normalization):
+    # Group Normalization
+    # https://arxiv.org/pdf/1803.08494
+    # Group normalization divides the channels into groups and computes
+    # within each group the mean and variance for normalization.
+    # Very similar to LayerNorm and InstanceNorm except the number of weights is num_channels / num_groups
+    # Group norm with 1 group is the same as Layer Norm
+    # Group norm with groups = num_channels is the same as Instance Norm
+
+    # flops calculation for group norm is the same as for the others
+    # bytes calculation is the same just reducing the effictive number of channels by num_groups
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        # concrete_inputs[1] = num_groups
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        if len(args_input_dims) > 1 and args_input_dims[1]:
+            dtype_out = event["args"]["Input type"][1]
+            stride_output = tuple(event["args"]["Input Strides"][1])
+        else:
+            dtype_out = None
+            stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[-3] / int(concrete_inputs[1]),
+            "has_bias": True,
+        }
+
+class InstanceNorm(Normalization):
+    # Instance Normalization
+    # https://arxiv.org/pdf/1607.08022
+    # Instance norm actually calls batch norm after a reshape in many cases
+    # https://github.com/pytorch/pytorch/blob/1457786f7445fb0e72794aa98c0ebaa3bc24ced5/aten/src/ATen/native/Normalization.cpp#L758
+    # but directly using the batch norm implementation will show the wrong input shape
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        # concrete_inputs[1] = num_groups
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        if len(args_input_dims) > 1 and args_input_dims[1]:
+            dtype_out = event["args"]["Input type"][1]
+            stride_output = tuple(event["args"]["Input Strides"][1])
+        else:
+            dtype_out = None
+            stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": prod(op_shape[:-2]),
+            "has_bias": True,
+        }
+
+class RMSNorm(Normalization):
+    # RMS Normalization
+    # https://arxiv.org/abs/1910.07467
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        # concrete_inputs[1] = num_groups
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        if len(args_input_dims) > 1 and args_input_dims[1]:
+            dtype_out = event["args"]["Input type"][1]
+            stride_output = tuple(event["args"]["Input Strides"][1])
+        else:
+            dtype_out = None
+            stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[-3],
+            "has_bias": True,
+        }

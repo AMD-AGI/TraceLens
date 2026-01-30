@@ -43,6 +43,9 @@ op_to_perf_model_class_map = {
     # normalization
     "aten::batch_norm": perf_model.BatchNorm,
     "aten::layer_norm": perf_model.LayerNorm,
+    "aten::group_norm": perf_model.GroupNorm,
+    "aten::instance_norm": perf_model.InstanceNorm,
+    "aten::rms_norm": perf_model.RMSNorm,
     }
 
 # Add pseudo-op extension mappings
@@ -127,12 +130,20 @@ def categorize_torch_op(row):
         "aten::native_batch_norm",
         "aten::miopen_batch_norm",
         "aten::cudnn_batch_norm",
+        "aten::layer_norm",
+        "aten::group_norm",
+        "aten::instance_norm",
+        "aten::rms_norm",
     ]:
         return "NORM_fwd"
     elif row["name"] in [
         "aten::native_batch_norm_backward",
         "aten::miopen_batch_norm_backward",
         "aten::cudnn_batch_norm_backward",
+        "aten::layer_norm_backward",
+        "aten::group_norm_backward",
+        "aten::instance_norm_backward",
+        "aten::rms_norm_backward",
     ]:
         return "NORM_bwd"
     # SDPA ops: distinguish forward and backward
