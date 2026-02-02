@@ -358,7 +358,7 @@ class TraceDiff:
             ops_cache[(uid1, uid2)] = ops
 
             idx1, idx2 = 0, 0
-            for (op, i, j) in ops:
+            for op, i, j in ops:
                 if op == "match":
                     child1 = tree1.get_UID2event(seq1[i])
                     child2 = tree2.get_UID2event(seq2[j])
@@ -909,154 +909,69 @@ class TraceDiff:
                         gpu_event_uids1 = []
                         for child in non_combined_children_trace1_gpu_paths:
                             child_node = baseline_uid2node.get(child.get("uid1"))
-                            if child_node and "gpu_events" in child_node:
-                                events = child_node["gpu_events"]
-                                if isinstance(events, list):
-                                    gpu_event_uids1.extend(events)
-                                else:
-                                    gpu_event_uids1.append(events)
+                            gpu_event_uids1.extend(child_node.get("gpu_events", []))
+
                         gpu_event_uids2 = []
                         for child in non_combined_children_trace2_gpu_paths:
                             child_node = variant_uid2node.get(child.get("uid2"))
-                            if child_node and "gpu_events" in child_node:
-                                events = child_node["gpu_events"]
-                                if isinstance(events, list):
-                                    gpu_event_uids2.extend(events)
-                                else:
-                                    gpu_event_uids2.append(events)
-                        # Get all GPU kernels from trace1's branch
-                        kernel_infos1 = []
-                        for gpu_uid in gpu_event_uids1:
-                            gpu_event = baseline_uid2node.get(gpu_uid)
-                            if gpu_event is None:
-                                continue
+                            gpu_event_uids2.extend(child_node.get("gpu_events", []))
 
-                            # Find parent CPU operation for this GPU event
-                            parent_uid = gpu_event.get("parent")
-                            parent_node = baseline_uid2node.get(parent_uid)
+                        def add_rows(gpu_event_uids, tree_obj, uid2node, source):
+                            tree_num = 1 if source == "trace1" else 2
+                            for gpu_uid in gpu_event_uids:
+                                gpu_event = uid2node.get(gpu_uid)
+                                if gpu_event is None:
+                                    continue
+                                parent_uid = gpu_event.get("parent")
+                                parent_node = uid2node.get(parent_uid)
+                                while parent_node is not None:
+                                    if (
+                                        tree_obj.event_to_category(parent_node)
+                                        == "cpu_op"
+                                    ):
+                                        break
+                                    parent_uid = parent_node.get("parent")
+                                    parent_node = uid2node.get(parent_uid)
 
-                            # Traverse up to find the first CPU op
-                            while parent_node is not None:
-                                if (
-                                    self.baseline.event_to_category(parent_node)
-                                    == "cpu_op"
-                                ):
-                                    break
-                                parent_uid = parent_node.get("parent")
-                                parent_node = baseline_uid2node.get(parent_uid)
+                                if parent_node is None:
+                                    continue
 
-                            if parent_node is None:
-                                continue
+                                rows.append(
+                                    {
+                                        "name": gpu_event["name"],
+                                        "kernel_uid": gpu_uid,
+                                        "cpu_op_name": self._get_op_name(
+                                            parent_uid, tree_num
+                                        ),
+                                        "source": source,
+                                        "Input Dims": get_input_shape(parent_node),
+                                        "Input Strides": get_input_strides(parent_node),
+                                        "Input type": get_input_type(parent_node),
+                                        "Concrete Inputs": get_concrete_inputs(
+                                            parent_node
+                                        ),
+                                        "kernel_time": gpu_event.get("dur", 0),
+                                        "lowest_common_ancestor_name": lca_name,
+                                        "lowest_common_ancestor_id": node["merged_id"],
+                                        "nn_module_stack": ";".join(
+                                            str(x)
+                                            for x in parent_node.get(
+                                                "nn_module_stack", []
+                                            )
+                                        ),
+                                        "nn_module_parent": (
+                                            parent_node.get("nn_module_stack") or [""]
+                                        )[-1],
+                                    }
+                                )
 
-                            kernel_infos1.append(
-                                {
-                                    "cpu_op_uid": parent_uid,
-                                    "cpu_op_node": parent_node,
-                                    "kernel_name": gpu_event["name"],
-                                    "kernel_uid": gpu_uid,
-                                    "kernel_time": gpu_event.get("dur", 0),
-                                    "timestamp": gpu_event.get("ts", 0),
-                                    "source": "trace1",
-                                    "nn_module_stack": parent_node.get(
-                                        "nn_module_stack", ""
-                                    ),
-                                }
-                            )
+                        add_rows(
+                            gpu_event_uids1, self.baseline, baseline_uid2node, "trace1"
+                        )
 
-                        # Get all GPU kernels from trace2's branch
-                        kernel_infos2 = []
-                        for gpu_uid in gpu_event_uids2:
-                            gpu_event = variant_uid2node.get(gpu_uid)
-                            if gpu_event is None:
-                                continue
-
-                            # Find parent CPU operation for this GPU event
-                            parent_uid = gpu_event.get("parent")
-                            parent_node = variant_uid2node.get(parent_uid)
-
-                            # Traverse up to find the first CPU op
-                            while parent_node is not None:
-                                if (
-                                    self.variant.event_to_category(parent_node)
-                                    == "cpu_op"
-                                ):
-                                    break
-                                parent_uid = parent_node.get("parent")
-                                parent_node = variant_uid2node.get(parent_uid)
-
-                            if parent_node is None:
-                                continue
-
-                            kernel_infos2.append(
-                                {
-                                    "cpu_op_uid": parent_uid,
-                                    "cpu_op_node": parent_node,
-                                    "kernel_name": gpu_event["name"],
-                                    "kernel_uid": gpu_uid,
-                                    "kernel_time": gpu_event.get("dur", 0),
-                                    "timestamp": gpu_event.get("ts", 0),
-                                    "source": "trace2",
-                                    "nn_module_stack": parent_node.get(
-                                        "nn_module_stack", ""
-                                    ),
-                                }
-                            )
-
-                        # Create a row for each kernel from trace1
-                        for kinfo in kernel_infos1:
-                            child_node = kinfo["cpu_op_node"]
-                            child_name = self._get_op_name(kinfo["cpu_op_uid"], 1)
-
-                            rows.append(
-                                {
-                                    "name": kinfo["kernel_name"],
-                                    "kernel_uid": kinfo["kernel_uid"],
-                                    "cpu_op_name": child_name,
-                                    "source": kinfo["source"],
-                                    "Input Dims": get_input_shape(child_node),
-                                    "Input Strides": get_input_strides(child_node),
-                                    "Input type": get_input_type(child_node),
-                                    "Concrete Inputs": get_concrete_inputs(child_node),
-                                    "kernel_time": kinfo["kernel_time"],
-                                    "lowest_common_ancestor_name": lca_name,
-                                    "lowest_common_ancestor_id": node["merged_id"],
-                                    "nn_module_stack": ";".join(
-                                        str(x)
-                                        for x in child_node.get("nn_module_stack", [])
-                                    ),
-                                    "nn_module_parent": (
-                                        child_node.get("nn_module_stack") or [""]
-                                    )[-1],
-                                }
-                            )
-
-                        # Create a row for each kernel from trace2
-                        for kinfo in kernel_infos2:
-                            child_node = kinfo["cpu_op_node"]
-                            child_name = self._get_op_name(kinfo["cpu_op_uid"], 2)
-
-                            rows.append(
-                                {
-                                    "name": kinfo["kernel_name"],
-                                    "kernel_uid": kinfo["kernel_uid"],
-                                    "cpu_op_name": child_name,
-                                    "source": kinfo["source"],
-                                    "Input Dims": get_input_shape(child_node),
-                                    "Input Strides": get_input_strides(child_node),
-                                    "Input type": get_input_type(child_node),
-                                    "Concrete Inputs": get_concrete_inputs(child_node),
-                                    "kernel_time": kinfo["kernel_time"],
-                                    "lowest_common_ancestor_name": lca_name,
-                                    "lowest_common_ancestor_id": node["merged_id"],
-                                    "nn_module_stack": ";".join(
-                                        str(x)
-                                        for x in child_node.get("nn_module_stack", [])
-                                    ),
-                                    "nn_module_parent": (
-                                        child_node.get("nn_module_stack") or [""]
-                                    )[-1],
-                                }
-                            )
+                        add_rows(
+                            gpu_event_uids2, self.variant, variant_uid2node, "trace2"
+                        )
 
                         visited_stats_nodes.add(merged_id)
                         visited_stats_nodes.update(
@@ -1076,8 +991,6 @@ class TraceDiff:
                     gpu_event_uids = event1.get("gpu_events", [])
                     for gpu_uid in gpu_event_uids:
                         gpu_event = baseline_uid2node.get(gpu_uid)
-                        if gpu_event is None:
-                            continue
 
                         # Find parent CPU operation for this GPU event
                         parent_uid = gpu_event.get("parent")
@@ -1129,8 +1042,6 @@ class TraceDiff:
                     gpu_event_uids = event2.get("gpu_events", [])
                     for gpu_uid in gpu_event_uids:
                         gpu_event = variant_uid2node.get(gpu_uid)
-                        if gpu_event is None:
-                            continue
 
                         # Find parent CPU operation for this GPU event
                         parent_uid = gpu_event.get("parent")
