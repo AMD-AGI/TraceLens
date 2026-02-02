@@ -939,7 +939,6 @@ class TraceDiff:
                                 rows.append(
                                     {
                                         "name": gpu_event["name"],
-                                        "kernel_uid": gpu_uid,
                                         "cpu_op_name": self._get_op_name(
                                             parent_uid, tree_num
                                         ),
@@ -1011,7 +1010,6 @@ class TraceDiff:
                         rows.append(
                             {
                                 "name": gpu_event["name"],
-                                "kernel_uid": gpu_uid,
                                 "cpu_op_name": child_name,
                                 "source": "trace1",
                                 "Input Dims": get_input_shape(parent_node),
@@ -1062,7 +1060,6 @@ class TraceDiff:
                         rows.append(
                             {
                                 "name": gpu_event["name"],
-                                "kernel_uid": gpu_uid,
                                 "cpu_op_name": child_name,
                                 "source": "trace2",
                                 "Input Dims": get_input_shape(parent_node),
