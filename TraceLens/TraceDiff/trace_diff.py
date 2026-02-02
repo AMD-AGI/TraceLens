@@ -302,7 +302,7 @@ class TraceDiff:
         wf_cache = {}
 
         # Cache for alignment operations to avoid recomputation between phases
-        alignment_cache = {}
+        ops_cache = {}
 
         def get_name(node):
             name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
@@ -355,10 +355,10 @@ class TraceDiff:
             ops = self.wagner_fischer(seq1, seq2, wf_cache)
 
             # Cache the alignment operations for reuse in merge_trees phase
-            alignment_cache[(uid1, uid2)] = ops
+            ops_cache[(uid1, uid2)] = ops
 
             idx1, idx2 = 0, 0
-            for op_idx, (op, i, j) in enumerate(ops):
+            for (op, i, j) in ops:
                 if op == "match":
                     child1 = tree1.get_UID2event(seq1[i])
                     child2 = tree2.get_UID2event(seq2[j])
@@ -394,7 +394,7 @@ class TraceDiff:
         dfs(node1, node2)
 
         # Store alignment cache for reuse in merge_trees phase
-        self._alignment_cache = alignment_cache
+        self._ops_cache = ops_cache
 
         return self.db1, self.db2, self.pod1, self.pod2
 
@@ -489,8 +489,8 @@ class TraceDiff:
 
             # Check cache from calculate_diff_boundaries phase
             cache_key = (uid1, uid2)
-            if cache_key in self._alignment_cache:
-                ops = self._alignment_cache[cache_key]
+            if cache_key in self._ops_cache:
+                ops = self._ops_cache[cache_key]
             else:
                 # Cache miss - compute using generic Wagner-Fischer
                 ops = self.wagner_fischer(children1, children2, merge_wf_cache)
