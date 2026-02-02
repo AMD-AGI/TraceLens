@@ -22,17 +22,37 @@ def create_normalization_layer_trace(outfile: str):
     class Net(torch.nn.Module):
         def __init__(self, input_shape):
             super(Net, self).__init__()
-            self.bn = torch.nn.BatchNorm2d(input_shape[-3])
-            self.ln = torch.nn.LayerNorm(input_shape[1:])
-            self.gn = torch.nn.GroupNorm(4, input_shape[-3])
-            self.rmsn = torch.nn.RMSNorm(input_shape)
-            self.inn = torch.nn.InstanceNorm2d(input_shape[-3])
+            self.bn = torch.nn.BatchNorm2d(input_shape[-3], affine=True)
+            self.ln = torch.nn.LayerNorm(input_shape[1:], elementwise_affine=True)
+            self.gn = torch.nn.GroupNorm(4, input_shape[-3], affine=True)
+            self.rmsn = torch.nn.RMSNorm(input_shape, elementwise_affine=True)
+            self.inn = torch.nn.InstanceNorm2d(input_shape[-3], affine=True)
+            self.bn2 = torch.nn.BatchNorm2d(input_shape[-3], affine=False)
+            self.ln2 = torch.nn.LayerNorm(input_shape[1:], elementwise_affine=False)
+            self.gn2 = torch.nn.GroupNorm(4, input_shape[-3], affine=False)
+            self.rmsn2 = torch.nn.RMSNorm(input_shape, elementwise_affine=False)
+            self.inn2 = torch.nn.InstanceNorm2d(input_shape[-3], affine=False)
         def forward(self, x):
-            x = self.bn(x)
-            x = self.ln(x)
-            x = self.gn(x)
-            x = self.rmsn(x)
-            x = self.inn(x)
+            with torch.profiler.record_function("BatchNorm affine=True"):
+                x = self.bn(x)
+            with torch.profiler.record_function("LayerNorm affine=True"):
+                x = self.ln(x)
+            with torch.profiler.record_function("GroupNorm affine=True"):
+                x = self.gn(x)
+            with torch.profiler.record_function("RMSNorm affine=True"):
+                x = self.rmsn(x)
+            with torch.profiler.record_function("InstanceNorm affine=True"):
+                x = self.inn(x)
+            with torch.profiler.record_function("BatchNorm affine=False"):
+                x = self.bn2(x)
+            with torch.profiler.record_function("LayerNorm affine=False"):
+                x = self.ln2(x)
+            with torch.profiler.record_function("GroupNorm affine=False"):
+                x = self.gn2(x)
+            with torch.profiler.record_function("RMSNorm affine=False"):
+                x = self.rmsn2(x)
+            with torch.profiler.record_function("InstanceNormNorm affine=False"):
+                x = self.inn2(x)
             return x
     torch.set_default_device('cuda')
     input_shape = [8, 16, 32, 32]
@@ -52,10 +72,11 @@ def create_normalization_layer_trace(outfile: str):
         with_flops=True,
         acc_events=True,
     ) as p:
-        for _ in range(10):
-            outputs = net(x)
-            loss = criterion(outputs, torch.randn(input_shape))
-            loss.backward()
+        for i in range(3):
+            with torch.profiler.record_function(f"step %d" % i):
+                outputs = net(x)
+                loss = criterion(outputs, torch.randn(input_shape))
+                loss.backward()
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     p.export_chrome_trace(outfile)
 
