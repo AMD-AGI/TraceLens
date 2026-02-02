@@ -155,7 +155,7 @@ class BaseTraceToTree(ABC):
             if nn_module_stack:
                 event["nn_module_stack"] = list(nn_module_stack)
             else:
-                event["nn_module_stack"] = ""
+                event["nn_module_stack"] = ["root"]
 
             if stack:
                 parent = stack[-1]
@@ -740,7 +740,7 @@ class TraceToTree:
             if nn_module_stack:
                 event["nn_module_stack"] = list(nn_module_stack)
             else:
-                event["nn_module_stack"] = ""
+                event["nn_module_stack"] = ["root"]
 
             if stack:
                 parent = stack[-1]
@@ -956,19 +956,22 @@ class TraceToTree:
                 _prefix=new_prefix,
                 is_last=(i == child_count - 1),
             )
-    def traverse_parents_and_get_callstack(self, node: Dict[str, Any], filter: tuple[str, ...] = ()):
+
+    def traverse_parents_and_get_callstack(
+        self, node: Dict[str, Any], filter: tuple[str, ...] = ()
+    ):
         depth = 0
-        print_str=node["name"]+" => "
+        print_str = node["name"] + " => "
         while True:
             name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
             max_len = 256
             if len(name) > max_len:
                 name = name[:max_len] + ".."
             if filter is None:
-                print_str+= f"{name} => "
+                print_str += f"{name} => "
             else:
                 if any(filter_str in name for filter_str in filter):
-                    print_str+= f"{name} => "
+                    print_str += f"{name} => "
             # Move to the parent node
             parent_node = self.get_parent_event(node)
             if parent_node is None:

@@ -69,6 +69,11 @@ class TraceDiff:
         """Invalidate merged tree cache when tree is rebuilt."""
         self._merged_id_to_event = None
 
+    def is_gpu_path(self, node):
+        if node is None:
+            return False
+        return not node.get("non_gpu_path", False)
+
     @staticmethod
     def _normalize_name_for_comparison(name):
         """
@@ -201,8 +206,83 @@ class TraceDiff:
         while True:
             parent_uid = current.get("parent")
             if parent_uid is None:
+                root = current
+                while True:
+                    children = current.get("children", [])
+                    if len(children) == 1:
+                        current = tree.get_UID2event(children[0])
+                    else:
+                        children = current.get("children", [])
+                        root["children"] = children
+                        for child_uid in children:
+                            child_event = tree.get_UID2event(child_uid)
+                            child_event["parent"] = root.get(
+                                TraceLens.util.TraceEventUtils.TraceKeys.UID
+                            )
+                        current = root
+                        break
                 return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
+
+    def wagner_fischer(self, items1, items2, wf_cache):
+        """
+        Wagner-Fischer algorithm that works with any items and name lookup functions.
+
+        Args:
+            items1: List of items
+            items2: List of items
+            wf_cache: Dictionary for caching results
+
+        Returns:
+            List of operations: [("match", i, j), ("delete", i, None), ("insert", None, j), ...]
+        """
+        # Pre-compute names for cache key
+        names1 = [
+            self._normalize_name_for_comparison(self._get_op_name(item, 1))
+            for item in items1
+        ]
+        names2 = [
+            self._normalize_name_for_comparison(self._get_op_name(item, 2))
+            for item in items2
+        ]
+
+        # Check cache
+        cache_key = (tuple(items1), tuple(items2))
+        if cache_key in wf_cache:
+            return wf_cache[cache_key]
+
+        m, n = len(items1), len(items2)
+
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        for i in range(m + 1):
+            dp[i][0] = i
+        for j in range(n + 1):
+            dp[0][j] = j
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                cost = 0 if names1[i - 1] == names2[j - 1] else 1
+                dp[i][j] = min(
+                    dp[i - 1][j] + 1,
+                    dp[i][j - 1] + 1,
+                    dp[i - 1][j - 1] + cost,
+                )
+        # Backtrack
+        i, j = m, n
+        ops = []
+        while i > 0 or j > 0:
+            if i > 0 and j > 0 and names1[i - 1] == names2[j - 1]:
+                ops.append(("match", i - 1, j - 1))
+                i -= 1
+                j -= 1
+            elif i > 0 and (j == 0 or dp[i][j] == dp[i - 1][j] + 1):
+                ops.append(("delete", i - 1, None))
+                i -= 1
+            else:
+                ops.append(("insert", None, j - 1))
+                j -= 1
+        ops.reverse()
+        wf_cache[cache_key] = ops
+        return ops
 
     def calculate_diff_boundaries(self):
         """
@@ -218,8 +298,11 @@ class TraceDiff:
         tree1 = self.baseline
         tree2 = self.variant
 
-        # Cache for Wagner-Fischer results to avoid recomputation
+        # Cache for Wagner-Fischer results to avoid recomputation within this phase
         wf_cache = {}
+
+        # Cache for alignment operations to avoid recomputation between phases
+        ops_cache = {}
 
         def get_name(node):
             name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
@@ -228,58 +311,16 @@ class TraceDiff:
         def get_children(tree, node):
             return tree.get_children_events(node)
 
+        def get_gpu_children(tree, node):
+            return [
+                child for child in get_children(tree, node) if self.is_gpu_path(child)
+            ]
+
         def add_to_pod(node, pod, tree):
             # Add node and all its descendants to pod
             pod.add(node.get(TraceLens.util.TraceEventUtils.TraceKeys.UID))
             for child in get_children(tree, node):
                 add_to_pod(child, pod, tree)
-
-        def wagner_fischer(seq1, seq2):
-            # Pre-compute name comparisons to avoid redundant lookups
-            names1 = [get_name(tree1.get_UID2event(uid)) for uid in seq1]
-            names2 = [get_name(tree2.get_UID2event(uid)) for uid in seq2]
-
-            # Create cache key from node NAMES (not UIDs) since the same operation sequences
-            # may appear with different UIDs in different parts of the tree
-            cache_key = (tuple(names1), tuple(names2))
-            if cache_key in wf_cache:
-                return wf_cache[cache_key]
-
-            m, n = len(seq1), len(seq2)
-
-            dp = [[0] * (n + 1) for _ in range(m + 1)]
-            for i in range(m + 1):
-                dp[i][0] = i
-            for j in range(n + 1):
-                dp[0][j] = j
-            for i in range(1, m + 1):
-                for j in range(1, n + 1):
-                    # Use pre-computed names instead of looking up nodes again
-                    cost = 0 if names1[i - 1] == names2[j - 1] else 1
-                    dp[i][j] = min(
-                        dp[i - 1][j] + 1,
-                        dp[i][j - 1] + 1,
-                        dp[i - 1][j - 1] + cost,
-                    )
-            # Backtrack to get the operations using pre-computed names
-            i, j = m, n
-            ops = []
-            while i > 0 or j > 0:
-                if i > 0 and j > 0 and names1[i - 1] == names2[j - 1]:
-                    ops.append(("match", i - 1, j - 1))
-                    i -= 1
-                    j -= 1
-                elif i > 0 and (j == 0 or dp[i][j] == dp[i - 1][j] + 1):
-                    ops.append(("delete", i - 1, None))
-                    i -= 1
-                else:
-                    ops.append(("insert", None, j - 1))
-                    j -= 1
-            ops.reverse()
-
-            # Store result in cache before returning
-            wf_cache[cache_key] = ops
-            return ops
 
         def dfs(node1, node2):
             # If either node is already a POD, skip
@@ -298,10 +339,10 @@ class TraceDiff:
                 return
 
             children1 = sorted(
-                get_children(tree1, node1), key=lambda child: child.get("ts", 0)
+                get_gpu_children(tree1, node1), key=lambda child: child.get("ts", 0)
             )
             children2 = sorted(
-                get_children(tree2, node2), key=lambda child: child.get("ts", 0)
+                get_gpu_children(tree2, node2), key=lambda child: child.get("ts", 0)
             )
             seq1 = [
                 child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
@@ -311,13 +352,18 @@ class TraceDiff:
                 child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
                 for child in children2
             ]
-            ops = wagner_fischer(seq1, seq2)
+            ops = self.wagner_fischer(seq1, seq2, wf_cache)
+
+            # Cache the alignment operations for reuse in merge_trees phase
+            ops_cache[(uid1, uid2)] = ops
+
             idx1, idx2 = 0, 0
             for op, i, j in ops:
                 if op == "match":
                     child1 = tree1.get_UID2event(seq1[i])
                     child2 = tree2.get_UID2event(seq2[j])
-                    dfs(child1, child2)
+                    if self.is_gpu_path(child1) or self.is_gpu_path(child2):
+                        dfs(child1, child2)
                     idx1 += 1
                     idx2 += 1
                 elif op == "delete":
@@ -346,6 +392,10 @@ class TraceDiff:
         node1 = tree1.get_UID2event(root_uid1)
         node2 = tree2.get_UID2event(root_uid2)
         dfs(node1, node2)
+
+        # Store alignment cache for reuse in merge_trees phase
+        self._ops_cache = ops_cache
+
         return self.db1, self.db2, self.pod1, self.pod2
 
     def merge_trees(self):
@@ -362,6 +412,9 @@ class TraceDiff:
 
         # Invalidate merged tree cache since we're rebuilding it
         self._invalidate_merged_cache()
+
+        # Cache for Wagner-Fischer results during merge phase
+        merge_wf_cache = {}
 
         # Helper to create a merged event
         def make_event(merged_id, uid1, uid2, merged_type, children, nn_module_stack):
@@ -388,6 +441,10 @@ class TraceDiff:
             if node is None or not isinstance(node, dict):
                 return []
             return node.get("children", [])
+
+        def safe_gpu_children(tree, uid):
+            children = safe_children(tree, uid)
+            return [child for child in children if self.is_gpu_path(tree.get(child))]
 
         def get_name_by_uid(tree, uid):
             node = tree.get(uid)
@@ -427,45 +484,16 @@ class TraceDiff:
                 nn_module_stack = self.variant.get_UID2event(uid2).get(
                     "nn_module_stack", ""
                 )
-            children1 = safe_children(baseline_uid2node, uid1)
-            children2 = safe_children(variant_uid2node, uid2)
-            # Wagner-Fischer to align children
-            ops = []
-            if children1 or children2:
-                m, n = len(children1), len(children2)
-                dp = [[0] * (n + 1) for _ in range(m + 1)]
-                for i in range(m + 1):
-                    dp[i][0] = i
-                for j in range(n + 1):
-                    dp[0][j] = j
-                for i in range(1, m + 1):
-                    for j in range(1, n + 1):
-                        name1 = get_name_by_uid(baseline_uid2node, children1[i - 1])
-                        name2 = get_name_by_uid(variant_uid2node, children2[j - 1])
-                        cost = 0 if name1 == name2 else 1
-                        dp[i][j] = min(
-                            dp[i - 1][j] + 1,
-                            dp[i][j - 1] + 1,
-                            dp[i - 1][j - 1] + cost,
-                        )
-                i, j = m, n
-                while i > 0 or j > 0:
-                    if (
-                        i > 0
-                        and j > 0
-                        and get_name_by_uid(baseline_uid2node, children1[i - 1])
-                        == get_name_by_uid(variant_uid2node, children2[j - 1])
-                    ):
-                        ops.append(("match", i - 1, j - 1))
-                        i -= 1
-                        j -= 1
-                    elif i > 0 and (j == 0 or dp[i][j] == dp[i - 1][j] + 1):
-                        ops.append(("delete", i - 1, None))
-                        i -= 1
-                    else:
-                        ops.append(("insert", None, j - 1))
-                        j -= 1
-                ops.reverse()
+            children1 = safe_gpu_children(baseline_uid2node, uid1)
+            children2 = safe_gpu_children(variant_uid2node, uid2)
+
+            # Check cache from calculate_diff_boundaries phase
+            cache_key = (uid1, uid2)
+            if cache_key in self._ops_cache:
+                ops = self._ops_cache[cache_key]
+            else:
+                # Cache miss - compute using generic Wagner-Fischer
+                ops = self.wagner_fischer(children1, children2, merge_wf_cache)
             child_merged_ids = []
             for op, i, j in ops:
                 if op == "match":
@@ -661,32 +689,37 @@ class TraceDiff:
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
 
+        def list_to_tuple(obj):
+            if isinstance(obj, list):
+                return tuple(list_to_tuple(item) for item in obj)
+            return obj
+
         def get_input_shape(node):
             args = node.get("args", {})
             shape = args.get("Input Dims")
             if shape is not None:
-                return str(shape)
+                return list_to_tuple(shape)
             return ""
 
         def get_concrete_inputs(node):
             args = node.get("args", {})
             val = args.get("Concrete Inputs")
             if val is not None:
-                return str(val)
+                return list_to_tuple(val)
             return ""
 
         def get_input_strides(node):
             args = node.get("args", {})
             val = args.get("Input Strides")
             if val is not None:
-                return str(val)
+                return list_to_tuple(val)
             return ""
 
         def get_input_type(node):
             args = node.get("args", {})
             val = args.get("Input type")
             if val is not None:
-                return str(val)
+                return list_to_tuple(val)
             return ""
 
         def get_duration(node):
@@ -698,11 +731,6 @@ class TraceDiff:
             except Exception:
                 pass
             return dur
-
-        def is_gpu_path(node):
-            if node is None:
-                return False
-            return not node.get("non_gpu_path", False)
 
         def is_kernel(node):
             cat = node.get("cat") or node.get("category")
@@ -740,7 +768,7 @@ class TraceDiff:
                 return None
 
             # If not on GPU path, return None
-            if not is_gpu_path(node):
+            if not self.is_gpu_path(node):
                 return None
 
             # On first call, get all kernels from this starting node
@@ -803,7 +831,7 @@ class TraceDiff:
                 return []
 
             # If not on GPU path, return empty
-            if not is_gpu_path(node):
+            if not self.is_gpu_path(node):
                 return []
 
             is_cpu_op = tree_obj.event_to_category(node) == "cpu_op"
@@ -848,198 +876,217 @@ class TraceDiff:
             if mt == "combined":
                 event1 = baseline_uid2node.get(node["uid1"])
                 event2 = variant_uid2node.get(node["uid2"])
-                if event1 and event2 and is_gpu_path(event1) and is_gpu_path(event2):
+                if (
+                    event1
+                    and event2
+                    and self.is_gpu_path(event1)
+                    and self.is_gpu_path(event2)
+                ):
                     children = [merged_id_to_event[cid] for cid in node["children"]]
                     non_combined_children = [
                         c for c in children if c["merged_type"] != "combined"
                     ]
-                    if any(
-                        is_gpu_path(baseline_uid2node.get(child.get("uid1")))
-                        or is_gpu_path(variant_uid2node.get(child.get("uid2")))
+                    non_combined_children_trace1_gpu_paths = [
+                        child
                         for child in non_combined_children
+                        if self.is_gpu_path(baseline_uid2node.get(child.get("uid1")))
+                    ]
+                    non_combined_children_trace2_gpu_paths = [
+                        child
+                        for child in non_combined_children
+                        if self.is_gpu_path(variant_uid2node.get(child.get("uid2")))
+                    ]
+                    if (
+                        non_combined_children_trace1_gpu_paths
+                        or non_combined_children_trace2_gpu_paths
                     ):
+
                         # Store the LCA name from this combined node
                         lca_name = self._get_op_name(
                             node["uid1"], 1
                         ) or self._get_op_name(node["uid2"], 2)
 
-                        # Find the single lowest CPU op that calls all kernels in trace1's branch
-                        cpu_op_uid1 = find_last_cpu_op_on_gpu_path(
-                            node, self.baseline, baseline_uid2node, "uid1"
+                        gpu_event_uids1 = []
+                        for child in non_combined_children_trace1_gpu_paths:
+                            child_node = baseline_uid2node.get(child.get("uid1"))
+                            gpu_event_uids1.extend(child_node.get("gpu_events", []))
+
+                        gpu_event_uids2 = []
+                        for child in non_combined_children_trace2_gpu_paths:
+                            child_node = variant_uid2node.get(child.get("uid2"))
+                            gpu_event_uids2.extend(child_node.get("gpu_events", []))
+
+                        def add_rows(gpu_event_uids, tree_obj, uid2node, source):
+                            tree_num = 1 if source == "trace1" else 2
+                            for gpu_uid in gpu_event_uids:
+                                gpu_event = uid2node.get(gpu_uid)
+                                if gpu_event is None:
+                                    continue
+                                parent_uid = gpu_event.get("parent")
+                                parent_node = uid2node.get(parent_uid)
+                                while parent_node is not None:
+                                    if (
+                                        tree_obj.event_to_category(parent_node)
+                                        == "cpu_op"
+                                    ):
+                                        break
+                                    parent_uid = parent_node.get("parent")
+                                    parent_node = uid2node.get(parent_uid)
+
+                                if parent_node is None:
+                                    continue
+
+                                rows.append(
+                                    {
+                                        "name": gpu_event["name"],
+                                        "cpu_op_name": self._get_op_name(
+                                            parent_uid, tree_num
+                                        ),
+                                        "source": source,
+                                        "Input Dims": get_input_shape(parent_node),
+                                        "Input Strides": get_input_strides(parent_node),
+                                        "Input type": get_input_type(parent_node),
+                                        "Concrete Inputs": get_concrete_inputs(
+                                            parent_node
+                                        ),
+                                        "kernel_time": gpu_event.get("dur", 0),
+                                        "lowest_common_ancestor_name": lca_name,
+                                        "lowest_common_ancestor_id": node["merged_id"],
+                                        "nn_module_stack": ";".join(
+                                            str(x)
+                                            for x in parent_node.get(
+                                                "nn_module_stack", []
+                                            )
+                                        ),
+                                        "nn_module_parent": (
+                                            parent_node.get("nn_module_stack") or [""]
+                                        )[-1],
+                                    }
+                                )
+
+                        add_rows(
+                            gpu_event_uids1, self.baseline, baseline_uid2node, "trace1"
                         )
 
-                        # Find the single lowest CPU op that calls all kernels in trace2's branch
-                        cpu_op_uid2 = find_last_cpu_op_on_gpu_path(
-                            node, self.variant, variant_uid2node, "uid2"
-                        )
-
-                        # Get nodes for the CPU ops (or fall back to parent events)
-                        if cpu_op_uid1 is not None:
-                            child_node1 = baseline_uid2node.get(cpu_op_uid1)
-                            child_name_trace1 = self._get_op_name(cpu_op_uid1, 1)
-                        else:
-                            child_node1 = event1
-                            child_name_trace1 = ""
-
-                        if cpu_op_uid2 is not None:
-                            child_node2 = variant_uid2node.get(cpu_op_uid2)
-                            child_name_trace2 = self._get_op_name(cpu_op_uid2, 2)
-                        else:
-                            child_node2 = event2
-                            child_name_trace2 = ""
-
-                        # Get kernel info from the parent node (which contains all kernels in branch)
-                        kernel_names1, kernel_time1 = get_kernel_info_subtree(
-                            node["uid1"], baseline_uid2node
-                        )
-                        kernel_names2, kernel_time2 = get_kernel_info_subtree(
-                            node["uid2"], variant_uid2node
-                        )
-
-                        input_shape1 = get_input_shape(child_node1)
-                        input_shape2 = get_input_shape(child_node2)
-                        concrete_inputs1 = get_concrete_inputs(child_node1)
-                        concrete_inputs2 = get_concrete_inputs(child_node2)
-                        input_strides1 = get_input_strides(child_node1)
-                        input_strides2 = get_input_strides(child_node2)
-                        input_type1 = get_input_type(child_node1)
-                        input_type2 = get_input_type(child_node2)
-
-                        rows.append(
-                            {
-                                "lowest_common_ancestor_name": lca_name,
-                                "merged_id": merged_id,
-                                "cpu_op_name_trace1": child_name_trace1,
-                                "cpu_op_name_trace2": child_name_trace2,
-                                "nn_module_stack_trace1": child_node1.get(
-                                    "nn_module_stack", ""
-                                ),
-                                "nn_module_stack_trace2": child_node2.get(
-                                    "nn_module_stack", ""
-                                ),
-                                "input_shape_trace1": input_shape1,
-                                "input_shape_trace2": input_shape2,
-                                "concrete_inputs_trace1": concrete_inputs1,
-                                "concrete_inputs_trace2": concrete_inputs2,
-                                "input_strides_trace1": input_strides1,
-                                "input_strides_trace2": input_strides2,
-                                "input_type_trace1": input_type1,
-                                "input_type_trace2": input_type2,
-                                "kernel_time_trace1": kernel_time1,
-                                "kernel_time_trace2": kernel_time2,
-                                "kernel_names_trace1": kernel_names1,
-                                "kernel_names_trace2": kernel_names2,
-                            }
+                        add_rows(
+                            gpu_event_uids2, self.variant, variant_uid2node, "trace2"
                         )
 
                         visited_stats_nodes.add(merged_id)
-                        return  # Do not traverse children further
+                        visited_stats_nodes.update(
+                            [
+                                child.get("merged_id")
+                                for child in non_combined_children_trace1_gpu_paths
+                                + non_combined_children_trace2_gpu_paths
+                            ]
+                        )
 
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
-                if event1 and is_gpu_path(event1):
-                    # Find all last CPU ops on GPU paths in this subtree
-                    cpu_op_uids = find_all_last_cpu_ops_on_gpu_path(
-                        node, self.baseline, baseline_uid2node, "uid1"
-                    )
+                if event1 and self.is_gpu_path(event1):
+                    lca_name = self._get_op_name(event1.get("parent"), 1)
 
-                    # Create a row for each CPU op found
-                    for cpu_op_uid in cpu_op_uids:
-                        cpu_op_node = baseline_uid2node.get(cpu_op_uid)
-                        if cpu_op_node is None:
+                    # Get all GPU kernels from trace1's branch
+                    gpu_event_uids = event1.get("gpu_events", [])
+                    for gpu_uid in gpu_event_uids:
+                        gpu_event = baseline_uid2node.get(gpu_uid)
+
+                        # Find parent CPU operation for this GPU event
+                        parent_uid = gpu_event.get("parent")
+                        parent_node = baseline_uid2node.get(parent_uid)
+
+                        # Traverse up to find the first CPU op
+                        while parent_node is not None:
+                            if self.baseline.event_to_category(parent_node) == "cpu_op":
+                                break
+                            parent_uid = parent_node.get("parent")
+                            parent_node = baseline_uid2node.get(parent_uid)
+
+                        if parent_node is None:
                             continue
 
-                        name = self._get_op_name(cpu_op_uid, 1)
-                        input_shape1 = get_input_shape(cpu_op_node)
-                        concrete_inputs1 = get_concrete_inputs(cpu_op_node)
-                        input_strides1 = get_input_strides(cpu_op_node)
-                        input_type1 = get_input_type(cpu_op_node)
-                        kernel_names1, kernel_time1 = get_kernel_info_subtree(
-                            cpu_op_uid, baseline_uid2node
+                        child_name = self._get_op_name(parent_uid, 1)
+
+                        rows.append(
+                            {
+                                "name": gpu_event["name"],
+                                "cpu_op_name": child_name,
+                                "source": "trace1",
+                                "Input Dims": get_input_shape(parent_node),
+                                "Input Strides": get_input_strides(parent_node),
+                                "Input type": get_input_type(parent_node),
+                                "Concrete Inputs": get_concrete_inputs(parent_node),
+                                "kernel_time": gpu_event.get("dur", 0),
+                                "lowest_common_ancestor_name": lca_name,
+                                "lowest_common_ancestor_id": node["merged_id"],
+                                "nn_module_stack": ";".join(
+                                    str(x)
+                                    for x in parent_node.get("nn_module_stack", [])
+                                ),
+                                "nn_module_parent": (
+                                    parent_node.get("nn_module_stack") or [""]
+                                )[-1],
+                            }
                         )
-                        if kernel_names1:
-                            rows.append(
-                                {
-                                    "lowest_common_ancestor_name": name,
-                                    "merged_id": merged_id,
-                                    "cpu_op_name_trace1": name,
-                                    "cpu_op_name_trace2": "",
-                                    "nn_module_stack_trace1": cpu_op_node.get(
-                                        "nn_module_stack", ""
-                                    ),
-                                    "nn_module_stack_trace2": "",
-                                    "input_shape_trace1": input_shape1,
-                                    "input_shape_trace2": "",
-                                    "concrete_inputs_trace1": concrete_inputs1,
-                                    "concrete_inputs_trace2": "",
-                                    "input_strides_trace1": input_strides1,
-                                    "input_strides_trace2": "",
-                                    "input_type_trace1": input_type1,
-                                    "input_type_trace2": "",
-                                    "kernel_time_trace1": kernel_time1,
-                                    "kernel_time_trace2": 0,
-                                    "kernel_names_trace1": kernel_names1,
-                                    "kernel_names_trace2": "",
-                                }
-                            )
+
                 visited_stats_nodes.add(merged_id)
                 return
-                # Continue traversing children
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
-                if event2 and is_gpu_path(event2):
-                    # Find all last CPU ops on GPU paths in this subtree
-                    cpu_op_uids = find_all_last_cpu_ops_on_gpu_path(
-                        node, self.variant, variant_uid2node, "uid2"
-                    )
+                if event2 and self.is_gpu_path(event2):
+                    lca_name = self._get_op_name(event2.get("parent"), 2)
 
-                    # Create a row for each CPU op found
-                    for cpu_op_uid in cpu_op_uids:
-                        cpu_op_node = variant_uid2node.get(cpu_op_uid)
-                        if cpu_op_node is None:
+                    # Get all GPU kernels from trace2's branch
+                    gpu_event_uids = event2.get("gpu_events", [])
+                    for gpu_uid in gpu_event_uids:
+                        gpu_event = variant_uid2node.get(gpu_uid)
+
+                        # Find parent CPU operation for this GPU event
+                        parent_uid = gpu_event.get("parent")
+                        parent_node = variant_uid2node.get(parent_uid)
+
+                        # Traverse up to find the first CPU op
+                        while parent_node is not None:
+                            if self.variant.event_to_category(parent_node) == "cpu_op":
+                                break
+                            parent_uid = parent_node.get("parent")
+                            parent_node = variant_uid2node.get(parent_uid)
+
+                        if parent_node is None:
                             continue
 
-                        name = self._get_op_name(cpu_op_uid, 2)
-                        input_shape2 = get_input_shape(cpu_op_node)
-                        concrete_inputs2 = get_concrete_inputs(cpu_op_node)
-                        input_strides2 = get_input_strides(cpu_op_node)
-                        input_type2 = get_input_type(cpu_op_node)
-                        kernel_names2, kernel_time2 = get_kernel_info_subtree(
-                            cpu_op_uid, variant_uid2node
+                        child_name = self._get_op_name(parent_uid, 2)
+
+                        rows.append(
+                            {
+                                "name": gpu_event["name"],
+                                "cpu_op_name": child_name,
+                                "source": "trace2",
+                                "Input Dims": get_input_shape(parent_node),
+                                "Input Strides": get_input_strides(parent_node),
+                                "Input type": get_input_type(parent_node),
+                                "Concrete Inputs": get_concrete_inputs(parent_node),
+                                "kernel_time": gpu_event.get("dur", 0),
+                                "lowest_common_ancestor_name": lca_name,
+                                "lowest_common_ancestor_id": node["merged_id"],
+                                "nn_module_stack": ";".join(
+                                    str(x)
+                                    for x in parent_node.get("nn_module_stack", [])
+                                ),
+                                "nn_module_parent": (
+                                    parent_node.get("nn_module_stack") or [""]
+                                )[-1],
+                            }
                         )
-                        if kernel_names2:
-                            rows.append(
-                                {
-                                    "lowest_common_ancestor_name": name,
-                                    "merged_id": merged_id,
-                                    "cpu_op_name_trace1": "",
-                                    "cpu_op_name_trace2": name,
-                                    "nn_module_stack_trace1": "",
-                                    "nn_module_stack_trace2": cpu_op_node.get(
-                                        "nn_module_stack", ""
-                                    ),
-                                    "input_shape_trace1": "",
-                                    "input_shape_trace2": input_shape2,
-                                    "concrete_inputs_trace1": "",
-                                    "concrete_inputs_trace2": concrete_inputs2,
-                                    "input_strides_trace1": "",
-                                    "input_strides_trace2": input_strides2,
-                                    "input_type_trace1": "",
-                                    "input_type_trace2": input_type2,
-                                    "kernel_time_trace1": 0,
-                                    "kernel_time_trace2": kernel_time2,
-                                    "kernel_names_trace1": "",
-                                    "kernel_names_trace2": kernel_names2,
-                                }
-                            )
+
                 visited_stats_nodes.add(merged_id)
                 return
 
             # Only traverse children if both events are on GPU path
             should_traverse_children = False
-            if is_gpu_path(event1) or is_gpu_path(event2):
+            if self.is_gpu_path(event1) or self.is_gpu_path(event2):
                 should_traverse_children = True
-            # print("node", node)
+
             if should_traverse_children:
                 for cid in node["children"]:
                     traverse(cid)
@@ -1050,6 +1097,7 @@ class TraceDiff:
 
         df = pd.DataFrame(rows)
         self.diff_stats_df = df
+
         return df
 
     def get_df_diff_stats_unique_args(
@@ -1077,22 +1125,10 @@ class TraceDiff:
         df_filtered = self.diff_stats_df
         if op_name:
             df_filtered = df_filtered[df_filtered["name"] == op_name]
-
-        # 2. Compute difference and absolute difference between traces using assign for efficiency
-        df_filtered = df_filtered.assign(
-            diff=lambda x: x["kernel_time_trace2"] - x["kernel_time_trace1"],
-            abs_diff=lambda x: (
-                x["kernel_time_trace2"] - x["kernel_time_trace1"]
-            ).abs(),
-        )
+        df_filtered = df_filtered.drop(columns=["lowest_common_ancestor_id"])
 
         # 3. Identify “argument” columns (everything that isn’t a metric)
-        metric_columns = [
-            "kernel_time_trace1",
-            "kernel_time_trace2",
-            "diff",
-            "abs_diff",
-        ]
+        metric_columns = ["kernel_time"]
         grouping_cols_original = [
             c for c in df_filtered.columns if c not in metric_columns
         ]
@@ -1109,7 +1145,7 @@ class TraceDiff:
                 agg_dict
             )
             # Add row_count column (number of grouped rows per unique group)
-            df_agg["row_count"] = df_filtered.groupby(
+            df_agg["operation_count"] = df_filtered.groupby(
                 grouping_cols_original, dropna=False
             ).size()
         except TypeError:
@@ -1120,7 +1156,7 @@ class TraceDiff:
                 df_temp[str_col] = df_temp[col].astype(str)
             df_agg = df_temp.groupby(str_cols, dropna=False).agg(agg_dict)
             # Add row_count column for stringified grouping columns
-            df_agg["row_count"] = df_temp.groupby(str_cols, dropna=False).size()
+            df_agg["operation_count"] = df_temp.groupby(str_cols, dropna=False).size()
 
         # 7. Flatten the multi‑index column labels
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
@@ -1147,14 +1183,14 @@ class TraceDiff:
             col for col in df_agg.columns if col not in primary_cols + metric_cols
         ]
         df_agg = df_agg[primary_cols + metric_cols + other_cols]
-        df_agg = df_agg.rename(columns={"row_count_": "row_count"})
+        df_agg = df_agg.rename(columns={"operation_count_": "operation_count"})
         cols = list(df_agg.columns)
-        cols.remove("row_count")
-        cols.insert(1, "row_count")
+        cols.remove("operation_count")
+        cols.insert(1, "operation_count")
         df_agg = df_agg[cols]
 
         # 10. Sort by the trace1 kernel time sum
-        sort_col = "kernel_time_trace1_sum"
+        sort_col = "kernel_time_sum"
         if sort_col in df_agg.columns:
             df_agg = df_agg.sort_values(by=sort_col, ascending=False, ignore_index=True)
 
@@ -1185,12 +1221,8 @@ class TraceDiff:
             os.makedirs(output_folder)
         merged_tree_file = os.path.join(output_folder, "merged_tree_output.txt")
         diff_stats_file = os.path.join(output_folder, "diff_stats.csv")
-        # diff_stats_summary_file = os.path.join(output_folder, "diff_stats_summary.csv")
         diff_stats_unique_args_summary_file = os.path.join(
             output_folder, "diff_stats_unique_args_summary.csv"
-        )
-        diff_stats_names_summary_file = os.path.join(
-            output_folder, "diff_stats_names_summary.csv"
         )
         self.print_merged_tree(
             output_file=merged_tree_file, prune_non_gpu=prune_non_gpu
