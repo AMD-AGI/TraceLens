@@ -9,7 +9,7 @@ from typing import Dict, Any, Callable
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
-
+import re
 
 from abc import ABC, abstractmethod
 import logging
@@ -116,6 +116,7 @@ class BaseTraceToTree(ABC):
         )
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
+        dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
             event["tree"] = True
@@ -127,6 +128,7 @@ class BaseTraceToTree(ABC):
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
             stack_key = (pid, tid)
             stack = dict_pidtid2stack[stack_key]
+            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
             while (
                 stack
@@ -136,6 +138,9 @@ class BaseTraceToTree(ABC):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+                # Pop from nn_module_stack if this was an nn.Module event
+                if self._is_nn_module_event(popped_event):
+                    nn_module_stack.pop()
 
             if (
                 stack
@@ -146,6 +151,12 @@ class BaseTraceToTree(ABC):
                 # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
                 continue
 
+            # Set nn_module_stack for the current event (copy to avoid reference issues)
+            if nn_module_stack:
+                event["nn_module_stack"] = list(nn_module_stack)
+            else:
+                event["nn_module_stack"] = ["root"]
+
             if stack:
                 parent = stack[-1]
                 parent.setdefault("children", []).append(
@@ -154,6 +165,13 @@ class BaseTraceToTree(ABC):
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
             stack.append(event)
+
+            # Push onto nn_module_stack if this is an nn.Module event
+            if self._is_nn_module_event(event):
+                nn_module_stack.append(
+                    event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
+                )
+
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -683,6 +701,7 @@ class TraceToTree:
         )
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
+        dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
             event["tree"] = True
@@ -694,6 +713,7 @@ class TraceToTree:
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
             stack_key = (pid, tid)
             stack = dict_pidtid2stack[stack_key]
+            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
             while (
                 stack
@@ -703,6 +723,9 @@ class TraceToTree:
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+                # Pop from nn_module_stack if this was an nn.Module event
+                if self._is_nn_module_event(popped_event):
+                    nn_module_stack.pop()
 
             if (
                 stack
@@ -713,6 +736,12 @@ class TraceToTree:
                 # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
                 continue
 
+            # Set nn_module_stack for the current event (copy to avoid reference issues)
+            if nn_module_stack:
+                event["nn_module_stack"] = list(nn_module_stack)
+            else:
+                event["nn_module_stack"] = ["root"]
+
             if stack:
                 parent = stack[-1]
                 parent.setdefault("children", []).append(
@@ -721,6 +750,13 @@ class TraceToTree:
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
             stack.append(event)
+
+            # Push onto nn_module_stack if this is an nn.Module event
+            if self._is_nn_module_event(event):
+                name = event["name"]
+                name = re.sub(r"_\d+$", "", name)
+                nn_module_stack.append(name)
+
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -827,23 +863,27 @@ class TraceToTree:
             ):
                 return event
         return None
-    def apply_annotation(
-        self,
-        name_filters =[]    
-    ) -> None:
-        events=self.events
-        annotation_events=[e for e in events if "user_annotation" in e.get("cat","")]
-        annotation_events.sort(key=lambda x: x.get("ts",0))
-        filtered_events=[]
+
+    def apply_annotation(self, name_filters=[]) -> None:
+        events = self.events
+        annotation_events = [e for e in events if "user_annotation" in e.get("cat", "")]
+        annotation_events.sort(key=lambda x: x.get("ts", 0))
+        filtered_events = []
         for i in name_filters:
-            filtered_events+=[e for e in events if e.get("name","").startswith(i)]
+            filtered_events += [e for e in events if e.get("name", "").startswith(i)]
         for e in filtered_events:
-            annotation="NA"
+            annotation = "NA"
             for ann in annotation_events:
-                if ann["ts"]<=e["ts"] and (e["ts"]+e["dur"])<ann["ts"]+ann["dur"]:
-                    annotation=ann.get("name")
+                if (
+                    ann["ts"] <= e["ts"]
+                    and (e["ts"] + e["dur"]) < ann["ts"] + ann["dur"]
+                ):
+                    annotation = ann.get("name")
                     break
-            self.events[e[TraceLens.util.TraceEventUtils.TraceKeys.UID]]["annotation"]=annotation
+            self.events[e[TraceLens.util.TraceEventUtils.TraceKeys.UID]][
+                "annotation"
+            ] = annotation
+
     def traverse_subtree_and_print(
         self,
         node: Dict[str, Any],
@@ -916,6 +956,28 @@ class TraceToTree:
                 _prefix=new_prefix,
                 is_last=(i == child_count - 1),
             )
+
+    def traverse_parents_and_get_callstack(
+        self, node: Dict[str, Any], filter: tuple[str, ...] = ()
+    ):
+        depth = 0
+        print_str = node["name"] + " => "
+        while True:
+            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
+            max_len = 256
+            if len(name) > max_len:
+                name = name[:max_len] + ".."
+            if filter is None:
+                print_str += f"{name} => "
+            else:
+                if any(filter_str in name for filter_str in filter):
+                    print_str += f"{name} => "
+            # Move to the parent node
+            parent_node = self.get_parent_event(node)
+            if parent_node is None:
+                return print_str.strip(" => ").strip(" ")
+            node = parent_node
+            depth += 1
 
     def traverse_parents_and_print(
         self, node: Dict[str, Any], cpu_op_fields: tuple[str, ...] = ()
