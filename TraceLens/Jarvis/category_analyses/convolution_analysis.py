@@ -1,11 +1,78 @@
 #!/usr/bin/env python3
-"""Convolution Operations Analysis"""
+"""Convolution Operations Analysis
 
-import pandas as pd
-import json
-import numpy as np
-import os
+Computes metrics for Convolution operations and outputs JSON for subagent processing.
+"""
+
 import argparse
+import sys
+import os
+import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from analysis_utils import (
+    load_category_data,
+    calculate_time_metrics,
+    build_operation_metrics,
+    calculate_average_efficiency,
+    write_metrics_json,
+    detect_transpose
+)
+
+
+def get_convolution_config():
+    """Return Convolution-specific configuration."""
+    return {
+        'efficiency_method': 'prefer_compute',  # Convolutions can be compute-bound
+        'extra_fields': [],
+        'operation_classifier': classify_convolution_operation
+    }
+
+
+def classify_convolution_operation(op_name: str, row) -> dict:
+    """Classify Convolution operation type."""
+    is_transpose = detect_transpose(op_name)
+    
+    op_lower = op_name.lower()
+    if is_transpose:
+        conv_type = 'transpose'
+    elif 'conv2d' in op_lower:
+        conv_type = 'conv2d'
+    elif 'conv1d' in op_lower:
+        conv_type = 'conv1d'
+    elif 'conv3d' in op_lower:
+        conv_type = 'conv3d'
+    elif 'depthwise' in op_lower:
+        conv_type = 'depthwise'
+    else:
+        conv_type = 'other'
+    
+    return {
+        'is_transpose': is_transpose,
+        'conv_type': conv_type
+    }
+
+
+def extract_category_specific(ops_df, metadata) -> dict:
+    """Extract Convolution-specific aggregate metrics."""
+    # Check for transpose operations (layout issue indicator)
+    transpose_ops = ops_df[ops_df['name'].str.contains('transpose', case=False, na=False)]
+    transpose_time_ms = transpose_ops['Kernel Time (µs)_sum'].sum() / 1000 if len(transpose_ops) > 0 else 0
+    
+    total_time_ms = 0
+    if 'Kernel Time (µs)_sum' in ops_df.columns:
+        total_time_ms = ops_df['Kernel Time (µs)_sum'].sum() / 1000
+    
+    transpose_overhead_pct = (transpose_time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
+    
+    return {
+        'transpose_count': len(transpose_ops),
+        'transpose_time_ms': round(transpose_time_ms, 3),
+        'transpose_overhead_percent': round(transpose_overhead_pct, 2),
+        'peak_maf_tflops': metadata.get('peak_bf16_maf_tflops'),
+        'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
+    }
 
 
 def main():
@@ -13,159 +80,38 @@ def main():
     parser.add_argument('--output-dir', required=True, help='Output directory')
     args = parser.parse_args()
     
-    output_dir = args.output_dir
+    try:
+        ops_df, metadata = load_category_data(args.output_dir, 'convolution')
+    except FileNotFoundError as e:
+        error_metrics = {
+            'category': 'convolution',
+            'status': 'ERROR',
+            'error': str(e)
+        }
+        write_metrics_json(error_metrics, args.output_dir, 'convolution')
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     
-    # Load data
-    ops_df = pd.read_csv(f'{output_dir}/category_data/convolution_ops.csv')
-    with open(f'{output_dir}/metadata/convolution_metadata.json', 'r') as f:
-        metadata = json.load(f)
+    config = get_convolution_config()
+    peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
+    peak_maf = metadata.get('peak_bf16_maf_tflops', 1)
     
-    peak_hbm_bw = metadata['peak_hbm_bw_tbs']
-    peak_maf = metadata['peak_bf16_maf_tflops']
+    time_metrics = calculate_time_metrics(ops_df, metadata)
+    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, peak_maf, 'prefer_compute')
+    operations = build_operation_metrics(ops_df, metadata, config)
+    category_specific = extract_category_specific(ops_df, metadata)
     
-    # Calculate total time
-    if 'Kernel Time (µs)_sum' in ops_df.columns:
-        total_time_us = ops_df['Kernel Time (µs)_sum'].sum()
-        total_time_ms = total_time_us / 1000
-        percent_of_compute = (total_time_ms / metadata['gpu_utilization']['total_time_ms']) * 100
-    else:
-        total_time_ms = 0
-        percent_of_compute = 0
+    metrics = {
+        'category': 'convolution',
+        'status': 'OK',
+        **time_metrics,
+        'average_efficiency_percent': avg_efficiency,
+        'operations': operations,
+        'category_specific': category_specific
+    }
     
-    # Calculate average efficiency
-    avg_efficiency = 0
-    eff_count = 0
-    for _, row in ops_df.iterrows():
-        if not pd.isna(row.get('TFLOPS/s_mean')):
-            eff = (row.get('TFLOPS/s_mean', 0) / peak_maf) * 100
-            avg_efficiency += eff
-            eff_count += 1
-        elif not pd.isna(row.get('TB/s_mean')):
-            eff = (row.get('TB/s_mean', 0) / peak_hbm_bw) * 100
-            avg_efficiency += eff
-            eff_count += 1
-    avg_efficiency = avg_efficiency / eff_count if eff_count > 0 else 0
-    
-    # Check for transpose operations (layout issue indicator)
-    transpose_ops = ops_df[ops_df['name'].str.contains('transpose', case=False, na=False)]
-    transpose_time_ms = transpose_ops['Kernel Time (µs)_sum'].sum() / 1000 if len(transpose_ops) > 0 else 0
-    transpose_overhead_pct = (transpose_time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
-    
-    # Identify potential bottlenecks
-    bottlenecks = []
-    
-    for idx, row in ops_df.iterrows():
-        op_name = row.get('name', 'Unknown')
-        time_ms = row.get('Kernel Time (µs)_sum', 0) / 1000
-        count = row.get('count', 1)
-        
-        # Calculate efficiency
-        efficiency = None
-        if not pd.isna(row.get('TFLOPS/s_mean')):
-            efficiency = (row.get('TFLOPS/s_mean', 0) / peak_maf) * 100
-        elif not pd.isna(row.get('TB/s_mean')):
-            efficiency = (row.get('TB/s_mean', 0) / peak_hbm_bw) * 100
-        
-        # Apply bottleneck criteria
-        reasons = []
-        if time_ms > 50 or (time_ms / total_time_ms * 100) > 5:
-            reasons.append("High time")
-        if efficiency and efficiency < 40:
-            reasons.append("Low efficiency")
-        if count > 1000:
-            reasons.append("High count")
-        if efficiency is None:
-            reasons.append("Missing perf model")
-        if 'transpose' in op_name.lower():
-            reasons.append("Transpose overhead - layout issue")
-        
-        if reasons:
-            is_transpose = 'transpose' in op_name.lower()
-            bottlenecks.append({
-                'op_name': op_name,
-                'time_ms': time_ms,
-                'percent_of_category': (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0,
-                'count': count,
-                'efficiency': efficiency,
-                'is_transpose': is_transpose,
-                'reasons': reasons
-            })
-    
-    bottlenecks.sort(key=lambda x: x['time_ms'], reverse=True)
-    
-    # Generate markdown output
-    markdown = f"""# Convolution Analysis Results
-
-## Summary
-- **Total operations:** {len(ops_df)}
-- **Total time:** {total_time_ms:.2f} ms ({percent_of_compute:.1f}% of compute)
-- **Average efficiency:** {avg_efficiency:.1f}% of peak
-- **Transpose operations:** {len(transpose_ops)} ({transpose_overhead_pct:.1f}% overhead)
-- **Peak MAF:** {peak_maf} TFLOPS
-- **Peak HBM BW:** {peak_hbm_bw} TB/s
-
-## Operations Breakdown
-
-| Operation | Count | Time (ms) | % of Category | Efficiency | Type |
-|-----------|-------|-----------|---------------|------------|------|
-"""
-    
-    top_ops = ops_df.nlargest(10, 'Kernel Time (µs)_sum') if 'Kernel Time (µs)_sum' in ops_df.columns else ops_df.head(10)
-    for _, row in top_ops.iterrows():
-        op_name = row.get('name', 'Unknown')
-        count = row.get('count', 1)
-        time_ms = row.get('Kernel Time (µs)_sum', 0) / 1000
-        pct = (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
-        
-        efficiency = "N/A"
-        if not pd.isna(row.get('TFLOPS/s_mean')):
-            eff = (row.get('TFLOPS/s_mean', 0) / peak_maf) * 100
-            efficiency = f"{eff:.1f}%"
-        elif not pd.isna(row.get('TB/s_mean')):
-            eff = (row.get('TB/s_mean', 0) / peak_hbm_bw) * 100
-            efficiency = f"{eff:.1f}%"
-        
-        op_type = "Transpose" if 'transpose' in op_name.lower() else "Convolution"
-        markdown += f"| {op_name[:40]} | {count} | {time_ms:.2f} | {pct:.1f}% | {efficiency} | {op_type} |\n"
-    
-    markdown += f"""
-## Potential Bottlenecks
-
-**{len(bottlenecks)} operations flagged** based on criteria
-
-"""
-    
-    if bottlenecks:
-        for i, b in enumerate(bottlenecks[:10], 1):
-            markdown += f"""### {i}. {b['op_name']}
-- **Time:** {b['time_ms']:.2f} ms ({b['percent_of_category']:.1f}% of category)
-- **Count:** {b['count']}
-- **Efficiency:** {f"{b['efficiency']:.1f}%" if b['efficiency'] else "N/A"}
-- **Type:** {"Transpose (Layout Issue)" if b['is_transpose'] else "Convolution"}
-- **Flagged for:** {", ".join(b['reasons'])}
-
-"""
-    else:
-        markdown += "*No significant bottlenecks identified.*\n\n"
-    
-    markdown += f"""## Key Metrics
-- **MIOpen/cuDNN kernels prefer NHWC layout**
-- **PyTorch defaults to NCHW layout**
-- **Result:** batched_transpose kernels add 30-45% overhead
-- **Solution:** `model.to(memory_format=torch.channels_last)`
-- **Transpose overhead detected:** {transpose_overhead_pct:.1f}% of convolution time
-
-## Additional Notes
-"""
-    
-    if transpose_overhead_pct > 20:
-        markdown += f"- **⚠️ High transpose overhead detected ({transpose_overhead_pct:.1f}%):** Consider using channels_last memory format\n"
-    if len(transpose_ops) > 0:
-        markdown += f"- **Transpose operations found:** {len(transpose_ops)} operations taking {transpose_time_ms:.2f} ms\n"
-    if percent_of_compute > 30:
-        markdown += f"- **Convolutions dominate compute ({percent_of_compute:.1f}%):** CNN-heavy workload\n"
-    
-    print(markdown)
+    output_path = write_metrics_json(metrics, args.output_dir, 'convolution')
+    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":

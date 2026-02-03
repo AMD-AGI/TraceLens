@@ -1,6 +1,6 @@
 ---
 name: Standalone Analysis Orchestrator
-description: Orchestrate modular standalone performance analysis - queries user, generates reports, pre-computes tree data, invokes category skills
+description: Orchestrate modular standalone performance analysis - queries user, generates reports, pre-computes tree data, invokes category subagents in parallel
 triggers:
   - standalone analysis
   - analyze trace standalone
@@ -13,9 +13,17 @@ tools:
 
 # Standalone Analysis Orchestrator
 
-Orchestrate modular standalone PyTorch trace analysis. Coordinate workflow, pre-compute expensive operations, invoke category-specific skills.
+Orchestrate modular standalone PyTorch trace analysis. Coordinate workflow, pre-compute expensive operations, invoke category-specific subagents in parallel.
 
-**Role**: Load trace once, pre-compute tree data, filter by category, invoke skills, aggregate results, generate dual reports.
+**Role**: Load trace once, pre-compute tree data, filter by category, invoke subagents in parallel, aggregate results, generate final report.
+
+---
+
+## Language Guidelines
+
+Use vendor-agnostic terminology throughout such as GPU kernels, collective communication, vendor GEMM library, DNN primitives, GPU graph, etc. Focus on operation semantics, not vendor implementation details
+
+**Exception:** When quoting kernel names from traces, it's acceptable to include the actual name for identification.
 
 ---
 
@@ -25,10 +33,10 @@ Orchestrate modular standalone PyTorch trace analysis. Coordinate workflow, pre-
 0. Query User Inputs (Platform, Trace Path, Cluster, Container)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Category Filtering)
-6. Invoke Category-Specific Skills
-7. Determine Optimization Paths
-8. Generate Replay Artifacts (Optional - Path B)
-9. Generate Dual Reports
+6. Invoke Category-Specific Subagents (PARALLEL)
+7. Aggregate Results and Determine Optimization Recommendations
+8. Generate Replay Artifacts
+9. Generate Final Report (with Warnings section if errors)
 ```
 
 ---
@@ -44,7 +52,7 @@ Orchestrate modular standalone PyTorch trace analysis. Coordinate workflow, pre-
    - Example: `/home/user/traces/model_trace.json`
 
 2. **Platform**
-   - Ask: "Which AMD platform are you analyzing?"
+   - Ask: "Which platform are you analyzing?"
    - Options:
      1. **MI300X** - 5.3 TB/s HBM, 708 TFLOPS BF16, 192 GB
      2. **MI325X** - 6.0 TB/s HBM, 708 TFLOPS BF16, 256 GB
@@ -60,17 +68,6 @@ Orchestrate modular standalone PyTorch trace analysis. Coordinate workflow, pre-
 5. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
-
-**Example prompt format:**
-```
-To run standalone analysis, I need the following information:
-
-1. Trace file path: _____
-2. Platform (MI300X/MI325X/MI355X/MI400): _____
-3. Cluster name: _____
-4. Container name: _____
-5. Output directory (optional): _____
-```
 
 ---
 
@@ -88,7 +85,7 @@ ssh <cluster> "docker exec <container> \
 
 This generates:
 - `perf_report.xlsx` - Excel report with all sheets
-- `perf_report_csvs/` directory with CSV files including `gpu_timeline.csv`, `unified_perf_summary.csv`
+- `perf_report_csvs/` directory with CSV files
 
 **Duration:** ~60-120s depending on trace size
 
@@ -116,147 +113,127 @@ This script performs:
 - `category_data/<category>_ops.csv` - Filtered operations per category
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
 - `category_data/<category>_tree_data.json` - Pre-computed tree analysis
-- `category_manifest.json` - Workflow metadata
+- `category_manifest.json` - Workflow metadata with categories_with_data
 
 **Duration:** ~60-90s for tree data pre-computation
 
 ---
 
-## Step 6: Invoke Category-Specific Skills for operations
+## Step 6: Invoke Category-Specific Subagents (PARALLEL)
 
-For each category with data (from `category_manifest.json`), invoke the corresponding skill:
+### 6.1 Read Manifest and Identify Valid Categories
 
-- `gemm` → @gemm-analysis
-- `sdpa_fwd` → @sdpa-analysis
-- `elementwise` → @elementwise-analysis
-- `reduce` → @reduce-analysis
-- `triton` → @triton-analysis
-- `moe_fused` → @moe-analysis
-- `batchnorm` → @batchnorm-analysis
-- `convolution` → @convolution-analysis
-- `other` → @generic-op-analysis
+```python
+import json
+with open('<output_dir>/category_manifest.json') as f:
+    manifest = json.load(f)
+valid_categories = manifest.get('categories_with_data', [])
+```
 
-**How Skills Work:**
-1. Each skill runs its Python analysis script (outputs markdown to stdout)
-2. LLM interprets the markdown output
-3. LLM validates bottlenecks and determines optimization paths
-4. LLM writes findings to `category_findings/<category>_findings.md`
+### 6.2 Launch ALL Valid Subagents in PARALLEL
 
-**Duration:** ~5-10s per category (script execution + LLM interpretation)
+For each category in `valid_categories`, invoke the corresponding subagent **simultaneously**.
+Do NOT wait between invocations - launch all at once.
+
+**Category to Subagent Mapping:**
+
+- `gemm` → /gemm-analyzer
+- `sdpa_fwd` → /sdpa-analyzer
+- `elementwise` → /elementwise-analyzer
+- `reduce` → /reduce-analyzer
+- `triton` → /triton-analyzer
+- `moe_fused` → /moe-analyzer
+- `batchnorm` → /batchnorm-analyzer
+- `convolution` → /convolution-analyzer
+- `other` → /generic-op-analyzer
+
+**Subagent Invocation Format:**
+
+Pass only the execution context - let the subagent handle script execution:
+
+```
+/gemm-analyzer
+- Output directory: <output_dir>
+- Cluster: <cluster>
+- Container: <container>
+- Input files: category_data/gemm_ops.csv, metadata/gemm_metadata.json, category_data/gemm_tree_data.json
+- Output file: category_findings/gemm_findings.md
+```
+
+**CRITICAL:** The orchestrator does NOT run any analysis scripts. Each subagent is responsible for:
+1. Running its Python script inside the container on the cluster
+2. Reading the metrics JSON output
+3. Identifying bottlenecks and generating findings
+
+### 6.3 Wait for All Subagents to Complete
+
+All subagents must complete before proceeding to Step 7.
+Each subagent writes its findings to `category_findings/<category>_findings.md`.
+
+### 6.4 Verify Outputs and Collect Errors
+
+After all subagents complete:
+
+1. Check each `<category>_findings.md` for "Status: ERROR"
+2. Collect list of failed categories and their error summaries
+3. **CRITICAL: Exclude failed categories from aggregation and recommendations**
+4. **CRITICAL: Do NOT attempt to manually analyze failed categories**
 
 ---
 
-## Step 7: Aggregate and Determine Optimization Paths
+## Step 7: Aggregate and Determine Optimization Recommendations
 
-### Read All Category Findings and Top Operations
-
-Load all findings files and the category manifest (which includes top operations):
+### Read All Category Findings
 
 ```python
 import os
 import json
 
 # Load category findings
-findings_summaries = {}
+findings_summaries = {}git add 
+failed_categories = []
 findings_dir = '<output_dir>/category_findings/'
+
 for f in os.listdir(findings_dir):
     if f.endswith('_findings.md'):
         with open(os.path.join(findings_dir, f)) as file:
-            findings_summaries[f] = file.read()
+            content = file.read()
+            if 'Status: ERROR' in content:
+                # Extract error and add to failed list
+                failed_categories.append({
+                    'category': f.replace('_findings.md', ''),
+                    'content': content
+                })
+            else:
+                findings_summaries[f] = content
 
-# Load category manifest (includes top operations from Step 3)
+# Load category manifest for top operations
 with open('<output_dir>/category_manifest.json', 'r') as f:
     manifest = json.load(f)
     top_ops = manifest.get('top_operations', [])
 ```
 
-**Use top operations data for prioritization:**
-- The `top_operations` list from Step 3 shows the highest time operations across ALL categories
-- Cross-reference category findings with top_ops to identify high-impact bottlenecks
-- Prioritize recommendations that address operations in the top_ops list
+### Aggregate Recommendations
 
-### Provide Recommendations for BOTH Paths
-
-**CRITICAL**: Present recommendations for both optimization approaches:
-
-#### Path A: Fusion / Algorithmic Changes
-*For when user CAN modify model or use different PyTorch APIs*
-
-- Flash Attention for unfused attention patterns (3-10x speedup)
-- torch.compile for kernel fusion opportunities
-- Custom fused kernels (e.g., fused layer norm, fused MLP)
-- Algorithmic changes (e.g., RMSNorm instead of LayerNorm)
-- Batching small operations together (e.g., tiny batched GEMMs)
-- Memory layout changes (NCHW → NHWC for convolutions)
-
-#### Path B: Kernel Optimization Only
-*For when user MUST keep same torch code and can only improve kernels*
-
-- Generate replay artifacts for kernel team to investigate
-- Identify suboptimal kernel selections
-- Flag tile size issues or inefficient kernel launches
-- Recommend tuning specific kernel parameters
-- Note memory access pattern issues
-
-**Always present both paths** - let user decide which applies to their situation.
-
-### Prioritize Recommendations Using Top Operations
-
-**Critical: Cross-reference category bottlenecks with top_ops from Step 3**
-
-For each bottleneck identified in category findings:
-1. **Check if it appears in top_ops list** (from Step 3 / category_manifest.json)
-2. **If yes:** This is a high-priority bottleneck (affects overall compute time)
-3. **If no:** Still important within its category, but lower overall impact
+Each subagent has produced algorithmic and kernel optimization recommendations.
+Consolidate these, cross-reference with `top_ops`, and prioritize by impact.
 
 **Prioritization Framework:**
 
 | Priority | Criteria |
 |----------|----------|
-| 🔴 **Critical** | In top_ops + Low efficiency (<30%) + High category % (>15%) |
-| 🟡 **High** | In top_ops OR (Low efficiency <40% + >10% category time) |
-| 🟢 **Medium** | >5% category time OR notable optimization pattern |
-| ⚪ **Low** | Everything else |
-
-### Estimate Optimization Impact
-
-For each recommendation, provide impact ranges to help prioritize:
-
-**Impact Projection Framework:**
-
-```markdown
-**Impact Projection** (if op improves to X% of peak):
-
-| Target Efficiency | Time | E2E Improvement |
-|-------------------|------|-----------------|
-| 20% of peak | 9.5 ms | ~49% faster for this op |
-| 50% of peak | 3.8 ms | ~50% faster for this op |
-```
-
-**Calculate E2E Impact:**
-- Use operation's % of total compute time (from top_ops or category data)
-- Example: If op is 10% of compute and improves 50% → 5% E2E speedup
-
-This acknowledges uncertainty while still enabling prioritization.
-
-**For Path A (fusion):** Calculate expected benefit using TraceLens perf models where available.
-
-**For Path B (kernel optimization):** Estimate ceiling:
-- Memory-bound ops: What's the gap to peak HBM bandwidth?
-- Compute-bound ops: What's the gap to peak MAF?
+| 🔴 Priority 1 | In top_ops + Low efficiency (<30%) + High category % (>15%) |
+| 🟡 Priority 2 | In top_ops OR (Low efficiency <40% + >10% category time) |
+| 🟢 Priority 3 | >5% category time OR notable optimization pattern |
 
 ---
 
-## Step 8: Generate Replay Artifacts (Optional - Path B)
+## Step 8: Generate Replay Artifacts
 
-**When to Generate Replay Artifacts:**
+**When to Generate:**
 1. Op is a significant bottleneck (>10% of compute)
 2. Efficiency is notably low (<30% of peak)
 3. Kernel team needs a minimal reproducer
-
-**Frame it as**: "Replay artifact recommended for kernel team to investigate and optimize."
-
-For significant bottlenecks, generate replay artifacts:
 
 ```bash
 ssh <cluster> "docker exec <container> python3 \
@@ -266,65 +243,14 @@ ssh <cluster> "docker exec <container> python3 \
   --op-names <op1> <op2> <op3>"
 ```
 
-Replace `<op1>`, `<op2>`, etc. with the specific operation names to generate replay artifacts for.
-
-**Outputs:** Creates `<output_dir>/replay_packages/<op_name>_replay_package.zip` for each operation
-
 ---
 
-## Step 9: Generate Final Reports
+## Step 9: Generate Final Report
 
-Create two reports in `<output_dir>`:
-
-### 1. `standalone_analysis_rough.md`
-
-**Purpose:** Working notes, process documentation, raw data
-
-Document the analysis process:
-- Analysis steps taken
-- Raw data and calculations (tables from category findings)
-- Tree analysis performed (parent chains reviewed)
-- TraceLens gaps encountered
-- Questions for further investigation
-
-**Structure:**
-```markdown
-# <Model> - <Platform> Standalone Analysis (Rough)
-
-## Analysis Process Summary
-### Step 1: Identify Traces & Setup
-[Document user inputs, platform selection]
-
-### Step 2: Generate Reports
-[Document TraceLens report generation]
-
-### Step 3-5: Prepare Category Data
-[Document GPU utilization, top ops, tree data pre-computation]
-
-### Step 6: Category Analyses
-[Document each category analysis invocation and key observations]
-
-### Step 7: Optimization Paths Determination
-[Document how Path A and Path B recommendations were derived]
-
-## Raw Data Exploration
-[All the data tables from category findings]
-
-## Tree Analysis
-[Parent chains explored, subtrees reviewed]
-
-## TraceLens Gaps
-[Missing features that would have helped]
-
-## Questions for Further Investigation
-[Open questions, areas needing more data]
-```
-
-### 2. `standalone_analysis_fair.md`
+Create `standalone_analysis.md` in `<output_dir>`:
 
 **Purpose:** Clean stakeholder report with prioritized recommendations
 
-**Structure:**
 ```markdown
 # <Model> - <Platform> Standalone Analysis
 
@@ -337,54 +263,62 @@ Document the analysis process:
 | GPU Utilization | Y% |
 | Top Bottleneck Category | Category (Z%) |
 | Flash Attention Usage | Yes/No |
-| ...additional key metrics... |
 
-### Top Operations (from Step 3)
-**These operations consume the most GPU time - prioritize optimizations here**
+## Warnings
+
+**Include this section ONLY if any subagent failed:**
+
+The following categories could not be analyzed due to script failures:
+
+| Category | Error Summary |
+|----------|---------------|
+| <category> | <brief error description> |
+
+These categories are excluded from the recommendations below.
+
+---
+
+## Top Operations
 
 | Rank | Operation | Category | Time (ms) | % of Total Compute |
 |------|-----------|----------|-----------|-------------------|
 | 1 | ... | ... | ... | ... |
 | 2 | ... | ... | ... | ... |
-| 3 | ... | ... | ... | ... |
-| ... | ... | ... | ... | ... |
 
 ---
 
 ## Recommendations
 
-**Note:** Recommendations are prioritized based on:
-1. Presence in Top Operations list (highest impact)
-2. Efficiency gap (how much improvement is possible)
-3. Category compute percentage
-
-### 🔴 Critical Priority: <Brief Title>
-**Operation**: [Name - from top_ops if applicable]
+### 🔴 Priority 1: <Brief Title>
 **Issue**: [1 sentence - what's wrong]
 **Action**: [1-2 sentences - what to do]
-**Impact**: [Expected E2E improvement - calculated from % of compute]
+**Impact**: [Expected improvement]
 → *See [Detailed Analysis: Section](#section-link) for details*
 
 ---
 
-### 🟡 High Priority: <Brief Title>
-**Operation**: [Name - from top_ops if applicable]
-[Same brief format]
+### 🟡 Priority 2: <Brief Title>
+**Issue**: [1 sentence]
+**Action**: [1-2 sentences]
+**Impact**: [Expected improvement]
+→ *See [Detailed Analysis: Section](#section-link) for details*
 
 ---
 
-### 🟢 Medium Priority: <Brief Title>
-[Same brief format]
+### 🟢 Priority 3: <Brief Title>
+**Issue**: [1 sentence]
+**Action**: [1-2 sentences]
+**Impact**: [Expected improvement]
+→ *See [Detailed Analysis: Section](#section-link) for details*
 
 ---
 
 ## Detailed Analysis
 
-### 1. <Category Name> (X% of compute)
-[Paste relevant content from category findings]
-[All kernel breakdowns, calculations, tables, explanations]
+### 1. <Operation Category> (X% of compute)
+[All kernel breakdowns, calculations, tables, explanations from category findings]
 
-### 2. <Category Name> (Y% of compute)
+### 2. <Operation Category> (X% of compute)
 [...]
 
 ---
@@ -395,18 +329,17 @@ Document the analysis process:
 - **Platform**: <platform>
 - **Peak HBM BW**: X TB/s
 - **Peak MAF**: Y TFLOPS
-- **Memory**: Z GB
 
 ### Replay Artifacts
 [List of generated replay packages if any]
 ```
 
-**Key formatting rules for Fair reports:**
-1. **Executive Summary**: Max ~20 lines - metrics table + bottleneck ranking
-2. **Recommendations**: Max ~10 lines PER recommendation - Issue/Action/Impact only
-3. **Detailed Analysis**: All kernel breakdowns, math, explanations go HERE
-4. **No redundancy**: Information appears in ONE place only
-5. **Cross-references**: Recommendations link to detailed sections
+**Key formatting rules:**
+1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
+2. **Executive Summary**: Max ~20 lines
+3. **Recommendations**: Max ~10 lines PER recommendation
+4. **Detailed Analysis**: All tables, calculations, explanations go HERE
+5. **No redundancy**: Information appears in ONE place only
 
 ---
 
@@ -417,34 +350,29 @@ Document the analysis process:
 3. **Calculate efficiency** - Compare achieved vs peak performance
 4. **Be specific** - Include shapes, kernel names, tile sizes
 5. **Provide BOTH optimization paths** - User decides which applies
-6. **Neutral comparative framing** - Focus on improving target, not declaring winners
+6. **Vendor-agnostic language** - Use generic terms for all recommendations
 7. **Hardware-agnostic analysis** - Don't hardcode GPU specs, use provided values
-8. **Separate expected vs unexpected differences** - Hardware limits vs software issues
-9. **Focus on bottlenecks + reproducers** - JARVIS role is to identify performance bottlenecks and generate minimal reproducers for kernel teams, not to diagnose root causes
+8. **Focus on bottlenecks + reproducers** - Identify bottlenecks, generate reproducers for kernel teams
 
-### What You CAN Infer from Traces
+---
 
-| Observable | Source |
-|------------|--------|
-| Kernel names | `trunc_kernel_details` column |
-| Kernel durations | Trace events |
-| Input shapes | `Input Dims` column |
-| Achieved TB/s, TFLOPS/s | Calculated from duration + data moved |
-| Efficiency % | Achieved / Peak |
-| Call stack | TreePerfAnalyzer |
-| Kernel lowering differences | Compare kernel breakdown between shapes |
+## Error Handling
 
-### What You CANNOT Infer (Avoid Speculation)
+### Before Invoking Subagents
+- Read `category_manifest.json` to get valid categories
+- Only invoke subagents for categories that exist in manifest
+- Skip categories with no operations
 
-| NOT Observable | Why | Instead Say |
-|----------------|-----|-------------|
-| Bank conflicts | Requires hardware counters (rocprof/nsight) | "Low efficiency - profile with rocprof to diagnose" |
-| Memory coalescing | Requires hardware counters | "Replay artifact provided for kernel team investigation" |
-| Occupancy | Requires hardware counters | "Kernel running slower than expected" |
-| Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
-| Specific root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
+### After All Subagents Complete
+- Check each `<category>_findings.md` for "Status: ERROR"
+- Collect list of failed categories and their error summaries
+- **CRITICAL: Exclude failed categories from aggregation and recommendations**
+- **CRITICAL: Do NOT attempt to manually analyze failed categories**
 
-**Key principle**: JARVIS identifies bottlenecks and generates reproducers. Root cause diagnosis requires profiling tools (rocprof, nsight-compute) on the replay artifacts.
+### In Final Report
+- Include Warnings section listing failed categories (only if errors occurred)
+- Provide recommendations only for successfully analyzed categories
+- If no errors, omit the Warnings section entirely
 
 ---
 
@@ -461,15 +389,6 @@ tree.traverse_parents_and_print(event)
 
 # Traverse subtree  
 tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'))
-
-# Find events by name
-for evt in tree.events:
-    if 'softmax' in evt.get('name', ''):
-        # process event
-
-# SDPA FLOPS calculation
-from TraceLens.PerfModel.perf_model import SDPA
-flops = SDPA.flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal)
 ```
 
 ---
@@ -487,9 +406,9 @@ flops = SDPA.flops_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal)
 
 ## Workflow Tips
 
-1. **Load trace ONCE** (Step 4) - Tree data pre-computation is the expensive operation
-2. **Context isolation** - Each skill gets only its data, preventing context pollution
-3. **Dual reports** - Rough for process documentation, Fair for stakeholders
-4. **Priority sorting** - Aggregate recommendations by impact
-5. **Handle missing categories gracefully** - Not all traces have all operation types
-6. **Use relative paths** - Scripts use paths relative to TraceLens repo root
+1. **Parallel subagent invocation** - Launch all category subagents simultaneously
+2. **Wait for completion** - All subagents must finish before aggregation
+3. **Load trace ONCE** - Tree data pre-computation is the expensive operation
+4. **Context isolation** - Each subagent gets only its data
+5. **Single report** - Clean stakeholder report with prioritized recommendations
+6. **Handle errors gracefully** - Failed categories go to Warnings, not manual analysis

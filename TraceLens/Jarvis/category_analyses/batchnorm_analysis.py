@@ -1,11 +1,58 @@
 #!/usr/bin/env python3
-"""BatchNorm Operations Analysis"""
+"""BatchNorm Operations Analysis
 
-import pandas as pd
-import json
-import numpy as np
-import os
+Computes metrics for BatchNorm operations and outputs JSON for subagent processing.
+"""
+
 import argparse
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from analysis_utils import (
+    load_category_data,
+    calculate_time_metrics,
+    build_operation_metrics,
+    calculate_average_efficiency,
+    write_metrics_json
+)
+
+
+def get_batchnorm_config():
+    """Return BatchNorm-specific configuration."""
+    return {
+        'efficiency_method': 'memory_bound',  # BatchNorm is memory-bound
+        'extra_fields': [],
+        'operation_classifier': classify_batchnorm_operation
+    }
+
+
+def classify_batchnorm_operation(op_name: str, row) -> dict:
+    """Classify BatchNorm operation type."""
+    op_lower = op_name.lower()
+    
+    if 'batch_norm' in op_lower or 'batchnorm' in op_lower:
+        bn_type = 'batch_norm'
+    elif 'layer_norm' in op_lower or 'layernorm' in op_lower:
+        bn_type = 'layer_norm'
+    elif 'group_norm' in op_lower or 'groupnorm' in op_lower:
+        bn_type = 'group_norm'
+    elif 'instance_norm' in op_lower:
+        bn_type = 'instance_norm'
+    else:
+        bn_type = 'other_norm'
+    
+    return {
+        'norm_type': bn_type
+    }
+
+
+def extract_category_specific(ops_df, metadata) -> dict:
+    """Extract BatchNorm-specific aggregate metrics."""
+    return {
+        'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
+    }
 
 
 def main():
@@ -13,131 +60,38 @@ def main():
     parser.add_argument('--output-dir', required=True, help='Output directory')
     args = parser.parse_args()
     
-    output_dir = args.output_dir
+    try:
+        ops_df, metadata = load_category_data(args.output_dir, 'batchnorm')
+    except FileNotFoundError as e:
+        error_metrics = {
+            'category': 'batchnorm',
+            'status': 'ERROR',
+            'error': str(e)
+        }
+        write_metrics_json(error_metrics, args.output_dir, 'batchnorm')
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     
-    # Load data
-    ops_df = pd.read_csv(f'{output_dir}/category_data/batchnorm_ops.csv')
-    with open(f'{output_dir}/metadata/batchnorm_metadata.json', 'r') as f:
-        metadata = json.load(f)
+    config = get_batchnorm_config()
+    peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
+    peak_maf = metadata.get('peak_bf16_maf_tflops', 1)
     
-    peak_hbm_bw = metadata['peak_hbm_bw_tbs']
+    time_metrics = calculate_time_metrics(ops_df, metadata)
+    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, peak_maf, 'memory_bound')
+    operations = build_operation_metrics(ops_df, metadata, config)
+    category_specific = extract_category_specific(ops_df, metadata)
     
-    # Calculate total time
-    if 'Kernel Time (µs)_sum' in ops_df.columns:
-        total_time_us = ops_df['Kernel Time (µs)_sum'].sum()
-        total_time_ms = total_time_us / 1000
-        percent_of_compute = (total_time_ms / metadata['gpu_utilization']['total_time_ms']) * 100
-    else:
-        total_time_ms = 0
-        percent_of_compute = 0
+    metrics = {
+        'category': 'batchnorm',
+        'status': 'OK',
+        **time_metrics,
+        'average_efficiency_percent': avg_efficiency,
+        'operations': operations,
+        'category_specific': category_specific
+    }
     
-    # Calculate average efficiency
-    avg_efficiency = 0
-    eff_count = 0
-    for _, row in ops_df.iterrows():
-        if not pd.isna(row.get('TB/s_mean')):
-            eff = (row.get('TB/s_mean', 0) / peak_hbm_bw) * 100
-            avg_efficiency += eff
-            eff_count += 1
-    avg_efficiency = avg_efficiency / eff_count if eff_count > 0 else 0
-    
-    # Identify potential bottlenecks
-    bottlenecks = []
-    
-    for idx, row in ops_df.iterrows():
-        op_name = row.get('name', 'Unknown')
-        time_ms = row.get('Kernel Time (µs)_sum', 0) / 1000
-        count = row.get('count', 1)
-        
-        # Calculate efficiency
-        efficiency = None
-        if not pd.isna(row.get('TB/s_mean')):
-            efficiency = (row.get('TB/s_mean', 0) / peak_hbm_bw) * 100
-        
-        # Apply bottleneck criteria
-        reasons = []
-        if time_ms > 10 or (time_ms / total_time_ms * 100) > 5:
-            reasons.append("High time")
-        if efficiency and efficiency < 40:
-            reasons.append("Low efficiency")
-        if count > 1000:
-            reasons.append("High count")
-        if pd.isna(row.get('TB/s_mean')):
-            reasons.append("Missing perf model")
-        
-        if reasons:
-            bottlenecks.append({
-                'op_name': op_name,
-                'time_ms': time_ms,
-                'percent_of_category': (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0,
-                'count': count,
-                'efficiency': efficiency,
-                'reasons': reasons
-            })
-    
-    bottlenecks.sort(key=lambda x: x['time_ms'], reverse=True)
-    
-    # Generate markdown output
-    markdown = f"""# BatchNorm Analysis Results
-
-## Summary
-- **Total operations:** {len(ops_df)}
-- **Total time:** {total_time_ms:.2f} ms ({percent_of_compute:.1f}% of compute)
-- **Average efficiency:** {avg_efficiency:.1f}% of peak HBM BW
-- **Peak HBM BW:** {peak_hbm_bw} TB/s
-
-## Operations Breakdown
-
-| Operation | Count | Time (ms) | % of Category | Efficiency |
-|-----------|-------|-----------|---------------|------------|
-"""
-    
-    top_ops = ops_df.nlargest(10, 'Kernel Time (µs)_sum') if 'Kernel Time (µs)_sum' in ops_df.columns else ops_df.head(10)
-    for _, row in top_ops.iterrows():
-        op_name = row.get('name', 'Unknown')
-        count = row.get('count', 1)
-        time_ms = row.get('Kernel Time (µs)_sum', 0) / 1000
-        pct = (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
-        
-        efficiency = "N/A"
-        if not pd.isna(row.get('TB/s_mean')):
-            eff = (row.get('TB/s_mean', 0) / peak_hbm_bw) * 100
-            efficiency = f"{eff:.1f}%"
-        
-        markdown += f"| {op_name[:50]} | {count} | {time_ms:.2f} | {pct:.1f}% | {efficiency} |\n"
-    
-    markdown += f"""
-## Potential Bottlenecks
-
-**{len(bottlenecks)} operations flagged** based on criteria
-
-"""
-    
-    if bottlenecks:
-        for i, b in enumerate(bottlenecks[:10], 1):
-            markdown += f"""### {i}. {b['op_name']}
-- **Time:** {b['time_ms']:.2f} ms ({b['percent_of_category']:.1f}% of category)
-- **Count:** {b['count']}
-- **Efficiency:** {f"{b['efficiency']:.1f}%" if b['efficiency'] else "N/A"}
-- **Flagged for:** {", ".join(b['reasons'])}
-
-"""
-    else:
-        markdown += "*No significant bottlenecks identified.*\n\n"
-    
-    markdown += f"""## Key Metrics
-- **No TraceLens perf model:** BatchNorm calculations must be done manually
-- **Often 10-50% of compute in CNNs:** ResNet, EfficientNet, etc.
-- **Uses PyTorch native kernels:** Not vendor-optimized BLAS
-- **Expected efficiency:** Should match simple elementwise ops (50-70% of peak BW)
-
-## Additional Notes
-- **Baseline comparison critical:** Compare BatchNorm efficiency to simple elementwise operations (add_, mul, copy_)
-- **If BatchNorm <20% of peak BW while elementwise >70%:** Indicates kernel issue
-- **Consider alternatives:** GroupNorm, LayerNorm may have better kernels
-"""
-    
-    print(markdown)
+    output_path = write_metrics_json(metrics, args.output_dir, 'batchnorm')
+    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":
