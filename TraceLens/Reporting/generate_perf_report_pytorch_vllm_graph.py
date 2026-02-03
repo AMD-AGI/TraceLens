@@ -56,7 +56,7 @@ def verify_subtree_events(capture_events,graph_events):
     print("Subtree events match successfully with {} events".format(len(capture_events)))
     return
 
-def update_subtree_uids_and_timestamps(subtree_events,subtree_filtered_events,start_uid,new_start_ts):
+def update_subtree_uids_and_timestamps(capture_tree,subtree_events,subtree_filtered_events,start_uid,new_start_ts):
     uid_mapping={}
     for idx,event in enumerate(subtree_events):
         old_uid=event[UID]
@@ -65,6 +65,8 @@ def update_subtree_uids_and_timestamps(subtree_events,subtree_filtered_events,st
         event[UID]=new_uid
     # Second pass to update parents and children
     for event in subtree_events:
+        
+        
         if "children" in event:
             new_children=[]
             for child_uid in event["children"]:
@@ -100,13 +102,23 @@ def append_subtree_to_event(tree,subtree_events,parent_event):
         tree.events_by_uid[event[UID]]=event
     print(type(tree.events_by_uid),len(tree.events_by_uid))
     return tree
+    
 
 def make_connections(graph_tree,graph_filtered_events,capture_filtered_events):
     for g_event,c_event in zip(graph_filtered_events,capture_filtered_events):
         graph_tree.events[c_event[UID]]["children"]=[g_event[UID]]
         graph_tree.events[g_event[UID]]["parent"]=c_event[UID]
         graph_tree.events[g_event[UID]]["args"]["correlation"]=c_event["args"].get("correlation",None)
-        ##print(f"Connected graph event {g_event['name'][0:30]} with capture event {c_event['name'][0:30]}")
+        c_event.setdefault("gpu_events", []).append(
+                    g_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+                )
+
+        parent = graph_tree.get_parent_event(c_event)
+        while parent:
+            parent.setdefault("gpu_events", []).append(
+                g_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+            )
+            parent = graph_tree.get_parent_event(parent)
     return graph_tree
 
 def get_dfs_short_kernels(
@@ -401,7 +413,7 @@ def generate_perf_report_pytorch(
             )
         )
         df_kernel_launchers_unique_args = (
-            perf_analyzer.get_df_kernel_launchers_unique_args_module(
+            perf_analyzer.get_df_kernel_launchers_unique_args(
                 df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True, 
             )
         )
@@ -508,6 +520,7 @@ def generate_perf_report_pytorch(
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
+        print(df_unified_perf)
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
                 df_unified_perf, agg_metrics=agg_metrics, include_pct=True
@@ -830,11 +843,12 @@ def main():
         verify_subtree_events(capture_filtered_events,graph_filtered_events)
 
         start_uid=graph_tree.events[-1][UID]+1
-        capture_events,_=update_subtree_uids_and_timestamps(capture_events,capture_filtered_events,start_uid,g_root["ts"])
+        capture_events,_=update_subtree_uids_and_timestamps(capture_tree,capture_events,capture_filtered_events,start_uid,g_root["ts"])
         capture_events[0]["parent"]=g_root[UID]
         g_root["children"].append(capture_events[0][UID])
         graph_tree=append_subtree_to_event(graph_tree,capture_events,g_root)
         graph_tree=make_connections(graph_tree,graph_filtered_events,capture_filtered_events)
+    
     generate_perf_report_pytorch(
         augmented_tree=graph_tree,
         output_xlsx_path=args.output_xlsx_path,
