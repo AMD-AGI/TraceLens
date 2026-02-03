@@ -167,8 +167,8 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
 def get_iter_details_from_name(name: str)-> dict:
     name=name.replace("(","_").replace(")","_")
     iter_details=re.sub(r"[sqk]+","_",name).split("_")
-    ctx_req,ctx_sum,gen_req,gen_sum=iter_details[3],iter_details[5],iter_details[10],iter_details[12]
-    print(name,ctx_req,ctx_sum,gen_req,gen_sum)
+    ctx_req,ctx_sum,gen_req,gen_sum=iter_details[3],iter_details[5],iter_details[11],iter_details[13]
+    print(name,iter_details,ctx_req,ctx_sum,gen_req,gen_sum)
     #iter_details=name.replace("(","_").replace(")","_").split("_")
     #ctx_req,ctx_sum,gen_req,gen_sum=iter_details[2],iter_details[3],iter_details[7],iter_details[8]
     return {
@@ -398,7 +398,7 @@ def main():
     #)
     #execution_details.extend(temp_execution_details)
     ## Find chunks of interest
-    if False:
+    if True:
         windows=find_windows_with_high_batch(iteration_roots, window_size=5, tol=0.25, min_required=0, relative_to="global")
         print(f"Found {len(windows)} windows with high batch sizes")
         temp_execution_details = extract_and_save(
@@ -430,7 +430,7 @@ def main():
     #)
     #ref_execution_details.extend(temp_execution_details)
     ## Find chunks of interest
-    if False:
+    if True:
         windows=find_windows_with_high_batch(ref_iteration_roots, window_size=5, tol=0.25, min_required=0, relative_to="global")
         print(f"Found {len(windows)} windows with high batch sizes")
         temp_execution_details = extract_and_save(
@@ -444,7 +444,7 @@ def main():
             json.dump(ref_execution_details, f, indent=2)
         print(f"Wrote execution details JSON to {json_path}")
     
-    #sys.exit(0)
+    sys.exit(0)
     
     print("Done extracting")
     matches = find_similar_sequences(iteration_roots, ref_iteration_roots, similarity_threshold=0.75)
