@@ -190,7 +190,7 @@ import os
 import json
 
 # Load category findings
-findings_summaries = {}git add 
+findings_summaries = {}
 failed_categories = []
 findings_dir = '<output_dir>/category_findings/'
 
