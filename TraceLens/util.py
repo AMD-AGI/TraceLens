@@ -445,7 +445,7 @@ class TraceEventUtils:
             key = x[TraceEventUtils.TraceKeys.Name]
             return (key, x[TraceEventUtils.TraceKeys.Args][arg_labels[key]])
 
-        metadata_fields = itertools.takewhile(
+        metadata_fields = filter(
             lambda x: x[TraceEventUtils.TraceKeys.Phase]
             == TraceEventUtils.TracePhases.Metadata,
             events,
