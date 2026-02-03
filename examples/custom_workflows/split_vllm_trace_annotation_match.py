@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 import csv
 from TraceLens.util import DataLoader
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
-
+import orjson
 # Iteration marker patterns
 EXECUTE_MODEL_PATTERN = re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
 
@@ -55,6 +55,12 @@ def get_filename(filepath: str) -> dict:
             json_file = json_files[0]
             print(f"  Reading {json_file} from zip...")
             return json_file
+    #if filepath.endswith('.gz'):
+    #    with gzip.open(filepath,'rb') as f:
+    #        return orjson.loads(f.read())
+    #elif filepath.endswith('.json'):
+    #    with open(filepath,'r') as f:
+    #        return json.load(f)
     return filepath
 
 def find_events_by_pattern(events: List[dict], pattern: re.Pattern, name: str, cat: str = None) -> List[dict]:
@@ -168,6 +174,40 @@ def get_iter_details_from_name(name: str)-> dict:
         "generation_requests": int(gen_req),
         "generation_sum": int(gen_sum),  
     }
+
+def detect_phase_from_iter_details(iter_details: list) -> str:
+    """Determine phase from a list of iter detail dicts.
+
+    Rules per entry:
+      - 'decode' if context_requests == 0 and generation_requests > 0
+      - 'prefill' if generation_requests == 0 and context_requests > 0
+      - 'prefill-decode' if both context_requests and generation_requests > 0
+      - 'unknown' otherwise
+
+    For a list of entries, returns a single phase:
+      - If all entries map to the same phase, return it
+      - If any entry is 'prefill-decode', prefer and return 'prefill-decode'
+      - Otherwise return 'mixed' when multiple phases are present
+    """
+    phases = []
+    for d in iter_details:
+        ctx = int(d.get("context_requests", 0))
+        gen = int(d.get("generation_requests", 0))
+        if ctx == 0 and gen > 0:
+            phases.append("decode")
+        elif gen == 0 and ctx > 0:
+            phases.append("prefill")
+        elif ctx > 0 and gen > 0:
+            phases.append("prefill-decode")
+        else:
+            phases.append("unknown")
+
+    unique_phases = set(phases)
+    if len(unique_phases) == 1:
+        return unique_phases.pop()
+    if "prefill-decode" in unique_phases:
+        return "prefill-decode"
+    return "mixed"
 def extract_and_save(
     roots: List[List[dict]],
     events: List[dict],
@@ -180,27 +220,31 @@ def extract_and_save(
     extraction_summary= []
     
     for idx, root in enumerate(roots):
+        iter_details=[get_iter_details_from_name(r["name"]) for r in root]
+        phase_details= find_phase_from_window(iter_details)
         iter_trace,gpu_dur = extract_iteration(root, events, trace_json)
         if base_name is None:
             name_append=root[0]["name"].replace("(", "_").replace(")", "")
-        else:
-            name_append=f"{base_name}"
+        else:    
+            name_append=f"{phase_details['phase']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
         out_path = os.path.join(output_dir, f"{prefix}_{idx}_{name_append}.json.gz")
         # Use binary mode and optimized compression for faster writing
-        #with gzip.open(out_path, "wb") as f:
-        #    f.write(json.dumps(iter_trace).encode('utf-8'))
+        with gzip.open(out_path, "wb") as f:
+            f.write(json.dumps(iter_trace).encode('utf-8'))
         
         print(f"  {prefix} {idx}: {len(iter_trace['traceEvents'])} events -> {out_path}")
         extraction_summary.append({
-            "iteration": idx,
+            "idx": idx,
             "output_path": out_path,
             "event_count": len(iter_trace['traceEvents']),
             "gpu_duration": gpu_dur,
-            "steps": [get_iter_details_from_name(r["name"]) for r in root]
+            "steps": iter_details,
+            "phase": phase_details,
         })
     return extraction_summary
  
-def find_similar_sequences(list1, list2, similarity_threshold=0.95):
+
+def find_similar_sequences(iteration_roots, ref_iteration_roots, similarity_threshold=0.95):
     """
     Find contiguous sequences where:
     - First element is the same
@@ -213,33 +257,32 @@ def find_similar_sequences(list1, list2, similarity_threshold=0.95):
     Returns:
         List of (start_idx1, end_idx1, start_idx2, end_idx2) for matching sequences
     """
+    iter_details=[get_iter_details_from_name(r["name"]) for r in iteration_roots]
+    ref_iter_details=[get_iter_details_from_name(r["name"]) for r in ref_iteration_roots]
     matches = []
     i, j = 0, 0
     
-    while i < len(list1) and j < len(list2):
+    while i < len(iter_details) and j < len(ref_iter_details):
         print(i,j)
         # Check if first elements match
-        if list1[i][0] == list2[j][0]:
+        if iter_details[i]["batch_size"] == ref_iter_details[j]["batch_size"]:
             print("match found")
             seq_start_i, seq_start_j = i, j
             seq_len = 0
-            
-            # Extend while first elements match and rest are similar
-            #while (i < len(list1) and j < len(list2) and 
-            #       list1[i][0] == list2[j][0] and
-            #       _are_similar(list1[i][1:], list2[j][1:], similarity_threshold)):
-            while (i < len(list1) and j < len(list2) and 
-                   list1[i][0] == list2[j][0]):
+            # Extend while first elements match
+            while (i < len(iter_details) and j < len(ref_iter_details) and 
+                   iter_details[i]["batch_size"] == ref_iter_details[j]["batch_size"]):
+                    #_are_similar(list1[i][1:], list2[j][1:], similarity_threshold)):
                 seq_len += 1
                 i += 1
                 j += 1
             
             if seq_len > 0:
+                
                 matches.append({
-                    'list1_range': (seq_start_i, seq_start_i + seq_len),
-                    'list2_range': (seq_start_j, seq_start_j + seq_len),
+                    'iter_roots': iteration_roots[seq_start_i:seq_start_i+seq_len],
+                    'ref_iter_roots': ref_iteration_roots[seq_start_j:seq_start_j+seq_len],
                     'length': seq_len,
-                    'key': list1[seq_start_i][0]
                 })
         else:
             # Move pointer of smaller first element
@@ -274,20 +317,42 @@ def find_windows_with_high_batch(
     iter_details=[get_iter_details_from_name(r["name"]) for r in iteration_roots]
     global_max = max(t["num_requests"] for t in iter_details)
     matches = []
-    for i in range(n - window_size + 1):
+    i=0
+    while i <= n - window_size:
         window = iter_details[i : i + window_size]
         roots= iteration_roots[i : i + window_size]
         bs = [t["num_requests"] for t in window]
         ref = max(bs) if relative_to == "window" else global_max
         # all batch sizes must be within (1-tol)*ref
         if min(bs) < (1 - tol) * ref:
+            i=i+1
             continue
         # at least one entry meets the minimum requirement
         if not any(x >= min_required for x in bs):
+            i=i+1
             continue
         matches.append((i, roots))
+        i=i+window_size
         print(f"Window starting at iteration {i} matches: batch sizes = {window}")
     return matches
+
+def find_phase_from_window(iter_details: List[dict]) -> dict:
+    prefill_present = any(d["context_requests"] > 0 for d in iter_details)
+    decode_present = any(d["generation_requests"] > 0 for d in iter_details)
+    avg_batch_size = int(sum(d["batch_size"] for d in iter_details) / len(iter_details))
+    avg_concurrency = int(sum(d["num_requests"] for d in iter_details) / len(iter_details))
+    phase="unknown"
+    if prefill_present and decode_present:
+        phase="prefill-decode"
+    elif prefill_present:
+        phase="prefill"
+    elif decode_present:
+        phase="decode"
+    return {
+        "phase": phase,
+        "avg_bs": avg_batch_size,
+        "avg_conc": avg_concurrency
+    }
 def main():
     parser = argparse.ArgumentParser(
         description="Split vLLM trace into per-iteration or per-dummy-run traces"
@@ -306,6 +371,9 @@ def main():
     )
     args = parser.parse_args()
     
+    execution_details=[]
+    ref_execution_details=[]
+    match_execution_details=[]
     # Load trace
 
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
@@ -315,80 +383,85 @@ def main():
     # Find iterations and dummy runs
     iteration_roots = find_events_by_pattern(events, EXECUTE_MODEL_PATTERN, "execute_model (iteration)", cat="user_annotation")
     if not iteration_roots:
-            print("Error: No iterations or dummy runs found in trace")
-            sys.exit(1)
+        print("Error: No iterations or dummy runs found in trace")
+        sys.exit(1)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    execution_details = extract_and_save(
-        [[root] for root in iteration_roots], events, trace_json, args.output_dir, None, "single_iteration"
-    )
+    #temp_execution_details = extract_and_save(
+    #    [[root] for root in iteration_roots], events, trace_json, args.output_dir, None, "single_iteration"
+    #)
+    #execution_details.extend(temp_execution_details)
+    ## Find chunks of interest
+    #windows=find_windows_with_high_batch(iteration_roots, window_size=5, tol=0.25, min_required=1, relative_to="global")
+    #print(f"Found {len(windows)} windows with high batch sizes")
+    #temp_execution_details = extract_and_save(
+    #    [match[1] for match in windows], events, trace_json, args.output_dir, "mix", "high_batch_window"
+    #)
+    #execution_details.extend(temp_execution_details)
 
-    # Save execution details as JSON
-    if execution_details:
+    if len(execution_details)>0:
         json_path = os.path.join(args.output_dir, "execution_details.json")
         with open(json_path, "w") as f:
             json.dump(execution_details, f, indent=2)
         print(f"Wrote execution details JSON to {json_path}")
+    if args.ref_trace_path is None:
+        print("No reference trace provided, exiting.")
+        sys.exit(0)
+
+    ref_trace_json = DataLoader.load_data(get_filename(args.ref_trace_path))
+    ref_events = ref_trace_json.get("traceEvents", [])
+    ref_iteration_roots = find_events_by_pattern(ref_events, EXECUTE_MODEL_PATTERN, "execute_model (iteration)", cat="user_annotation")
+
+    if not ref_iteration_roots:
+        print("Error: No iterations or dummy runs found in reference trace")
+        sys.exit(1)
     
-    
+    # Create output directory
+    os.makedirs(args.ref_output_dir, exist_ok=True)
+    #temp_execution_details = extract_and_save(
+    #    [[root] for root in ref_iteration_roots], ref_events, ref_trace_json, args.ref_output_dir, None, "single_iteration"
+    #)
+    #ref_execution_details.extend(temp_execution_details)
     ## Find chunks of interest
-    
-    windows=find_windows_with_high_batch(iteration_roots, window_size=3, tol=0.25, min_required=1, relative_to="global")
-    
-    print(f"Found {len(windows)} windows with high batch sizes")
-    execution_details = extract_and_save(
-        [match[1] for match in windows], events, trace_json, args.output_dir, "mix", "high_batch_window"
-    )
-    if execution_details:
-        json_path = os.path.join(args.output_dir, "high_match_execution_details.json")
+    #windows=find_windows_with_high_batch(ref_iteration_roots, window_size=5, tol=0.25, min_required=1, relative_to="global")
+    #print(f"Found {len(windows)} windows with high batch sizes")
+    #temp_execution_details = extract_and_save(
+    #    [match[1] for match in windows], ref_events, ref_trace_json, args.ref_output_dir, "mix", "high_batch_window"
+    #)
+    #ref_execution_details.extend(temp_execution_details)
+
+    if len(ref_execution_details)>0:
+        json_path = os.path.join(args.ref_output_dir, "execution_details.json")
         with open(json_path, "w") as f:
-            json.dump(execution_details, f, indent=2)
+            json.dump(ref_execution_details, f, indent=2)
         print(f"Wrote execution details JSON to {json_path}")
-
-
-    if args.ref_trace_path is not None:
-        trace_json = DataLoader.load_data(get_filename(args.ref_trace))
-        ref_events = trace_json.get("traceEvents", [])
-        ref_iteration_roots = find_events_by_pattern(ref_events, EXECUTE_MODEL_PATTERN, "execute_model (iteration)", cat="user_annotation")
-
-
     
-    total_extracted = 0
-    if args.ref_trace_path is not None:
-        base_iters=get_iter_details(iteration_roots)
-        ref_iters=get_iter_details(ref_iteration_roots)
-        for i,j in zip(base_iters,ref_iters):
-            print(i,j)
-        print("Done extracting")
-        matches = find_similar_sequences(base_iters, ref_iters, similarity_threshold=0.75)
-        match_id=1
-        for match_id,match in enumerate(matches):
-            b_start=match["list1_range"][0]
-            r_start=match["list2_range"][0]
-            print(f"==== Match {match_id+1} ====\n")
-            print("Main (batch_size, ctx_requests, ctx_sum, gen_requests, gen_sum) -> Reference (batch_size, ctx_requests, ctx_sum, gen_requests, gen_sum)")
-            for i in range(match["length"]):
-                print(f"{base_iters[b_start]} -> {ref_iters[r_start]}" )
-                b_start+=1
-                r_start+=1
-            print("\n\n")
-
-    #sys.exit()
-    # Extract iterations
-    if args.iterations:
-        start, end = parse_range(args.iterations, len(iteration_roots))
-        print(f"\nExtracting iterations {start} to {end-1}...")
-        count = extract_and_save(
-            iteration_roots, events, trace_json, args.output_dir,
-            base_name, "iteration", start, end
+    
+    print("Done extracting")
+    matches = find_similar_sequences(iteration_roots, ref_iteration_roots, similarity_threshold=0.75)
+    match_id=1
+    for match_id,match in enumerate(matches):
+        iter_phase= find_phase_from_window([get_iter_details_from_name(r["name"]) for r in match["iter_roots"]])
+        ref_iter_phase = find_phase_from_window([get_iter_details_from_name(r["name"]) for r in match["ref_iter_roots"]])
+        if iter_phase["phase"] != ref_iter_phase["phase"]:
+            print(f"Skipping match {match_id+1} due to phase mismatch: {iter_phase['phase']} vs {ref_iter_phase['phase']}")
+            continue
+        temp_execution_details = extract_and_save(
+            [match["iter_roots"]], events, trace_json, args.output_dir, "aligned",f"matched_sequence_{match_id}_{len(match['iter_roots'])}"
         )
-        total_extracted += count
-    
-    # Extract dummy runs
-    
-    
-    print(f"\nDone! Extracted {total_extracted} traces to {args.output_dir}")
+        ref_temp_execution_details = extract_and_save(
+            [match["ref_iter_roots"]], ref_events, ref_trace_json, args.ref_output_dir, "aligned", f"matched_sequence_{match_id}_{len(match['ref_iter_roots'])}"
+        )
+        match_execution_details.extend(temp_execution_details)
+        match_execution_details[-1].update({f"ref_{k}": v for k, v in ref_temp_execution_details[0].items()})
+        print([r["name"] for r in match["iter_roots"]])
+        print([r["name"] for r in match["ref_iter_roots"]])
+    if len(match_execution_details)>0:
+        json_path = os.path.join(args.ref_output_dir, "aligned_execution_details.json")
+        with open(json_path, "w") as f:
+            json.dump(match_execution_details, f, indent=2)
+        print(f"Wrote execution details JSON to {json_path}")
 
 
 if __name__ == "__main__":
