@@ -60,10 +60,10 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      4. **MI400** - 7.0 TB/s HBM, 1000 TFLOPS BF16, 320 GB
 
 3. **Cluster Name**
-   - Ask: "Which cluster should we use for analysis? (e.g., tw008)"
+   - Ask: "Which cluster should we use for analysis?"
 
 4. **Container Name**
-   - Ask: "Which Docker container has TraceLens installed? (e.g., multimodal_qwen_3)"
+   - Ask: "Which Docker container has TraceLens installed?"
 
 5. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
