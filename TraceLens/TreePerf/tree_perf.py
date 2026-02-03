@@ -139,9 +139,9 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-
         data = DataLoader.load_data(profile_filepath)
         data = data["traceEvents"]
+        metadata = TraceEventUtils.get_metadata(data)
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -153,6 +153,7 @@ class TreePerfAnalyzer:
         
         return TreePerfAnalyzer(
             tree, 
+            metadata=metadata,
             jax=jax, 
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
@@ -164,6 +165,7 @@ class TreePerfAnalyzer:
     def __init__(
         self,
         tree: TraceToTree,
+        metadata: dict,
         add_python_func=False,
         arch=None,
         jax=False,
@@ -176,6 +178,7 @@ class TreePerfAnalyzer:
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
+        self.metadata = metadata
         self.add_python_func = add_python_func
         self.arch = arch
         self.python_path = python_path
@@ -729,6 +732,10 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+            metadata = self.metadata[event["pid"]][event["tid"]]
+            metrics_event["process_name"] = metadata.get("process_name", None)
+            metrics_event["process_label"] = metadata.get("process_labels", None)
+            metrics_event["thread_name"] = metadata.get("thread_name", None)
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -900,6 +907,9 @@ class TreePerfAnalyzer:
         """
         grouping_cols_original = [
             "name",
+            "process_name",
+            "process_label",
+            "thread_name",
             "op category",
             "Input Dims",
             "Input type",
