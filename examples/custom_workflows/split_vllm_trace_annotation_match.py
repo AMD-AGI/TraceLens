@@ -36,7 +36,8 @@ from TraceLens.util import DataLoader
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
 import orjson
 # Iteration marker patterns
-EXECUTE_MODEL_PATTERN = re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
+#EXECUTE_MODEL_PATTERN = re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
+EXECUTE_MODEL_PATTERN = re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)")
 
 DUMMY_RUN_PATTERN = re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run")
 GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
@@ -164,8 +165,12 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
     return start, min(end, max_len)
 
 def get_iter_details_from_name(name: str)-> dict:
-    iter_details=name.replace("(","_").replace(")","_").split("_")
-    ctx_req,ctx_sum,gen_req,gen_sum=iter_details[2],iter_details[3],iter_details[7],iter_details[8]
+    name=name.replace("(","_").replace(")","_")
+    iter_details=re.sub(r"[sqk]+","_",name).split("_")
+    ctx_req,ctx_sum,gen_req,gen_sum=iter_details[3],iter_details[5],iter_details[10],iter_details[12]
+    print(name,ctx_req,ctx_sum,gen_req,gen_sum)
+    #iter_details=name.replace("(","_").replace(")","_").split("_")
+    #ctx_req,ctx_sum,gen_req,gen_sum=iter_details[2],iter_details[3],iter_details[7],iter_details[8]
     return {
         "batch_size": int(ctx_sum)+int(gen_sum),
         "num_requests": int(ctx_req)+int(gen_req),
@@ -393,12 +398,13 @@ def main():
     #)
     #execution_details.extend(temp_execution_details)
     ## Find chunks of interest
-    #windows=find_windows_with_high_batch(iteration_roots, window_size=5, tol=0.25, min_required=1, relative_to="global")
-    #print(f"Found {len(windows)} windows with high batch sizes")
-    #temp_execution_details = extract_and_save(
-    #    [match[1] for match in windows], events, trace_json, args.output_dir, "mix", "high_batch_window"
-    #)
-    #execution_details.extend(temp_execution_details)
+    if False:
+        windows=find_windows_with_high_batch(iteration_roots, window_size=5, tol=0.25, min_required=0, relative_to="global")
+        print(f"Found {len(windows)} windows with high batch sizes")
+        temp_execution_details = extract_and_save(
+            [match[1] for match in windows], events, trace_json, args.output_dir, "mix", "high_batch_window"
+        )
+        execution_details.extend(temp_execution_details)
 
     if len(execution_details)>0:
         json_path = os.path.join(args.output_dir, "execution_details.json")
@@ -424,12 +430,13 @@ def main():
     #)
     #ref_execution_details.extend(temp_execution_details)
     ## Find chunks of interest
-    #windows=find_windows_with_high_batch(ref_iteration_roots, window_size=5, tol=0.25, min_required=1, relative_to="global")
-    #print(f"Found {len(windows)} windows with high batch sizes")
-    #temp_execution_details = extract_and_save(
-    #    [match[1] for match in windows], ref_events, ref_trace_json, args.ref_output_dir, "mix", "high_batch_window"
-    #)
-    #ref_execution_details.extend(temp_execution_details)
+    if False:
+        windows=find_windows_with_high_batch(ref_iteration_roots, window_size=5, tol=0.25, min_required=0, relative_to="global")
+        print(f"Found {len(windows)} windows with high batch sizes")
+        temp_execution_details = extract_and_save(
+            [match[1] for match in windows], ref_events, ref_trace_json, args.ref_output_dir, "mix", "high_batch_window"
+        )
+        ref_execution_details.extend(temp_execution_details)
 
     if len(ref_execution_details)>0:
         json_path = os.path.join(args.ref_output_dir, "execution_details.json")
@@ -437,6 +444,7 @@ def main():
             json.dump(ref_execution_details, f, indent=2)
         print(f"Wrote execution details JSON to {json_path}")
     
+    #sys.exit(0)
     
     print("Done extracting")
     matches = find_similar_sequences(iteration_roots, ref_iteration_roots, similarity_threshold=0.75)
