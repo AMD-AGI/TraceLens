@@ -38,6 +38,7 @@ Thanks for your interest in improving **TraceLens** — a toolkit that parses Py
   - [Scope (optional)](#scope-optional)
   - [Examples](#examples)
 - [Commit Message Convention](#commit-message-convention)
+- [Running Tests Locally](#running-tests-locally)
 
 ---
 
@@ -149,3 +150,31 @@ docs(readme-tracediff): add docs for jax tracediff
 ```
 
 This format helps us to automatically generate changelogs and provide more clarity in versioning.
+
+## Running Tests Locally
+
+Once you have made your changes and are ready to open a PR, it is good practice to first run some tests locally. This will expose any errors that require fixing and ensure the code is safe to push. Please check the /tests folder to run the tests. You will require pytest to run these tests.
+
+### Installing pytest
+
+If you don't have pytest installed, you can add it using pip:
+
+```sh
+pip install pytest
+```
+
+### Running Tests
+
+To run all tests in the `/tests` directory:
+
+```sh
+pytest tests/
+```
+
+To run a specific test file:
+
+```sh
+pytest tests/test_compare_perf_report.py
+```
+
+For more options and usage, see the [pytest documentation](https://docs.pytest.org/en/stable/).
