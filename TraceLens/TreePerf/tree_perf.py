@@ -592,6 +592,13 @@ class TreePerfAnalyzer:
         if rename_map:
             df_perf_metrics_summary.rename(columns=rename_map, inplace=True)
 
+        # Reorder columns: name, process_name, process_label, thread_name, param cols, everything else
+        priority_cols = ["name", "process_name", "process_label", "thread_name"]
+        other_cols = [col for col in df_perf_metrics_summary.columns 
+                      if col not in priority_cols and col not in param_cols]
+                      
+        df_perf_metrics_summary = df_perf_metrics_summary[priority_cols + param_cols + other_cols]
+
         df_perf_metrics_summary.sort_values(
             by=["Kernel Time (µs)_sum", "UID"],
             ascending=[False, True],
@@ -923,10 +930,10 @@ class TreePerfAnalyzer:
         """
         grouping_cols_original = [
             "name",
+            "op category",
             "process_name",
             "process_label",
             "thread_name",
-            "op category",
             "Input Dims",
             "Input type",
             "Input Strides",
@@ -1486,13 +1493,13 @@ class TreePerfAnalyzer:
         grouping_cols = [
             "name",
             "op category",
+            "process_name",
+            "process_label",
+            "thread_name",
             "Input Dims",
             "Input type",
             "Input Strides",
             "Concrete Inputs",
-            "process_name",
-            "process_label",
-            "thread_name",
         ]
 
         # Convert columns to string for grouping
