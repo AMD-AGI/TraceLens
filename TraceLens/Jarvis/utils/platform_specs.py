@@ -24,6 +24,7 @@ PLATFORM_SPECS = {
 }
 
 CATEGORY_SKILL_MAP = {
+    "cpu_idle": "cpu-idle-analysis",  # Priority 0 - invoke when idle > 50%
     "gemm": "gemm-analysis",
     "moe_fused": "moe-analysis",
     "sdpa_fwd": "sdpa-analysis",

@@ -87,8 +87,6 @@ This generates:
 - `perf_report.xlsx` - Excel report with all sheets
 - `perf_report_csvs/` directory with CSV files
 
-**Duration:** ~60-120s depending on trace size
-
 ---
 
 ## Steps 2-5: Prepare Category Data
@@ -137,6 +135,7 @@ Do NOT wait between invocations - launch all at once.
 
 **Category to Subagent Mapping:**
 
+- `cpu_idle` → /cpu-idle-analyzer (ALWAYS invoke if idle_time_percent > 50%)
 - `gemm` → /gemm-analyzer
 - `sdpa_fwd` → /sdpa-analyzer
 - `elementwise` → /elementwise-analyzer
@@ -146,6 +145,13 @@ Do NOT wait between invocations - launch all at once.
 - `batchnorm` → /batchnorm-analyzer
 - `convolution` → /convolution-analyzer
 - `other` → /generic-op-analyzer
+
+**CRITICAL: CPU/Idle Analysis Priority**
+
+Before launching category subagents, check `gpu_utilization.idle_time_percent` in the manifest:
+- If `idle_time_percent > 50%`: cpu_idle analyzer MUST be invoked
+- CPU/idle findings MUST appear as Priority 0 (before all other priorities)
+- This supersedes all category-level bottlenecks because fixing idle time affects ALL operations
 
 **Subagent Invocation Format:**
 
@@ -216,15 +222,25 @@ with open('<output_dir>/category_manifest.json', 'r') as f:
 ### Aggregate Recommendations
 
 Each subagent has produced algorithmic and kernel optimization recommendations.
-Consolidate these, cross-reference with `top_ops`, and prioritize by impact.
+Consolidate these, cross-reference with `top_ops`, and prioritize by impact. 
 
 **Prioritization Framework:**
 
+Select kernels in top_ops and order by highest impact on the end to end time. Focus on areas with low efficiency and high category time.
+
+**CRITICAL: Priority 0 - GPU Idle Time**
+
+If `idle_time_percent > 30%`, this is Priority 0 and MUST be the FIRST recommendation:
+- Idle time affects ALL operations and represents the largest optimization opportunity
+- CPU/idle recommendations MUST appear BEFORE any category recommendations
+
 | Priority | Criteria |
 |----------|----------|
-| 🔴 Priority 1 | In top_ops + Low efficiency (<30%) + High category % (>15%) |
-| 🟡 Priority 2 | In top_ops OR (Low efficiency <40% + >10% category time) |
-| 🟢 Priority 3 | >5% category time OR notable optimization pattern |
+| ⚫ Priority 0 | idle_time_percent > 30% - ALWAYS first, supersedes all others |
+| 🔴 Priority 1 | In top_ops + (Sorted by efficiency and high category %) |
+| 🟡 Priority 2 | In top_ops + (Sorted by efficiency and high category %) |
+| 🟢 Priority 3 | In top_ops + (Sorted by efficiency and high category %) |
+and so on ....
 
 ---
 
@@ -247,9 +263,9 @@ ssh <cluster> "docker exec <container> python3 \
 
 ## Step 9: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>`:
+Create `standalone_analysis.md` in `<output_dir>`. Use the format shown below for the file. Validate the report before just sharing the priority recommendations on the chat and prompt the user to review the report.
 
-**Purpose:** Clean stakeholder report with prioritized recommendations
+**Purpose:** Stakeholder report with prioritized recommendations
 
 ```markdown
 # <Model> - <Platform> Standalone Analysis
@@ -262,7 +278,6 @@ Create `standalone_analysis.md` in `<output_dir>`:
 | Total Compute Time | X ms |
 | GPU Utilization | Y% |
 | Top Bottleneck Category | Category (Z%) |
-| Flash Attention Usage | Yes/No |
 
 ## Warnings
 
@@ -288,6 +303,18 @@ These categories are excluded from the recommendations below.
 ---
 
 ## Recommendations
+
+**Priority 0 Report Format (Only When Valid):**
+
+When idle_time > 50%, the Recommendations section MUST lead with:
+
+### ⚫ Priority 0: CRITICAL - GPU Underutilization (X% Idle)
+**Issue**: [1-2 sentences - what's wrong]
+**Action**: [1-2 sentences - what to do].
+**Impact**: Immediate Speedup Achieved
+→ *See [Detailed Analysis: CPU/Idle Time](#cpu-idle-time-analysis) for details*
+
+---
 
 ### 🔴 Priority 1: <Brief Title>
 **Issue**: [1 sentence - what's wrong]
@@ -349,7 +376,7 @@ These categories are excluded from the recommendations below.
 2. **Include counts** - Operation counts help identify hotspots
 3. **Calculate efficiency** - Compare achieved vs peak performance
 4. **Be specific** - Include shapes, kernel names, tile sizes
-5. **Provide BOTH optimization paths** - User decides which applies
+5. **Provide multiple optimization paths** - User decides which applies
 6. **Vendor-agnostic language** - Use generic terms for all recommendations
 7. **Hardware-agnostic analysis** - Don't hardcode GPU specs, use provided values
 8. **Focus on bottlenecks + reproducers** - Identify bottlenecks, generate reproducers for kernel teams

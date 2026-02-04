@@ -24,12 +24,15 @@ def main():
     parser.add_argument('--platform', required=True, choices=list(PLATFORM_SPECS.keys()),
                         help='AMD platform (MI300X, MI325X, MI355X, MI400)')
     parser.add_argument('--output-dir', required=True, help='Output directory')
+    parser.add_argument('--enable_pseudo_ops', action='store_true', 
+                        help='Enable pseudo ops in TreePerfAnalyzer')
     
     args = parser.parse_args()
     
     trace_path = args.trace_path
     platform = args.platform
     output_dir = args.output_dir
+    enable_pseudo_ops = args.enable_pseudo_ops
     csv_dir = f"{output_dir}/perf_report_csvs"
     
     print("="*80)
@@ -38,6 +41,7 @@ def main():
     print(f"Platform: {platform}")
     print(f"Trace: {trace_path}")
     print(f"Output: {output_dir}")
+    print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("="*80)
     
     # Create directory structure
@@ -77,6 +81,11 @@ def main():
     if gpu_utilization_metrics['computation_time_percent'] < 95:
         print(f"  ⚠️  WARNING: Compute utilization < 95%")
     
+    # Check for critical idle time - flag for CPU/idle analysis
+    cpu_idle_critical = gpu_utilization_metrics['idle_time_percent'] > 50
+    if cpu_idle_critical:
+        print(f"  🔴 CRITICAL: Idle time > 50% - CPU/idle analysis required")
+    
     # ============================================================================
     # STEP 3: Identify Top Operations
     # ============================================================================
@@ -115,7 +124,8 @@ def main():
         from TraceLens.TreePerf import TreePerfAnalyzer
         
         print(f"  Loading trace: {trace_path}")
-        analyzer = TreePerfAnalyzer.from_file(trace_path, add_python_func=True)
+        print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
+        analyzer = TreePerfAnalyzer.from_file(trace_path, add_python_func=True, enable_pseudo_ops=enable_pseudo_ops)
         tree = analyzer.tree
         print(f"  ✓ Trace loaded successfully")
         print(f"  ✓ Tree has {len(tree.events)} events")
@@ -268,12 +278,58 @@ def main():
             "tree_data_file": f"{output_dir}/category_data/{category_name}_tree_data.json"
         })
     
+    # ============================================================================
+    # CPU/Idle Category Creation (when idle > 50%)
+    # ============================================================================
+    if cpu_idle_critical:
+        print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
+        print(f"    🔴 Creating CPU/idle category due to {gpu_utilization_metrics['idle_time_percent']:.1f}% idle time")
+        
+        # Create CPU idle metadata
+        cpu_idle_metadata = {
+            "platform": platform,
+            "peak_hbm_bw_tbs": platform_specs["peak_hbm_bw_tbs"],
+            "peak_bf16_maf_tflops": platform_specs["peak_bf16_maf_tflops"],
+            "memory_gb": platform_specs["memory_gb"],
+            "trace_path": trace_path,
+            "output_dir": output_dir,
+            "category": "CPU/Idle Analysis",
+            "category_name": "cpu_idle",
+            "gpu_utilization": gpu_utilization_metrics,
+            "idle_critical": True,
+            "severity": "CRITICAL" if gpu_utilization_metrics['idle_time_percent'] > 70 else "HIGH"
+        }
+        
+        cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
+        with open(cpu_idle_metadata_file, 'w') as f:
+            json.dump(cpu_idle_metadata, f, indent=2)
+        
+        # Create empty ops CSV (cpu_idle doesn't use ops, it uses gpu_timeline)
+        cpu_idle_csv = f"{output_dir}/category_data/cpu_idle_ops.csv"
+        pd.DataFrame().to_csv(cpu_idle_csv, index=False)
+        
+        print(f"    ✓ Exported metadata")
+        
+        # Insert at beginning of categories (highest priority)
+        exported_categories.insert(0, {
+            "name": "cpu_idle",
+            "display_name": "CPU/Idle Analysis",
+            "skill": "cpu-idle-analysis",
+            "ops_count": 0,
+            "csv_file": cpu_idle_csv,
+            "metadata_file": cpu_idle_metadata_file,
+            "tree_data_file": None,
+            "priority": 0,
+            "critical": True
+        })
+    
     # Save category manifest
     manifest = {
         "platform": platform,
         "trace_path": trace_path,
         "output_dir": output_dir,
         "gpu_utilization": gpu_utilization_metrics,
+        "cpu_idle_critical": cpu_idle_critical,
         "categories": exported_categories
     }
     
