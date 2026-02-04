@@ -307,6 +307,7 @@ def inject_pseudo_op(
             "External id": kernel_evt["args"]["correlation"],
             "Pseudo op": True,
         },
+        "parent": orig_cpu_evt["UID"],  # Set pseudo op's parent to original CPU op
         "children": [launcher_evt["UID"]],  # we still nest the launcher
         "gpu_events": [kernel_evt["UID"]],
     }
@@ -315,6 +316,10 @@ def inject_pseudo_op(
     children = orig_cpu_evt["children"]
     children.remove(launcher_evt["UID"])
     children.append(pseudo_evt["UID"])
+    # ── re-wire the launcher's parent to point to pseudo op ────────────────
+    launcher_evt["parent"] = pseudo_evt[
+        "UID"
+    ]  # Change launcher's parent from orig_cpu_evt to pseudo_evt
 
 
 # we also need to
