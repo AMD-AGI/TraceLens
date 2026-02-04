@@ -8,21 +8,18 @@ JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyz
 
 ### To run performance analysis:
 
-1. Copy over the contents of the ./TraceLens/Jarvis/skills file to ./cursor/skills
-
-2. **In Cursor, invoke:**
+1. **In Cursor, invoke:**
    ```
    @standalone-analysis-orchestrator
    ```
 
-3. **Provide when prompted:**
+2. **Provide when prompted:**
    - Trace file path
    - Platform (MI300X/MI325X/MI355X/MI400)
    - Cluster name
    - Container name
    - Output directory (optional)
 
-4. **Get results:**
-   - `standalone_analysis_rough.md` - Working notes
-   - `standalone_analysis_fair.md` - Stakeholder report
+3. **Get results:**
+   - `standalone_analysis.md` - Stakeholder report
    - Category-specific findings in `category_findings/`
