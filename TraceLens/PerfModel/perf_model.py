@@ -3143,6 +3143,8 @@ class BatchNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = bool(event["args"]["Concrete Inputs"][5])
         if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event["args"]["Input type"][1]
             stride_output = tuple(event["args"]["Input Strides"][1])
