@@ -3027,6 +3027,8 @@ class Normalization:
         self.num_channels = self.param_details["num_channels"]
         # only layernorm can disable this but leaving it out totally breaks the NORM tab
         self.has_bias = self.param_details["has_bias"]
+        self.is_training = self.param_details["is_training"]
+        self.is_affine = self.param_details["is_affine"]
 
         self.bpe_in = name2bpe(self.dtype_in_out[0])
         if self.dtype_in_out[1] is not None:
@@ -3036,10 +3038,58 @@ class Normalization:
             self.bpe_out = self.bpe_in
 
     # Many of the norm implementations need the same flops and bytes calculations
-    # so we put them here in the base class
+    # and really only use different dimensions for channels
+    #            training=True                       training=False
+    #          (use batch stats)                  (use running stats)
+    #
+    #            affine=False                          affine=False            
+    #             (no γ, β)                             (no γ, β)               
+    # ────────────────────────────────────────────────────────────────────────────
+    #  FORWARD:                              FORWARD:                             
+    #  ✓ Compute mean/var                    ✗ No mean/var compute               
+    #  ✓ Update running stats                  (use frozen running)               
+    #  ✗ No γ/β transform                    ✗ No γ/β transform                  
+    #                                                                             
+    #  BACKWARD:                             BACKWARD:                            
+    #  ✓ grad_input                          N/A                                  
+    #  ✗ No grad_weight/grad_bias                                                 
+    # ────────────────────────────────────────────────────────────────────────────
+    #               affine=True                           affine=True             
+    #               (has γ, β)                            (has γ, β)              
+    #                                                                             
+    #  FORWARD:                              FORWARD:                             
+    #  ✓ Compute mean/var                    ✗ No mean/var compute                
+    #  ✓ Update running stats                  (use frozen running)               
+    #  ✓ Apply γ/β transform                 ✓ Apply γ/β transform                
+    #                                                                             
+    #  BACKWARD:                             BACKWARD:                            
+    #  ✓ grad_input                          N/A                                  
+    #  ✓ grad_weight (for γ)                                                      
+    #  ✓ grad_bias (for β)                                                        
+    # ────────────────────────────────────────────────────────────────────────────
+    # example implementations:
+    # FWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L75
+    # BWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L405
+    # STATS: https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L177
+    @staticmethod
+    def flops_func(has_bias: bool, is_affine: bool, is_training: bool, is_bwd: bool, num_elems: int, num_channels: int):
+        # at inference time we generate alpha and beta from the averages and gamma and bias if applicable
+        # then multiply alpha and add beta to each element. 
+        
+        # processing with bias/weight is done even if is_affine is false and has_bias is false using 0/1
+        # https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L32
+        param_compute = num_channels * 3 # (1/std * mean, multiply by alpha, subtract from bias)
+        if is_training:
+            # compute mean / std
+            # sum to get mean, subtract mean from each elem and add them,
+            # could potentially be log_n for sum-reduce but is not
+            param_compute += num_elems * 3
+                   
+        actual_compute = 2 * num_elems
+        return param_compute + actual_compute
+
     def flops(self):
-        # at inference time, batchnorm multiplies by gamma and adds beta
-        return (2 if self.has_bias else 1) * self.nelems
+        return self.calc_fwd_flops(self.nelems, self.has_bias)
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
@@ -3050,10 +3100,34 @@ class Normalization:
         """Return the MAF type for this operation (vector for elementwise)."""
         return "vector"
 
-    def bytes(self):
-        activation_bytes = self.nelems * self.bpe_in + self.nelems * self.bpe_out
-        weight_bytes = (2 if self.has_bias else 1) * self.num_channels * self.bpe_in
+    @staticmethod
+    def bytes_func(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int):
+        # assume that activations only read and written once for the forward pass and cached for stats
+        # assume weights, bias, mean, variance also only read once
+        num_weight_tensors = 2 # mean and variance are always needed
+        if is_affine:
+            num_weight_tensors += 1
+            if has_bias:
+                num_weight_tensors += 1
+        
+        if is_training:
+            # updating the running stats
+            # assuming all activations cached
+            # but mean and variance needs to be written
+            num_weight_tensors += 2
+            
+        
+        activation_bytes = num_elems * bpe_in + num_elems * bpe_out
+        weight_bytes = num_weight_tensors * num_channels * bpe_in
         return activation_bytes + weight_bytes
+    
+    def bytes(self):
+        return self.calc_fwd_bytes(self.nelems, self.has_bias, self.num_channels, self.bpe_in, self.bpe_out)
+    
+    @staticmethod
+    def bytes_func_bwd(has_bias: bool, is_affine: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int):
+        pass
+    
 
 class BatchNorm(Normalization):
     """
@@ -3202,5 +3276,5 @@ class RMSNorm(Normalization):
             "stride_input": stride_input,
             "stride_output": stride_output,
             "num_channels": op_shape[-3],
-            "has_bias": True,
+            "has_bias": False, # RMS norm does not shift
         }

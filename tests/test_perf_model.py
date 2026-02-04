@@ -8,7 +8,7 @@ import os
 import pytest
 import torch
 import torch.nn
-import TraceLens
+#import TraceLens
 # Normalization layers
 
 default_normalization_layer_trace_file = "traces/perf_model/normalization/normalization_layer_test.json.gz"
@@ -73,10 +73,9 @@ def create_normalization_layer_trace(outfile: str):
         acc_events=True,
     ) as p:
         for i in range(3):
-            with torch.profiler.record_function(f"step %d" % i):
-                outputs = net(x)
-                loss = criterion(outputs, torch.randn(input_shape))
-                loss.backward()
+            outputs = net(x)
+            loss = criterion(outputs, torch.randn(input_shape))
+            loss.backward()
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     p.export_chrome_trace(outfile)
 
