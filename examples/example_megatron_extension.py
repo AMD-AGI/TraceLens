@@ -59,11 +59,11 @@ def tree_postprocess_extension(trace_tree):
 def get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event: dict) -> list[dict]:
     """
     Get backward operations for a given forward operation.
+    Uses on-demand subtree aggregation to find all backward events.
     """
-    bwd_eventUIDs = fwd_op_event.get("bwd_events")
-    if not bwd_eventUIDs:
-        trace_tree.link_bwd_events(fwd_op_event["UID"])
-        bwd_eventUIDs = fwd_op_event.get("bwd_events")
+    bwd_eventUIDs = fwd_op_event.get("bwd_events") or trace_tree.get_subtree_bwd_events(
+        fwd_op_event["UID"]
+    )
     bwd_events = [trace_tree.get_UID2event(uid) for uid in bwd_eventUIDs]
     return bwd_events
 

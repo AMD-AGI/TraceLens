@@ -251,9 +251,8 @@ class TreePerfAnalyzer:
 
         # Handle kernel aggregation
         if bwd:
-            if not event.get("bwd_events"):
-                self.tree.link_bwd_events(event["UID"])
-            cpu_op_uids = event["bwd_events"]
+            # Always use subtree aggregation for backward metrics
+            cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
         else:
             cpu_op_uids = [event["UID"]]
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
@@ -1179,10 +1178,8 @@ class TreePerfAnalyzer:
         Returns:
             list: List of collected event dictionaries.
         """
-        # First, link all forward events with perf models to their backward events
-        for event in self.tree.events:
-            if self._has_perf_model(event):
-                self.tree.link_bwd_events(event["UID"])
+        # Note: 1:1 bwd_events linking is done in build_tree() via link_all_fwd_bwd_events()
+        # Use get_subtree_bwd_events() for on-demand subtree aggregation
 
         collected = []
         visited = set()
@@ -2186,10 +2183,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
