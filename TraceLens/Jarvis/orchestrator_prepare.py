@@ -42,7 +42,6 @@ def main():
     
     # Create directory structure
     os.makedirs(f"{output_dir}/metadata", exist_ok=True)
-    os.makedirs(f"{output_dir}/findings", exist_ok=True)
     os.makedirs(f"{output_dir}/category_data", exist_ok=True)
     
     platform_specs = PLATFORM_SPECS[platform]

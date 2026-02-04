@@ -310,3 +310,185 @@ def classify_other_operation(op_name: str) -> str:
         return 'graph'
     
     return 'miscellaneous'
+
+
+def detect_paged_attention(op_name: str, kernel_details: str = None) -> bool:
+    """
+    Check if SDPA operation uses Paged Attention (vLLM style).
+    
+    Args:
+        op_name: Operation name
+        kernel_details: Optional kernel_details_summary string from CSV
+        
+    Returns:
+        True if paged attention is detected
+    """
+    # Check operation name for vLLM paged attention markers
+    paged_markers = ['unified_attention', 'paged_attention', 'vllm']
+    if any(marker in op_name.lower() for marker in paged_markers):
+        return True
+    
+    # Check kernel details for paged attention kernels
+    if kernel_details:
+        if 'kernel_paged_attention' in str(kernel_details).lower():
+            return True
+        if 'paged_attention_2d' in str(kernel_details).lower():
+            return True
+    
+    return False
+
+
+def parse_kernel_breakdown(kernel_details_str: str) -> dict:
+    """
+    Parse kernel_details_summary to extract sub-kernel timing breakdown.
+    
+    Args:
+        kernel_details_str: String representation of kernel details list
+        
+    Returns:
+        Dict with kernel breakdown: {kernel_name: {mean_us, percent, total_us}}
+    """
+    result = {
+        'kernels': [],
+        'total_kernel_time_us': 0,
+        'has_paged_attention': False,
+        'has_fwd_kernel': False,
+        'has_reshape_cache': False
+    }
+    
+    if not kernel_details_str or pd.isna(kernel_details_str):
+        return result
+    
+    try:
+        # Parse the string representation of the list
+        import ast
+        # Handle numpy types in string
+        kernel_str = str(kernel_details_str)
+        kernel_str = kernel_str.replace('np.float64(', '').replace(')', '')
+        
+        # Try to extract kernel info using regex for robustness
+        import re
+        
+        # Pattern to match kernel entries
+        kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
+        matches = re.findall(kernel_pattern, kernel_str, re.DOTALL)
+        
+        total_time = 0
+        kernels = []
+        
+        for name, mean_us in matches:
+            mean_us_float = float(mean_us)
+            total_time += mean_us_float
+            
+            # Classify kernel type
+            kernel_type = 'other'
+            if 'reshape_and_cache' in name.lower():
+                kernel_type = 'reshape_cache'
+                result['has_reshape_cache'] = True
+            elif 'paged_attention' in name.lower():
+                kernel_type = 'paged_attention'
+                result['has_paged_attention'] = True
+            elif '_fwd_kernel' in name.lower() or 'fwd_kernel' in name.lower():
+                kernel_type = 'fwd_kernel'
+                result['has_fwd_kernel'] = True
+            
+            kernels.append({
+                'name': name,
+                'mean_us': mean_us_float,
+                'kernel_type': kernel_type
+            })
+        
+        # Calculate percentages
+        if total_time > 0:
+            for k in kernels:
+                k['percent'] = round((k['mean_us'] / total_time) * 100, 2)
+        
+        result['kernels'] = kernels
+        result['total_kernel_time_us'] = round(total_time, 2)
+        
+    except Exception as e:
+        # If parsing fails, return empty result
+        pass
+    
+    return result
+
+
+def parse_perf_params(perf_params_str: str) -> dict:
+    """
+    Parse perf_params to extract attention configuration and workload profile.
+    
+    Args:
+        perf_params_str: String representation of perf_params dict
+        
+    Returns:
+        Dict with parsed parameters
+    """
+    result = {
+        'batch_size': None,
+        'n_q': None,
+        'h_q': None,
+        'n_kv': None,
+        'h_kv': None,
+        'd_h_qk': None,
+        'd_h_v': None,
+        'dropout': None,
+        'causal': None,
+        'flash_impl': None,
+        'sum_ctx_tokens': None,
+        'sum_gen_tokens': None,
+        'ctx_ratio': None,
+        'workload_type': 'unknown'
+    }
+    
+    if not perf_params_str or pd.isna(perf_params_str):
+        return result
+    
+    try:
+        import ast
+        params = ast.literal_eval(str(perf_params_str))
+        
+        # Extract basic parameters
+        result['batch_size'] = params.get('B')
+        result['n_q'] = params.get('N_Q')
+        result['h_q'] = params.get('H_Q')
+        result['n_kv'] = params.get('N_KV')
+        result['h_kv'] = params.get('H_KV')
+        result['d_h_qk'] = params.get('d_h_qk')
+        result['d_h_v'] = params.get('d_h_v')
+        result['dropout'] = params.get('dropout')
+        result['causal'] = params.get('causal')
+        result['flash_impl'] = params.get('flash_impl')
+        
+        # Extract context/generation tokens for workload profiling
+        ctx_tokens = params.get('sum_ctx_tokens', 0)
+        gen_tokens = params.get('sum_gen_tokens', 0)
+        result['sum_ctx_tokens'] = ctx_tokens
+        result['sum_gen_tokens'] = gen_tokens
+        
+        # Calculate context ratio and determine workload type
+        total_tokens = ctx_tokens + gen_tokens
+        if total_tokens > 0:
+            ctx_ratio = ctx_tokens / total_tokens
+            result['ctx_ratio'] = round(ctx_ratio, 3)
+            
+            if ctx_ratio > 0.8:
+                result['workload_type'] = 'prefill_heavy'
+            elif ctx_ratio < 0.2:
+                result['workload_type'] = 'decode_heavy'
+            else:
+                result['workload_type'] = 'mixed'
+        
+        # Detect GQA (Grouped Query Attention)
+        if result['h_q'] and result['h_kv']:
+            if result['h_kv'] < result['h_q']:
+                result['attention_pattern'] = 'GQA'
+                result['gqa_ratio'] = result['h_q'] // result['h_kv']
+            elif result['h_kv'] == result['h_q']:
+                result['attention_pattern'] = 'MHA'
+            else:
+                result['attention_pattern'] = 'unknown'
+                
+    except Exception as e:
+        pass
+    
+    return result
