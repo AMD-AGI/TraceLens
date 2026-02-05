@@ -30,7 +30,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Cluster, Container)
+0. Query User Inputs (Platform, Trace Path, Node, Container)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Category Filtering)
 6. Invoke Category-Specific Subagents (PARALLEL)
@@ -59,8 +59,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      3. **MI355X** - 6.5 TB/s HBM, 850 TFLOPS BF16, 288 GB
      4. **MI400** - 7.0 TB/s HBM, 1000 TFLOPS BF16, 320 GB
 
-3. **Cluster Name**
-   - Ask: "Which cluster should we use for analysis?"
+3. **Node Name**
+   - Ask: "Which Node should we use for analysis?"
 
 4. **Container Name**
    - Ask: "Which Docker container has TraceLens installed?"
@@ -76,7 +76,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 Execute TraceLens CLI in the container:
 
 ```bash
-ssh <cluster> "docker exec <container> \
+ssh <node> "docker exec <container> \
   TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
@@ -94,7 +94,7 @@ This generates:
 Execute the Jarvis orchestrator preparation script in the container:
 
 ```bash
-ssh <cluster> "docker exec <container> python3 \
+ssh <node> "docker exec <container> python3 \
   TraceLens/Jarvis/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
@@ -160,14 +160,14 @@ Pass only the execution context - let the subagent handle script execution:
 ```
 /gemm-analyzer
 - Output directory: <output_dir>
-- Cluster: <cluster>
+- Node: <node>
 - Container: <container>
 - Input files: category_data/gemm_ops.csv, metadata/gemm_metadata.json, category_data/gemm_tree_data.json
 - Output file: category_findings/gemm_findings.md
 ```
 
 **CRITICAL:** The orchestrator does NOT run any analysis scripts. Each subagent is responsible for:
-1. Running its Python script inside the container on the cluster
+1. Running its Python script inside the container on the node
 2. Reading the metrics JSON output
 3. Identifying bottlenecks and generating findings
 
@@ -252,7 +252,7 @@ and so on ....
 3. Kernel team needs a minimal reproducer
 
 ```bash
-ssh <cluster> "docker exec <container> python3 \
+ssh <node> "docker exec <container> python3 \
   TraceLens/Jarvis/generate_replay_artifacts.py \
   --output-dir <output_dir> \
   --perf-report-path <output_dir>/perf_report.xlsx \

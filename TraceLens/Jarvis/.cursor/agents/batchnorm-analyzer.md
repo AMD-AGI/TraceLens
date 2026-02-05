@@ -16,8 +16,8 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
-- `cluster`: Cluster name for SSH access (e.g., `tw008`)
-- `container`: Docker container with TraceLens installed (e.g., `multimodal_qwen_3`)
+- `node`: Node name for SSH access (e.g., `my_node`)
+- `container`: Docker container with TraceLens installed (e.g., `my_container`)
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/batchnorm_ops.csv` - Filtered BatchNorm operations
@@ -55,10 +55,10 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script (Inside Container)
 
-Execute the Python script inside the container on the cluster:
+Execute the Python script inside the container on the node:
 
 ```bash
-ssh <cluster> "docker exec <container> python3 \
+ssh <node> "docker exec <container> python3 \
   TraceLens/Jarvis/category_analyses/batchnorm_analysis.py \
   --output-dir <output_dir>"
 ```
