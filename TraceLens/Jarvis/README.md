@@ -1,6 +1,8 @@
 # TraceLens Jarvis - Agentic Analysis Framework
 
-JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations.
+> **⚠️ Experimental**: This feature is under active development and may change.
+
+JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. 
 
 ---
 
@@ -8,7 +10,7 @@ JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyz
 
 ### To run performance analysis:
 
-1. **In Cursor, invoke:**
+1. **In a Cursor chat, invoke:**
    ```
    @standalone-analysis-orchestrator
    ```
@@ -23,3 +25,25 @@ JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyz
 3. **Get results:**
    - `standalone_analysis.md` - Stakeholder report
    - Category-specific findings in `category_findings/`
+
+---
+
+## Architecture
+
+### Orchestrator
+The **Standalone Analysis Orchestrator** skill coordinates the entire analysis workflow.
+It queries user inputs, runs TraceLens to pre-compute trace data, and invokes category-specific sub-agents in parallel. Finally, it aggregates findings and generates a prioritized stakeholder report with optimization recommendations.
+
+### Sub-Agents
+| Agent | Purpose |
+|-------|---------|
+| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
+| `gemm-analyzer` | Analyzes matrix multiplication operations |
+| `sdpa-analyzer` | Analyzes scaled dot-product attention |
+| `elementwise-analyzer` | Analyzes elementwise operations |
+| `reduce-analyzer` | Analyzes reduction operations |
+| `triton-analyzer` | Analyzes Triton-compiled kernels |
+| `moe-analyzer` | Analyzes MoE operations |
+| `batchnorm-analyzer` | Analyzes batch normalization |
+| `convolution-analyzer` | Analyzes convolution operations |
+| `generic-op-analyzer` | Analyzes uncategorized operations |
