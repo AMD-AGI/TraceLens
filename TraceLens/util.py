@@ -448,17 +448,20 @@ class TraceEventUtils:
 
         # Use defaultdict to avoid sorting and groupby complexity
         result = defaultdict(lambda: defaultdict(dict))
-        
+
         for event in events:
-            if event[TraceEventUtils.TraceKeys.Phase] != TraceEventUtils.TracePhases.Metadata:
+            if (
+                event[TraceEventUtils.TraceKeys.Phase]
+                != TraceEventUtils.TracePhases.Metadata
+            ):
                 continue
-            
+
             pid = event[TraceEventUtils.TraceKeys.PID]
             tid = event.get(TraceEventUtils.TraceKeys.TID)
             metadata_key, metadata_value = get_metadata_val(event)
-            
+
             result[pid][tid][metadata_key] = metadata_value
-        
+
         # Convert defaultdicts to regular dicts for return
         return {pid: dict(tid_dict) for pid, tid_dict in result.items()}
 

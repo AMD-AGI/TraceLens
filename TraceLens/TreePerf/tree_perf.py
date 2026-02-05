@@ -35,7 +35,6 @@ from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 
 
-
 def normalize_dtype_to_precision(dtype_str):
     """
     Normalize a dtype string to a standard precision identifier.
@@ -130,12 +129,12 @@ def get_max_achievable_tflops(perf_model, arch):
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
-        profile_filepath, 
+        profile_filepath,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
-        *args, 
-        **kwargs
+        *args,
+        **kwargs,
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
@@ -149,15 +148,15 @@ class TreePerfAnalyzer:
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
         tree = TraceToTree(data, event_to_category=categorizer)
-        
+
         return TreePerfAnalyzer(
             tree,
-            jax=jax, 
+            jax=jax,
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
-            *args, 
-            **kwargs
+            *args,
+            **kwargs,
         )
 
     def __init__(
@@ -170,7 +169,7 @@ class TreePerfAnalyzer:
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
-        tree_postprocess_extension=None
+        tree_postprocess_extension=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -185,18 +184,18 @@ class TreePerfAnalyzer:
         )
         self.gpu_only = self.check_gpu_only()
         self.tree.build_tree(add_python_func=add_python_func)
-        
+
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
             try:
                 apply_pseudo_op_extensions(self.tree)
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
-        
+
         # Backward compatibility for custom tree postprocessing
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
-        
+
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
@@ -417,8 +416,12 @@ class TreePerfAnalyzer:
                 "pid": event["pid"],
                 "tid": event["tid"],
                 "process_name": self.tree.metadata[event["pid"]][0].get("process_name"),
-                "process_label": self.tree.metadata[event["pid"]][0].get("process_labels"),
-                "thread_name": self.tree.metadata[event["pid"]][event["tid"]].get("thread_name"),
+                "process_label": self.tree.metadata[event["pid"]][0].get(
+                    "process_labels"
+                ),
+                "thread_name": self.tree.metadata[event["pid"]][event["tid"]].get(
+                    "thread_name"
+                ),
                 "external_id": event["args"].get("External id"),
             }
             if include_args:
@@ -574,17 +577,17 @@ class TreePerfAnalyzer:
 
         # Rename columns for cleaner output
         rename_map = {
-            'GFLOPS_first': 'GFLOPS',
-            'Data Moved (MB)_first': 'Data Moved (MB)',
-            'FLOPS/Byte_first': 'FLOPS/Byte',
+            "GFLOPS_first": "GFLOPS",
+            "Data Moved (MB)_first": "Data Moved (MB)",
+            "FLOPS/Byte_first": "FLOPS/Byte",
             "process_name_first": "process_name",
             "process_label_first": "process_label",
             "thread_name_first": "thread_name",
-            'Input Dims_first': 'Input Dims',
-            'Input type_first': 'Input type',
-            'Input Strides_first': 'Input Strides',
-            'Concrete Inputs_first': 'Concrete Inputs',
-            'UID_first': 'UID'
+            "Input Dims_first": "Input Dims",
+            "Input type_first": "Input type",
+            "Input Strides_first": "Input Strides",
+            "Concrete Inputs_first": "Concrete Inputs",
+            "UID_first": "UID",
         }
 
         if "Compute Spec_first" in df_perf_metrics_summary.columns:
@@ -594,10 +597,15 @@ class TreePerfAnalyzer:
 
         # Reorder columns: name, process_name, process_label, thread_name, param cols, everything else
         priority_cols = ["name", "process_name", "process_label", "thread_name"]
-        other_cols = [col for col in df_perf_metrics_summary.columns 
-                      if col not in priority_cols and col not in param_cols]
-                      
-        df_perf_metrics_summary = df_perf_metrics_summary[priority_cols + param_cols + other_cols]
+        other_cols = [
+            col
+            for col in df_perf_metrics_summary.columns
+            if col not in priority_cols and col not in param_cols
+        ]
+
+        df_perf_metrics_summary = df_perf_metrics_summary[
+            priority_cols + param_cols + other_cols
+        ]
 
         df_perf_metrics_summary.sort_values(
             by=["Kernel Time (µs)_sum", "UID"],
@@ -757,7 +765,9 @@ class TreePerfAnalyzer:
             thread_metadata = self.tree.metadata[event["pid"]][event["tid"]]
             process_metadata = self.tree.metadata[event["pid"]][0]
             metrics_event["process_name"] = process_metadata.get("process_name", None)
-            metrics_event["process_label"] = process_metadata.get("process_labels", None)
+            metrics_event["process_label"] = process_metadata.get(
+                "process_labels", None
+            )
             metrics_event["thread_name"] = thread_metadata.get("thread_name", None)
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
@@ -1328,9 +1338,15 @@ class TreePerfAnalyzer:
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
-                "process_name": self.tree.metadata[event.get("pid")][0].get("process_name"),
-                "process_label": self.tree.metadata[event.get("pid")][0].get("process_labels"),
-                "thread_name": self.tree.metadata[event.get("pid")][event.get("tid")].get("thread_name"),
+                "process_name": self.tree.metadata[event.get("pid")][0].get(
+                    "process_name"
+                ),
+                "process_label": self.tree.metadata[event.get("pid")][0].get(
+                    "process_labels"
+                ),
+                "thread_name": self.tree.metadata[event.get("pid")][
+                    event.get("tid")
+                ].get("thread_name"),
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
@@ -2167,10 +2183,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
@@ -2626,9 +2640,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                     "name": event["name"],
                     "UID": event["UID"],
                     "pid": event["pid"],
-                    "process_name": self.tree.metadata[event["pid"]][0].get("process_name"),
-                    "process_label": self.tree.metadata[event["pid"]][0].get("process_labels"),
-                    "thread_name": self.tree.metadata[event["pid"]][event["tid"]].get("thread_name"),
+                    "process_name": self.tree.metadata[event["pid"]][0].get(
+                        "process_name"
+                    ),
+                    "process_label": self.tree.metadata[event["pid"]][0].get(
+                        "process_labels"
+                    ),
+                    "thread_name": self.tree.metadata[event["pid"]][event["tid"]].get(
+                        "thread_name"
+                    ),
                     "dur": event["dur"],
                     "cat": event["cat"],
                     "op category": event["gpu_kernel_op_cat"],
