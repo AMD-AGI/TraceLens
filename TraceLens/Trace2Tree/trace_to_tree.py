@@ -578,6 +578,7 @@ class TraceToTree:
         for i, event in enumerate(events_data):
             event[UID_KEY] = i
         self.events = events_data
+        self.metadata = TraceEventUtils.get_metadata(events_data)
 
         # Build UID lookup dictionary
         self.events_by_uid = {event[UID_KEY]: event for event in self.events}
