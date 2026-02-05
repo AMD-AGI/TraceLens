@@ -8,6 +8,8 @@ import re
 from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
+import json
+import os
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -26,7 +28,8 @@ class TraceDiff:
         self.merged_uid_map = {}  # (tree_num, uid) -> corresponding_uid or -1
         self.diff_stats_df = pd.DataFrame()  # DataFrame for diff stats
         self.diff_stats_summary_df = pd.DataFrame()  # DataFrame for diff stats summary
-
+        self.cpu_op_map_trace1 = None
+        self.cpu_op_map_trace2 = None
         # Cache for merged tree mapping only (baseline/variant dicts are already in tree objects)
         self._merged_id_to_event = None
 
@@ -1197,6 +1200,44 @@ class TraceDiff:
         self.diff_stats_unique_args_summary_df = df_agg
         return df_agg
 
+    def get_cpu_op_to_kernels_json(self) -> tuple[dict, dict]:
+        """
+        Create a JSON-serializable dict mapping CPU ops to the kernels they call,
+        for both traces. Uses 'name' (kernel) and 'cpu_op_name' from diff_stats_unique_args_summary_df.
+
+        Returns:
+            Dict with keys "trace1" and "trace2", each mapping cpu_op_name -> list of kernel names.
+        """
+        import json
+
+        if (
+            self.diff_stats_unique_args_summary_df is None
+            or self.diff_stats_unique_args_summary_df.empty
+        ):
+            print(
+                "[TraceDiff] diff_stats_unique_args_summary_df is empty. "
+                "Run generate_tracediff_report() first."
+            )
+            return {"trace1": {}, "trace2": {}}
+
+        df_agg = self.diff_stats_unique_args_summary_df
+
+        cpu_op_map_trace1 = (
+            df_agg[df_agg["source"] == "trace1"]
+            .groupby(["cpu_op_name"])
+            .agg({"name": lambda x: sorted(set(x))})
+            .sort_index()
+        )
+        cpu_op_map_trace2 = (
+            df_agg[df_agg["source"] == "trace2"]
+            .groupby(["cpu_op_name"])
+            .agg({"name": lambda x: sorted(set(x))})
+            .sort_index()
+        )
+
+        self.cpu_op_map_trace1 = cpu_op_map_trace1
+        self.cpu_op_map_trace2 = cpu_op_map_trace2
+
     def generate_tracediff_report(self):
         """
         Generate all TraceDiff output DataFrames and update the object variables.
@@ -1204,6 +1245,7 @@ class TraceDiff:
         """
         self.generate_diff_stats()
         self.get_df_diff_stats_unique_args()
+        self.get_cpu_op_to_kernels_json()
 
     def print_tracediff_report_files(
         self, output_folder="rprt_diff", prune_non_gpu=False
@@ -1243,4 +1285,18 @@ class TraceDiff:
         else:
             print(
                 f"[TraceDiff] diff_stats_unique_args_summary_df is empty. Run generate_tracediff_report() first."
+            )
+        if self.cpu_op_map_trace1 is not None:
+            with open(os.path.join(output_folder, "cpu_op_map_trace1.json"), "w", encoding="utf-8") as f:
+                json.dump(self.cpu_op_map_trace1.to_dict()['name'], f, indent=2, ensure_ascii=False)
+        else:
+            print(
+                f"[TraceDiff] cpu_op_map_trace1 is empty. Run get_cpu_op_to_kernels_json() first."
+            )
+        if self.cpu_op_map_trace2 is not None:
+            with open(os.path.join(output_folder, "cpu_op_map_trace2.json"), "w", encoding="utf-8") as f:
+                json.dump(self.cpu_op_map_trace2.to_dict()['name'], f, indent=2, ensure_ascii=False)
+        else:
+            print(
+                f"[TraceDiff] cpu_op_map_trace2 is empty. Run get_cpu_op_to_kernels_json() first."
             )
