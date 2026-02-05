@@ -414,12 +414,17 @@ class TreePerfAnalyzer:
                 "UID": event["UID"],
                 "pid": event["pid"],
                 "tid": event["tid"],
-                "process_name": self.tree.metadata[event["pid"]][0].get("process_name"),
-                "process_label": self.tree.metadata[event["pid"]][0].get(
-                    "process_labels"
+                "process_name": self.tree.metadata.get(event["pid"], {}).get(0, {}).get(
+                    "process_name",
+                    'Unknown'
                 ),
-                "thread_name": self.tree.metadata[event["pid"]][event["tid"]].get(
-                    "thread_name"
+                "process_label": self.tree.metadata.get(event["pid"], {}).get(0, {}).get(
+                    "process_labels",
+                    'Unknown'
+                ),
+                "thread_name": self.tree.metadata.get(event["pid"], {}).get(event["tid"], {}).get(
+                    "thread_name",
+                    'Unknown'
                 ),
                 "external_id": event["args"].get("External id"),
             }
@@ -744,13 +749,13 @@ class TreePerfAnalyzer:
                     metrics_event["parent_module"] = re.sub(
                         r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
                     ).strip("")
-            thread_metadata = self.tree.metadata[event["pid"]][event["tid"]]
-            process_metadata = self.tree.metadata[event["pid"]][0]
-            metrics_event["process_name"] = process_metadata.get("process_name", None)
+            thread_metadata = self.tree.metadata.get(event["pid"], {}).get(event["tid"], {})
+            process_metadata = self.tree.metadata.get(event["pid"], {}).get(0, {})
+            metrics_event["process_name"] = process_metadata.get("process_name", 'Unknown')
             metrics_event["process_label"] = process_metadata.get(
-                "process_labels", None
+                "process_labels", 'Unknown'
             )
-            metrics_event["thread_name"] = thread_metadata.get("thread_name", None)
+            metrics_event["thread_name"] = thread_metadata.get("thread_name", 'Unknown')
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -1356,15 +1361,18 @@ class TreePerfAnalyzer:
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
-                "process_name": self.tree.metadata[event.get("pid")][0].get(
-                    "process_name"
+                "process_name": self.tree.metadata.get(event.get("pid"), {}).get(0, {}).get(
+                    "process_name",
+                    'Unknown'
                 ),
-                "process_label": self.tree.metadata[event.get("pid")][0].get(
-                    "process_labels"
+                "process_label": self.tree.metadata.get(event.get("pid"), {}).get(0, {}).get(
+                    "process_labels",
+                    'Unknown'
                 ),
-                "thread_name": self.tree.metadata[event.get("pid")][
-                    event.get("tid")
-                ].get("thread_name"),
+                "thread_name": self.tree.metadata.get(event.get("pid"), {}).get(event.get("tid"), {}).get(
+                    "thread_name",
+                    'Unknown'
+                ),
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
@@ -2698,14 +2706,17 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                     "name": event["name"],
                     "UID": event["UID"],
                     "pid": event["pid"],
-                    "process_name": self.tree.metadata[event["pid"]][0].get(
-                        "process_name"
+                    "process_name": self.tree.metadata.get(event["pid"], {}).get(0, {}).get(
+                        "process_name",
+                        'Unknown'
                     ),
-                    "process_label": self.tree.metadata[event["pid"]][0].get(
-                        "process_labels"
+                    "process_label": self.tree.metadata.get(event["pid"], {}).get(0, {}).get(
+                        "process_labels",
+                        'Unknown'
                     ),
-                    "thread_name": self.tree.metadata[event["pid"]][event["tid"]].get(
-                        "thread_name"
+                    "thread_name": self.tree.metadata.get(event["pid"], {}).get(event["tid"], {}).get(
+                        "thread_name",
+                        'Unknown'
                     ),
                     "dur": event["dur"],
                     "cat": event["cat"],
