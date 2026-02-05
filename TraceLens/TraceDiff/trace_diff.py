@@ -1287,15 +1287,33 @@ class TraceDiff:
                 f"[TraceDiff] diff_stats_unique_args_summary_df is empty. Run generate_tracediff_report() first."
             )
         if self.cpu_op_map_trace1 is not None:
-            with open(os.path.join(output_folder, "cpu_op_map_trace1.json"), "w", encoding="utf-8") as f:
-                json.dump(self.cpu_op_map_trace1.to_dict()['name'], f, indent=2, ensure_ascii=False)
+            with open(
+                os.path.join(output_folder, "cpu_op_map_trace1.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    self.cpu_op_map_trace1.to_dict()["name"],
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
         else:
             print(
                 f"[TraceDiff] cpu_op_map_trace1 is empty. Run get_cpu_op_to_kernels_json() first."
             )
         if self.cpu_op_map_trace2 is not None:
-            with open(os.path.join(output_folder, "cpu_op_map_trace2.json"), "w", encoding="utf-8") as f:
-                json.dump(self.cpu_op_map_trace2.to_dict()['name'], f, indent=2, ensure_ascii=False)
+            with open(
+                os.path.join(output_folder, "cpu_op_map_trace2.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    self.cpu_op_map_trace2.to_dict()["name"],
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
         else:
             print(
                 f"[TraceDiff] cpu_op_map_trace2 is empty. Run get_cpu_op_to_kernels_json() first."
