@@ -525,9 +525,12 @@ class TreePerfAnalyzer:
         dict_agg["FLOPS/Byte"] = "first"
         dict_agg["TB/s"] = agg_metrics
         dict_agg["TFLOPS/s"] = agg_metrics
-        dict_agg["process_name"] = "first"
-        dict_agg["process_label"] = "first"
-        dict_agg["thread_name"] = "first"
+        if "process_name" in df_perf_metrics.columns:
+            dict_agg["process_name"] = "first"
+        if "process_label" in df_perf_metrics.columns:
+            dict_agg["process_label"] = "first"
+        if "thread_name" in df_perf_metrics.columns:
+            dict_agg["thread_name"] = "first"
         # Compute Spec - static for same args
         if "Compute Spec" in df_perf_metrics.columns:
             dict_agg["Compute Spec"] = "first"
@@ -577,19 +580,7 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary.reset_index(inplace=True)
 
         # Rename columns for cleaner output
-        rename_map = {
-            "GFLOPS_first": "GFLOPS",
-            "Data Moved (MB)_first": "Data Moved (MB)",
-            "FLOPS/Byte_first": "FLOPS/Byte",
-            "process_name_first": "process_name",
-            "process_label_first": "process_label",
-            "thread_name_first": "thread_name",
-            "Input Dims_first": "Input Dims",
-            "Input type_first": "Input type",
-            "Input Strides_first": "Input Strides",
-            "Concrete Inputs_first": "Concrete Inputs",
-            "UID_first": "UID",
-        }
+        rename_map = {}
 
         if "Compute Spec_first" in df_perf_metrics_summary.columns:
             rename_map["Compute Spec_first"] = "Compute Spec"
@@ -597,7 +588,13 @@ class TreePerfAnalyzer:
             df_perf_metrics_summary.rename(columns=rename_map, inplace=True)
 
         # Reorder columns: name, process_name, process_label, thread_name, param cols, everything else
-        priority_cols = ["name", "process_name", "process_label", "thread_name"]
+        priority_cols = ["name"]
+        if "process_name" in df_perf_metrics_summary.columns:
+            priority_cols.append("process_name")
+        if "process_label" in df_perf_metrics_summary.columns:
+            priority_cols.append("process_label")
+        if "thread_name" in df_perf_metrics_summary.columns:
+            priority_cols.append("thread_name")
         other_cols = [
             col
             for col in df_perf_metrics_summary.columns
@@ -609,7 +606,7 @@ class TreePerfAnalyzer:
         ]
 
         df_perf_metrics_summary.sort_values(
-            by=["Kernel Time (µs)_sum", "UID"],
+            by=["Kernel Time (µs)_sum", "UID_first"],
             ascending=[False, True],
             inplace=True,
         )
