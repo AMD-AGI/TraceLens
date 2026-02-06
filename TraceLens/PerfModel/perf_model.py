@@ -3184,7 +3184,6 @@ class BatchNorm(Normalization):
     but flops is a multiply-add and bytes also loads scale and bias
     https://arxiv.org/abs/1502.03167
     """
-
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -3205,6 +3204,34 @@ class BatchNorm(Normalization):
             "is_affine": is_affine,
             "is_training": is_training,
         }
+
+class BatchNormBwd(Normalization):        
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = bool(event["args"]["Concrete Inputs"][5])
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": args_input_dims[3][0], # inputs 1 and 2 can be null if non-affine
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+
+    def bytes_bwd(self):
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
 
 class LayerNorm(Normalization):
     """
@@ -3239,6 +3266,39 @@ class LayerNorm(Normalization):
             "is_affine": is_affine,
             "is_training": is_training,
         }
+
+class LayerNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
+        # could use ast or json.reads but this is simpler
+        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
+        has_bias = args_input_dims[2] is not None
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[1] is not None
+        is_training = True
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": has_bias,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+
+    def bytes_bwd(self):
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
 
 class GroupNorm(Normalization):
     # Group Normalization
@@ -3275,6 +3335,36 @@ class GroupNorm(Normalization):
             "is_training": is_training,
         }
 
+class GroupNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        # concrete_inputs[1] = num_groups
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = True
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[1] / int(concrete_inputs[1]), # exactly 1 batch dim, so num_channels is always dim 1
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+
+    def bytes_bwd(self):
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+
 class InstanceNorm(Normalization):
     # Instance Normalization
     # https://arxiv.org/pdf/1607.08022
@@ -3305,6 +3395,38 @@ class InstanceNorm(Normalization):
             "is_affine": is_affine,
             "is_training": is_training,
         }
+
+class InstanceNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        # The "use_input_stats" argument means that we need to calculate stats from the batch,
+        # effectively the same as how we use training in other cases
+        # layernorm actually calls batchnorm and sets is_training to use_input_stats
+        is_training = bool(concrete_inputs[5])
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[1], # exactly 1 batch dim in source
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+
+    def bytes_bwd(self):
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
 
 class RMSNorm(Normalization):
     # RMS Normalization
@@ -3346,26 +3468,53 @@ class RMSNorm(Normalization):
     def bytes(self):
         # assume caching works, read input, write output, read weight if affine
         return self.num_elems * self.bpe_in + self.num_elems * self + (self.num_channels * self.bpe_in if self.is_affine else 0)
+
+class RMSNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        dtype_out = None
+        stride_output = None
+        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": is_affine,
+            "is_training": False,            
+        }
     
+    def flops(self):
+        return self.flops_bwd()
+    
+    def bytes(self):
+        return self.bytes_bwd()
+
     def flops_bwd(self):
-        flops = 0      
-        if self.event["args"]["Concrete Inputs"] >5 and len(self.event["args"]["Concrete Inputs"][5]) == 2:
-            non_normalized_elems = self.num_elems / self.num_channels
-            # if weights not null, multiply by grad_out
-            flops = 0 if not self.is_affine else self.num_elems
-            # compute x_hat = input * rstd
-            flops += self.num_elems
-      
-            if self.event["args"]["Concrete Inputs"][5][0]:
-                # compute grad in
-                # compute dot product along normalized shape, then use it to compute grad_in
-                flops += 2 * self.num_elems # compute dot product
-                flops += 4 * self.num_elems # compute grad_in using dot product
-            if self.event["args"]["Concrete Inputs"][5][1] and self.is_affine:
-                # compute weights grad
-                flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
-                if non_normalized_elems > 1:
-                    flops += self.num_elems # accumulates num_channels elements from all inputs
+        non_normalized_elems = self.num_elems / self.num_channels
+        # if weights not null, multiply by grad_out
+        flops = 0 if not self.is_affine else self.num_elems
+        # compute x_hat = input * rstd
+        flops += self.num_elems
+    
+        if self.event["args"]["Concrete Inputs"][5][0]:
+            # compute grad in
+            # compute dot product along normalized shape, then use it to compute grad_in
+            flops += 2 * self.num_elems # compute dot product
+            flops += 4 * self.num_elems # compute grad_in using dot product
+        if self.event["args"]["Concrete Inputs"][5][1] and self.is_affine:
+            # compute weights grad
+            flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
+            if non_normalized_elems > 1:
+                flops += self.num_elems # accumulates num_channels elements from all inputs
         return flops
     
     def bytes_bwd(self):
