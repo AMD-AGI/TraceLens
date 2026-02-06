@@ -3175,8 +3175,8 @@ class Normalization:
     
     def bytes_bwd(self):
         return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
-    
 
+# There are separate calls for fwd and bwd calls, so we need separate classes
 class BatchNorm(Normalization):
     """
     Batch Normalization
@@ -3219,7 +3219,9 @@ class LayerNorm(Normalization):
         args_input_dims = event["args"]["Input Dims"]
         op_shape = tuple(args_input_dims[0])
         concrete_inputs = event["args"]["Concrete Inputs"]
-        num_channels = prod(concrete_inputs[1])
+        # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
+        # could use ast or json.reads but this is simpler
+        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
         has_bias = args_input_dims[2] is not None
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
@@ -3319,12 +3321,13 @@ class RMSNorm(Normalization):
         is_affine = args_input_dims[2] is not None
         dtype_out = None
         stride_output = None
+        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": prod(concrete_inputs[1]), # normalized shape
+            "num_channels": num_channels,
             "has_bias": False,
             "is_affine": is_affine,
             "is_training": False,            
@@ -3345,22 +3348,24 @@ class RMSNorm(Normalization):
         return self.num_elems * self.bpe_in + self.num_elems * self + (self.num_channels * self.bpe_in if self.is_affine else 0)
     
     def flops_bwd(self):
-        non_normalized_elems = self.num_elems / self.num_channels
-        # if weights not null, multiply by grad_out
-        flops = 0 if not self.is_affine else self.num_elems
-        # compute x_hat = input * rstd
-        flops += self.num_elems
+        flops = 0      
+        if self.event["args"]["Concrete Inputs"] >5 and len(self.event["args"]["Concrete Inputs"][5]) == 2:
+            non_normalized_elems = self.num_elems / self.num_channels
+            # if weights not null, multiply by grad_out
+            flops = 0 if not self.is_affine else self.num_elems
+            # compute x_hat = input * rstd
+            flops += self.num_elems
       
-        if self.event["args"]["Concrete Inputs"][5][0]:
-            # compute grad in
-            # compute dot product along normalized shape, then use it to compute grad_in
-            flops += 2 * self.num_elems # compute dot product
-            flops += 4 * self.num_elems # compute grad_in using dot product
-        if self.event["args"]["Concrete Inputs"][5][1] and self.is_affine:
-            # compute weights grad
-            flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
-            if non_normalized_elems > 1:
-                flops += self.num_elems # accumulates num_channels elements from all inputs
+            if self.event["args"]["Concrete Inputs"][5][0]:
+                # compute grad in
+                # compute dot product along normalized shape, then use it to compute grad_in
+                flops += 2 * self.num_elems # compute dot product
+                flops += 4 * self.num_elems # compute grad_in using dot product
+            if self.event["args"]["Concrete Inputs"][5][1] and self.is_affine:
+                # compute weights grad
+                flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
+                if non_normalized_elems > 1:
+                    flops += self.num_elems # accumulates num_channels elements from all inputs
         return flops
     
     def bytes_bwd(self):
