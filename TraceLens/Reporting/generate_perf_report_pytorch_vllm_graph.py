@@ -119,6 +119,16 @@ def make_connections(graph_tree,graph_filtered_events,capture_filtered_events):
                 g_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
             )
             parent = graph_tree.get_parent_event(parent)
+    for event in graph_tree.events:
+            # Skip GPU events
+            cat = event.get("cat")
+            if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
+                continue
+            # Now, we are dealing with non-GPU events
+            if "gpu_events" not in event:
+                event["non_gpu_path"] = True
+            else:
+                event.pop("non_gpu_path", None)
     return graph_tree
 
 def get_dfs_short_kernels(
@@ -841,13 +851,13 @@ def main():
         graph_events,graph_filtered_events=get_subtree_events(graph_tree,g_root,cat_filter=["kernel","gpu_memset","gpu_memcpy"])
         print("Verifying subtree events for capture root {} and graph root {}".format(c_root["name"],g_root["name"]))
         verify_subtree_events(capture_filtered_events,graph_filtered_events)
-
         start_uid=graph_tree.events[-1][UID]+1
         capture_events,_=update_subtree_uids_and_timestamps(capture_tree,capture_events,capture_filtered_events,start_uid,g_root["ts"])
         capture_events[0]["parent"]=g_root[UID]
         g_root["children"].append(capture_events[0][UID])
         graph_tree=append_subtree_to_event(graph_tree,capture_events,g_root)
         graph_tree=make_connections(graph_tree,graph_filtered_events,capture_filtered_events)
+
     
     generate_perf_report_pytorch(
         augmented_tree=graph_tree,
