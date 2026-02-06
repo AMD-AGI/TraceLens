@@ -119,6 +119,9 @@ class BaseTraceToTree(ABC):
         dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
+            event_name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
+            if event_name.startswith("<built-in method"):
+                continue
             event["tree"] = True
             self.name2event_uids[
                 event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
@@ -705,6 +708,9 @@ class TraceToTree:
         dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
+            event_name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
+            if event_name.startswith("<built-in method"):
+                continue
             event["tree"] = True
             self.name2event_uids[
                 event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
