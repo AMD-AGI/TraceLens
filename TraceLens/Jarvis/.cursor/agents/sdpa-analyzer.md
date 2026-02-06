@@ -178,6 +178,13 @@ Include:
 - **Check efficiency:** Should be 40-70% for long sequences (>2048)
 - **Kernel:** Generate replay artifact if below expected
 
+#### Contiguous Copy Overhead in SDPA Wrapper
+- **Symptoms:** Multiple aten::copy_ ops with same shape as SDPA Q/K/V inputs, appearing immediately before and after the Flash Attention call
+- **Look for:** aten::contiguous -> aten::clone -> aten::copy_ chain within the sdpa_attention_ wrapper function, typically 3 copies before SDPA (Q, K, V) and 1 after (output)
+- **Issue:** Framework SDPA wrapper unconditionally calls .contiguous() on Q, K, V inputs and output, even when the Flash Attention backend supports strided tensors
+- **Algorithmic:** Check if the Flash Attention backend supports strided (non-contiguous) inputs; if so, remove .contiguous() calls from the SDPA wrapper
+- **Impact:** Eliminates significant overhead relative to SDPA compute time across all attention layers
+
 ### Paged Attention Patterns (vLLM)
 
 #### Decode-Heavy Workload
