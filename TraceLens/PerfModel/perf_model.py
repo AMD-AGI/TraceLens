@@ -3020,7 +3020,7 @@ class Normalization:
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
-        self.nelems = prod(self.param_details["op_shape"])
+        self.num_elems = prod(self.param_details["op_shape"])
         self.dtype_in_out = self.param_details["dtype_in_out"]
         self.stride_input = self.param_details["stride_input"]
         self.stride_output = self.param_details["stride_output"]
@@ -3072,7 +3072,7 @@ class Normalization:
     # BWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L405
     # STATS: https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L177
     @staticmethod
-    def flops_func(has_bias: bool, is_affine: bool, is_training: bool, is_bwd: bool, num_elems: int, num_channels: int):
+    def flops_func(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int):
         # at inference time we generate alpha and beta from the averages and gamma and bias if applicable
         # then multiply alpha and add beta to each element. 
         
@@ -3084,12 +3084,16 @@ class Normalization:
             # sum to get mean, subtract mean from each elem and add them,
             # could potentially be log_n for sum-reduce but is not
             param_compute += num_elems * 3
-                   
+
+        # compute 1/std = inverse(sqrt(running_var + eps))
+        # for non-training this is called in native_batch_norm etc and for training this is computed once and saved for several uses
+        param_compute += num_channels * 3
+        
         actual_compute = 2 * num_elems
         return param_compute + actual_compute
 
     def flops(self):
-        return self.calc_fwd_flops(self.nelems, self.has_bias)
+        return self.flops_func(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
@@ -3122,11 +3126,55 @@ class Normalization:
         return activation_bytes + weight_bytes
     
     def bytes(self):
-        return self.calc_fwd_bytes(self.nelems, self.has_bias, self.num_channels, self.bpe_in, self.bpe_out)
+        return self.bytes_func(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+    
+    # BWD call
+    # for each channel
+        # read invstd if train else compute it
+        # sum = reduce-sum on all inputs and grad output
+        # dotp = subtract mean from x, multiply by dy
+        # if train:
+            # k = dotp * invstd^2 / N # scalar
+            # mean = sum / N # scalar
+            # dx =  ((x - mean) * k)
+            # grad_in = (grad_out - grad_mean - variance) * invstd * w
+            # if affine save w and sum 
+    @staticmethod
+    def flops_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int):
+        elems_per_channel = num_elems / num_channels
+        flops_per_channel = 3 if not is_training else 0 # invstd
+        flops_per_channel += 4 * elems_per_channel # calc dotp
+        if is_training:
+            # the real implementation can skip computing grad_in but this is ignored for now
+            # the computation happens whether or not is_affine and has_bias is true
+            flops_per_channel += 5 * elems_per_channel
+        return num_channels * flops_per_channel
+    
+    def flops_bwd(self):
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
     
     @staticmethod
-    def bytes_func_bwd(has_bias: bool, is_affine: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int):
-        pass
+    def bytes_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int):
+        # assumes everything read once and cached
+        # assumes grad_out is bpe_out, everything else is bpe_in
+        # read grad_out and the input once, invstd if it is saved
+        
+        # read grad_out and input, write grad_in
+        bytes = num_elems * bpe_out + num_elems * bpe_in * 2
+        if is_training:
+            bytes += num_channels * bpe_in # invstd
+        # write grad_in
+        bytes_out += num_elems * bpe_in
+        # read weight if affine
+        if is_affine:
+            bytes += num_channels * bpe_in * (2 if has_bias else 1)
+            # write grad_weight and grad_bias if affine and training
+            if is_training:
+                bytes += num_channels * bpe_in * (2 if has_bias else 1)
+        return bytes
+    
+    def bytes_bwd(self):
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
     
 
 class BatchNorm(Normalization):
@@ -3158,6 +3206,8 @@ class BatchNorm(Normalization):
             "stride_output": stride_output,
             "num_channels": op_shape[-3], # BatchNorm requires channels first
             "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
         }
 
 class LayerNorm(Normalization):
@@ -3176,6 +3226,8 @@ class LayerNorm(Normalization):
         has_bias = len(args_input_dims[3]) != 0
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = True
         if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event["args"]["Input type"][1]
             stride_output = tuple(event["args"]["Input Strides"][1])
@@ -3189,6 +3241,8 @@ class LayerNorm(Normalization):
             "stride_output": stride_output,
             "num_channels": num_channels,
             "has_bias": has_bias,
+            "is_affine": is_affine,
+            "is_training": is_training,
         }
 
 class GroupNorm(Normalization):
@@ -3211,6 +3265,8 @@ class GroupNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = True
         if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event["args"]["Input type"][1]
             stride_output = tuple(event["args"]["Input Strides"][1])
@@ -3224,6 +3280,8 @@ class GroupNorm(Normalization):
             "stride_output": stride_output,
             "num_channels": op_shape[-3] / int(concrete_inputs[1]),
             "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
         }
 
 class InstanceNorm(Normalization):
@@ -3240,6 +3298,12 @@ class InstanceNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        # The "use_input_stats" argument means that we need to calculate stats from the batch,
+        # effectively the same as how we use training in other cases
+        # layernorm actually calls batchnorm and sets is_training to use_input_stats
+        # https://github.com/pytorch/pytorch/blob/4ee85a80c4488f4b76915140b33ae5bdfe249db1/aten/src/ATen/native/Normalization.cpp#L758
+        is_training = bool(concrete_inputs[5])
         if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event["args"]["Input type"][1]
             stride_output = tuple(event["args"]["Input Strides"][1])
@@ -3253,19 +3317,23 @@ class InstanceNorm(Normalization):
             "stride_output": stride_output,
             "num_channels": prod(op_shape[:-2]),
             "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
         }
 
 class RMSNorm(Normalization):
     # RMS Normalization
     # https://arxiv.org/abs/1910.07467
+    # implementation is very different from the others
+    # https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
-        # concrete_inputs[1] = num_groups
         concrete_inputs = event["args"]["Concrete Inputs"]
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
         if len(args_input_dims) > 1 and args_input_dims[1]:
             dtype_out = event["args"]["Input type"][1]
             stride_output = tuple(event["args"]["Input Strides"][1])
@@ -3277,6 +3345,48 @@ class RMSNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[-3],
-            "has_bias": False, # RMS norm does not shift
+            "num_channels": prod(concrete_inputs[1]), # normalized shape
+            "has_bias": False,
+            "is_affine": is_affine,
+            "is_training": False,            
         }
+
+    # RMS norm is different enough from everything else that we are not using the base implementation
+    # flops is prod(dims that are not part of normalized_shape) * (2 * num_channels + 2) to compute rsqt
+    # multiply rsqt by each elem, then if weight is not null multiply weight by each elem
+    # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    def flops(self):
+        non_normalized_elems = self.num_elems / self.num_channels
+        flops = non_normalized_elems * (2 * self.num_channels + 2) # compute rsqt
+        flops += self.num_elems * (2 if self.is_affine else 1) # apply weight if affine, apply rms in any case
+        return flops
+        
+    def bytes(self):
+        # assume caching works, read input, write output, read weight if affine
+        return self.num_elems * self.bpe_in + self.num_elems * self + (self.num_channels * self.bpe_in if self.is_affine else 0)
+    
+    def flops_bwd(self):
+        non_normalized_elems = self.num_elems / self.num_channels
+        # if weights not null, multiply by grad_out
+        flops = 0 if not self.is_affine else self.num_elems
+        # compute x_hat = input * rstd
+        flops += self.num_elems
+      
+        if self.event["args"]["Concrete Inputs"][5][0]:
+            # compute grad in
+            # compute dot product along normalized shape, then use it to compute grad_in
+            flops += 2 * self.num_elems # compute dot product
+            flops += 4 * self.num_elems # compute grad_in using dot product
+        if self.event["args"]["Concrete Inputs"][5][1] and self.is_affine:
+            # compute weights grad
+            flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
+            if non_normalized_elems > 1:
+                flops += self.num_elems # accumulates num_channels elements from all inputs
+        return flops
+    
+    def bytes_bwd(self):
+        # read grad_out, input, weight if not null, write grad_in, grad_weight if not null
+        bytes = self.num_elems * self.bpe_out + self.num_elems * self.bpe_in * 2 # grad_out and input
+        if self.is_affine:
+            bytes += self.num_channels * self.bpe_in * 2 # weight and grad_weight
+        return bytes
