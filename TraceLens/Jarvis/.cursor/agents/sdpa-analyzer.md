@@ -148,7 +148,7 @@ For each validated bottleneck, provide recommendations based on attention type:
 
 ### Step 8: Write Category Findings
 
-Create `<output_dir>/category_findings/sdpa_fwd_findings.md`
+Create `<output_dir>/category_findings/sdpa_fwd_findings.md`. Create it through the container on the node:
 
 Include:
 - Attention type detected (Flash, Paged, Standard)

@@ -106,7 +106,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/triton_findings.md`
+Create `<output_dir>/category_findings/triton_findings.md`. Create it through the container on the node.
 
 ---
 

@@ -166,10 +166,125 @@ Pass only the execution context - let the subagent handle script execution:
 - Output file: category_findings/gemm_findings.md
 ```
 
-**CRITICAL:** The orchestrator does NOT run any analysis scripts. Each subagent is responsible for:
+**CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Use sub-agents, each of which subagent are responsible for:
 1. Running its Python script inside the container on the node
 2. Reading the metrics JSON output
 3. Identifying bottlenecks and generating findings
+
+---
+
+### CRITICAL CONSTRAINTS for All Subagents
+
+Include these constraints in EVERY subagent invocation prompt:
+
+#### 1. Use GPU Kernel Time for Prioritization
+
+- **ALWAYS** use `gpu_kernel_time_ms` or `Kernel Time (µs)_sum` for bottleneck ranking
+- **CPU duration** (`cpu_duration_ms` or `total_duration_us`) is for sync/overhead analysis ONLY
+- **NEVER** conflate the two metrics - they measure different things:
+  - GPU kernel time = actual GPU execution (optimization target for kernel teams)
+  - CPU duration = total operation time including sync, launch overhead
+  
+```python
+# CORRECT: Use GPU kernel time for prioritization
+bottleneck_score = gpu_kernel_time_ms * (100 - efficiency_percent)
+
+# WRONG: Using CPU duration for kernel bottleneck analysis
+# bottleneck_score = cpu_duration_ms * (100 - efficiency_percent)
+```
+
+#### 2. Flag Efficiency Anomalies
+
+- Any efficiency > 100% **MUST** be noted as `[ANOMALY] - verify measurement`
+- Do **NOT** use >100% values to claim "excellent performance"
+- Report the anomaly but base recommendations on other operations
+- Efficiency anomalies indicate:
+  - Wrong peak spec for the platform
+  - Measurement timing issues
+  - Workload characteristics outside normal bounds
+
+```markdown
+<!-- CORRECT -->
+| Operation | Efficiency | Note |
+|-----------|------------|------|
+| gemm_1    | 127.3%     | [ANOMALY] Exceeds peak - verify measurement |
+
+<!-- WRONG -->
+| Operation | Efficiency | Assessment |
+|-----------|------------|------------|
+| gemm_1    | 127.3%     | Excellent  |
+```
+
+#### 3. Cross-Reference with Manifest Time Breakdown
+
+- Read `time_breakdown` from metadata JSON for context
+- Use `gpu_kernel_time_ms` from manifest for category prioritization
+- If `has_sync_bottleneck: true`, note this as a separate issue (framework/model, not kernel)
+
+```python
+# Read metadata for time breakdown
+with open('<output_dir>/metadata/<category>_metadata.json') as f:
+    metadata = json.load(f)
+    
+time_breakdown = metadata.get('time_breakdown', {})
+gpu_time = time_breakdown.get('gpu_kernel_time_ms', 0)
+sync_time = time_breakdown.get('sync_time_ms', 0)
+has_sync = time_breakdown.get('has_sync_bottleneck', False)
+
+if has_sync:
+    print("⚠️ Sync bottleneck detected - recommend investigating host-device sync points")
+```
+
+#### 4. Sync Time Detection
+
+- If CPU duration >> GPU kernel time (>5x), flag as **sync bottleneck**
+- These are model/framework issues, NOT kernel issues
+- Recommend: "Investigate host-device synchronization points"
+- Do NOT attribute sync time to kernel inefficiency
+
+```markdown
+<!-- When sync_time is significant -->
+### Sync Bottleneck Detected
+
+**Issue:** Operations show {sync_time}ms sync overhead vs {gpu_time}ms GPU execution
+**Root Cause:** Host-device synchronization (e.g., `cudaDeviceSynchronize`, `_local_scalar_dense`)
+**Recommendation:** Review model code for unnecessary sync points; consider async execution
+**Note:** This is a framework/model issue, not a kernel optimization target
+```
+
+#### 5. Output Consistency
+
+- Status must be `SUCCESS` or `ERROR`
+- Time values in milliseconds (ms) unless otherwise noted
+- Efficiency values as percentages (0-100% typically; flag >100% as anomaly)
+- Always include operation count for context
+
+---
+
+**Subagent Prompt Template:**
+
+When invoking a subagent, use this template:
+
+```
+You are analyzing {category} operations for a PyTorch trace on {platform}.
+
+**CRITICAL - READ FIRST:**
+- Use GPU kernel time (not CPU duration) for all bottleneck analysis
+- Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
+- If CPU duration >> GPU kernel time (>5x), flag as sync bottleneck (framework issue, not kernel)
+- Check metadata time_breakdown for has_sync_bottleneck flag
+
+**Platform Specs:**
+- Peak HBM BW: {peak_hbm_bw} TB/s
+- Peak MAF: {peak_maf} TFLOPS
+
+**Input files:**
+- category_data/{category}_ops.csv
+- metadata/{category}_metadata.json
+- category_data/{category}_tree_data.json (if available)
+
+**Output:** category_findings/{category}_findings.md
+```
 
 ### 6.3 Wait for All Subagents to Complete
 
@@ -184,6 +299,113 @@ After all subagents complete:
 2. Collect list of failed categories and their error summaries
 3. **CRITICAL: Exclude failed categories from aggregation and recommendations**
 4. **CRITICAL: Do NOT attempt to manually analyze failed categories**
+
+---
+
+## Step 6.5: Validate Subagent Outputs
+
+Before aggregating results, perform these validation checks to ensure accuracy:
+
+### 1. Time Sanity Check
+
+```python
+import json
+import os
+
+# Load manifest with ground truth
+with open('<output_dir>/category_manifest.json') as f:
+    manifest = json.load(f)
+
+# Sum of category GPU kernel times should ~= computation time
+total_category_time = sum(
+    cat.get('gpu_kernel_time_ms', 0) 
+    for cat in manifest['categories']
+    if cat['name'] != 'cpu_idle'
+)
+
+computation_time = manifest['gpu_utilization']['total_time_ms'] * \
+                   manifest['gpu_utilization']['computation_time_percent'] / 100
+
+discrepancy = abs(total_category_time - computation_time) / computation_time * 100
+if discrepancy > 15:
+    print(f"⚠️ Time discrepancy: Category sum ({total_category_time:.1f}ms) vs " +
+          f"Computation time ({computation_time:.1f}ms) = {discrepancy:.1f}% difference")
+```
+
+### 2. Efficiency Anomaly Check
+
+Scan all findings for efficiency values > 100%:
+
+```python
+import re
+
+findings_dir = '<output_dir>/category_findings/'
+anomalies = []
+
+for f in os.listdir(findings_dir):
+    if f.endswith('_findings.md'):
+        with open(os.path.join(findings_dir, f)) as file:
+            content = file.read()
+            # Check for >100% efficiency values
+            matches = re.findall(r'(\d{3,}\.?\d*)\s*%', content)
+            for m in matches:
+                if float(m) > 100:
+                    anomalies.append({
+                        'category': f.replace('_findings.md', ''),
+                        'value': f"{m}%"
+                    })
+
+if anomalies:
+    print("⚠️ Efficiency anomalies detected (>100%):")
+    for a in anomalies:
+        print(f"  - {a['category']}: {a['value']}")
+    print("Note: Anomalies indicate measurement issues - do not use for prioritization")
+```
+
+### 3. Coverage Check
+
+Verify all categories in manifest have corresponding findings:
+
+```python
+expected_categories = [c['name'] for c in manifest['categories']]
+found_findings = [f.replace('_findings.md', '') 
+                  for f in os.listdir(findings_dir) 
+                  if f.endswith('_findings.md')]
+
+missing = set(expected_categories) - set(found_findings)
+if missing:
+    print(f"⚠️ Missing findings for: {', '.join(missing)}")
+```
+
+### 4. Priority Consistency Check
+
+Ensure categories with highest GPU kernel time % are given highest priority:
+
+```python
+# Sort categories by GPU kernel time
+sorted_cats = sorted(
+    [c for c in manifest['categories'] if c['name'] != 'cpu_idle'],
+    key=lambda x: x.get('gpu_kernel_time_ms', 0),
+    reverse=True
+)
+
+# Top 3 by time should be priorities 1-3
+top_time_categories = [c['name'] for c in sorted_cats[:3]]
+print(f"Top 3 categories by GPU kernel time: {top_time_categories}")
+print("Verify these receive Priority 1-3 in final report")
+```
+
+### Validation Output
+
+Add a validation summary to the aggregation step:
+
+```markdown
+## Validation Summary
+- Time Check: [PASS/WARN] - Category sum vs computation time discrepancy
+- Efficiency Check: [PASS/WARN] - Anomalies > 100%
+- Coverage Check: [PASS/WARN] - Missing categories
+- Priority Check: [INFO] - Top time categories for priority verification
+```
 
 ---
 

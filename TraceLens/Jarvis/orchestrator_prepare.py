@@ -44,9 +44,10 @@ def main():
     print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("="*80)
     
-    # Create directory structure
-    os.makedirs(f"{output_dir}/metadata", exist_ok=True)
-    os.makedirs(f"{output_dir}/category_data", exist_ok=True)
+    # Create directory structure (chmod 777 so host user can write when running in container as root)
+    for d in [output_dir, f"{output_dir}/metadata", f"{output_dir}/category_data", f"{output_dir}/category_findings"]:
+        os.makedirs(d, exist_ok=True)
+        os.chmod(d, 0o777)
     
     platform_specs = PLATFORM_SPECS[platform]
     
@@ -323,6 +324,85 @@ def main():
             "critical": True
         })
     
+    # ============================================================================
+    # STEP 5.5: Calculate Time Metric Breakdown per Category
+    # ============================================================================
+    print("\n[STEP 5.5] Calculating Time Metric Breakdown per Category...")
+    
+    # Calculate GPU kernel time vs CPU duration per category
+    # GPU kernel time = actual GPU execution (use for bottleneck prioritization)
+    # CPU duration = total operation time including sync/launch overhead
+    # Sync time = operations where CPU duration >> GPU kernel time
+    
+    for cat_info in exported_categories:
+        category_name = cat_info['name']
+        if category_name == 'cpu_idle':
+            continue  # Skip cpu_idle category - no ops
+        
+        category_df = unified_df[unified_df['enhanced_category'] == category_name]
+        
+        # Calculate GPU kernel time (ms)
+        if 'Kernel Time (µs)_sum' in category_df.columns:
+            gpu_kernel_time_ms = category_df['Kernel Time (µs)_sum'].sum() / 1000
+        elif 'total_direct_kernel_time_ms' in category_df.columns:
+            gpu_kernel_time_ms = category_df['total_direct_kernel_time_ms'].sum()
+        else:
+            gpu_kernel_time_ms = 0
+        
+        # Calculate CPU duration (ms) - total_duration_us if available
+        if 'total_duration_us' in category_df.columns:
+            cpu_duration_ms = category_df['total_duration_us'].sum() / 1000
+        elif 'Duration (µs)_sum' in category_df.columns:
+            cpu_duration_ms = category_df['Duration (µs)_sum'].sum() / 1000
+        else:
+            cpu_duration_ms = gpu_kernel_time_ms  # Fallback to kernel time
+        
+        # Calculate sync time (ops where CPU duration >> GPU kernel time)
+        # Sync bottleneck = CPU duration - GPU kernel time when ratio > 5x
+        sync_time_ms = 0
+        sync_ops_count = 0
+        
+        for _, row in category_df.iterrows():
+            if 'Kernel Time (µs)_sum' in row and 'total_duration_us' in row:
+                kernel_us = row.get('Kernel Time (µs)_sum', 0) or 0
+                duration_us = row.get('total_duration_us', 0) or 0
+                if kernel_us > 0 and duration_us > kernel_us * 5:
+                    sync_time_ms += (duration_us - kernel_us) / 1000
+                    sync_ops_count += 1
+        
+        # Add time metrics to category info
+        cat_info['gpu_kernel_time_ms'] = round(gpu_kernel_time_ms, 3)
+        cat_info['cpu_duration_ms'] = round(cpu_duration_ms, 3)
+        cat_info['sync_time_ms'] = round(sync_time_ms, 3)
+        cat_info['sync_ops_count'] = sync_ops_count
+        
+        # Flag sync bottleneck if significant
+        if sync_time_ms > 0.1 * gpu_kernel_time_ms and sync_time_ms > 1:
+            cat_info['has_sync_bottleneck'] = True
+            print(f"    ⚠️  {category_name}: Sync bottleneck detected ({sync_time_ms:.2f}ms sync time)")
+        else:
+            cat_info['has_sync_bottleneck'] = False
+        
+        # Also update the metadata file with time breakdown
+        metadata_file = cat_info['metadata_file']
+        if os.path.exists(metadata_file):
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            metadata['time_breakdown'] = {
+                'gpu_kernel_time_ms': cat_info['gpu_kernel_time_ms'],
+                'cpu_duration_ms': cat_info['cpu_duration_ms'],
+                'sync_time_ms': cat_info['sync_time_ms'],
+                'sync_ops_count': cat_info['sync_ops_count'],
+                'has_sync_bottleneck': cat_info['has_sync_bottleneck'],
+                'note': 'Use gpu_kernel_time_ms for bottleneck prioritization. sync_time_ms indicates host-device sync overhead.'
+            }
+            
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+    
+    print(f"  ✓ Time metrics calculated for all categories")
+    
     # Save category manifest
     manifest = {
         "platform": platform,
@@ -330,7 +410,8 @@ def main():
         "output_dir": output_dir,
         "gpu_utilization": gpu_utilization_metrics,
         "cpu_idle_critical": cpu_idle_critical,
-        "categories": exported_categories
+        "categories": exported_categories,
+        "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead."
     }
     
     manifest_file = f"{output_dir}/category_manifest.json"

@@ -144,7 +144,7 @@ For each identified pattern, provide recommendations in priority order:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/cpu_idle_findings.md`:
+Create `<output_dir>/category_findings/cpu_idle_findings.md`. Create it through the container on the node:
 
 ```markdown
 # CPU/Idle Time Analysis Findings

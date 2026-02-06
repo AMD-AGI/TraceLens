@@ -72,6 +72,105 @@ def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
     }
 
 
+def validate_efficiency(achieved: float, peak: float, metric_name: str) -> Dict[str, Any]:
+    """
+    Validate efficiency calculation and flag anomalies.
+
+    Efficiency values > 100% indicate measurement issues or incorrect peak specs.
+    These should be flagged as anomalies, not used to claim "excellent performance".
+    
+    Args:
+        achieved: Achieved performance value (TFLOPS or TB/s)
+        peak: Peak performance value (TFLOPS or TB/s)
+        metric_name: Name of the metric for warning messages
+
+    Returns:
+        Dict with:
+            - value: Efficiency percentage (or None if invalid)
+            - warning: Warning message if anomaly detected (or None)
+            - is_anomaly: Boolean indicating if this is an anomalous value
+    """
+    if peak <= 0:
+        return {
+            "value": None,
+            "warning": f"{metric_name}: Invalid peak value ({peak})",
+            "is_anomaly": True
+        }
+    
+    if achieved is None or np.isnan(achieved):
+        return {
+            "value": None,
+            "warning": None,
+            "is_anomaly": False
+        }
+    
+    efficiency = (achieved / peak) * 100
+    
+    if efficiency > 110:
+        return {
+            "value": round(efficiency, 2),
+            "warning": f"[ANOMALY] {metric_name} exceeds peak by {efficiency-100:.1f}% - verify measurement or peak spec",
+            "is_anomaly": True
+        }
+    elif efficiency > 100:
+        return {
+            "value": round(efficiency, 2),
+            "warning": f"[WARNING] {metric_name} slightly exceeds peak ({efficiency:.1f}%) - may be within measurement error",
+            "is_anomaly": False
+        }
+    
+    return {
+        "value": round(efficiency, 2),
+        "warning": None,
+        "is_anomaly": False
+    }
+
+
+def calculate_efficiency_with_validation(
+    achieved_tflops: Optional[float],
+    achieved_tbps: Optional[float],
+    peak_maf: float,
+    peak_hbm_bw: float
+) -> Dict[str, Any]:
+    """
+    Calculate both compute and memory efficiency with validation.
+    
+    Args:
+        achieved_tflops: Achieved TFLOPS
+        achieved_tbps: Achieved TB/s
+        peak_maf: Peak MAF in TFLOPS
+        peak_hbm_bw: Peak HBM bandwidth in TB/s
+        
+    Returns:
+        Dict with efficiency values and any warnings
+    """
+    compute_result = validate_efficiency(
+        achieved_tflops,
+        peak_maf,
+        "Compute efficiency"
+    )
+    
+    memory_result = validate_efficiency(
+        achieved_tbps,
+        peak_hbm_bw,
+        "Memory bandwidth"
+    )
+    
+    warnings = []
+    if compute_result['warning']:
+        warnings.append(compute_result['warning'])
+    if memory_result['warning']:
+        warnings.append(memory_result['warning'])
+    
+    return {
+        "compute_efficiency_pct": compute_result['value'],
+        "compute_is_anomaly": compute_result['is_anomaly'],
+        "memory_efficiency_pct": memory_result['value'],
+        "memory_is_anomaly": memory_result['is_anomaly'],
+        "warnings": warnings if warnings else None
+    }
+
+
 def calculate_efficiency(
     row: pd.Series,
     peak_hbm_bw: float,
@@ -79,7 +178,7 @@ def calculate_efficiency(
     method: str = 'auto'
 ) -> Dict[str, Optional[float]]:
     """
-    Calculate efficiency metrics for an operation.
+    Calculate efficiency metrics for an operation with validation.
     
     Args:
         row: DataFrame row with operation metrics
@@ -93,14 +192,16 @@ def calculate_efficiency(
             - 'prefer_memory': Try TB/s first, fall back to TFLOPS
             
     Returns:
-        Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type
+        Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type, warning
     """
     result = {
         'tflops_achieved': None,
         'tb_s_achieved': None,
         'efficiency_percent': None,
         'bound_type': None,
-        'flops_per_byte': None
+        'flops_per_byte': None,
+        'warning': None,
+        'is_anomaly': False
     }
     
     flops_byte = row.get('FLOPS/Byte', 0) if not pd.isna(row.get('FLOPS/Byte')) else 0
@@ -114,42 +215,39 @@ def calculate_efficiency(
     if tb_s is not None:
         result['tb_s_achieved'] = round(tb_s, 2)
     
-    # Determine bound type and calculate efficiency
+    # Determine bound type and calculate efficiency with validation
+    def set_efficiency_with_validation(achieved, peak, bound_type, metric_name):
+        validation = validate_efficiency(achieved, peak, metric_name)
+        result['efficiency_percent'] = validation['value']
+        result['bound_type'] = bound_type
+        result['warning'] = validation['warning']
+        result['is_anomaly'] = validation['is_anomaly']
+    
     if method == 'memory_bound':
         if tb_s is not None:
-            result['efficiency_percent'] = round((tb_s / peak_hbm_bw) * 100, 2)
-            result['bound_type'] = 'memory'
+            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
     elif method == 'compute_bound':
         if tflops_s is not None:
-            result['efficiency_percent'] = round((tflops_s / peak_maf) * 100, 2)
-            result['bound_type'] = 'compute'
+            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
     elif method == 'auto':
         if flops_byte > 100 and tflops_s is not None:
-            result['efficiency_percent'] = round((tflops_s / peak_maf) * 100, 2)
-            result['bound_type'] = 'compute'
+            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
         elif flops_byte < 50 and tb_s is not None:
-            result['efficiency_percent'] = round((tb_s / peak_hbm_bw) * 100, 2)
-            result['bound_type'] = 'memory'
+            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
         elif tflops_s is not None:
-            result['efficiency_percent'] = round((tflops_s / peak_maf) * 100, 2)
-            result['bound_type'] = 'compute'
+            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
         elif tb_s is not None:
-            result['efficiency_percent'] = round((tb_s / peak_hbm_bw) * 100, 2)
-            result['bound_type'] = 'memory'
+            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
     elif method == 'prefer_compute':
         if tflops_s is not None:
-            result['efficiency_percent'] = round((tflops_s / peak_maf) * 100, 2)
-            result['bound_type'] = 'compute'
+            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
         elif tb_s is not None:
-            result['efficiency_percent'] = round((tb_s / peak_hbm_bw) * 100, 2)
-            result['bound_type'] = 'memory'
+            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
     elif method == 'prefer_memory':
         if tb_s is not None:
-            result['efficiency_percent'] = round((tb_s / peak_hbm_bw) * 100, 2)
-            result['bound_type'] = 'memory'
+            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
         elif tflops_s is not None:
-            result['efficiency_percent'] = round((tflops_s / peak_maf) * 100, 2)
-            result['bound_type'] = 'compute'
+            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
     
     return result
 
@@ -206,6 +304,10 @@ def build_operation_metrics(
             'percent_of_category': round(percent_of_category, 2),
             'efficiency': efficiency
         }
+        
+        # Add efficiency warning if present (for anomaly detection)
+        if efficiency.get('warning'):
+            op_metric['efficiency_warning'] = efficiency['warning']
         
         # Add extra fields if specified
         extra_fields = category_config.get('extra_fields', [])

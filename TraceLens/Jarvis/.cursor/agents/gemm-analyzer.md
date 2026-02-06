@@ -125,7 +125,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/gemm_findings.md`:
+Create `<output_dir>/category_findings/gemm_findings.md`. 
 
 ```markdown
 # GEMM Analysis Summary
