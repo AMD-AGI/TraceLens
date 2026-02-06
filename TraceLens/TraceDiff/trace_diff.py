@@ -341,9 +341,7 @@ class TraceDiff:
             all_nodes1 = [
                 baseline_uid2node[c] for c in all1 if baseline_uid2node.get(c)
             ]
-            all_nodes2 = [
-                variant_uid2node[c] for c in all2 if variant_uid2node.get(c)
-            ]
+            all_nodes2 = [variant_uid2node[c] for c in all2 if variant_uid2node.get(c)]
             children1 = [
                 n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                 for n in all_nodes1
@@ -356,24 +354,19 @@ class TraceDiff:
             ]
             names1 = {get_name_uid(c, 1) for c in children1}
             names2 = {get_name_uid(c, 2) for c in children2}
-            in1_not2 = names1 - names2
-            in2_not1 = names2 - names1
-            all2_by_name = {
-                get_name_uid(c, 2): c
-                for c in all2
-                if variant_uid2node.get(c)
-            }
-            all1_by_name = {
-                get_name_uid(c, 1): c
-                for c in all1
-                if baseline_uid2node.get(c)
-            }
-            for n in in1_not2:
-                if n and n in all2_by_name:
-                    children2.append(all2_by_name[n])
-            for n in in2_not1:
-                if n and n in all1_by_name:
-                    children1.append(all1_by_name[n])
+
+            names1_all = {get_name_uid(c, 1): c for c in all1}
+            names2_all = {get_name_uid(c, 2): c for c in all2}
+
+            names1_only = names1 - names2
+            names2_only = names2 - names1
+
+            for n in names1_only:
+                if n in names2_all:
+                    children2.append(names2_all[n])
+            for n in names2_only:
+                if n in names1_all:
+                    children1.append(names1_all[n])
 
             def sort_by_ts(uids, uid2node):
                 nodes = [(uid2node.get(u), u) for u in uids if uid2node.get(u)]
@@ -1152,18 +1145,18 @@ class TraceDiff:
             kernel_name = re.sub(r"<.*?>", "", kernel_name)
             kernel_name = re.sub(r"\[.*?\]", "", kernel_name)
 
-            # GEMM kernel. Keeps 
+            # GEMM kernel. Keeps
             if kernel_name.startswith("Cijk"):
                 kernel_name = kernel_name.split("_UserArgs")[0]
-            
+
             # If kernel name contains 'Cijk', truncate everything after 'SAV_'
             if kernel_name.startswith("_gemm_"):
                 kernel_name = kernel_name.split("_BLOCK")[0]
-            
+
             if kernel_name.startswith("_matmul_"):
                 kernel_name = kernel_name.split("_matmul")[0] + "_matmul"
             if kernel_name.startswith("nvjet"):
-                kernel_name = 'nvjet'
+                kernel_name = "nvjet"
 
             # Remove more clutter
             kernel_name = kernel_name.replace("void ", "").replace("void", "")
