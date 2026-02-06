@@ -34,6 +34,9 @@ JARVIS is an AI-powered performance analysis agent that uses TraceLens to analyz
 The **Standalone Analysis Orchestrator** skill coordinates the entire analysis workflow.
 It queries user inputs, runs TraceLens to pre-compute trace data, and invokes category-specific sub-agents in parallel. Finally, it aggregates findings and generates a prioritized stakeholder report with optimization recommendations.
 
+### Continual Learning
+After an analysis run, if you identify a missed issue, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.
+
 ### Sub-Agents
 | Agent | Purpose |
 |-------|---------|
