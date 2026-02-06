@@ -3193,18 +3193,14 @@ class BatchNorm(Normalization):
         stride_input = tuple(event["args"]["Input Strides"][0])
         is_affine = args_input_dims[2] is not None
         is_training = bool(event["args"]["Concrete Inputs"][5])
-        if len(args_input_dims) > 1 and args_input_dims[1]:
-            dtype_out = event["args"]["Input type"][1]
-            stride_output = tuple(event["args"]["Input Strides"][1])
-        else:
-            dtype_out = None
-            stride_output = None
+        dtype_out = None
+        stride_output = None
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[-3], # BatchNorm requires channels first
+            "num_channels": args_input_dims[3][0], # inputs 1 and 2 can be null if non-affine
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3222,18 +3218,15 @@ class LayerNorm(Normalization):
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         op_shape = tuple(args_input_dims[0])
-        num_channels = prod(args_input_dims[2])
-        has_bias = len(args_input_dims[3]) != 0
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        num_channels = prod(concrete_inputs[1])
+        has_bias = args_input_dims[2] is not None
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = args_input_dims[1] is not None
         is_training = True
-        if len(args_input_dims) > 1 and args_input_dims[1]:
-            dtype_out = event["args"]["Input type"][1]
-            stride_output = tuple(event["args"]["Input Strides"][1])
-        else:
-            dtype_out = None
-            stride_output = None
+        dtype_out = None
+        stride_output = None
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
@@ -3267,18 +3260,14 @@ class GroupNorm(Normalization):
         stride_input = tuple(event["args"]["Input Strides"][0])
         is_affine = args_input_dims[2] is not None
         is_training = True
-        if len(args_input_dims) > 1 and args_input_dims[1]:
-            dtype_out = event["args"]["Input type"][1]
-            stride_output = tuple(event["args"]["Input Strides"][1])
-        else:
-            dtype_out = None
-            stride_output = None
+        dtype_out = None
+        stride_output = None
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[-3] / int(concrete_inputs[1]),
+            "num_channels": op_shape[1] / int(concrete_inputs[1]), # exactly 1 batch dim, so num_channels is always dim 1
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3293,7 +3282,6 @@ class InstanceNorm(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
-        # concrete_inputs[1] = num_groups
         concrete_inputs = event["args"]["Concrete Inputs"]
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
@@ -3302,20 +3290,15 @@ class InstanceNorm(Normalization):
         # The "use_input_stats" argument means that we need to calculate stats from the batch,
         # effectively the same as how we use training in other cases
         # layernorm actually calls batchnorm and sets is_training to use_input_stats
-        # https://github.com/pytorch/pytorch/blob/4ee85a80c4488f4b76915140b33ae5bdfe249db1/aten/src/ATen/native/Normalization.cpp#L758
         is_training = bool(concrete_inputs[5])
-        if len(args_input_dims) > 1 and args_input_dims[1]:
-            dtype_out = event["args"]["Input type"][1]
-            stride_output = tuple(event["args"]["Input Strides"][1])
-        else:
-            dtype_out = None
-            stride_output = None
+        dtype_out = None
+        stride_output = None
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": prod(op_shape[:-2]),
+            "num_channels": op_shape[1], # exactly 1 batch dim in source
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3334,12 +3317,8 @@ class RMSNorm(Normalization):
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
         is_affine = args_input_dims[2] is not None
-        if len(args_input_dims) > 1 and args_input_dims[1]:
-            dtype_out = event["args"]["Input type"][1]
-            stride_output = tuple(event["args"]["Input Strides"][1])
-        else:
-            dtype_out = None
-            stride_output = None
+        dtype_out = None
+        stride_output = None
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
