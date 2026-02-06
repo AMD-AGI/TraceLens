@@ -2396,9 +2396,22 @@ class vllm_unified_attention_with_output(SDPA):
         annotation= str(event.get("annotation"))
         if annotation == "NA":
             raise NotImplementedError("VLLM attention without annotation is not supported")
-        requests=annotation.replace("(","_").replace(")","_").split("_")
-        if len(requests)<8:
-            raise NotImplementedError("VLLM attention without annotation is not supported")
+        if "sq" not in annotation:
+            requests=annotation.replace("(","_").replace(")","_").split("_")
+            if len(requests)<8:
+                raise NotImplementedError("VLLM attention without annotation is not supported")
+            c_sq,c_sk,c_sqsq,c_sqsk= int(requests[3]),int(requests[3]),int(requests[4]),int(requests[4])
+            g_sq,g_sk,g_sqsq,g_sqsk = 0,0,0,0
+            #int(requests[8]),int(requests[8]),int(requests[8]),int(requests[8])
+        else:
+            name=annotation.replace("(","_").replace(")","_")
+            requests=re.sub(r"[sqk]+","_",name).split("_")
+            if len(requests)<16:
+                raise NotImplementedError("VLLM attention without annotation is not supported")
+            c_sq,c_sk,c_sqsq,c_sqsk= int(requests[5]),int(requests[6]),int(requests[7]),int(requests[8])
+            g_sq,g_sk,g_sqsq,g_sqsk = int(requests[13]),int(requests[14]),int(requests[15]),int(requests[16])
+        
+        
         input_dims = event["args"]["Input Dims"]
         
         concrete_inputs = event["args"]["Concrete Inputs"]
@@ -2409,7 +2422,7 @@ class vllm_unified_attention_with_output(SDPA):
         N_KV, H_KV, d_h_v = k_shape
         dropout_p = 0.0
         is_causal=False
-
+        
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2421,38 +2434,46 @@ class vllm_unified_attention_with_output(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": True,
-            "sum_ctx_tokens": int(requests[3]),
-            "sum_ctx_squared_tokens": int(requests[4]),
-            "sum_gen_tokens": int(requests[8])
+            "c_sq": c_sq,
+            "c_sk": c_sk,
+            "c_sqsq": c_sqsq,
+            "c_sqsk": c_sqsk,
+            "g_sq": g_sq,
+            "g_sk": g_sk,
+            "g_sqsq": g_sqsq,
+            "g_sqsk": g_sqsk,
         }
 
     def flops(self):
         #prefill part
-        if self.param_details["sum_ctx_tokens"]==0:
-            raise NotImplementedError("Roofline for pure generation phase is not defined")
-        ctx_flops_qk = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk)
-        ctx_flops_pv = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"]* self.d_h_v )
+        if self.param_details["c_sq"]==0 and self.param_details["g_sq"]==0:
+            raise NotImplementedError("vLLM attention perf model for decode phase requires custom annotations")
+        ## Consideration for chunked prefill. This will consider non causal attention between current and previous chunks, and causal attention between current chunks
+        ctx_flops_qk = self.H_Q * (2 *  self.param_details["c_sqsk"] * self.d_h_qk)
+        ctx_flops_pv = self.H_Q * (2 *  self.param_details["c_sqsk"]* self.d_h_v )
+        ctx_flops_qk -= self.H_Q * (1 *  self.param_details["c_sqsq"] * self.d_h_qk)
+        ctx_flops_pv -= self.H_Q * (1 *  self.param_details["c_sqsq"]* self.d_h_v )
         #Generation tokens
         ## ToDo: Add seqlen for KV
-        gen_flops_qk = self.H_Q * (2 * self.param_details["sum_gen_tokens"] * self.d_h_qk)
-        gen_flops_pv = self.H_Q * (2 * self.param_details["sum_gen_tokens"]* self.d_h_v )
+        gen_flops_qk = self.H_Q * (2 * self.param_details["g_sqsk"] * self.d_h_qk)
+        gen_flops_pv = self.H_Q * (2 * self.param_details["g_sqsk"]* self.d_h_v )
         
         return ctx_flops_qk+ctx_flops_pv+gen_flops_qk+gen_flops_pv
 
     def bytes_func_vllm(self,B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
-        ## Prefill 
-        elems_q_read = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_qk
-        elems_k_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_qk
-        elems_v_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_v
-        elems_out_write = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_v
+        ## context tokens
+        elems_q_read = B * self.param_details["c_sq"] * H_Q * d_h_qk
+        elems_k_read = B * self.param_details["c_sk"] * H_KV * d_h_qk
+        elems_v_read = B * self.param_details["c_sk"] * H_KV * d_h_v
+        elems_out_write = B * self.param_details["c_sq"] * H_Q * d_h_v
         total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
-        #Decode - this will not be used as needs additional information from vLLM engine
-
-        #elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
-        #elems_k_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_qk
-        #elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
-        #elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
-        #total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        ## Decode tokens
+        elems_q_read = B * self.param_details["g_sq"] * H_Q * d_h_qk
+        elems_k_read = B * self.param_details["g_sk"] * H_KV * d_h_qk
+        elems_v_read = B * self.param_details["g_sk"] * H_KV * d_h_v
+        elems_out_write = B * self.param_details["g_sq"] * H_Q * d_h_v
+        
+        total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
         return total_elems_moved * bytes_per_element
 
     # TODO make bytes_per_element based on profile info
