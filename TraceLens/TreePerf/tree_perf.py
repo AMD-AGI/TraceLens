@@ -658,6 +658,12 @@ class TreePerfAnalyzer:
             while current is not None:
                 cat = self.event_to_category(current)
                 if cat == "cpu_op":
+                    # Special case: 'execute' is a pass-through cpu_op
+                    # (e.g. conv_bn_fused -> execute -> cuda launch -> kernel)
+                    # Skip it and use its parent as the launcher instead.
+                    if current.get("name") == "execute":
+                        current = self.tree.get_parent_event(current)
+                        continue
                     leaf_cpu_op = current
                     break
                 elif cat == "python_function":

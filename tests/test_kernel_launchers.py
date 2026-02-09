@@ -655,14 +655,18 @@ class TestGraphLaunch:
 
 
 class TestExecutePattern:
-    """Test the special 'execute' cpu_op pattern."""
+    """Test the special 'execute' cpu_op pattern.
 
-    def test_execute_cpu_op_is_leaf_launcher(self):
+    The 'execute' cpu_op is a pass-through: the real launcher is its parent cpu_op.
+    e.g. conv_bn_fused -> execute -> cuda launch -> kernel
+         => launcher should be conv_bn_fused, NOT execute.
+    """
+
+    def test_execute_skipped_parent_is_launcher(self):
         """
         cpu_op -> cpu_op(execute) -> runtime -> kernel
 
-        The 'execute' cpu_op should be detected as the kernel launcher since
-        it's the first cpu_op ancestor when walking up from the kernel.
+        The 'execute' cpu_op should be skipped; its parent cpu_op is the launcher.
         """
         corr = 950
         events = [
@@ -703,36 +707,33 @@ class TestExecutePattern:
 
         launchers = analyzer.get_kernel_launchers()
 
-        # The 'execute' cpu_op should be the launcher (it's the leaf/first cpu_op from kernel)
+        # 'execute' is skipped; the parent cpu_op should be the launcher
         assert len(launchers) == 1
-        assert launchers[0]["name"] == "execute"
+        assert launchers[0]["name"] == "outer_wrapper_op"
         assert launchers[0]["direct_kernel_count"] == 1
 
-    def test_execute_with_python_func(self):
+    def test_conv_bn_fused_execute_pattern(self):
         """
-        cpu_op -> cpu_op(execute) -> python_func -> runtime -> kernel
+        conv_bn_fused -> execute -> runtime -> kernel
 
-        Even with python functions, 'execute' should still be detected as launcher.
+        Real-world regression case: conv_bn_fused should be the launcher.
         """
-        corr = 951
+        corr = 952
         events = [
             _mk_event(
-                "cpu_op", "outer_op", ts=1000, dur=250, pid=100, tid=100, args={}
-            ),
-            _mk_event("cpu_op", "execute", ts=1050, dur=150, pid=100, tid=100, args={}),
-            _mk_event(
-                "python_function",
-                "graph/execute.py:run",
-                ts=1060,
-                dur=130,
+                "cpu_op",
+                "conv_bn_fused",
+                ts=1000,
+                dur=200,
                 pid=100,
                 tid=100,
-                args={},
+                args={"Input Dims": [[1, 64, 56, 56]]},
             ),
+            _mk_event("cpu_op", "execute", ts=1050, dur=100, pid=100, tid=100, args={}),
             _mk_event(
                 "cuda_runtime",
                 "hipLaunchKernel",
-                ts=1080,
+                ts=1060,
                 dur=5,
                 pid=100,
                 tid=100,
@@ -740,32 +741,26 @@ class TestExecutePattern:
             ),
             _mk_event(
                 "kernel",
-                "graph_kernel",
-                ts=1120,
-                dur=60,
+                "conv_fwd_kernel",
+                ts=1100,
+                dur=80,
                 pid=0,
                 tid=7,
                 args={"correlation": corr, "stream": 7},
             ),
-            _mk_ac2g(corr, pid=0, tid=7, ts=1120, phase="s"),
-            _mk_ac2g(corr, pid=0, tid=7, ts=1120, phase="f"),
+            _mk_ac2g(corr, pid=0, tid=7, ts=1100, phase="s"),
+            _mk_ac2g(corr, pid=0, tid=7, ts=1100, phase="f"),
         ]
 
-        # Test WITHOUT python func
-        tree1 = TraceToTree(deepcopy(events))
-        analyzer1 = TreePerfAnalyzer(tree1, add_python_func=False)
-        launchers1 = analyzer1.get_kernel_launchers()
+        tree = TraceToTree(deepcopy(events))
+        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
 
-        # Test WITH python func
-        tree2 = TraceToTree(deepcopy(events))
-        analyzer2 = TreePerfAnalyzer(tree2, add_python_func=True)
-        launchers2 = analyzer2.get_kernel_launchers()
+        launchers = analyzer.get_kernel_launchers()
 
-        # Both should find 'execute' as the launcher
-        assert len(launchers1) == 1
-        assert len(launchers2) == 1
-        assert launchers1[0]["name"] == "execute"
-        assert launchers2[0]["name"] == "execute"
+        assert len(launchers) == 1
+        assert launchers[0]["name"] == "conv_bn_fused"
+        assert launchers[0]["direct_kernel_count"] == 1
+        assert launchers[0]["total_direct_kernel_time"] == 80.0
 
 
 class TestNestedCpuOps:
