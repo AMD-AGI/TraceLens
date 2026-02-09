@@ -10,6 +10,7 @@ from typing import Any, Callable, cast, Dict, Optional
 import pandas as pd
 import json
 import os
+import re
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -30,6 +31,7 @@ class TraceDiff:
         self.diff_stats_summary_df = pd.DataFrame()  # DataFrame for diff stats summary
         self.cpu_op_map_trace1 = None
         self.cpu_op_map_trace2 = None
+        self.cpu_op_map = None
         # Cache for merged tree mapping only (baseline/variant dicts are already in tree objects)
         self._merged_id_to_event = None
 
@@ -1208,7 +1210,56 @@ class TraceDiff:
         Returns:
             Dict with keys "trace1" and "trace2", each mapping cpu_op_name -> list of kernel names.
         """
-        import json
+        def find_common_name(name1,name2,module_map):
+            modules1 = module_map.get(name1,[])
+            modules2 = module_map.get(name2,[])
+
+            name1_clean = name1.split('::')[-1]
+            name2_clean = name2.split('::')[-1]
+            if name1_clean == name2_clean:
+                return name1_clean
+            if name1_clean in name2_clean:
+                return name1_clean
+            if name2_clean in name1_clean:
+                return name2_clean
+            if len(modules1)==1 and len(modules2)==1:
+                if modules1[0]==modules2[0]:
+                    return re.sub(" ","",modules1[0])
+            return None
+        def get_rename_map(df):
+            result = {
+                str(lca_id): {
+                    source: {
+                        "name": list(group["cpu_op_name"].unique()),
+                        #"nn_module_parent": list(group["nn_module_parent"].unique())
+                    }
+                    for source, group in df[df['lowest_common_ancestor_id'] == lca_id].groupby('source')
+                }
+                for lca_id in df['lowest_common_ancestor_id'].unique()
+            }
+
+            module_map={}
+            for cpu_op in df["cpu_op_name"].unique():
+                for source, group in df[df['cpu_op_name'] == cpu_op].groupby('source'):
+                    module_map[cpu_op]= list(group["nn_module_parent"].unique())
+            visited_cpu_op = []
+            rename_map ={}
+            ##
+            for _, mapping in result.items():
+                if "trace1" in mapping and "trace2" in mapping:
+                    if any(op in visited_cpu_op for op in mapping['trace1']['name']) or any(op in visited_cpu_op for op in mapping['trace2']['name']):
+                        continue
+                    visited_cpu_op.extend(mapping['trace1']['name'])
+                    visited_cpu_op.extend(mapping['trace2']['name'])
+                    if len(mapping["trace1"]["name"]) == len(mapping["trace2"]["name"]):
+                        for n1,n2 in zip(mapping["trace1"]["name"],mapping["trace2"]["name"]):
+                            if n1 != n2:
+                                common_name=find_common_name(n1,n2,module_map)
+                                if common_name is not None: 
+                                    print(f"Renaming: {n1}, {n2} to {common_name}")
+                                    rename_map[n2]=common_name 
+                                    rename_map[n1]=common_name
+            return rename_map
 
         if (
             self.diff_stats_unique_args_summary_df is None
@@ -1238,6 +1289,25 @@ class TraceDiff:
         self.cpu_op_map_trace1 = cpu_op_map_trace1
         self.cpu_op_map_trace2 = cpu_op_map_trace2
 
+        df = self.diff_stats_df
+
+        rename_map = get_rename_map(df)
+
+        def rename_cpu_op(row):
+            if row['cpu_op_name'] in rename_map:
+                return rename_map[row['cpu_op_name']]
+            return row['cpu_op_name']
+
+        df_agg['cpu_op_name'] = df_agg.apply(rename_cpu_op, axis=1)
+
+        cpu_op_map = (
+            df_agg.groupby(["cpu_op_name"])
+            .agg({"name": lambda x: sorted(set(x))})
+            .sort_index()
+        )
+        
+        self.cpu_op_map = cpu_op_map
+
     def generate_tracediff_report(self):
         """
         Generate all TraceDiff output DataFrames and update the object variables.
@@ -1256,8 +1326,10 @@ class TraceDiff:
             - merged_tree_output.txt
             - diff_stats.csv
             - diff_stats_summary.csv
+            - cpu_op_map_trace1.json
+            - cpu_op_map_trace2.json
+            - cpu_op_map.json
         """
-        import os
 
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
@@ -1318,3 +1390,15 @@ class TraceDiff:
             print(
                 f"[TraceDiff] cpu_op_map_trace2 is empty. Run get_cpu_op_to_kernels_json() first."
             )
+        if self.cpu_op_map is not None:
+            with open(
+                os.path.join(output_folder, "cpu_op_map.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    self.cpu_op_map.to_dict()["name"],
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
