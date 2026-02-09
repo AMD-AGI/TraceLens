@@ -530,7 +530,6 @@ def generate_perf_report_pytorch(
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
-        print(df_unified_perf)
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
                 df_unified_perf, agg_metrics=agg_metrics, include_pct=True
@@ -842,6 +841,10 @@ def main():
     print("Loaded capture tree with {} events".format(len(capture_tree.events)))
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
     capture_roots=[event for event in capture_tree.events if "compiled_graph_wrapper" in event.get("name","").lower() ]
+    if len(capture_roots)==0:
+        capture_roots=[event for event in capture_tree.events if "vllm/compilation/wrapper.py(216): __call__" in event.get("name","").lower() ]
+
+        
     #compiled_graph_wrapper
     #orchinductor_root
     graph_roots=[event for event in graph_tree.events if "graphlaunch" in event.get("name","").lower() ]
@@ -858,7 +861,6 @@ def main():
         graph_tree=append_subtree_to_event(graph_tree,capture_events,g_root)
         graph_tree=make_connections(graph_tree,graph_filtered_events,capture_filtered_events)
 
-    
     generate_perf_report_pytorch(
         augmented_tree=graph_tree,
         output_xlsx_path=args.output_xlsx_path,
