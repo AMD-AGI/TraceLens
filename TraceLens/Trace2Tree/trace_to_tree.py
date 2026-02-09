@@ -119,7 +119,6 @@ class BaseTraceToTree(ABC):
         dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
-            event_name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
             event["tree"] = True
             self.name2event_uids[
                 event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
@@ -136,16 +135,12 @@ class BaseTraceToTree(ABC):
                 and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
-                # Parent is the element below the top (stack[-1] is the event we're popping)
-                parent = stack[-2] if len(stack) >= 2 else None
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
                 # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
-                # Collapse single-child built-in nodes during pop (we've seen all children)
-                self._collapse_builtin_if_single_child(popped_event, parent)
 
             if (
                 stack
@@ -184,38 +179,6 @@ class BaseTraceToTree(ABC):
                         event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                     )
                 dict_pidtid2num_cpu_ops[stack_key] += 1
-
-    def _collapse_builtin_if_single_child(self, event, parent):
-        """
-        If event is a '<built-in method' node with exactly one child, collapse it:
-        make the child a direct child of parent and remove event from the tree.
-        parent may be None if event was a root.
-        """
-        event_name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
-        if not event_name.startswith("<built-in method"):
-            return
-        children = event.get("children", [])
-        if len(children) != 1:
-            return
-        child_uid = children[0]
-        child = self.get_UID2event(child_uid)
-        builtin_uid = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-        if parent is None:
-            if builtin_uid in self.cpu_root_nodes:
-                self.cpu_root_nodes = [
-                    child_uid if uid == builtin_uid else uid
-                    for uid in self.cpu_root_nodes
-                ]
-            child["parent"] = None
-        else:
-            child["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-            parent_children = parent.setdefault("children", [])
-            idx = parent_children.index(builtin_uid)
-            parent_children[idx] = child_uid
-        event["tree"] = False
-        event["parent"] = None
-        event["children"] = []
-        self.name2event_uids[event_name].remove(builtin_uid)
 
     def label_non_gpu_paths(self):
         # 1. Iterate through non GPU nodes and chck the gpu_events list
@@ -742,7 +705,6 @@ class TraceToTree:
         dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
-            event_name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
             event["tree"] = True
             self.name2event_uids[
                 event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
@@ -759,16 +721,12 @@ class TraceToTree:
                 and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
-                # Parent is the element below the top (stack[-1] is the event we're popping)
-                parent = stack[-2] if len(stack) >= 2 else None
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
                 # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
-                # Collapse single-child built-in nodes during pop (we've seen all children)
-                self._collapse_builtin_if_single_child(popped_event, parent)
 
             if (
                 stack
@@ -807,38 +765,6 @@ class TraceToTree:
                         event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                     )
                 dict_pidtid2num_cpu_ops[stack_key] += 1
-
-    def _collapse_builtin_if_single_child(self, event, parent):
-        """
-        If event is a '<built-in method' node with exactly one child, collapse it:
-        make the child a direct child of parent and remove event from the tree.
-        parent may be None if event was a root.
-        """
-        event_name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
-        if not event_name.startswith("<built-in method"):
-            return
-        children = event.get("children", [])
-        if len(children) != 1:
-            return
-        child_uid = children[0]
-        child = self.get_UID2event(child_uid)
-        builtin_uid = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-        if parent is None:
-            if builtin_uid in self.cpu_root_nodes:
-                self.cpu_root_nodes = [
-                    child_uid if uid == builtin_uid else uid
-                    for uid in self.cpu_root_nodes
-                ]
-            child["parent"] = None
-        else:
-            child["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-            parent_children = parent.setdefault("children", [])
-            idx = parent_children.index(builtin_uid)
-            parent_children[idx] = child_uid
-        event["tree"] = False
-        event["parent"] = None
-        event["children"] = []
-        self.name2event_uids[event_name].remove(builtin_uid)
 
     def add_gpu_ops_to_tree(self):
         for runtime_event in self.events:
