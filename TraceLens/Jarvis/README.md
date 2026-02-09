@@ -43,6 +43,13 @@ pip install -e .
    @standalone-analysis-orchestrator
    ```
 
+   OR
+
+   ```
+   Run standalone analysis on <path_to_trace.json>
+   ```
+
+
 2. **Provide when prompted:**
    - Trace file path
    - Platform (MI300X/MI325X/MI355X/MI400)
@@ -96,7 +103,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes ca
 ```
 
 ### Continual Learning
-After an analysis run, if you identify a missed issue, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.
+After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.
 
 ### Sub-Agents
 | Agent | Purpose |
