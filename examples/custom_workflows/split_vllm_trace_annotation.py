@@ -90,7 +90,7 @@ def extract_iteration(
     correlation_ids: Set[int] = set()
     flow_events = []  # Collect flow events separately
     gpu_events = []  # Collect GPU events separately
-
+    num_gpu_events=0
     for e in events:
         ts = e.get("ts")
         
@@ -140,11 +140,19 @@ def extract_iteration(
     for e in gpu_events:
         if e.get("args", {}).get("correlation") in correlation_ids:
             filtered_events.append(e)
-    
+            num_gpu_events+=1
+    from tqdm import tqdm
+    for e in tqdm(filtered_events):
+        if "vllm::unified_attention_with_output" in e.get("name", ""):
+            #print(e.keys())
+            dims = e.get("args", {}).get("Input Dims")
+            if dims and len(dims) > 0 and len(dims[0]) > 0:
+                batch = dims[0][0]
+            break
     # Create output trace
     output = trace_json.copy()
     output["traceEvents"] = filtered_events
-    return output
+    return output,batch,num_gpu_events
 
 
 def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
@@ -172,8 +180,9 @@ def extract_and_save(
     indices = range(start, end)
     
     for idx, root in zip(indices, selected):
-        iter_trace = extract_iteration(root, events, trace_json)
-        name_append=root["name"].replace("(", "_").replace(")", "")
+        iter_trace,batch,num_gpu_events = extract_iteration(root, events, trace_json)
+        #name_append=root["name"].replace("(", "_").replace(")", "")
+        name_append = f"batch{batch}_gpu{num_gpu_events}" 
         out_path = os.path.join(output_dir, f"{base_name}_{prefix}_{idx}_{name_append}.json.gz")
         with gzip.open(out_path, "wt") as f:
             json.dump(iter_trace, f)
@@ -229,7 +238,6 @@ def main():
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
     base_name = os.path.basename(args.trace_path)
     base_name = base_name.replace(".json.gz", "").replace(".json", "")
     
