@@ -1222,6 +1222,8 @@ class TraceDiff:
                 return name1_clean
             if name2_clean in name1_clean:
                 return name2_clean
+            if name1_clean[0:20]== name2_clean[0:20]:
+                return f"{name1_clean}/{name2_clean}"
             if len(modules1)==1 and len(modules2)==1:
                 if modules1[0]==modules2[0]:
                     return re.sub(" ","",modules1[0])
@@ -1231,7 +1233,7 @@ class TraceDiff:
                 str(lca_id): {
                     source: {
                         "name": list(group["cpu_op_name"].unique()),
-                        #"nn_module_parent": list(group["nn_module_parent"].unique())
+                        "nn_module_parent": list(group["nn_module_parent"].unique())
                     }
                     for source, group in df[df['lowest_common_ancestor_id'] == lca_id].groupby('source')
                 }
@@ -1245,9 +1247,9 @@ class TraceDiff:
             visited_cpu_op = []
             rename_map ={}
             ##
-            for _, mapping in result.items():
+            for lcaid, mapping in result.items():
                 if "trace1" in mapping and "trace2" in mapping:
-                    if any(op in visited_cpu_op for op in mapping['trace1']['name']) or any(op in visited_cpu_op for op in mapping['trace2']['name']):
+                    if all(op in visited_cpu_op for op in mapping['trace1']['name']) and all(op in visited_cpu_op for op in mapping['trace2']['name']):
                         continue
                     visited_cpu_op.extend(mapping['trace1']['name'])
                     visited_cpu_op.extend(mapping['trace2']['name'])
@@ -1259,6 +1261,30 @@ class TraceDiff:
                                     print(f"Renaming: {n1}, {n2} to {common_name}")
                                     rename_map[n2]=common_name 
                                     rename_map[n1]=common_name
+                    else:
+                        n1_list=mapping["trace1"]["name"]
+                        n1_list_copy = n1_list.copy()
+                        n2_list=mapping["trace2"]["name"]
+                        for n1 in n1_list:
+                            found=0
+                            for n2 in n2_list:
+                                if n1==n2:
+                                    n1_list_copy.remove(n1)
+                                    n2_list.remove(n2)
+                                    break
+                        n1_list=n1_list_copy.copy()
+                        for n1 in n1_list_copy:
+                            for n2 in n2_list:
+                                common_name=find_common_name(n1,n2,module_map)
+                                if common_name is not None: 
+                                    print(f"Renaming: {n1}, {n2} to {common_name}")
+                                    rename_map[n1]=common_name 
+                                    rename_map[n2]=common_name
+                                    n2_list.remove(n2)
+                                    n1_list.remove(n1)
+                                    break
+                        if len(n1_list)>0 or len(n2_list)>0:
+                            print(f"Unmatched for LCA {lcaid}: {n1_list} vs {n2_list}")
             return rename_map
 
         if (
@@ -1300,11 +1326,13 @@ class TraceDiff:
 
         df_agg['cpu_op_name'] = df_agg.apply(rename_cpu_op, axis=1)
 
-        cpu_op_map = (
-            df_agg.groupby(["cpu_op_name"])
-            .agg({"name": lambda x: sorted(set(x))})
-            .sort_index()
-        )
+        cpu_op_map = {
+            cpu_op: {
+                source: sorted(list(group["name"].unique()))
+                for source, group in df[df['cpu_op_name'] == cpu_op].groupby('source')
+            }
+            for cpu_op in df['cpu_op_name'].unique()
+        }
         
         self.cpu_op_map = cpu_op_map
 
@@ -1397,7 +1425,7 @@ class TraceDiff:
                 encoding="utf-8",
             ) as f:
                 json.dump(
-                    self.cpu_op_map.to_dict()["name"],
+                    self.cpu_op_map,
                     f,
                     indent=2,
                     ensure_ascii=False,
