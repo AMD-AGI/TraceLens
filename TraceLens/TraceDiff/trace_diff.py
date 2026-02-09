@@ -10,6 +10,7 @@ from typing import Any, Callable, cast, Dict, Optional
 import pandas as pd
 import json
 import os
+from collections import defaultdict
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -803,7 +804,7 @@ class TraceDiff:
                 - gpu_events: list of GPU event nodes in this cluster
                 - kernel_names: list of kernel names
                 - kernel_time: total time for these kernels
-                - timestamp: start time of the CPU op (for chronological ordering)
+                - ts: start time of the CPU op (for chronological ordering)
             """
             node = tree_uid2node.get(root_uid)
             if node is None:
@@ -861,7 +862,7 @@ class TraceDiff:
                     "gpu_events": gpu_events,
                     "kernel_names": kernel_names,
                     "kernel_time": kernel_time,
-                    "timestamp": min_timestamp  # Use minimum GPU kernel timestamp for ordering
+                    "ts": min_timestamp  # Use minimum GPU kernel timestamp for ordering
                 })
             
             return clusters
@@ -917,8 +918,8 @@ class TraceDiff:
                         )
 
                         # Sort clusters by timestamp (chronological order)
-                        clusters1 = sorted(clusters1, key=lambda c: c["timestamp"])
-                        clusters2 = sorted(clusters2, key=lambda c: c["timestamp"])
+                        clusters1 = sorted(clusters1, key=lambda c: c["ts"])
+                        clusters2 = sorted(clusters2, key=lambda c: c["ts"])
                         
                         # Create mappings from input_dims to clusters
                         clusters1_by_dims = {c["input_dims"]: c for c in clusters1}
@@ -1096,17 +1097,17 @@ class TraceDiff:
                         if common_dims:
                             # Handle CPU ops before the first common dim
                             first_common_dim = common_dims[0]
-                            first_ts1 = clusters1_by_dims[first_common_dim]["timestamp"]
-                            first_ts2 = clusters2_by_dims[first_common_dim]["timestamp"]
+                            first_ts1 = clusters1_by_dims[first_common_dim]["ts"]
+                            first_ts2 = clusters2_by_dims[first_common_dim]["ts"]
                             
                             # Collect CPU ops before first common dim
                             gap_clusters1 = [
                                 c1 for c1 in clusters1
-                                if c1["timestamp"] < first_ts1 and c1["input_dims"] not in added_dims
+                                if c1["ts"] < first_ts1 and c1["input_dims"] not in added_dims
                             ]
                             gap_clusters2 = [
                                 c2 for c2 in clusters2
-                                if c2["timestamp"] < first_ts2 and c2["input_dims"] not in added_dims
+                                if c2["ts"] < first_ts2 and c2["input_dims"] not in added_dims
                             ]
                             
                             # Create single row for all CPU ops in the gap
@@ -1127,19 +1128,19 @@ class TraceDiff:
                                     current_cluster2 = clusters2_by_dims[current_dim]
                                     next_cluster1 = clusters1_by_dims[next_dim]
                                     next_cluster2 = clusters2_by_dims[next_dim]
-                                    current_ts1 = current_cluster1["timestamp"]
-                                    next_ts1 = next_cluster1["timestamp"]
-                                    current_ts2 = current_cluster2["timestamp"]
-                                    next_ts2 = next_cluster2["timestamp"]
+                                    current_ts1 = current_cluster1["ts"]
+                                    next_ts1 = next_cluster1["ts"]
+                                    current_ts2 = current_cluster2["ts"]
+                                    next_ts2 = next_cluster2["ts"]
                                     
                                     # Collect CPU ops in the gap
                                     gap_clusters1 = [
                                         c1 for c1 in current_cluster1["gpu_events"]
-                                        if (current_ts1 < c1["timestamp"] < next_ts1)
+                                        if (current_ts1 < c1["ts"] < next_ts1)
                                     ]
                                     gap_clusters2 = [
                                         c2 for c2 in current_cluster2["gpu_events"]
-                                        if (current_ts2 < c2["timestamp"] < next_ts2)
+                                        if (current_ts2 < c2["ts"] < next_ts2)
                                     ]
                                     
                                     # Create single row for all CPU ops in the gap
@@ -1149,17 +1150,17 @@ class TraceDiff:
                             
                             # Handle CPU ops after the last common dim
                             last_common_dim = common_dims[-1]
-                            last_ts1 = clusters1_by_dims[last_common_dim]["timestamp"]
-                            last_ts2 = clusters2_by_dims[last_common_dim]["timestamp"]
+                            last_ts1 = clusters1_by_dims[last_common_dim]["ts"]
+                            last_ts2 = clusters2_by_dims[last_common_dim]["ts"]
                             
                             # Collect CPU ops after last common dim
                             gap_clusters1 = [
                                 c1 for c1 in clusters1
-                                if c1["timestamp"] > last_ts1 and c1["input_dims"] not in added_dims
+                                if c1["ts"] > last_ts1 and c1["input_dims"] not in added_dims
                             ]
                             gap_clusters2 = [
                                 c2 for c2 in clusters2
-                                if c2["timestamp"] > last_ts2 and c2["input_dims"] not in added_dims
+                                if c2["ts"] > last_ts2 and c2["input_dims"] not in added_dims
                             ]
                             
                             # Create single row for all CPU ops in the gap
@@ -1180,7 +1181,10 @@ class TraceDiff:
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
                 if event1 and self.is_gpu_path(event1):
-                                        # Find all last CPU ops on GPU paths in this subtree
+                    lca = event1.get("parent")
+                    lca_name = self._get_op_name(lca, 1)
+                    lca_id = baseline_uid2node.get(lca['uid1'])['merged_id']
+                    # Find all last CPU ops on GPU paths in this subtree
                     cpu_op_uids = find_all_last_cpu_ops_on_gpu_path(
                         node, self.baseline, baseline_uid2node, "uid1"
                     )
@@ -1191,7 +1195,7 @@ class TraceDiff:
                         if cpu_op_node is None:
                             continue
 
-                        name = self._get_op_name(cpu_op_uid, 1)
+                        cpu_op_name = self._get_op_name(cpu_op_uid, 1)
                         input_shape1 = self.get_input_shape(cpu_op_node)
                         concrete_inputs1 = self.get_concrete_inputs(cpu_op_node)
                         input_strides1 = self.get_input_strides(cpu_op_node)
@@ -1202,9 +1206,10 @@ class TraceDiff:
                         if kernel_names1:
                             rows.append(
                                 {
-                                    "lowest_common_ancestor_name": name,
+                                    "lowest_common_ancestor_name": lca_name,
+                                    'lowest_common_ancestor_id': lca_id,
                                     "merged_id": merged_id,
-                                    "cpu_op_name_trace1": name,
+                                    "cpu_op_name_trace1": cpu_op_name,
                                     "cpu_op_name_trace2": "",
                                     "nn_module_stack_trace1": cpu_op_node.get(
                                         "nn_module_stack", ""
@@ -1230,6 +1235,9 @@ class TraceDiff:
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
                 if event2 and self.is_gpu_path(event2):
+                    lca = event2.get("parent")
+                    lca_name = self._get_op_name(lca, 2)
+                    lca_id = variant_uid2node.get(lca['uid2'])['merged_id']
                     # Find all last CPU ops on GPU paths in this subtree
                     cpu_op_uids = find_all_last_cpu_ops_on_gpu_path(
                         node, self.variant, variant_uid2node, "uid2"
@@ -1252,7 +1260,8 @@ class TraceDiff:
                         if kernel_names2:
                             rows.append(
                                 {
-                                    "lowest_common_ancestor_name": name,
+                                    "lowest_common_ancestor_name": lca_name,
+                                    'lowest_common_ancestor_id': lca_id,
                                     "merged_id": merged_id,
                                     "cpu_op_name_trace1": "",
                                     "cpu_op_name_trace2": name,
@@ -1279,7 +1288,7 @@ class TraceDiff:
 
             # Only traverse children if both events are on GPU path
             should_traverse_children = False
-            if is_gpu_path(event1) or is_gpu_path(event2):
+            if self.is_gpu_path(event1) or self.is_gpu_path(event2):
                 should_traverse_children = True
             # print("node", node)
             if should_traverse_children:
