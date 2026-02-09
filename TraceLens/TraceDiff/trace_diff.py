@@ -336,45 +336,45 @@ class TraceDiff:
 
         def get_children_with_missing(uid1, uid2):
             """Get aligned children lists, adding missing-by-name from full child list."""
-            all1 = safe_children(baseline_uid2node, uid1)
-            all2 = safe_children(variant_uid2node, uid2)
+            children1 = safe_children(baseline_uid2node, uid1)
+            children2 = safe_children(variant_uid2node, uid2)
             all_nodes1 = [
-                baseline_uid2node[c] for c in all1 if baseline_uid2node.get(c)
+                baseline_uid2node[c] for c in children1 if baseline_uid2node.get(c)
             ]
-            all_nodes2 = [variant_uid2node[c] for c in all2 if variant_uid2node.get(c)]
-            children1 = [
+            all_nodes2 = [variant_uid2node[c] for c in children2 if variant_uid2node.get(c)]
+            gpu_children1 = [
                 n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                 for n in all_nodes1
                 if self.is_gpu_path(n)
             ]
-            children2 = [
+            gpu_children2 = [
                 n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                 for n in all_nodes2
                 if self.is_gpu_path(n)
             ]
-            names1 = {get_name_uid(c, 1) for c in children1}
-            names2 = {get_name_uid(c, 2) for c in children2}
+            gpu_names1 = {get_name_uid(c, 1) for c in gpu_children1}
+            gpu_names2 = {get_name_uid(c, 2) for c in gpu_children2}
 
-            names1_all = {get_name_uid(c, 1): c for c in all1}
-            names2_all = {get_name_uid(c, 2): c for c in all2}
+            all_names1 = {get_name_uid(c, 1): c for c in children1}
+            all_names2 = {get_name_uid(c, 2): c for c in children2}
 
-            names1_only = names1 - names2
-            names2_only = names2 - names1
+            names1_only = gpu_names1 - gpu_names2
+            names2_only = gpu_names2 - gpu_names1
 
             for n in names1_only:
-                if n in names2_all:
-                    children2.append(names2_all[n])
+                if n in all_names2:
+                    gpu_children2.append(all_names2[n])
             for n in names2_only:
-                if n in names1_all:
-                    children1.append(names1_all[n])
+                if n in all_names1:
+                    gpu_children1.append(all_names1[n])
 
             def sort_by_ts(uids, uid2node):
-                nodes = [(uid2node.get(u), u) for u in uids if uid2node.get(u)]
-                nodes.sort(key=lambda x: x[0].get("ts", 0) if x[0] else 0)
+                nodes = [(uid2node.get(u), u) for u in uids]
+                nodes.sort(key=lambda x: x[0].get("ts", 0))
                 return [u for _, u in nodes]
 
-            return sort_by_ts(children1, baseline_uid2node), sort_by_ts(
-                children2, variant_uid2node
+            return sort_by_ts(gpu_children1, baseline_uid2node), sort_by_ts(
+                gpu_children2, variant_uid2node
             )
 
         def traverse_and_merge(uid1, uid2):
