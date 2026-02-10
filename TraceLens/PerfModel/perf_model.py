@@ -3029,6 +3029,7 @@ class Normalization:
         self.has_bias = self.param_details["has_bias"]
         self.is_training = self.param_details["is_training"]
         self.is_affine = self.param_details["is_affine"]
+        self.output_mask = self.param_details.get("output_mask", False)
 
         self.bpe_in = name2bpe(self.dtype_in_out[0])
         if self.dtype_in_out[1] is not None:
@@ -3205,15 +3206,23 @@ class BatchNorm(Normalization):
             "is_training": is_training,
         }
 
+    def flops_bwd(self):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
 class BatchNormBwd(Normalization):        
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
-        is_training = bool(event["args"]["Concrete Inputs"][5])
+        op_shape = tuple(args_input_dims[1])
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        output_mask = event["args"]["Concrete Inputs"][9]
+        is_affine = output_mask[1]
+        is_training = bool(event["args"]["Concrete Inputs"][7])
+        
         dtype_out = None
         stride_output = None
         return {
@@ -3225,12 +3234,13 @@ class BatchNormBwd(Normalization):
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
+            "output_mask": output_mask,
         }
 
     def flops(self):
         return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
 
-    def bytes_bwd(self):
+    def bytes(self):
         return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
 
 class LayerNorm(Normalization):
@@ -3244,15 +3254,15 @@ class LayerNorm(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[0])
+        op_shape = tuple(args_input_dims[1])
         concrete_inputs = event["args"]["Concrete Inputs"]
-        # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
+        # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
-        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
-        has_bias = args_input_dims[2] is not None
+        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(',')])
+        has_bias = args_input_dims[6] is not None
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[1] is not None
+        is_affine = args_input_dims[5] is not None
         is_training = True
         dtype_out = None
         stride_output = None
@@ -3266,20 +3276,27 @@ class LayerNorm(Normalization):
             "is_affine": is_affine,
             "is_training": is_training,
         }
+
+    def flops_bwd(self):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
 
 class LayerNormBwd(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[0])
+        op_shape = tuple(args_input_dims[1])
         concrete_inputs = event["args"]["Concrete Inputs"]
         # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
         num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
-        has_bias = args_input_dims[2] is not None
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[1] is not None
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        output_mask = event["args"]["Concrete Inputs"][7]
+        is_affine = output_mask[1]
+        has_bias = output_mask[2]
         is_training = True
         dtype_out = None
         stride_output = None
@@ -3292,12 +3309,13 @@ class LayerNormBwd(Normalization):
             "has_bias": has_bias,
             "is_affine": is_affine,
             "is_training": is_training,
+            "output_mask": output_mask,
         }
 
     def flops(self):
         return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
 
-    def bytes_bwd(self):
+    def bytes(self):
         return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
 
 class GroupNorm(Normalization):
@@ -3335,19 +3353,26 @@ class GroupNorm(Normalization):
             "is_training": is_training,
         }
 
+    def flops_bwd(self):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
 class GroupNormBwd(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         # concrete_inputs[1] = num_groups
         concrete_inputs = event["args"]["Concrete Inputs"]
-        op_shape = tuple(args_input_dims[0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        op_shape = tuple(args_input_dims[1])
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        is_affine = args_input_dims[5] is not None
         is_training = True
         dtype_out = None
         stride_output = None
+        output_mask = concrete_inputs[9]
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
@@ -3357,12 +3382,13 @@ class GroupNormBwd(Normalization):
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
+            "output_mask": output_mask,
         }
 
     def flops(self):
         return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
 
-    def bytes_bwd(self):
+    def bytes(self):
         return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
 
 class InstanceNorm(Normalization):
@@ -3396,37 +3422,24 @@ class InstanceNorm(Normalization):
             "is_training": is_training,
         }
 
+    def flops_bwd(self):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
 class InstanceNormBwd(Normalization):
+    # instance_norm_backward does not appear in the traces and does not even exist in
+    # https://github.com/pytorch/pytorch/blob/1457786f7445fb0e72794aa98c0ebaa3bc24ced5/aten/src/ATen/native/Normalization.cpp
     @staticmethod
     def get_param_details(event):
-        args_input_dims = event["args"]["Input Dims"]
-        concrete_inputs = event["args"]["Concrete Inputs"]
-        op_shape = tuple(args_input_dims[0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
-        # The "use_input_stats" argument means that we need to calculate stats from the batch,
-        # effectively the same as how we use training in other cases
-        # layernorm actually calls batchnorm and sets is_training to use_input_stats
-        is_training = bool(concrete_inputs[5])
-        dtype_out = None
-        stride_output = None
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, dtype_out),
-            "stride_input": stride_input,
-            "stride_output": stride_output,
-            "num_channels": op_shape[1], # exactly 1 batch dim in source
-            "has_bias": True,
-            "is_affine": is_affine,
-            "is_training": is_training,
-        }
+        raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+        raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
 
-    def bytes_bwd(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+    def bytes(self):
+        raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
 
 class RMSNorm(Normalization):
     # RMS Normalization
@@ -3469,18 +3482,25 @@ class RMSNorm(Normalization):
         # assume caching works, read input, write output, read weight if affine
         return self.num_elems * self.bpe_in + self.num_elems * self + (self.num_channels * self.bpe_in if self.is_affine else 0)
 
+    def flops_bwd(self):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+
 class RMSNormBwd(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         concrete_inputs = event["args"]["Concrete Inputs"]
-        op_shape = tuple(args_input_dims[0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        op_shape = tuple(args_input_dims[1])
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        is_affine = args_input_dims[4] is not None
         dtype_out = None
         stride_output = None
-        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
+        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(',')])
+        output_mask = concrete_inputs[5]
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
@@ -3489,7 +3509,8 @@ class RMSNormBwd(Normalization):
             "num_channels": num_channels,
             "has_bias": False,
             "is_affine": is_affine,
-            "is_training": False,            
+            "is_training": False,
+            "output_mask": output_mask,
         }
     
     def flops(self):
@@ -3505,12 +3526,12 @@ class RMSNormBwd(Normalization):
         # compute x_hat = input * rstd
         flops += self.num_elems
     
-        if self.event["args"]["Concrete Inputs"][5][0]:
+        if self.output_mask[0]:
             # compute grad in
             # compute dot product along normalized shape, then use it to compute grad_in
             flops += 2 * self.num_elems # compute dot product
             flops += 4 * self.num_elems # compute grad_in using dot product
-        if self.event["args"]["Concrete Inputs"][5][1] and self.is_affine:
+        if self.output_mask[1] and self.is_affine:
             # compute weights grad
             flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
             if non_normalized_elems > 1:

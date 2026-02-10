@@ -438,6 +438,9 @@ class TreePerfAnalyzer:
                     non_data_mov=non_data_mov,
                     perf_model_class=perf_model_class,
                 )
+            except NotImplementedError:
+                # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
+                continue
             except Exception as e:
                 list_warn_perf_metrics_failed.append((event, e))
                 continue
@@ -1394,6 +1397,10 @@ class TreePerfAnalyzer:
                         if k.startswith("param: ")
                     }
                     row["perf_params"] = perf_params if perf_params else None
+                except NotImplementedError:
+                    # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
+                    continue
+
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
@@ -1412,6 +1419,9 @@ class TreePerfAnalyzer:
                         if k.startswith("param: ")
                     }
                     row["perf_params"] = perf_params if perf_params else None
+                except NotImplementedError:
+                    # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
+                    continue
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
