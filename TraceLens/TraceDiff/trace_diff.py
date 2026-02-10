@@ -1391,7 +1391,7 @@ class TraceDiff:
                     print(
                         name[0:30], "\t", mapping.get("trace2", {}).get("cpu_op_name", [])
                     )
-            return result
+            return cpu_op_map
 
         df_agg = self.diff_stats_unique_args_summary_df
         df = self.diff_stats_df
@@ -1409,11 +1409,12 @@ class TraceDiff:
             .sort_index()
         )
         cpu_op_map = get_cpu_op_map(df_agg, df)
-        self.cpu_op_map = cpu_op_map
-        if self.identical_traces:
-            for _, mapping in cpu_op_map.items():
-                mapping.pop('trace2', None)
 
+        if self.identical_traces:
+            for cpu_op, mapping in cpu_op_map.items():
+                cpu_op_map[cpu_op] = mapping["trace1"]
+
+        self.cpu_op_map = cpu_op_map
         self.cpu_op_map_trace1 = cpu_op_map_trace1
         self.cpu_op_map_trace2 = cpu_op_map_trace2
         
