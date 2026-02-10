@@ -16,6 +16,7 @@ from .kernel_name_parser import gemm_name_parser
 
 from .utils import name2bpe, simulation_dtype_map, torch_dtype_map
 
+
 # 1. GEMM
 class GEMM:
     """
@@ -2389,26 +2390,31 @@ class aiter__fmha_v3_backward(SDPA):
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
+
 class vllm_unified_attention_with_output(SDPA):
 
     @staticmethod
     def get_param_details(event):
-        annotation= str(event.get("annotation"))
+        annotation = str(event.get("annotation"))
         if annotation == "NA":
-            raise NotImplementedError("VLLM attention without annotation is not supported")
-        requests=annotation.replace("(","_").replace(")","_").split("_")
-        if len(requests)<8:
-            raise NotImplementedError("VLLM attention without annotation is not supported")
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
+        requests = annotation.replace("(", "_").replace(")", "_").split("_")
+        if len(requests) < 8:
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
         input_dims = event["args"]["Input Dims"]
-        
+
         concrete_inputs = event["args"]["Concrete Inputs"]
         q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[3]
         bhnd_idx = 0, 2, 1, 3
-        B=1
+        B = 1
         N_Q, H_Q, d_h_qk = q_shape
         N_KV, H_KV, d_h_v = k_shape
         dropout_p = 0.0
-        is_causal=False
+        is_causal = False
 
         return {
             "B": B,
@@ -2423,41 +2429,53 @@ class vllm_unified_attention_with_output(SDPA):
             "flash_impl": True,
             "sum_ctx_tokens": int(requests[3]),
             "sum_ctx_squared_tokens": int(requests[4]),
-            "sum_gen_tokens": int(requests[8])
+            "sum_gen_tokens": int(requests[8]),
         }
 
     def flops(self):
-        #prefill part
-        if self.param_details["sum_ctx_tokens"]==0:
-            raise NotImplementedError("Roofline for pure generation phase is not defined")
-        ctx_flops_qk = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk)
-        ctx_flops_pv = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"]* self.d_h_v )
-        #Generation tokens
+        # prefill part
+        if self.param_details["sum_ctx_tokens"] == 0:
+            raise NotImplementedError(
+                "Roofline for pure generation phase is not defined"
+            )
+        ctx_flops_qk = self.H_Q * (
+            2 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk
+        )
+        ctx_flops_pv = self.H_Q * (
+            2 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_v
+        )
+        # Generation tokens
         ## ToDo: Add seqlen for KV
-        gen_flops_qk = self.H_Q * (2 * self.param_details["sum_gen_tokens"] * self.d_h_qk)
-        gen_flops_pv = self.H_Q * (2 * self.param_details["sum_gen_tokens"]* self.d_h_v )
-        
-        return ctx_flops_qk+ctx_flops_pv+gen_flops_qk+gen_flops_pv
+        gen_flops_qk = self.H_Q * (
+            2 * self.param_details["sum_gen_tokens"] * self.d_h_qk
+        )
+        gen_flops_pv = self.H_Q * (
+            2 * self.param_details["sum_gen_tokens"] * self.d_h_v
+        )
 
-    def bytes_func_vllm(self,B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
-        ## Prefill 
+        return ctx_flops_qk + ctx_flops_pv + gen_flops_qk + gen_flops_pv
+
+    def bytes_func_vllm(
+        self, B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
+    ):
+        ## Prefill
         elems_q_read = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_qk
         elems_k_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_qk
         elems_v_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_v
         elems_out_write = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_v
         total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
-        #Decode - this will not be used as needs additional information from vLLM engine
+        # Decode - this will not be used as needs additional information from vLLM engine
 
-        #elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
-        #elems_k_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_qk
-        #elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
-        #elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
-        #total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        # elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
+        # elems_k_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_qk
+        # elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
+        # elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
+        # total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
         return total_elems_moved * bytes_per_element
 
     # TODO make bytes_per_element based on profile info
     def bytes(self, bytes_per_element=2):
-        
+
         return self.bytes_func_vllm(
             self.B,
             self.N_Q,
@@ -2469,6 +2487,8 @@ class vllm_unified_attention_with_output(SDPA):
             self.param_details["causal"],
             bytes_per_element,
         )
+
+
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
@@ -3015,6 +3035,7 @@ class jax_conv:
             bytes_per_element=self.bytes_per_element,
         )
 
+
 class Normalization:
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
@@ -3043,43 +3064,51 @@ class Normalization:
     #            training=True                       training=False
     #          (use batch stats)                  (use running stats)
     #
-    #            affine=False                          affine=False            
-    #             (no γ, β)                             (no γ, β)               
+    #            affine=False                          affine=False
+    #             (no γ, β)                             (no γ, β)
     # ────────────────────────────────────────────────────────────────────────────
-    #  FORWARD:                              FORWARD:                             
-    #  ✓ Compute mean/var                    ✗ No mean/var compute               
-    #  ✓ Update running stats                  (use frozen running)               
-    #  ✗ No γ/β transform                    ✗ No γ/β transform                  
-    #                                                                             
-    #  BACKWARD:                             BACKWARD:                            
-    #  ✓ grad_input                          N/A                                  
-    #  ✗ No grad_weight/grad_bias                                                 
+    #  FORWARD:                              FORWARD:
+    #  ✓ Compute mean/var                    ✗ No mean/var compute
+    #  ✓ Update running stats                  (use frozen running)
+    #  ✗ No γ/β transform                    ✗ No γ/β transform
+    #
+    #  BACKWARD:                             BACKWARD:
+    #  ✓ grad_input                          N/A
+    #  ✗ No grad_weight/grad_bias
     # ────────────────────────────────────────────────────────────────────────────
-    #               affine=True                           affine=True             
-    #               (has γ, β)                            (has γ, β)              
-    #                                                                             
-    #  FORWARD:                              FORWARD:                             
-    #  ✓ Compute mean/var                    ✗ No mean/var compute                
-    #  ✓ Update running stats                  (use frozen running)               
-    #  ✓ Apply γ/β transform                 ✓ Apply γ/β transform                
-    #                                                                             
-    #  BACKWARD:                             BACKWARD:                            
-    #  ✓ grad_input                          N/A                                  
-    #  ✓ grad_weight (for γ)                                                      
-    #  ✓ grad_bias (for β)                                                        
+    #               affine=True                           affine=True
+    #               (has γ, β)                            (has γ, β)
+    #
+    #  FORWARD:                              FORWARD:
+    #  ✓ Compute mean/var                    ✗ No mean/var compute
+    #  ✓ Update running stats                  (use frozen running)
+    #  ✓ Apply γ/β transform                 ✓ Apply γ/β transform
+    #
+    #  BACKWARD:                             BACKWARD:
+    #  ✓ grad_input                          N/A
+    #  ✓ grad_weight (for γ)
+    #  ✓ grad_bias (for β)
     # ────────────────────────────────────────────────────────────────────────────
     # example implementations:
     # FWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L75
     # BWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L405
     # STATS: https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L177
     @staticmethod
-    def flops_func(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int):
+    def flops_func(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+    ):
         # at inference time we generate alpha and beta from the averages and gamma and bias if applicable
-        # then multiply alpha and add beta to each element. 
-        
+        # then multiply alpha and add beta to each element.
+
         # processing with bias/weight is done even if is_affine is false and has_bias is false using 0/1
         # https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L32
-        param_compute = num_channels * 3 # (1/std * mean, multiply by alpha, subtract from bias)
+        param_compute = (
+            num_channels * 3
+        )  # (1/std * mean, multiply by alpha, subtract from bias)
         if is_training:
             # compute mean / std
             # sum to get mean, subtract mean from each elem and add them,
@@ -3089,12 +3118,18 @@ class Normalization:
         # compute 1/std = inverse(sqrt(running_var + eps))
         # for non-training this is called in native_batch_norm etc and for training this is computed once and saved for several uses
         param_compute += num_channels * 3
-        
+
         actual_compute = 2 * num_elems
         return param_compute + actual_compute
 
     def flops(self):
-        return self.flops_func(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+        return self.flops_func(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+        )
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
@@ -3106,45 +3141,67 @@ class Normalization:
         return "vector"
 
     @staticmethod
-    def bytes_func(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int):
+    def bytes_func(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+        bpe_in: int,
+        bpe_out: int,
+    ):
         # assume that activations only read and written once for the forward pass and cached for stats
         # assume weights, bias, mean, variance also only read once
-        num_weight_tensors = 2 # mean and variance are always needed
+        num_weight_tensors = 2  # mean and variance are always needed
         if is_affine:
             num_weight_tensors += 1
             if has_bias:
                 num_weight_tensors += 1
-        
+
         if is_training:
             # updating the running stats
             # assuming all activations cached
             # but mean and variance needs to be written
             num_weight_tensors += 2
-            
-        
+
         activation_bytes = num_elems * bpe_in + num_elems * bpe_out
         weight_bytes = num_weight_tensors * num_channels * bpe_in
         return activation_bytes + weight_bytes
-    
+
     def bytes(self):
-        return self.bytes_func(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
-    
+        return self.bytes_func(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+        )
+
     # BWD call
     # for each channel
-        # read invstd if train else compute it
-        # sum = reduce-sum on all inputs and grad output
-        # dotp = subtract mean from x, multiply by dy
-        # if train:
-            # k = dotp * invstd^2 / N # scalar
-            # mean = sum / N # scalar
-            # dx =  ((x - mean) * k)
-            # grad_in = (grad_out - grad_mean - variance) * invstd * w
-            # if affine save w and sum 
+    # read invstd if train else compute it
+    # sum = reduce-sum on all inputs and grad output
+    # dotp = subtract mean from x, multiply by dy
+    # if train:
+    # k = dotp * invstd^2 / N # scalar
+    # mean = sum / N # scalar
+    # dx =  ((x - mean) * k)
+    # grad_in = (grad_out - grad_mean - variance) * invstd * w
+    # if affine save w and sum
     @staticmethod
-    def flops_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, output_mask):
+    def flops_func_bwd(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+        output_mask,
+    ):
         elems_per_channel = num_elems / num_channels
-        flops_per_channel = 3 if not is_training else 0 # invstd
-        flops_per_channel += 4 * elems_per_channel # calc dotp
+        flops_per_channel = 3 if not is_training else 0  # invstd
+        flops_per_channel += 4 * elems_per_channel  # calc dotp
         if output_mask[0]:
             if is_training:
                 flops_per_channel += 5 * elems_per_channel
@@ -3152,20 +3209,36 @@ class Normalization:
             #  dx_ptr[j] = dy_ptr[j] * invstd * w;
             flops_per_channel += 2 * elems_per_channel
         return num_channels * flops_per_channel
-    
+
     def flops_bwd(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
-    
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
+
     @staticmethod
-    def bytes_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int, output_mask):
+    def bytes_func_bwd(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+        bpe_in: int,
+        bpe_out: int,
+        output_mask,
+    ):
         # assumes everything read once and cached
         # assumes grad_out is bpe_out, everything else is bpe_in
         # read grad_out and the input once, invstd if it is saved
-        
+
         # read grad_out and input, write grad_in
         bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] else 1)
         if is_training:
-            bytes += num_channels * bpe_in # invstd
+            bytes += num_channels * bpe_in  # invstd
         # write grad_in
         bytes_out += num_elems * bpe_in
         # read weight if affine
@@ -3175,9 +3248,19 @@ class Normalization:
             if is_training:
                 bytes += num_channels * bpe_in * (2 if has_bias else 1)
         return bytes
-    
+
     def bytes_bwd(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
 
 # There are separate calls for fwd and bwd calls, so we need separate classes
 class BatchNorm(Normalization):
@@ -3187,6 +3270,7 @@ class BatchNorm(Normalization):
     but flops is a multiply-add and bytes also loads scale and bias
     https://arxiv.org/abs/1502.03167
     """
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -3202,19 +3286,26 @@ class BatchNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": args_input_dims[3][0], # inputs 1 and 2 can be null if non-affine
+            "num_channels": args_input_dims[3][
+                0
+            ],  # inputs 1 and 2 can be null if non-affine
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
         }
 
     def flops_bwd(self):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
 
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
 
-class BatchNormBwd(Normalization):        
+
+class BatchNormBwd(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -3224,7 +3315,7 @@ class BatchNormBwd(Normalization):
         output_mask = event["args"]["Concrete Inputs"][9]
         is_affine = output_mask[1]
         is_training = bool(event["args"]["Concrete Inputs"][7])
-        
+
         dtype_out = None
         stride_output = None
         return {
@@ -3232,7 +3323,9 @@ class BatchNormBwd(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": args_input_dims[3][0], # inputs 1 and 2 can be null if non-affine
+            "num_channels": args_input_dims[3][
+                0
+            ],  # inputs 1 and 2 can be null if non-affine
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3240,10 +3333,27 @@ class BatchNormBwd(Normalization):
         }
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
 
     def bytes(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
 
 class LayerNorm(Normalization):
     """
@@ -3260,7 +3370,7 @@ class LayerNorm(Normalization):
         concrete_inputs = event["args"]["Concrete Inputs"]
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
-        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(',')])
+        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(",")])
         has_bias = args_input_dims[6] is not None
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
@@ -3280,10 +3390,15 @@ class LayerNorm(Normalization):
         }
 
     def flops_bwd(self):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
 
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
 
 class LayerNormBwd(Normalization):
     @staticmethod
@@ -3293,7 +3408,7 @@ class LayerNormBwd(Normalization):
         concrete_inputs = event["args"]["Concrete Inputs"]
         # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
-        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
+        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(",")])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
         output_mask = event["args"]["Concrete Inputs"][7]
@@ -3315,10 +3430,27 @@ class LayerNormBwd(Normalization):
         }
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
 
     def bytes(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
 
 class GroupNorm(Normalization):
     # Group Normalization
@@ -3349,17 +3481,25 @@ class GroupNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1] / int(concrete_inputs[1]), # exactly 1 batch dim, so num_channels is always dim 1
+            "num_channels": op_shape[1]
+            / int(
+                concrete_inputs[1]
+            ),  # exactly 1 batch dim, so num_channels is always dim 1
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
         }
 
     def flops_bwd(self):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
 
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
 
 class GroupNormBwd(Normalization):
     @staticmethod
@@ -3380,7 +3520,10 @@ class GroupNormBwd(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1] / int(concrete_inputs[1]), # exactly 1 batch dim, so num_channels is always dim 1
+            "num_channels": op_shape[1]
+            / int(
+                concrete_inputs[1]
+            ),  # exactly 1 batch dim, so num_channels is always dim 1
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3388,10 +3531,27 @@ class GroupNormBwd(Normalization):
         }
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
 
     def bytes(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
 
 class InstanceNorm(Normalization):
     # Instance Normalization
@@ -3418,17 +3578,22 @@ class InstanceNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1], # exactly 1 batch dim in source
+            "num_channels": op_shape[1],  # exactly 1 batch dim in source
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
         }
 
     def flops_bwd(self):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
 
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
 
 class InstanceNormBwd(Normalization):
     # instance_norm_backward does not appear in the traces and does not even exist in
@@ -3442,6 +3607,7 @@ class InstanceNormBwd(Normalization):
 
     def bytes(self):
         raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
+
 
 class RMSNorm(Normalization):
     # RMS Normalization
@@ -3458,7 +3624,7 @@ class RMSNorm(Normalization):
         is_affine = args_input_dims[2] is not None
         dtype_out = None
         stride_output = None
-        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(',')])
+        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(",")])
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
@@ -3467,7 +3633,7 @@ class RMSNorm(Normalization):
             "num_channels": num_channels,
             "has_bias": False,
             "is_affine": is_affine,
-            "is_training": False,            
+            "is_training": False,
         }
 
     # RMS norm is different enough from everything else that we are not using the base implementation
@@ -3476,19 +3642,30 @@ class RMSNorm(Normalization):
     # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
     def flops(self):
         non_normalized_elems = self.num_elems / self.num_channels
-        flops = non_normalized_elems * (2 * self.num_channels + 2) # compute rsqt
-        flops += self.num_elems * (2 if self.is_affine else 1) # apply weight if affine, apply rms in any case
+        flops = non_normalized_elems * (2 * self.num_channels + 2)  # compute rsqt
+        flops += self.num_elems * (
+            2 if self.is_affine else 1
+        )  # apply weight if affine, apply rms in any case
         return flops
-        
+
     def bytes(self):
         # assume caching works, read input, write output, read weight if affine
-        return self.num_elems * self.bpe_in + self.num_elems * self + (self.num_channels * self.bpe_in if self.is_affine else 0)
+        return (
+            self.num_elems * self.bpe_in
+            + self.num_elems * self
+            + (self.num_channels * self.bpe_in if self.is_affine else 0)
+        )
 
     def flops_bwd(self):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
 
     def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError(f"Backward pass for {self.__class__.__name__} is not defined.")
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
 
 class RMSNormBwd(Normalization):
     @staticmethod
@@ -3501,7 +3678,7 @@ class RMSNormBwd(Normalization):
         is_affine = args_input_dims[4] is not None
         dtype_out = None
         stride_output = None
-        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(',')])
+        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(",")])
         output_mask = concrete_inputs[5]
         return {
             "op_shape": op_shape,
@@ -3514,10 +3691,10 @@ class RMSNormBwd(Normalization):
             "is_training": False,
             "output_mask": output_mask,
         }
-    
+
     def flops(self):
         return self.flops_bwd()
-    
+
     def bytes(self):
         return self.bytes_bwd()
 
@@ -3527,22 +3704,28 @@ class RMSNormBwd(Normalization):
         flops = 0 if not self.is_affine else self.num_elems
         # compute x_hat = input * rstd
         flops += self.num_elems
-    
+
         if self.output_mask[0]:
             # compute grad in
             # compute dot product along normalized shape, then use it to compute grad_in
-            flops += 2 * self.num_elems # compute dot product
-            flops += 4 * self.num_elems # compute grad_in using dot product
+            flops += 2 * self.num_elems  # compute dot product
+            flops += 4 * self.num_elems  # compute grad_in using dot product
         if self.output_mask[1] and self.is_affine:
             # compute weights grad
-            flops += self.num_elems # compute grad_weight by multiplying grad_out and x_hat
+            flops += (
+                self.num_elems
+            )  # compute grad_weight by multiplying grad_out and x_hat
             if non_normalized_elems > 1:
-                flops += self.num_elems # accumulates num_channels elements from all inputs
+                flops += (
+                    self.num_elems
+                )  # accumulates num_channels elements from all inputs
         return flops
-    
+
     def bytes_bwd(self):
         # read grad_out, input, weight if not null, write grad_in, grad_weight if not null
-        bytes = self.num_elems * self.bpe_out + self.num_elems * self.bpe_in * 2 # grad_out and input
+        bytes = (
+            self.num_elems * self.bpe_out + self.num_elems * self.bpe_in * 2
+        )  # grad_out and input
         if self.is_affine:
-            bytes += self.num_channels * self.bpe_in * 2 # weight and grad_weight
+            bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes

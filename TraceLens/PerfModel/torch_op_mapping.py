@@ -46,7 +46,7 @@ op_to_perf_model_class_map = {
     "aten::group_norm": perf_model.GroupNorm,
     "aten::instance_norm": perf_model.InstanceNorm,
     "aten::rms_norm": perf_model.RMSNorm,
-    }
+}
 
 # Add pseudo-op extension mappings
 op_to_perf_model_class_map.update(get_pseudo_op_mappings())

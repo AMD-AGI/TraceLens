@@ -8,14 +8,19 @@ import os
 import pytest
 import torch
 import torch.nn
-#import TraceLens
+
+# import TraceLens
 # Normalization layers
 
-default_normalization_layer_trace_file = "traces/perf_model/normalization/normalization_layer_test.json.gz"
+default_normalization_layer_trace_file = (
+    "traces/perf_model/normalization/normalization_layer_test.json.gz"
+)
+
 
 @pytest.mark.parameterize("trace_file", [default_normalization_layer_trace_file])
 def test_normalization_layers(trace_file: str):
     assert os.path.exists(trace_file), f"Trace file {trace_file} does not exist"
+
 
 def create_normalization_layer_trace(outfile: str):
     # super simple network with the normalization layers that we care about
@@ -32,6 +37,7 @@ def create_normalization_layer_trace(outfile: str):
             self.gn2 = torch.nn.GroupNorm(4, input_shape[1], affine=False)
             self.inn2 = torch.nn.InstanceNorm2d(input_shape[-3], affine=False)
             self.rmsn2 = torch.nn.RMSNorm(input_shape[2:], elementwise_affine=False)
+
         def forward(self, x):
             with torch.profiler.record_function("BatchNorm affine=True"):
                 x = self.bn(x)
@@ -54,11 +60,12 @@ def create_normalization_layer_trace(outfile: str):
             with torch.profiler.record_function("RMSNorm affine=False"):
                 x = self.rmsn2(x)
             return x
-    torch.set_default_device('cuda')
+
+    torch.set_default_device("cuda")
     input_shape = [8, 16, 32, 32]
     net = Net(input_shape)
     torch.manual_seed(0)
-    
+
     x = torch.randn(input_shape)
     criterion = torch.nn.MSELoss()
     with torch.profiler.profile(
@@ -78,6 +85,7 @@ def create_normalization_layer_trace(outfile: str):
             loss.backward()
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     p.export_chrome_trace(outfile)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -101,7 +109,6 @@ def main():
         print(f"Creating normalization layer trace at {args.normalization_trace_file}")
         create_normalization_layer_trace(args.normalization_trace_file)
 
+
 if __name__ == "__main__":
     main()
-
-

@@ -35,7 +35,6 @@ from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 
 
-
 def normalize_dtype_to_precision(dtype_str):
     """
     Normalize a dtype string to a standard precision identifier.
@@ -130,12 +129,12 @@ def get_max_achievable_tflops(perf_model, arch):
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
-        profile_filepath, 
+        profile_filepath,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
-        *args, 
-        **kwargs
+        *args,
+        **kwargs,
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
@@ -150,15 +149,15 @@ class TreePerfAnalyzer:
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
         tree = TraceToTree(data, event_to_category=categorizer)
-        
+
         return TreePerfAnalyzer(
-            tree, 
-            jax=jax, 
+            tree,
+            jax=jax,
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
-            *args, 
-            **kwargs
+            *args,
+            **kwargs,
         )
 
     def __init__(
@@ -171,7 +170,7 @@ class TreePerfAnalyzer:
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
-        tree_postprocess_extension=None
+        tree_postprocess_extension=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -186,18 +185,18 @@ class TreePerfAnalyzer:
         )
         self.gpu_only = self.check_gpu_only()
         self.tree.build_tree(add_python_func=add_python_func)
-        
+
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
             try:
                 apply_pseudo_op_extensions(self.tree)
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
-        
+
         # Backward compatibility for custom tree postprocessing
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
-        
+
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
@@ -702,7 +701,9 @@ class TreePerfAnalyzer:
             kernel_launchers.append(runtime_evt)
         return kernel_launchers
 
-    def get_df_kernel_launchers(self, id_cols=False, include_kernel_details=False, include_call_stack=False):
+    def get_df_kernel_launchers(
+        self, id_cols=False, include_kernel_details=False, include_call_stack=False
+    ):
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -733,9 +734,13 @@ class TreePerfAnalyzer:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
                 if include_call_stack:
-                    call_stack=self.tree.traverse_parents_and_get_callstack(event,filter=("nn.Module",))
+                    call_stack = self.tree.traverse_parents_and_get_callstack(
+                        event, filter=("nn.Module",)
+                    )
                     metrics_event["call_stack"] = call_stack
-                    metrics_event["parent_module"] = re.sub(r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]).strip("")
+                    metrics_event["parent_module"] = re.sub(
+                        r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
+                    ).strip("")
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -780,7 +785,7 @@ class TreePerfAnalyzer:
         if "call_stack" in df_temp.columns:
             agg_dict["call_stack"] = "first"
         df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
-        
+
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(
@@ -804,6 +809,7 @@ class TreePerfAnalyzer:
         df_agg.reset_index(drop=True, inplace=True)
 
         return df_agg
+
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
     @staticmethod
     def get_df_kernel_launchers_summary_by_shape(df_kernel_launchers, name):
@@ -1448,7 +1454,9 @@ class TreePerfAnalyzer:
             warnings.warn(
                 f"Failed to compute perf metrics for {len(perf_metrics_failed)}/{len(events)} events."
             )
-            warnings.warn(f"Sample event: {perf_metrics_failed[0][0]} Error: {perf_metrics_failed[0][1]}")
+            warnings.warn(
+                f"Sample event: {perf_metrics_failed[0][0]} Error: {perf_metrics_failed[0][1]}"
+            )
 
         df = pd.DataFrame(rows)
 
@@ -1766,7 +1774,7 @@ class TreePerfAnalyzer:
         df_agg.reset_index(drop=True, inplace=True)
 
         return df_agg
-    
+
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
             event
