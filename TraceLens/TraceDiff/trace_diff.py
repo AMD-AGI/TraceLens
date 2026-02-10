@@ -990,13 +990,14 @@ class TraceDiff:
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
                 if event1 and self.is_gpu_path(event1):
+                    # This branch should only be executed if root is not combined and is on GPU path
                     if combined_parent_node is not None:
-                        lca_id = combined_parent_node.get('merged_id')
+                        lca_id = combined_parent_node.get("merged_id")
                         lca = merged_id_to_event[lca_id]
-                        lca_name = self._get_op_name(lca['uid1'], 1)
+                        lca_name = self._get_op_name(lca["uid1"], 1)
                         lca_name = re.sub(r"\(\d+\)", "", lca_name)
                     else:
-                        lca_name = None # Root node has no LCA
+                        lca_name = None  # Root node has no LCA
                         lca_id = None
 
                     # Get all GPU kernels from trace1's branch
@@ -1047,13 +1048,14 @@ class TraceDiff:
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
                 if event2 and self.is_gpu_path(event2):
+                    # This branch should only be executed if root is not combined and is on GPU path
                     if combined_parent_node is not None:
-                        lca_id = combined_parent_node.get('merged_id')
+                        lca_id = combined_parent_node.get("merged_id")
                         lca = merged_id_to_event[lca_id]
-                        lca_name = self._get_op_name(lca['uid2'], 2)
+                        lca_name = self._get_op_name(lca["uid2"], 2)
                         lca_name = re.sub(r"\(\d+\)", "", lca_name)
                     else:
-                        lca_name = None # Root node has no LCA
+                        lca_name = None  # Root node has no LCA
                         lca_id = None
 
                     # Get all GPU kernels from trace2's branch
@@ -1102,7 +1104,7 @@ class TraceDiff:
                 visited_stats_nodes.add(merged_id)
                 return
 
-            # Only traverse children if both events are on GPU path
+            # Only traverse children if either trace is on a GPU path
             should_traverse_children = False
             if self.is_gpu_path(event1) or self.is_gpu_path(event2):
                 should_traverse_children = True
@@ -1225,80 +1227,88 @@ class TraceDiff:
         Returns:
             Dict with keys "trace1" and "trace2", each mapping cpu_op_name -> list of kernel names.
         """
-        def find_common_name(name1,name2,module_map):
-            modules1 = module_map.get(name1,[])
-            modules2 = module_map.get(name2,[])
 
-            name1_clean = name1.split('::')[-1]
-            name2_clean = name2.split('::')[-1]
+        def find_common_name(name1, name2, module_map):
+            modules1 = module_map.get(name1, [])
+            modules2 = module_map.get(name2, [])
+
+            name1_clean = name1.split("::")[-1]
+            name2_clean = name2.split("::")[-1]
             if name1_clean == name2_clean:
                 return name1_clean
             if name1_clean in name2_clean:
                 return name1_clean
             if name2_clean in name1_clean:
                 return name2_clean
-            if name1_clean[0:20]== name2_clean[0:20]:
+            if name1_clean[0:20] == name2_clean[0:20]:
                 return f"{name1_clean}/{name2_clean}"
-            if len(modules1)==1 and len(modules2)==1:
-                if modules1[0]==modules2[0]:
-                    return re.sub(" ","",modules1[0])
+            if len(modules1) == 1 and len(modules2) == 1:
+                if modules1[0] == modules2[0]:
+                    return re.sub(" ", "", modules1[0])
             return None
+
         def get_rename_map(df):
             result = {
                 str(lca_id): {
                     source: {
                         "name": list(group["cpu_op_name"].unique()),
-                        "nn_module_parent": list(group["nn_module_parent"].unique())
+                        "nn_module_parent": list(group["nn_module_parent"].unique()),
                     }
-                    for source, group in df[df['lowest_common_ancestor_id'] == lca_id].groupby('source')
+                    for source, group in df[
+                        df["lowest_common_ancestor_id"] == lca_id
+                    ].groupby("source")
                 }
-                for lca_id in df['lowest_common_ancestor_id'].unique()
+                for lca_id in df["lowest_common_ancestor_id"].unique()
             }
 
-            module_map={}
+            module_map = {}
             for cpu_op in df["cpu_op_name"].unique():
-                for source, group in df[df['cpu_op_name'] == cpu_op].groupby('source'):
-                    module_map[cpu_op]= list(group["nn_module_parent"].unique())
+                for source, group in df[df["cpu_op_name"] == cpu_op].groupby("source"):
+                    module_map[cpu_op] = list(group["nn_module_parent"].unique())
             visited_cpu_op = []
-            rename_map ={}
+            rename_map = {}
             ##
             for lcaid, mapping in result.items():
                 if "trace1" in mapping and "trace2" in mapping:
-                    if all(op in visited_cpu_op for op in mapping['trace1']['name']) and all(op in visited_cpu_op for op in mapping['trace2']['name']):
+                    if all(
+                        op in visited_cpu_op for op in mapping["trace1"]["name"]
+                    ) and all(op in visited_cpu_op for op in mapping["trace2"]["name"]):
                         continue
-                    visited_cpu_op.extend(mapping['trace1']['name'])
-                    visited_cpu_op.extend(mapping['trace2']['name'])
+                    visited_cpu_op.extend(mapping["trace1"]["name"])
+                    visited_cpu_op.extend(mapping["trace2"]["name"])
                     if len(mapping["trace1"]["name"]) == len(mapping["trace2"]["name"]):
-                        for n1,n2 in zip(mapping["trace1"]["name"],mapping["trace2"]["name"]):
+                        for n1, n2 in zip(
+                            mapping["trace1"]["name"], mapping["trace2"]["name"]
+                        ):
                             if n1 != n2:
-                                common_name=find_common_name(n1,n2,module_map)
-                                if common_name is not None: 
+                                common_name = find_common_name(n1, n2, module_map)
+                                if common_name is not None:
                                     print(f"Renaming: {n1}, {n2} to {common_name}")
-                                    rename_map[n2]=common_name 
-                                    rename_map[n1]=common_name
+                                    rename_map[n2] = common_name
+                                    rename_map[n1] = common_name
                     else:
-                        n1_list=mapping["trace1"]["name"]
+                        n1_list = mapping["trace1"]["name"]
                         n1_list_copy = n1_list.copy()
-                        n2_list=mapping["trace2"]["name"]
+                        n2_list = mapping["trace2"]["name"]
                         for n1 in n1_list:
-                            found=0
+                            found = 0
                             for n2 in n2_list:
-                                if n1==n2:
+                                if n1 == n2:
                                     n1_list_copy.remove(n1)
                                     n2_list.remove(n2)
                                     break
-                        n1_list=n1_list_copy.copy()
+                        n1_list = n1_list_copy.copy()
                         for n1 in n1_list_copy:
                             for n2 in n2_list:
-                                common_name=find_common_name(n1,n2,module_map)
-                                if common_name is not None: 
+                                common_name = find_common_name(n1, n2, module_map)
+                                if common_name is not None:
                                     print(f"Renaming: {n1}, {n2} to {common_name}")
-                                    rename_map[n1]=common_name 
-                                    rename_map[n2]=common_name
+                                    rename_map[n1] = common_name
+                                    rename_map[n2] = common_name
                                     n2_list.remove(n2)
                                     n1_list.remove(n1)
                                     break
-                        if len(n1_list)>0 or len(n2_list)>0:
+                        if len(n1_list) > 0 or len(n2_list) > 0:
                             print(f"Unmatched for LCA {lcaid}: {n1_list} vs {n2_list}")
             return rename_map
 
@@ -1335,20 +1345,20 @@ class TraceDiff:
         rename_map = get_rename_map(df)
 
         def rename_cpu_op(row):
-            if row['cpu_op_name'] in rename_map:
-                return rename_map[row['cpu_op_name']]
-            return row['cpu_op_name']
+            if row["cpu_op_name"] in rename_map:
+                return rename_map[row["cpu_op_name"]]
+            return row["cpu_op_name"]
 
-        df_agg['cpu_op_name'] = df_agg.apply(rename_cpu_op, axis=1)
+        df_agg["cpu_op_name"] = df_agg.apply(rename_cpu_op, axis=1)
 
         cpu_op_map = {
             cpu_op: {
                 source: sorted(list(group["name"].unique()))
-                for source, group in df[df['cpu_op_name'] == cpu_op].groupby('source')
+                for source, group in df[df["cpu_op_name"] == cpu_op].groupby("source")
             }
-            for cpu_op in df['cpu_op_name'].unique()
+            for cpu_op in df["cpu_op_name"].unique()
         }
-        
+
         self.cpu_op_map = cpu_op_map
 
     def generate_tracediff_report(self):
