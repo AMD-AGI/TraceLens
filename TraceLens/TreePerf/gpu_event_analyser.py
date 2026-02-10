@@ -95,14 +95,21 @@ class GPUEventAnalyser:
         comm_events = []
         memcpy_events = []
 
+        points = []
         for event in self.events:
 
             # TODO: ideally we want to get gpu events based on process id
             # That will be done shortly
             category = event.get("cat")
             if category in {"kernel", "gpu_memcpy", "gpu_memset"}:
+                
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
+                start_time = event["ts"]
+                end_time = event["t_end"]
+                points.append((start_time, 'start', event['UID']))
+                points.append((end_time, 'end', event['UID']))
+                event['overlapping_uids'] = []
                 gpu_events.append(event)
 
                 if category == "gpu_memcpy":
@@ -114,6 +121,34 @@ class GPUEventAnalyser:
                         comp_events.append(event)
                 else:
                     raise ValueError(f"Unknown event category: {category}")
+        points.sort(key=lambda x: (x[0], x[1] != 'start'))
+        active_uids = set()  # Store UIDs instead of events
+        event_map = {event['UID']: event for event in gpu_events}  # Map UIDs to events
+
+        for _, point_type, uid in points:
+            if point_type == 'start':
+                # When an event starts, all currently active events overlap with it
+                event = event_map[uid]
+                if active_uids:
+                    if 'overlapping_uids' not in event:
+                        event['overlapping_uids'] = []
+                    event['overlapping_uids'].extend(active_uids)
+
+                    # Also add this event's UID to all active events' overlapping_uids
+                    for active_uid in active_uids:
+                        active_event = event_map[active_uid]
+                        if 'overlapping_uids' not in active_event:
+                            active_event['overlapping_uids'] = []
+                        active_event['overlapping_uids'].append(uid)
+
+                active_uids.add(uid)
+            else:
+                active_uids.remove(uid)
+
+        # Convert overlapping_uids to sets to remove duplicates and back to sorted lists
+        for event in gpu_events:
+            if 'overlapping_uids' in event:
+                event['overlapping_uids'] = sorted(list(set(event['overlapping_uids'])))
         return {
             GPUEventAnalyser.all_gpu_key: gpu_events,
             GPUEventAnalyser.computation_key: comp_events,
