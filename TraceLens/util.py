@@ -159,6 +159,10 @@ class JaxProfileProcessor:
         custom_call_target = re.search(
             r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*", line
         )
+        replica_groups = re.search(
+            r"replica_groups=(?P<replica_string>(?:\{(?:\{[0-9]+(?:,[0-9]+)*\}(?:,\{[0-9]+(?:,[0-9]+)*\})*)\}|\[[0-9]+(?:,[0-9]+)*\]<=\[[0-9]+(?:,[0-9]+)*\])(?:T\([0-9,]+\)\s+dimensions=\{[0-9,]*\})?)",
+            line,
+        )
         line = line.split(" ")
         key = line[0]
         dict_line["output"] = line[2]
@@ -187,6 +191,9 @@ class JaxProfileProcessor:
                             raise Exception("Input operand type mismatch", line)
                         dict_line["type"] = gemm_type
                         dict_line["computation"] = "gemm"
+        if replica_groups is not None:
+            dict_line["replica_groups"] = replica_groups["replica_string"]
+
         return (key, dict_line)
 
     @staticmethod
