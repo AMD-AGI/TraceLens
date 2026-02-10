@@ -25,7 +25,7 @@ When invoked by the orchestrator, you will receive the following context:
 3. `<output_dir>/category_manifest.json` - Contains gpu_utilization metrics
 
 **Output file you must write:**
-- `<output_dir>/category_findings/cpu_idle_findings.md`
+- `<output_dir>/system_findings/cpu_idle_findings.md`
 
 ---
 
@@ -144,7 +144,7 @@ For each identified pattern, provide recommendations in priority order:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/cpu_idle_findings.md`. Create it through the container on the node:
+Create `<output_dir>/system_findings/cpu_idle_findings.md`. Create it through the container on the node:
 
 ```markdown
 # CPU/Idle Time Analysis Findings

@@ -1,6 +1,6 @@
 ---
 name: Standalone Analysis Orchestrator
-description: Orchestrate modular standalone performance analysis - queries user, generates reports, pre-computes tree data, invokes category subagents in parallel
+description: Orchestrate two-tier standalone performance analysis - system-level (CPU/idle, multi-kernel) and compute kernel tiers with independently composable reports
 triggers:
   - standalone analysis
   - analyze trace standalone
@@ -13,9 +13,11 @@ tools:
 
 # Standalone Analysis Orchestrator
 
-Orchestrate modular standalone PyTorch trace analysis. Coordinate workflow, pre-compute expensive operations, invoke category-specific subagents in parallel.
+Orchestrate modular standalone PyTorch trace analysis using a **two-tier architecture**:
+- **System-Level Analysis** (Step 6): CPU/idle time + multi-kernel issues (memcpy, NCCL blocking, overlap)
+- **Compute Kernel Analysis** (Step 7): Per-category kernel efficiency (GEMM, SDPA, elementwise, etc.)
 
-**Role**: Load trace once, pre-compute tree data, filter by category, invoke subagents in parallel, aggregate results, generate final report.
+**Role**: Load trace once, pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
 
 ---
 
@@ -32,11 +34,13 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ```
 0. Query User Inputs (Platform, Trace Path, Node, Container)
 1. Generate Performance Report
-2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Category Filtering)
-6. Invoke Category-Specific Subagents (PARALLEL)
-7. Aggregate Results and Determine Optimization Recommendations
-8. Generate Replay Artifacts
-9. Generate Final Report (with Warnings section if errors)
+2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
+7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
+8. Validate Subagent Outputs (system_findings/ + category_findings/)
+9. Aggregate Results: System-Level + Compute Kernel Recommendations
+10. Generate Replay Artifacts
+11. Generate Final Report (composable System + Compute sections)
 ```
 
 ---
@@ -105,37 +109,120 @@ This script performs:
 - **Step 2:** Assess GPU utilization (computation, idle, communication times)
 - **Step 3:** Identify top 10 operations by GPU time
 - **Step 4:** Pre-compute tree data for bottleneck operations (load trace ONCE)
+- **Step 4.5:** Pre-compute multi-kernel issue data (memcpy by direction, NCCL events, overlap metrics)
 - **Step 5:** Filter and export category-specific data
 
 **Outputs:**
 - `category_data/<category>_ops.csv` - Filtered operations per category
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
 - `category_data/<category>_tree_data.json` - Pre-computed tree analysis
-- `category_manifest.json` - Workflow metadata with categories_with_data
+- `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
+- `category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
+- `system_findings/` - Directory for system-level analysis outputs
+- `category_findings/` - Directory for compute kernel analysis outputs
 
 **Duration:** ~60-90s for tree data pre-computation
 
 ---
 
-## Step 6: Invoke Category-Specific Subagents (PARALLEL)
+## Step 6: System-Level Analysis (PARALLEL)
 
-### 6.1 Read Manifest and Identify Valid Categories
+System-level analysis examines issues that affect the GPU pipeline as a whole -- idle time, memory transfer patterns, and communication/compute overlap. These are **not** about individual kernel efficiency.
+
+**Output directory:** `system_findings/`
+
+### 6.1 Read Manifest and Identify System-Level Subagents
 
 ```python
 import json
 with open('<output_dir>/category_manifest.json') as f:
     manifest = json.load(f)
-valid_categories = manifest.get('categories_with_data', [])
+
+gpu_util = manifest.get('gpu_utilization', {})
+system_categories = [c for c in manifest.get('categories', []) if c.get('tier') == 'system']
 ```
 
-### 6.2 Launch ALL Valid Subagents in PARALLEL
+### 6.2 Launch System-Level Subagents in PARALLEL
 
-For each category in `valid_categories`, invoke the corresponding subagent **simultaneously**.
+Launch **both** sub-agents simultaneously. Do NOT wait between invocations.
+
+**System-Level Subagent Mapping:**
+
+- `cpu_idle` → /cpu-idle-analyzer (invoke if `idle_time_percent > 50%`)
+- `multi_kernel` → /multi-kernel-analyzer (invoke if memcpy/NCCL events exist in trace)
+
+**Invocation conditions:**
+- **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 50`
+- **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
+
+**CPU/Idle Subagent Invocation:**
+
+```
+/cpu-idle-analyzer
+- Output directory: <output_dir>
+- Node: <node>
+- Container: <container>
+- Input files: category_data/cpu_idle_ops.csv, metadata/cpu_idle_metadata.json
+- Output file: system_findings/cpu_idle_findings.md
+```
+
+**Multi-Kernel Subagent Invocation:**
+
+```
+/multi-kernel-analyzer
+- Output directory: <output_dir>
+- Node: <node>
+- Container: <container>
+- Input files: category_data/multi_kernel_data.json, metadata/multi_kernel_metadata.json
+- Output file: system_findings/multi_kernel_findings.md
+```
+
+**CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
+1. Running its Python script inside the container on the node
+2. Reading the metrics JSON output
+3. Identifying issues and generating findings
+
+### 6.3 Wait for System-Level Subagents to Complete
+
+Both subagents must complete before proceeding to Step 7.
+Each writes findings to `system_findings/<name>_findings.md`.
+
+### 6.4 Verify System Outputs
+
+After both subagents complete:
+
+1. Check each findings file in `system_findings/` for "Status: ERROR"
+2. Collect failed analyses and error summaries
+3. **CRITICAL: Exclude failed analyses from aggregation**
+4. **CRITICAL: Do NOT attempt manual analysis of failed system checks**
+
+---
+
+## Step 7: Invoke Compute Kernel Subagents (PARALLEL)
+
+Compute kernel analysis examines individual operation category efficiency. CPU/Idle is NOT in this tier -- it was handled in Step 6.
+
+**Output directory:** `category_findings/`
+
+### 7.1 Read Manifest and Identify Compute Kernel Categories
+
+```python
+import json
+with open('<output_dir>/category_manifest.json') as f:
+    manifest = json.load(f)
+
+# Only compute kernel tier categories (exclude system tier)
+compute_categories = [c for c in manifest.get('categories', [])
+                      if c.get('tier') == 'compute_kernel']
+```
+
+### 7.2 Launch ALL Compute Kernel Subagents in PARALLEL
+
+For each category in `compute_categories`, invoke the corresponding subagent **simultaneously**.
 Do NOT wait between invocations - launch all at once.
 
-**Category to Subagent Mapping:**
+**Compute Kernel Subagent Mapping:**
 
-- `cpu_idle` → /cpu-idle-analyzer (ALWAYS invoke if idle_time_percent > 50%)
 - `gemm` → /gemm-analyzer
 - `sdpa_fwd` → /sdpa-analyzer
 - `elementwise` → /elementwise-analyzer
@@ -145,13 +232,6 @@ Do NOT wait between invocations - launch all at once.
 - `batchnorm` → /batchnorm-analyzer
 - `convolution` → /convolution-analyzer
 - `other` → /generic-op-analyzer
-
-**CRITICAL: CPU/Idle Analysis Priority**
-
-Before launching category subagents, check `gpu_utilization.idle_time_percent` in the manifest:
-- If `idle_time_percent > 50%`: cpu_idle analyzer MUST be invoked
-- CPU/idle findings MUST appear as Priority 0 (before all other priorities)
-- This supersedes all category-level bottlenecks because fixing idle time affects ALL operations
 
 **Subagent Invocation Format:**
 
@@ -166,16 +246,16 @@ Pass only the execution context - let the subagent handle script execution:
 - Output file: category_findings/gemm_findings.md
 ```
 
-**CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Use sub-agents, each of which subagent are responsible for:
+**CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
 1. Running its Python script inside the container on the node
 2. Reading the metrics JSON output
 3. Identifying bottlenecks and generating findings
 
 ---
 
-### CRITICAL CONSTRAINTS for All Subagents
+### CRITICAL CONSTRAINTS for Compute Kernel Subagents
 
-Include these constraints in EVERY subagent invocation prompt:
+Include these constraints in EVERY compute kernel subagent invocation prompt:
 
 #### 1. Use GPU Kernel Time for Prioritization
 
@@ -261,9 +341,9 @@ if has_sync:
 
 ---
 
-**Subagent Prompt Template:**
+**Compute Kernel Subagent Prompt Template:**
 
-When invoking a subagent, use this template:
+When invoking a compute kernel subagent, use this template:
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
@@ -286,12 +366,12 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 **Output:** category_findings/{category}_findings.md
 ```
 
-### 6.3 Wait for All Subagents to Complete
+### 7.3 Wait for All Compute Kernel Subagents to Complete
 
-All subagents must complete before proceeding to Step 7.
+All subagents must complete before proceeding to Step 8.
 Each subagent writes its findings to `category_findings/<category>_findings.md`.
 
-### 6.4 Verify Outputs and Collect Errors
+### 7.4 Verify Outputs and Collect Errors
 
 After all subagents complete:
 
@@ -302,9 +382,9 @@ After all subagents complete:
 
 ---
 
-## Step 6.5: Validate Subagent Outputs
+## Step 8: Validate Subagent Outputs
 
-Before aggregating results, perform these validation checks to ensure accuracy:
+Before aggregating results, validate outputs from **both** tiers (system_findings/ and category_findings/):
 
 ### 1. Time Sanity Check
 
@@ -316,17 +396,17 @@ import os
 with open('<output_dir>/category_manifest.json') as f:
     manifest = json.load(f)
 
-# Sum of category GPU kernel times should ~= computation time
+# Sum of compute kernel GPU kernel times should ~= computation time
 total_category_time = sum(
     cat.get('gpu_kernel_time_ms', 0) 
     for cat in manifest['categories']
-    if cat['name'] != 'cpu_idle'
+    if cat.get('tier') == 'compute_kernel'
 )
 
 computation_time = manifest['gpu_utilization']['total_time_ms'] * \
                    manifest['gpu_utilization']['computation_time_percent'] / 100
 
-discrepancy = abs(total_category_time - computation_time) / computation_time * 100
+discrepancy = abs(total_category_time - computation_time) / computation_time * 100 if computation_time > 0 else 0
 if discrepancy > 15:
     print(f"⚠️ Time discrepancy: Category sum ({total_category_time:.1f}ms) vs " +
           f"Computation time ({computation_time:.1f}ms) = {discrepancy:.1f}% difference")
@@ -334,7 +414,7 @@ if discrepancy > 15:
 
 ### 2. Efficiency Anomaly Check
 
-Scan all findings for efficiency values > 100%:
+Scan compute kernel findings for efficiency values > 100%:
 
 ```python
 import re
@@ -346,7 +426,6 @@ for f in os.listdir(findings_dir):
     if f.endswith('_findings.md'):
         with open(os.path.join(findings_dir, f)) as file:
             content = file.read()
-            # Check for >100% efficiency values
             matches = re.findall(r'(\d{3,}\.?\d*)\s*%', content)
             for m in matches:
                 if float(m) > 100:
@@ -364,109 +443,139 @@ if anomalies:
 
 ### 3. Coverage Check
 
-Verify all categories in manifest have corresponding findings:
+Verify all expected categories have findings in the correct directories:
 
 ```python
-expected_categories = [c['name'] for c in manifest['categories']]
-found_findings = [f.replace('_findings.md', '') 
-                  for f in os.listdir(findings_dir) 
-                  if f.endswith('_findings.md')]
+# System-level coverage
+system_findings_dir = '<output_dir>/system_findings/'
+expected_system = [c['name'] for c in manifest['categories'] if c.get('tier') == 'system']
+found_system = [f.replace('_findings.md', '') 
+                for f in os.listdir(system_findings_dir) 
+                if f.endswith('_findings.md')]
+missing_system = set(expected_system) - set(found_system)
+if missing_system:
+    print(f"⚠️ Missing system findings for: {', '.join(missing_system)}")
 
-missing = set(expected_categories) - set(found_findings)
-if missing:
-    print(f"⚠️ Missing findings for: {', '.join(missing)}")
+# Compute kernel coverage
+category_findings_dir = '<output_dir>/category_findings/'
+expected_compute = [c['name'] for c in manifest['categories'] if c.get('tier') == 'compute_kernel']
+found_compute = [f.replace('_findings.md', '') 
+                 for f in os.listdir(category_findings_dir) 
+                 if f.endswith('_findings.md')]
+missing_compute = set(expected_compute) - set(found_compute)
+if missing_compute:
+    print(f"⚠️ Missing compute kernel findings for: {', '.join(missing_compute)}")
 ```
 
 ### 4. Priority Consistency Check
 
-Ensure categories with highest GPU kernel time % are given highest priority:
+Ensure categories with highest GPU kernel time % are given highest priority in the compute kernel tier:
 
 ```python
-# Sort categories by GPU kernel time
 sorted_cats = sorted(
-    [c for c in manifest['categories'] if c['name'] != 'cpu_idle'],
+    [c for c in manifest['categories'] if c.get('tier') == 'compute_kernel'],
     key=lambda x: x.get('gpu_kernel_time_ms', 0),
     reverse=True
 )
 
-# Top 3 by time should be priorities 1-3
 top_time_categories = [c['name'] for c in sorted_cats[:3]]
-print(f"Top 3 categories by GPU kernel time: {top_time_categories}")
-print("Verify these receive Priority 1-3 in final report")
+print(f"Top 3 compute kernel categories by GPU time: {top_time_categories}")
+print("Verify these receive P1-P3 in compute kernel recommendations")
 ```
 
 ### Validation Output
 
-Add a validation summary to the aggregation step:
-
 ```markdown
 ## Validation Summary
-- Time Check: [PASS/WARN] - Category sum vs computation time discrepancy
+- Time Check: [PASS/WARN] - Compute kernel sum vs computation time discrepancy
 - Efficiency Check: [PASS/WARN] - Anomalies > 100%
-- Coverage Check: [PASS/WARN] - Missing categories
+- System Coverage: [PASS/WARN] - Missing system findings
+- Compute Coverage: [PASS/WARN] - Missing compute kernel findings
 - Priority Check: [INFO] - Top time categories for priority verification
 ```
 
 ---
 
-## Step 7: Aggregate and Determine Optimization Recommendations
+## Step 9: Aggregate Results -- Two-Tier Recommendations
 
-### Read All Category Findings
+### Read Findings from BOTH Tiers
 
 ```python
 import os
 import json
 
-# Load category findings
-findings_summaries = {}
-failed_categories = []
-findings_dir = '<output_dir>/category_findings/'
+# --- System-level findings ---
+system_findings = {}
+failed_system = []
+system_dir = '<output_dir>/system_findings/'
 
-for f in os.listdir(findings_dir):
+for f in os.listdir(system_dir):
     if f.endswith('_findings.md'):
-        with open(os.path.join(findings_dir, f)) as file:
+        with open(os.path.join(system_dir, f)) as file:
             content = file.read()
+            name = f.replace('_findings.md', '')
             if 'Status: ERROR' in content:
-                # Extract error and add to failed list
-                failed_categories.append({
-                    'category': f.replace('_findings.md', ''),
-                    'content': content
-                })
+                failed_system.append({'category': name, 'content': content})
             else:
-                findings_summaries[f] = content
+                system_findings[name] = content
 
-# Load category manifest for top operations
+# --- Compute kernel findings ---
+compute_findings = {}
+failed_compute = []
+compute_dir = '<output_dir>/category_findings/'
+
+for f in os.listdir(compute_dir):
+    if f.endswith('_findings.md'):
+        with open(os.path.join(compute_dir, f)) as file:
+            content = file.read()
+            name = f.replace('_findings.md', '')
+            if 'Status: ERROR' in content:
+                failed_compute.append({'category': name, 'content': content})
+            else:
+                compute_findings[name] = content
+
+# Load manifest for top operations and metadata
 with open('<output_dir>/category_manifest.json', 'r') as f:
     manifest = json.load(f)
     top_ops = manifest.get('top_operations', [])
 ```
 
-### Aggregate Recommendations
+### Aggregate System-Level Recommendations
 
-Each subagent has produced algorithmic and kernel optimization recommendations.
-Consolidate these, cross-reference with `top_ops`, and prioritize by impact. 
+System-level recommendations address pipeline/framework issues that affect ALL operations.
 
-**Prioritization Framework:**
+**System-Level Prioritization:**
 
-Select kernels in top_ops and order by highest impact on the end to end time. Focus on areas with low efficiency and high category time.
+Assign priorities sequentially starting from P1 based on which analyses are present. If CPU/Idle is skipped, multi-kernel issues start at P1.
 
-**CRITICAL: Priority 0 - GPU Idle Time**
+| Order | Source | Criteria | Included When |
+|-------|--------|----------|---------------|
+| First | CPU/Idle | `idle_time_percent > 30%` | Only if CPU/Idle analysis was invoked |
+| Next | Multi-Kernel | Highest severity multi-kernel issue (memcpy/NCCL blocking/overlap) | Always if multi-kernel invoked |
+| Next | Multi-Kernel | Next severity multi-kernel issue | If additional issues exist |
 
-If `idle_time_percent > 30%`, this is Priority 0 and MUST be the FIRST recommendation:
-- Idle time affects ALL operations and represents the largest optimization opportunity
-- CPU/idle recommendations MUST appear BEFORE any category recommendations
+**Examples:**
+- CPU/Idle + Multi-Kernel → P1: CPU/Idle, P2: Multi-Kernel highest, P3: Multi-Kernel next
+- Multi-Kernel only (CPU/Idle skipped) → P1: Multi-Kernel highest, P2: Multi-Kernel next
+
+### Aggregate Compute Kernel Recommendations
+
+Compute kernel recommendations address individual operation efficiency. Each subagent has produced algorithmic and kernel optimization recommendations. Consolidate these, cross-reference with `top_ops`, and prioritize by impact.
+
+**Compute Kernel Prioritization:**
+
+Select kernels in top_ops and order by highest impact on end-to-end time. Focus on areas with low efficiency and high category time.
 
 | Priority | Criteria |
 |----------|----------|
-| ⚫ Priority 0 | idle_time_percent > 30% - ALWAYS first, supersedes all others |
-| 🔴 Priority 1 | In top_ops + (Sorted by efficiency and high category %) |
-| 🟡 Priority 2 | In top_ops + (Sorted by efficiency and high category %) |
-| 🟢 Priority 3 | In top_ops + (Sorted by efficiency and high category %) |
+| 🔴 P1 | In top_ops + (Sorted by efficiency and high category %) |
+| 🟡 P2 | In top_ops + (Sorted by efficiency and high category %) |
+| 🟢 P3 | In top_ops + (Sorted by efficiency and high category %) |
 and so on ....
 
 ---
 
-## Step 8: Generate Replay Artifacts
+## Step 10: Generate Replay Artifacts
 
 **When to Generate:**
 1. Op is a significant bottleneck (>10% of compute)
@@ -483,11 +592,13 @@ ssh <node> "docker exec <container> python3 \
 
 ---
 
-## Step 9: Generate Final Report
+## Step 11: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>`. Use the format shown below for the file. Validate the report before just sharing the priority recommendations on the chat and prompt the user to review the report.
+Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: System-Level Optimizations and Compute Kernel Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
-**Purpose:** Stakeholder report with prioritized recommendations
+Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
+
+**Purpose:** Stakeholder report with prioritized recommendations in two tiers
 
 ```markdown
 # <Model> - <Platform> Standalone Analysis
@@ -499,19 +610,21 @@ Create `standalone_analysis.md` in `<output_dir>`. Use the format shown below fo
 |--------|-------|
 | Total Compute Time | X ms |
 | GPU Utilization | Y% |
-| Top Bottleneck Category | Category (Z%) |
+| Idle Time | Z% |
+| Exposed Communication | W% |
+| Top Bottleneck Category | Category (V%) |
 
 ## Warnings
 
 **Include this section ONLY if any subagent failed:**
 
-The following categories could not be analyzed due to script failures:
+The following analyses could not be completed due to script failures:
 
-| Category | Error Summary |
-|----------|---------------|
-| <category> | <brief error description> |
+| Analysis | Tier | Error Summary |
+|----------|------|---------------|
+| <name> | System / Compute Kernel | <brief error description> |
 
-These categories are excluded from the recommendations below.
+These are excluded from the recommendations below.
 
 ---
 
@@ -524,48 +637,103 @@ These categories are excluded from the recommendations below.
 
 ---
 
-## Recommendations
+## System-Level Optimizations
 
-**Priority 0 Report Format (Only When Valid):**
+Findings from system-level analysis (GPU utilization, memory transfer patterns,
+communication/compute overlap). These affect the GPU pipeline as a whole.
 
-When idle_time > 50%, the Recommendations section MUST lead with:
+<!-- Number priorities sequentially starting from P1. Include CPU/Idle only if invoked. -->
+<!-- Example with CPU/Idle: P1=CPU/Idle, P2=Multi-Kernel highest, P3=Multi-Kernel next -->
+<!-- Example without CPU/Idle: P1=Multi-Kernel highest, P2=Multi-Kernel next -->
+<!-- Title format: Descriptive name only. Do NOT append severity labels like (CRITICAL) or (MEDIUM). -->
 
-### ⚫ Priority 0: CRITICAL - GPU Underutilization (X% Idle)
+### ⚫ P<N>: <CPU/Idle Title>
+
 **Issue**: [1-2 sentences - what's wrong]
-**Action**: [1-2 sentences - what to do].
-**Impact**: Immediate Speedup Achieved
-→ *See [Detailed Analysis: CPU/Idle Time](#cpu-idle-time-analysis) for details*
 
----
-
-### 🔴 Priority 1: <Brief Title>
-**Issue**: [1 sentence - what's wrong]
 **Action**: [1-2 sentences - what to do]
+
 **Impact**: [Expected improvement]
-→ *See [Detailed Analysis: Section](#section-link) for details*
+
+→ *See [Detailed Analysis: System-Level > CPU/Idle Time](#cpu-idle-time-analysis) for details*
 
 ---
 
-### 🟡 Priority 2: <Brief Title>
+### 🔴 P<N+1>: <Multi-Kernel Issue Title>
+
+**Issue**: [1 sentence - what's wrong]
+
+**Action**: [1-2 sentences - what to do]
+
+**Impact**: [Expected improvement]
+
+→ *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
+
+---
+
+### 🟡 P<N+2>: <Next Multi-Kernel Issue>
+
 **Issue**: [1 sentence]
+
 **Action**: [1-2 sentences]
+
 **Impact**: [Expected improvement]
-→ *See [Detailed Analysis: Section](#section-link) for details*
 
 ---
 
-### 🟢 Priority 3: <Brief Title>
+## Compute Kernel Optimizations
+
+Findings from per-category kernel analysis (GEMM, SDPA, elementwise, etc.).
+Summaries of recommendations from Step 7 sub-agents, focused on individual kernel efficiency.
+
+### 🔴 P1: <Brief Title>
+
+**Issue**: [1 sentence - what's wrong]
+
+**Action**: [1-2 sentences - what to do]
+
+**Impact**: [Expected improvement]
+
+→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
+
+---
+
+### 🟡 P2: <Brief Title>
+
 **Issue**: [1 sentence]
+
 **Action**: [1-2 sentences]
+
 **Impact**: [Expected improvement]
-→ *See [Detailed Analysis: Section](#section-link) for details*
+
+→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
 
 ---
 
-## Detailed Analysis
+### 🟢 P3: <Brief Title>
+
+**Issue**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [Expected improvement]
+
+---
+
+## Detailed Analysis: System-Level
+
+### 1. CPU/Idle Time Analysis
+[Full cpu_idle_findings.md content from system_findings/]
+
+### 2. Multi-Kernel Issues
+[Full multi_kernel_findings.md content from system_findings/]
+
+---
+
+## Detailed Analysis: Compute Kernels
 
 ### 1. <Operation Category> (X% of compute)
-[All kernel breakdowns, calculations, tables, explanations from category findings]
+[All kernel breakdowns, calculations, tables, explanations from category_findings/]
 
 ### 2. <Operation Category> (X% of compute)
 [...]
@@ -586,9 +754,13 @@ When idle_time > 50%, the Recommendations section MUST lead with:
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **Recommendations**: Max ~10 lines PER recommendation
-4. **Detailed Analysis**: All tables, calculations, explanations go HERE
-5. **No redundancy**: Information appears in ONE place only
+3. **System-Level Optimizations**: Number sequentially from P1; include CPU/Idle first only if invoked, then Multi-Kernel issues
+4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
+5. **Each section is independently composable** -- can be shared standalone
+6. **System and Compute tiers use separate sequential P1/P2/P3 numbering (no gaps)**
+7. **Detailed Analysis**: Split into System-Level and Compute Kernels subsections
+8. **No redundancy**: Information appears in ONE place only
+9. **Recommendations**: Max ~10 lines PER recommendation
 
 ---
 
@@ -609,17 +781,24 @@ When idle_time > 50%, the Recommendations section MUST lead with:
 
 ### Before Invoking Subagents
 - Read `category_manifest.json` to get valid categories
+- Use `tier` field to determine which subagents belong to Step 6 (system) vs Step 7 (compute kernel)
 - Only invoke subagents for categories that exist in manifest
 - Skip categories with no operations
 
-### After All Subagents Complete
-- Check each `<category>_findings.md` for "Status: ERROR"
+### After System-Level Subagents Complete (Step 6)
+- Check each file in `system_findings/` for "Status: ERROR"
+- Collect failed analyses and error summaries
+- **CRITICAL: Exclude failed analyses from aggregation**
+- **CRITICAL: Do NOT attempt to manually analyze failed system checks**
+
+### After Compute Kernel Subagents Complete (Step 7)
+- Check each file in `category_findings/` for "Status: ERROR"
 - Collect list of failed categories and their error summaries
 - **CRITICAL: Exclude failed categories from aggregation and recommendations**
 - **CRITICAL: Do NOT attempt to manually analyze failed categories**
 
 ### In Final Report
-- Include Warnings section listing failed categories (only if errors occurred)
+- Include Warnings section listing failed analyses from BOTH tiers (only if errors occurred)
 - Provide recommendations only for successfully analyzed categories
 - If no errors, omit the Warnings section entirely
 
@@ -655,9 +834,10 @@ tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'
 
 ## Workflow Tips
 
-1. **Parallel subagent invocation** - Launch all category subagents simultaneously
-2. **Wait for completion** - All subagents must finish before aggregation
-3. **Load trace ONCE** - Tree data pre-computation is the expensive operation
-4. **Context isolation** - Each subagent gets only its data
-5. **Single report** - Clean stakeholder report with prioritized recommendations
-6. **Handle errors gracefully** - Failed categories go to Warnings, not manual analysis
+1. **Two-tier parallelism** - Launch system-level (Step 6) and compute kernel (Step 7) subagents in parallel within each tier
+2. **Wait for completion** - All subagents in both tiers must finish before validation (Step 8)
+3. **Load trace ONCE** - Tree data and multi-kernel data pre-computation happen in a single trace load
+4. **Context isolation** - Each subagent gets only its data; system subagents read from `system_findings/`, compute from `category_findings/`
+5. **Composable reports** - System-Level and Compute Kernel sections can stand alone as independent deliverables
+6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1)
+7. **Handle errors gracefully** - Failed analyses go to Warnings, not manual analysis

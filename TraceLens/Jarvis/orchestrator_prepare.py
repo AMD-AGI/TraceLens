@@ -45,7 +45,8 @@ def main():
     print("="*80)
     
     # Create directory structure (chmod 777 so host user can write when running in container as root)
-    for d in [output_dir, f"{output_dir}/metadata", f"{output_dir}/category_data", f"{output_dir}/category_findings"]:
+    for d in [output_dir, f"{output_dir}/metadata", f"{output_dir}/category_data",
+              f"{output_dir}/category_findings", f"{output_dir}/system_findings"]:
         os.makedirs(d, exist_ok=True)
         os.chmod(d, 0o777)
     
@@ -192,9 +193,137 @@ def main():
         
         print(f"  ✓ Pre-computed tree data for bottleneck operations")
         
+        # ====================================================================
+        # STEP 4.5: Pre-compute Multi-Kernel Issue Data
+        # ====================================================================
+        print("\n[STEP 4.5] Pre-computing Multi-Kernel Issue Data...")
+        
+        try:
+            from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+            
+            # Use GPUEventAnalyser to categorize events (single source of truth
+            # for compute/communication/memcpy classification)
+            gpu_analyser = GPUEventAnalyser(tree.events)
+            event_lists = gpu_analyser.get_gpu_event_lists()
+            mk_gpu_events = event_lists[GPUEventAnalyser.all_gpu_key]
+            mk_comp_events = event_lists[GPUEventAnalyser.computation_key]
+            mk_comm_events = event_lists[GPUEventAnalyser.communication_key]
+            mk_memcpy_events = event_lists[GPUEventAnalyser.memcpy_key]
+            
+            # Sub-classify memcpy by direction (not provided by GPUEventAnalyser)
+            memcpy_by_direction = {"D2H": [], "H2D": [], "D2D": [], "other": []}
+            for event in mk_memcpy_events:
+                name = event.get("name", "").lower()
+                if "dtoh" in name or "device -> host" in name or "devicetohost" in name:
+                    memcpy_by_direction["D2H"].append(event)
+                elif "htod" in name or "host -> device" in name or "hosttodevice" in name:
+                    memcpy_by_direction["H2D"].append(event)
+                elif "dtod" in name or "device -> device" in name or "devicetodevice" in name:
+                    memcpy_by_direction["D2D"].append(event)
+                else:
+                    memcpy_by_direction["other"].append(event)
+            
+            # Build memcpy summary
+            memcpy_summary = {"total_count": len(mk_memcpy_events), "total_time_us": 0, "by_direction": {}}
+            for direction, events in memcpy_by_direction.items():
+                if not events:
+                    continue
+                durations = [e.get("dur", 0) for e in events]
+                sizes = [e.get("args", {}).get("bytes", 0) for e in events]
+                dir_summary = {
+                    "count": len(events),
+                    "total_time_us": round(sum(durations), 2),
+                    "avg_time_us": round(sum(durations) / len(durations), 2),
+                    "max_time_us": round(max(durations), 2),
+                    "total_bytes": sum(s for s in sizes if s),
+                    "avg_bytes": round(sum(s for s in sizes if s) / len(events), 2) if any(sizes) else 0,
+                }
+                memcpy_summary["by_direction"][direction] = dir_summary
+                memcpy_summary["total_time_us"] += dir_summary["total_time_us"]
+            memcpy_summary["total_time_us"] = round(memcpy_summary["total_time_us"], 2)
+            
+            # Build NCCL/communication summary
+            nccl_summary = {"total_count": len(mk_comm_events), "total_time_us": 0}
+            if mk_comm_events:
+                nccl_durations = [e.get("dur", 0) for e in mk_comm_events]
+                nccl_summary["total_time_us"] = round(sum(nccl_durations), 2)
+                nccl_summary["avg_time_us"] = round(sum(nccl_durations) / len(nccl_durations), 2)
+                nccl_summary["max_time_us"] = round(max(nccl_durations), 2)
+                
+                # Top NCCL ops by duration
+                sorted_nccl = sorted(mk_comm_events, key=lambda e: e.get("dur", 0), reverse=True)
+                nccl_summary["top_ops"] = [
+                    {
+                        "name": e.get("name", ""),
+                        "duration_us": round(e.get("dur", 0), 2),
+                        "stream": e.get("args", {}).get("stream", None)
+                    }
+                    for e in sorted_nccl[:10]
+                ]
+            
+            # Compute overlap metrics using GPUEventAnalyser
+            overlap_analysis = {}
+            if mk_gpu_events:
+                try:
+                    GPUEventAnalyser.verify_dict_gpu_event_lists(event_lists)
+                    metrics = GPUEventAnalyser.compute_metrics_dict(event_lists)
+                    
+                    total_time = metrics.get("total_time", 0)
+                    comp_time = metrics.get("computation_time", 0)
+                    total_comm_time = metrics.get("total_comm_time", 0)
+                    exposed_comm_time = metrics.get("exposed_comm_time", 0)
+                    total_memcpy_time = metrics.get("total_memcpy_time", 0)
+                    exposed_memcpy_time = metrics.get("exposed_memcpy_time", 0)
+                    
+                    overlap_analysis = {
+                        "total_time_us": round(total_time, 2),
+                        "computation_time_us": round(comp_time, 2),
+                        "total_comm_time_us": round(total_comm_time, 2),
+                        "exposed_comm_time_us": round(exposed_comm_time, 2),
+                        "total_memcpy_time_us": round(total_memcpy_time, 2),
+                        "exposed_memcpy_time_us": round(exposed_memcpy_time, 2),
+                        "comm_overlap_ratio": round(1 - (exposed_comm_time / total_comm_time), 4) if total_comm_time > 0 else None,
+                        "memcpy_overlap_ratio": round(1 - (exposed_memcpy_time / total_memcpy_time), 4) if total_memcpy_time > 0 else None,
+                        "comm_percent_of_total": round(exposed_comm_time / total_time * 100, 2) if total_time > 0 else 0,
+                        "memcpy_percent_of_total": round(exposed_memcpy_time / total_time * 100, 2) if total_time > 0 else 0,
+                    }
+                except Exception as e:
+                    print(f"    ⚠️  Could not compute overlap metrics: {e}")
+                    overlap_analysis = {"error": str(e)}
+            
+            # Write multi_kernel_data.json (raw statistics only -- pattern
+            # detection and recommendations are handled by multi_kernel_analysis.py
+            # and the multi-kernel-analyzer sub-agent respectively)
+            multi_kernel_data = {
+                "memcpy_summary": memcpy_summary,
+                "nccl_summary": nccl_summary,
+                "overlap_analysis": overlap_analysis,
+            }
+            
+            multi_kernel_data_file = f"{output_dir}/category_data/multi_kernel_data.json"
+            with open(multi_kernel_data_file, 'w') as f:
+                json.dump(multi_kernel_data, f, indent=2)
+            
+            print(f"  ✓ Multi-kernel data: {len(mk_memcpy_events)} memcpy events, {len(mk_comm_events)} NCCL events")
+        
+        except Exception as e:
+            print(f"  ⚠️  Error during multi-kernel data pre-computation: {e}")
+            import traceback
+            traceback.print_exc()
+            # Write empty data so downstream scripts don't fail
+            multi_kernel_data = {
+                "memcpy_summary": {"total_count": 0, "total_time_us": 0, "by_direction": {}},
+                "nccl_summary": {"total_count": 0, "total_time_us": 0},
+                "overlap_analysis": {},
+                "error": str(e)
+            }
+            multi_kernel_data_file = f"{output_dir}/category_data/multi_kernel_data.json"
+            with open(multi_kernel_data_file, 'w') as f:
+                json.dump(multi_kernel_data, f, indent=2)
+        
     except ImportError as e:
         print(f"  ⚠️  Could not import TraceLens: {e}")
-        print(f"  Skipping tree data pre-computation")
+        print(f"  Skipping tree data and multi-kernel pre-computation")
     except Exception as e:
         print(f"  ⚠️  Error during tree data pre-computation: {e}")
         import traceback
@@ -273,6 +402,7 @@ def main():
             "name": category_name,
             "display_name": display_name,
             "skill": CATEGORY_SKILL_MAP.get(category_name, "generic-op-analysis"),
+            "tier": "compute_kernel",
             "ops_count": len(category_df),
             "csv_file": csv_file,
             "metadata_file": metadata_file,
@@ -316,12 +446,61 @@ def main():
             "name": "cpu_idle",
             "display_name": "CPU/Idle Analysis",
             "skill": "cpu-idle-analysis",
+            "tier": "system",
             "ops_count": 0,
             "csv_file": cpu_idle_csv,
             "metadata_file": cpu_idle_metadata_file,
             "tree_data_file": None,
             "priority": 0,
             "critical": True
+        })
+    
+    # ============================================================================
+    # Multi-Kernel System-Level Category Creation
+    # ============================================================================
+    multi_kernel_data_file = f"{output_dir}/category_data/multi_kernel_data.json"
+    has_multi_kernel_events = False
+    if os.path.exists(multi_kernel_data_file):
+        with open(multi_kernel_data_file, 'r') as f:
+            mk_data = json.load(f)
+        has_multi_kernel_events = (mk_data.get("memcpy_summary", {}).get("total_count", 0) > 0 or
+                                   mk_data.get("nccl_summary", {}).get("total_count", 0) > 0)
+    
+    if has_multi_kernel_events:
+        print(f"\n  Category: Multi-Kernel Issues (multi_kernel)")
+        print(f"    ℹ️  Multi-kernel data available (memcpy/NCCL events present)")
+        
+        # Create multi-kernel metadata
+        multi_kernel_metadata = {
+            "platform": platform,
+            "peak_hbm_bw_tbs": platform_specs["peak_hbm_bw_tbs"],
+            "peak_bf16_maf_tflops": platform_specs["peak_bf16_maf_tflops"],
+            "memory_gb": platform_specs["memory_gb"],
+            "trace_path": trace_path,
+            "output_dir": output_dir,
+            "category": "Multi-Kernel Issues",
+            "category_name": "multi_kernel",
+            "gpu_utilization": gpu_utilization_metrics,
+            "tier": "system"
+        }
+        
+        multi_kernel_metadata_file = f"{output_dir}/metadata/multi_kernel_metadata.json"
+        with open(multi_kernel_metadata_file, 'w') as f:
+            json.dump(multi_kernel_metadata, f, indent=2)
+        
+        print(f"    ✓ Exported metadata")
+        
+        # Add to categories list (system tier)
+        exported_categories.append({
+            "name": "multi_kernel",
+            "display_name": "Multi-Kernel Issues",
+            "skill": "multi-kernel-analysis",
+            "tier": "system",
+            "ops_count": 0,
+            "csv_file": None,
+            "metadata_file": multi_kernel_metadata_file,
+            "data_file": multi_kernel_data_file,
+            "tree_data_file": None,
         })
     
     # ============================================================================
@@ -336,8 +515,8 @@ def main():
     
     for cat_info in exported_categories:
         category_name = cat_info['name']
-        if category_name == 'cpu_idle':
-            continue  # Skip cpu_idle category - no ops
+        if category_name in ('cpu_idle', 'multi_kernel'):
+            continue  # Skip system-level categories - no ops CSV
         
         category_df = unified_df[unified_df['enhanced_category'] == category_name]
         
