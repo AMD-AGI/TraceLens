@@ -1284,10 +1284,12 @@ class TraceDiff:
                                 common_name = find_common_name(n1, n2, module_map)
                                 if common_name is not None:
                                     print(f"Renaming: {n1}, {n2} to {common_name}")
-                                    rename_map[n2]=common_name 
-                                    rename_map[n1]=common_name
+                                    rename_map[n2] = common_name
+                                    rename_map[n1] = common_name
                                 else:
-                                    print(f"No common name found for {n1} and {n2} under the same LCA, keeping original names.")
+                                    print(
+                                        f"No common name found for {n1} and {n2} under the same LCA, keeping original names."
+                                    )
                     else:
                         n1_list = mapping["trace1"]["name"]
                         n1_list_copy = n1_list.copy()
