@@ -26,7 +26,7 @@ def main():
     print(f"Loading profile from: {args.input}")
     perf_analyzer = TreePerfAnalyzer.from_file(args.input)
     df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
-        include_kernel_names=True
+        include_kernel_details=True
     )
 
     print(f"Generating unique ops view...")
