@@ -873,7 +873,7 @@ class TraceDiff:
         rows = []
         visited_stats_nodes = set()
 
-        def traverse(merged_id):
+        def traverse(merged_id, combined_parent_node):
             if merged_id in visited_stats_nodes:
                 return
             node = merged_id_to_event[merged_id]
@@ -989,7 +989,13 @@ class TraceDiff:
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
                 if event1 and self.is_gpu_path(event1):
-                    lca_name = self._get_op_name(event1.get("parent"), 1)
+                    if combined_parent_node is not None:
+                        lca_id = combined_parent_node.get('merged_id')
+                        lca = merged_id_to_event[lca_id]
+                        lca_name = self._get_op_name(lca['uid1'], 1)
+                    else:
+                        lca_name = None # Root node has no LCA
+                        lca_id = None
 
                     # Get all GPU kernels from trace1's branch
                     gpu_event_uids = event1.get("gpu_events", [])
@@ -1023,7 +1029,7 @@ class TraceDiff:
                                 "Concrete Inputs": get_concrete_inputs(parent_node),
                                 "kernel_time": gpu_event.get("dur", 0),
                                 "lowest_common_ancestor_name": lca_name,
-                                "lowest_common_ancestor_id": node["merged_id"],
+                                "lowest_common_ancestor_id": lca_id,
                                 "nn_module_stack": ";".join(
                                     str(x)
                                     for x in parent_node.get("nn_module_stack", [])
@@ -1039,7 +1045,13 @@ class TraceDiff:
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
                 if event2 and self.is_gpu_path(event2):
-                    lca_name = self._get_op_name(event2.get("parent"), 2)
+                    if combined_parent_node is not None:
+                        lca_id = combined_parent_node.get('merged_id')
+                        lca = merged_id_to_event[lca_id]
+                        lca_name = self._get_op_name(lca['uid2'], 2)
+                    else:
+                        lca_name = None # Root node has no LCA
+                        lca_id = None
 
                     # Get all GPU kernels from trace2's branch
                     gpu_event_uids = event2.get("gpu_events", [])
@@ -1073,7 +1085,7 @@ class TraceDiff:
                                 "Concrete Inputs": get_concrete_inputs(parent_node),
                                 "kernel_time": gpu_event.get("dur", 0),
                                 "lowest_common_ancestor_name": lca_name,
-                                "lowest_common_ancestor_id": node["merged_id"],
+                                "lowest_common_ancestor_id": lca_id,
                                 "nn_module_stack": ";".join(
                                     str(x)
                                     for x in parent_node.get("nn_module_stack", [])
@@ -1094,11 +1106,11 @@ class TraceDiff:
 
             if should_traverse_children:
                 for cid in node["children"]:
-                    traverse(cid)
+                    traverse(cid, combined_parent_node)
             return
 
         for root_id in merged_root_ids:
-            traverse(root_id)
+            traverse(root_id, None)
 
         df = pd.DataFrame(rows)
         self.diff_stats_df = df
