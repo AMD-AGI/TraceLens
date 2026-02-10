@@ -910,6 +910,7 @@ class TraceDiff:
                         lca_name = self._get_op_name(
                             node["uid1"], 1
                         ) or self._get_op_name(node["uid2"], 2)
+                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
 
                         gpu_event_uids1 = []
                         for child in non_combined_children_trace1_gpu_paths:
@@ -993,6 +994,7 @@ class TraceDiff:
                         lca_id = combined_parent_node.get('merged_id')
                         lca = merged_id_to_event[lca_id]
                         lca_name = self._get_op_name(lca['uid1'], 1)
+                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
                     else:
                         lca_name = None # Root node has no LCA
                         lca_id = None
@@ -1049,6 +1051,7 @@ class TraceDiff:
                         lca_id = combined_parent_node.get('merged_id')
                         lca = merged_id_to_event[lca_id]
                         lca_name = self._get_op_name(lca['uid2'], 2)
+                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
                     else:
                         lca_name = None # Root node has no LCA
                         lca_id = None
