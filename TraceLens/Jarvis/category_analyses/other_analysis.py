@@ -58,7 +58,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
         'communication_count': comm_count,
         'graph_count': graph_count,
         'miscellaneous_count': misc_count,
-        'peak_maf_tflops': metadata.get('peak_bf16_maf_tflops'),
+        'peak_maf_tflops': metadata.get('max_achievable_tflops', {}).get('matrix_bf16') if isinstance(metadata.get('max_achievable_tflops'), dict) else metadata.get('peak_bf16_maf_tflops'),
         'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
     }
 
@@ -85,10 +85,10 @@ def main():
     
     config = get_other_config()
     peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
-    peak_maf = metadata.get('peak_bf16_maf_tflops', 1)
+    maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
     
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, peak_maf, 'prefer_memory')
+    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, maf, 'prefer_memory')
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     

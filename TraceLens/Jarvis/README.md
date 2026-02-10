@@ -68,10 +68,10 @@ pip install -e .
 ```
 analysis_output/
 ├── standalone_analysis.md          # Stakeholder report
-├── category_manifest.json          # Category metadata and GPU utilization
 ├── perf_report.xlsx                # Excel performance report
 ├── perf_report_csvs/               # CSV exports (gpu_timeline, ops_summary, etc.)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data
+│   ├── category_manifest.json      # Category metadata and GPU utilization
 │   ├── *_ops.csv
 │   ├── *_metrics.json
 │   └── *_tree_data.json

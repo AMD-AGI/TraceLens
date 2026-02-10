@@ -49,7 +49,7 @@ def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
 
 def load_manifest(output_dir: str) -> Dict:
     """Load category manifest for metadata."""
-    manifest_path = f'{output_dir}/category_manifest.json'
+    manifest_path = f'{output_dir}/category_data/category_manifest.json'
     
     if os.path.exists(manifest_path):
         with open(manifest_path, 'r') as f:

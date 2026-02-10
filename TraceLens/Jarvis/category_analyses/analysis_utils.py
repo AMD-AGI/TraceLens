@@ -171,19 +171,39 @@ def calculate_efficiency_with_validation(
     }
 
 
+def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> float:
+    """Resolve the correct peak MAF for an operation using Compute Spec.
+    
+    Tier 2 of the 3-tier efficiency fallback: uses Compute Spec column
+    to look up the precision-aware peak from max_achievable_tflops.
+    Falls back to matrix_bf16 if Compute Spec is missing or unknown.
+    """
+    compute_spec = row.get('Compute Spec', '')
+    if compute_spec and isinstance(compute_spec, str) and compute_spec in max_achievable_tflops:
+        return max_achievable_tflops[compute_spec]
+    return fallback_maf
+
+
 def calculate_efficiency(
     row: pd.Series,
     peak_hbm_bw: float,
-    peak_maf: float,
+    peak_maf_or_maf_dict,
     method: str = 'auto'
 ) -> Dict[str, Optional[float]]:
     """
-    Calculate efficiency metrics for an operation with validation.
+    Calculate efficiency metrics for an operation with 3-tier fallback:
+    
+    1. If 'Pct Roofline' exists in CSV row (from TreePerf arch), use it directly.
+       This is precision-aware and roofline-correct.
+    2. Else if 'Compute Spec' + max_achievable_tflops are available, look up the
+       correct peak and compute efficiency manually.
+    3. Else fall back to matrix_bf16 peak (legacy behavior).
     
     Args:
         row: DataFrame row with operation metrics
         peak_hbm_bw: Peak HBM bandwidth in TB/s
-        peak_maf: Peak MAF in TFLOPS
+        peak_maf_or_maf_dict: Either a float (legacy single peak) or a dict
+            (max_achievable_tflops) for precision-aware lookup
         method: Efficiency calculation method:
             - 'memory_bound': Use TB/s only
             - 'compute_bound': Use TFLOPS/s only  
@@ -200,6 +220,7 @@ def calculate_efficiency(
         'efficiency_percent': None,
         'bound_type': None,
         'flops_per_byte': None,
+        'compute_spec': None,
         'warning': None,
         'is_anomaly': False
     }
@@ -210,10 +231,39 @@ def calculate_efficiency(
     tflops_s = row.get('TFLOPS/s_mean') if not pd.isna(row.get('TFLOPS/s_mean')) else None
     tb_s = row.get('TB/s_mean') if not pd.isna(row.get('TB/s_mean')) else None
     
+    compute_spec = row.get('Compute Spec', '')
+    if compute_spec and isinstance(compute_spec, str):
+        result['compute_spec'] = compute_spec
+    
     if tflops_s is not None:
         result['tflops_achieved'] = round(tflops_s, 2)
     if tb_s is not None:
         result['tb_s_achieved'] = round(tb_s, 2)
+    
+    # --- Tier 1: Use Pct Roofline from TreePerf if available ---
+    pct_roofline = row.get('Pct Roofline')
+    if pct_roofline is not None and not pd.isna(pct_roofline):
+        result['efficiency_percent'] = round(float(pct_roofline), 2)
+        # Determine bound type from FLOPS/Byte
+        if flops_byte > 100:
+            result['bound_type'] = 'compute'
+        elif flops_byte < 50:
+            result['bound_type'] = 'memory'
+        else:
+            result['bound_type'] = 'compute' if tflops_s is not None else 'memory'
+        # Check for anomaly
+        if result['efficiency_percent'] > 110:
+            result['warning'] = f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
+            result['is_anomaly'] = True
+        return result
+    
+    # --- Tier 2/3: Manual calculation with precision-aware peak ---
+    # Resolve peak_maf: if dict, look up by Compute Spec; if float, use directly
+    if isinstance(peak_maf_or_maf_dict, dict):
+        fallback_maf = peak_maf_or_maf_dict.get('matrix_bf16', 1)
+        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
+    else:
+        peak_maf = peak_maf_or_maf_dict
     
     # Determine bound type and calculate efficiency with validation
     def set_efficiency_with_validation(achieved, peak, bound_type, metric_name):
@@ -272,7 +322,9 @@ def build_operation_metrics(
         List of operation metric dicts
     """
     peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
-    peak_maf = metadata.get('peak_bf16_maf_tflops', 1)
+    # Use max_achievable_tflops dict for precision-aware efficiency;
+    # fall back to legacy peak_bf16_maf_tflops for backward compatibility
+    maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
     efficiency_method = category_config.get('efficiency_method', 'auto')
     
     # Calculate total time for percentage calculations
@@ -294,8 +346,8 @@ def build_operation_metrics(
         time_ms = row.get('Kernel Time (µs)_sum', 0) / 1000
         percent_of_category = (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
         
-        # Calculate efficiency
-        efficiency = calculate_efficiency(row, peak_hbm_bw, peak_maf, efficiency_method)
+        # Calculate efficiency (precision-aware via Pct Roofline or Compute Spec)
+        efficiency = calculate_efficiency(row, peak_hbm_bw, maf, efficiency_method)
         
         op_metric = {
             'name': op_name,
@@ -328,7 +380,7 @@ def build_operation_metrics(
 def calculate_average_efficiency(
     ops_df: pd.DataFrame,
     peak_hbm_bw: float,
-    peak_maf: float,
+    peak_maf_or_maf_dict,
     method: str = 'auto'
 ) -> float:
     """
@@ -337,7 +389,8 @@ def calculate_average_efficiency(
     Args:
         ops_df: Operations DataFrame
         peak_hbm_bw: Peak HBM bandwidth in TB/s
-        peak_maf: Peak MAF in TFLOPS
+        peak_maf_or_maf_dict: Either a float (legacy single peak) or a dict
+            (max_achievable_tflops) for precision-aware lookup
         method: Efficiency calculation method
         
     Returns:
@@ -347,7 +400,7 @@ def calculate_average_efficiency(
     count = 0
     
     for _, row in ops_df.iterrows():
-        eff = calculate_efficiency(row, peak_hbm_bw, peak_maf, method)
+        eff = calculate_efficiency(row, peak_hbm_bw, peak_maf_or_maf_dict, method)
         if eff['efficiency_percent'] is not None:
             total_eff += eff['efficiency_percent']
             count += 1
@@ -379,7 +432,7 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
 
 def detect_quantized_gemm(op_name: str) -> bool:
     """Check if GEMM operation is quantized."""
-    quantized_markers = ['w8a8', 'int8', 'fp8', 'w4a16', 'w4a4']
+    quantized_markers = ['w8a8', 'int8', 'fp8', 'w4a16', 'w4a4', 'fp4', 'mxfp4']
     return any(marker in op_name.lower() for marker in quantized_markers)
 
 

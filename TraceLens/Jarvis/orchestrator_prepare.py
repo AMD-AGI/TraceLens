@@ -125,9 +125,17 @@ def main():
     try:
         from TraceLens.TreePerf import TreePerfAnalyzer
         
+        # Build arch dict for precision-aware roofline (Pct Roofline column)
+        arch = {
+            "name": platform_specs["name"],
+            "mem_bw_gbps": platform_specs["mem_bw_gbps"],
+            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
+        }
+        
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
-        analyzer = TreePerfAnalyzer.from_file(trace_path, add_python_func=True, enable_pseudo_ops=enable_pseudo_ops)
+        print(f"  Arch: {platform_specs['name']} (mem_bw={platform_specs['mem_bw_gbps']} GB/s)")
+        analyzer = TreePerfAnalyzer.from_file(trace_path, add_python_func=True, enable_pseudo_ops=enable_pseudo_ops, arch=arch)
         tree = analyzer.tree
         print(f"  ✓ Trace loaded successfully")
         print(f"  ✓ Tree has {len(tree.events)} events")
@@ -382,8 +390,8 @@ def main():
         # Create metadata JSON
         metadata = {
             "platform": platform,
-            "peak_hbm_bw_tbs": platform_specs["peak_hbm_bw_tbs"],
-            "peak_bf16_maf_tflops": platform_specs["peak_bf16_maf_tflops"],
+            "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
             "memory_gb": platform_specs["memory_gb"],
             "trace_path": trace_path,
             "output_dir": output_dir,
@@ -419,8 +427,8 @@ def main():
         # Create CPU idle metadata
         cpu_idle_metadata = {
             "platform": platform,
-            "peak_hbm_bw_tbs": platform_specs["peak_hbm_bw_tbs"],
-            "peak_bf16_maf_tflops": platform_specs["peak_bf16_maf_tflops"],
+            "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
             "memory_gb": platform_specs["memory_gb"],
             "trace_path": trace_path,
             "output_dir": output_dir,
@@ -473,8 +481,8 @@ def main():
         # Create multi-kernel metadata
         multi_kernel_metadata = {
             "platform": platform,
-            "peak_hbm_bw_tbs": platform_specs["peak_hbm_bw_tbs"],
-            "peak_bf16_maf_tflops": platform_specs["peak_bf16_maf_tflops"],
+            "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
             "memory_gb": platform_specs["memory_gb"],
             "trace_path": trace_path,
             "output_dir": output_dir,
@@ -593,7 +601,7 @@ def main():
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead."
     }
     
-    manifest_file = f"{output_dir}/category_manifest.json"
+    manifest_file = f"{output_dir}/category_data/category_manifest.json"
     with open(manifest_file, 'w') as f:
         json.dump(manifest, f, indent=2)
     

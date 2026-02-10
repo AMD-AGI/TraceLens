@@ -58,10 +58,10 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 2. **Platform**
    - Ask: "Which platform are you analyzing?"
    - Options:
-     1. **MI300X** - 5.3 TB/s HBM, 708 TFLOPS BF16, 192 GB
-     2. **MI325X** - 6.0 TB/s HBM, 708 TFLOPS BF16, 256 GB
-     3. **MI355X** - 6.5 TB/s HBM, 850 TFLOPS BF16, 288 GB
-     4. **MI400** - 7.0 TB/s HBM, 1000 TFLOPS BF16, 320 GB
+     1. **MI300X**
+     2. **MI325X**
+     3. **MI355X**
+     4. **MI400**
 
 3. **Node Name**
    - Ask: "Which Node should we use for analysis?"
@@ -117,7 +117,7 @@ This script performs:
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
 - `category_data/<category>_tree_data.json` - Pre-computed tree analysis
 - `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
-- `category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
+- `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
 - `category_findings/` - Directory for compute kernel analysis outputs
 
@@ -135,7 +135,7 @@ System-level analysis examines issues that affect the GPU pipeline as a whole --
 
 ```python
 import json
-with open('<output_dir>/category_manifest.json') as f:
+with open('<output_dir>/category_data/category_manifest.json') as f:
     manifest = json.load(f)
 
 gpu_util = manifest.get('gpu_utilization', {})
@@ -208,7 +208,7 @@ Compute kernel analysis examines individual operation category efficiency. CPU/I
 
 ```python
 import json
-with open('<output_dir>/category_manifest.json') as f:
+with open('<output_dir>/category_data/category_manifest.json') as f:
     manifest = json.load(f)
 
 # Only compute kernel tier categories (exclude system tier)
@@ -356,7 +356,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
-- Peak MAF: {peak_maf} TFLOPS
+- Max Achievable TFLOPS (from metadata max_achievable_tflops dict, keyed by compute spec e.g. matrix_bf16, matrix_fp8)
 
 **Input files:**
 - category_data/{category}_ops.csv
@@ -393,7 +393,7 @@ import json
 import os
 
 # Load manifest with ground truth
-with open('<output_dir>/category_manifest.json') as f:
+with open('<output_dir>/category_data/category_manifest.json') as f:
     manifest = json.load(f)
 
 # Sum of compute kernel GPU kernel times should ~= computation time
@@ -535,7 +535,7 @@ for f in os.listdir(compute_dir):
                 compute_findings[name] = content
 
 # Load manifest for top operations and metadata
-with open('<output_dir>/category_manifest.json', 'r') as f:
+with open('<output_dir>/category_data/category_manifest.json', 'r') as f:
     manifest = json.load(f)
     top_ops = manifest.get('top_operations', [])
 ```
@@ -551,12 +551,21 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 | Order | Source | Criteria | Included When |
 |-------|--------|----------|---------------|
 | First | CPU/Idle | `idle_time_percent > 30%` | Only if CPU/Idle analysis was invoked |
-| Next | Multi-Kernel | Highest severity multi-kernel issue (memcpy/NCCL blocking/overlap) | Always if multi-kernel invoked |
-| Next | Multi-Kernel | Next severity multi-kernel issue | If additional issues exist |
+| Next | Multi-Kernel | Highest severity multi-kernel issue (memcpy/NCCL blocking/overlap) | Only if severity is not NONE/N/A |
+| Next | Multi-Kernel | Next severity multi-kernel issue | If additional actionable issues exist |
 
-**Examples:**
-- CPU/Idle + Multi-Kernel → P1: CPU/Idle, P2: Multi-Kernel highest, P3: Multi-Kernel next
-- Multi-Kernel only (CPU/Idle skipped) → P1: Multi-Kernel highest, P2: Multi-Kernel next
+**CRITICAL: No-Issue Handling:**
+- If **all** system-level analyses report NONE/N/A severity (no actionable issues), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
+- Instead, display a short summary: "No system-level bottlenecks detected. GPU utilization is healthy at X%, with negligible memcpy/communication overhead."
+- This avoids misleading stakeholders with a red P1 icon for a non-issue.
+
+**System-Level Icon Mapping (by priority number, NOT severity):**
+
+| Priority | Icon |
+|----------|------|
+| P1 | 🔴 |
+| P2 | 🟡 |
+| P3+ | 🟢 |
 
 ### Aggregate Compute Kernel Recommendations
 
@@ -566,12 +575,19 @@ Compute kernel recommendations address individual operation efficiency. Each sub
 
 Select kernels in top_ops and order by highest impact on end-to-end time. Focus on areas with low efficiency and high category time.
 
-| Priority | Criteria |
-|----------|----------|
-| 🔴 P1 | In top_ops + (Sorted by efficiency and high category %) |
-| 🟡 P2 | In top_ops + (Sorted by efficiency and high category %) |
-| 🟢 P3 | In top_ops + (Sorted by efficiency and high category %) |
-and so on ....
+| Priority | Icon | Criteria |
+|----------|------|----------|
+| P1 | 🔴 | In top_ops + (Sorted by efficiency and high category %) |
+| P2 | 🟡 | In top_ops + (Sorted by efficiency and high category %) |
+| P3+ | 🟢 | In top_ops + (Sorted by efficiency and high category %) |
+
+**Compute Kernel Icon Mapping (by priority number, NOT severity):**
+
+| Priority | Icon |
+|----------|------|
+| P1 | 🔴 |
+| P2 | 🟡 |
+| P3+ | 🟢 |
 
 ---
 
@@ -642,12 +658,20 @@ These are excluded from the recommendations below.
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
-<!-- Number priorities sequentially starting from P1. Include CPU/Idle only if invoked. -->
-<!-- Example with CPU/Idle: P1=CPU/Idle, P2=Multi-Kernel highest, P3=Multi-Kernel next -->
-<!-- Example without CPU/Idle: P1=Multi-Kernel highest, P2=Multi-Kernel next -->
+<!-- CONDITIONAL: If NO actionable system-level issues found (all severities are NONE/N/A), use the clean template below. -->
+<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if invoked. -->
+<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. Do NOT append severity labels like (CRITICAL) or (MEDIUM). -->
 
-### ⚫ P<N>: <CPU/Idle Title>
+<!-- === TEMPLATE A: No actionable system-level issues === -->
+<!-- Use this when all system-level analyses report NONE/N/A severity -->
+
+✅ No system-level bottlenecks detected. GPU utilization is healthy at X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
+
+<!-- === TEMPLATE B: Actionable issues found === -->
+<!-- Use this when at least one system-level analysis reports an actionable severity (LOW/MEDIUM/HIGH/CRITICAL) -->
+
+### 🔴 P1: <CPU/Idle Title OR Multi-Kernel Issue Title>
 
 **Issue**: [1-2 sentences - what's wrong]
 
@@ -655,11 +679,11 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Impact**: [Expected improvement]
 
-→ *See [Detailed Analysis: System-Level > CPU/Idle Time](#cpu-idle-time-analysis) for details*
+→ *See [Detailed Analysis: System-Level > CPU/Idle Time](#cpu-idle-time-analysis) for details* OR → *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
 
 ---
 
-### 🔴 P<N+1>: <Multi-Kernel Issue Title>
+### 🟡 P2: <Multi-Kernel Issue Title>
 
 **Issue**: [1 sentence - what's wrong]
 
@@ -671,7 +695,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ---
 
-### 🟡 P<N+2>: <Next Multi-Kernel Issue>
+### 🟢 P3: <Next Multi-Kernel Issue>
 
 **Issue**: [1 sentence]
 
@@ -685,6 +709,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 Findings from per-category kernel analysis (GEMM, SDPA, elementwise, etc.).
 Summaries of recommendations from Step 7 sub-agents, focused on individual kernel efficiency.
+
+<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 
 ### 🔴 P1: <Brief Title>
 
@@ -745,7 +771,9 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 ### Hardware Reference
 - **Platform**: <platform>
 - **Peak HBM BW**: X TB/s
-- **Peak MAF**: Y TFLOPS
+- **Peak MAF (BF16)**: Y TFLOPS
+- **Peak MAF (FP8)**: Z TFLOPS (if supported)
+- **Peak MAF (FP4)**: W TFLOPS (if supported)
 
 ### Replay Artifacts
 [List of generated replay packages if any]
@@ -754,13 +782,16 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **System-Level Optimizations**: Number sequentially from P1; include CPU/Idle first only if invoked, then Multi-Kernel issues
+3. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
 4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
 5. **Each section is independently composable** -- can be shared standalone
 6. **System and Compute tiers use separate sequential P1/P2/P3 numbering (no gaps)**
-7. **Detailed Analysis**: Split into System-Level and Compute Kernels subsections
-8. **No redundancy**: Information appears in ONE place only
-9. **Recommendations**: Max ~10 lines PER recommendation
+7. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
+   - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
+   - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
+8. **Detailed Analysis**: Split into System-Level and Compute Kernels subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
+9. **No redundancy**: Information appears in ONE place only
+10. **Recommendations**: Max ~10 lines PER recommendation
 
 ---
 
@@ -780,7 +811,7 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 ## Error Handling
 
 ### Before Invoking Subagents
-- Read `category_manifest.json` to get valid categories
+- Read `category_data/category_manifest.json` to get valid categories
 - Use `tier` field to determine which subagents belong to Step 6 (system) vs Step 7 (compute kernel)
 - Only invoke subagents for categories that exist in manifest
 - Skip categories with no operations
@@ -839,5 +870,5 @@ tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'
 3. **Load trace ONCE** - Tree data and multi-kernel data pre-computation happen in a single trace load
 4. **Context isolation** - Each subagent gets only its data; system subagents read from `system_findings/`, compute from `category_findings/`
 5. **Composable reports** - System-Level and Compute Kernel sections can stand alone as independent deliverables
-6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1)
+6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1). Icons follow priority number: System 🔴→🟡→🟢, Compute 🔴→🟡→🟢
 7. **Handle errors gracefully** - Failed analyses go to Warnings, not manual analysis

@@ -22,7 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/cpu_idle_ops.csv` - Timeline data for idle analysis
 2. `<output_dir>/metadata/cpu_idle_metadata.json` - GPU utilization breakdown
-3. `<output_dir>/category_manifest.json` - Contains gpu_utilization metrics
+3. `<output_dir>/category_data/category_manifest.json` - Contains gpu_utilization metrics
 
 **Output file you must write:**
 - `<output_dir>/system_findings/cpu_idle_findings.md`
@@ -32,7 +32,7 @@ When invoked by the orchestrator, you will receive the following context:
 ## Error Handling
 
 **If category data files are missing:**
-1. Read gpu_utilization directly from category_manifest.json
+1. Read gpu_utilization directly from category_data/category_manifest.json
 2. Provide analysis based on available data
 3. Note limitations in findings
 
@@ -142,7 +142,7 @@ For each identified pattern, provide recommendations in priority order:
    - Reduces Python overhead and enables fusion
    - Expected impact: Reduction in framework overhead
 
-### Step 6: Write Category Findings
+### Step 6: Write Findings
 
 Create `<output_dir>/system_findings/cpu_idle_findings.md`. Create it through the container on the node:
 
@@ -181,7 +181,7 @@ ALL other operations and represents [Y ms] of potential improvement.
 
 ## Recommendations
 
-### Priority 0: [Most Impactful Action]
+### Priority 1: [Most Impactful Action]
 **Issue**: [1 sentence description]
 **Action**: [Specific steps to take]
 **Expected Impact**: [Quantified improvement]
@@ -196,7 +196,7 @@ ALL other operations and represents [Y ms] of potential improvement.
 
 ## Key Principles
 
-1. **This is Priority 0** - Idle time analysis supersedes all category-level findings
+1. **This is Priority 1** - Idle time analysis supersedes all system-level findings
 2. **Quantify the opportunity** - Show exact time that could be recovered
 3. **Provide actionable solutions** - Specific steps, not vague suggestions
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions

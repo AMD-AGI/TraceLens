@@ -70,7 +70,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
         'transpose_count': len(transpose_ops),
         'transpose_time_ms': round(transpose_time_ms, 3),
         'transpose_overhead_percent': round(transpose_overhead_pct, 2),
-        'peak_maf_tflops': metadata.get('peak_bf16_maf_tflops'),
+        'peak_maf_tflops': metadata.get('max_achievable_tflops', {}).get('matrix_bf16') if isinstance(metadata.get('max_achievable_tflops'), dict) else metadata.get('peak_bf16_maf_tflops'),
         'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
     }
 
@@ -94,10 +94,10 @@ def main():
     
     config = get_convolution_config()
     peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
-    peak_maf = metadata.get('peak_bf16_maf_tflops', 1)
+    maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
     
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, peak_maf, 'prefer_compute')
+    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, maf, 'prefer_compute')
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     

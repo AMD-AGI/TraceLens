@@ -91,10 +91,10 @@ def main():
     
     config = get_elementwise_config()
     peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
-    peak_maf = metadata.get('peak_bf16_maf_tflops', 1)
+    maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
     
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, peak_maf, 'memory_bound')
+    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, maf, 'memory_bound')
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     
