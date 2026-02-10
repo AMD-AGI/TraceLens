@@ -3141,27 +3141,29 @@ class Normalization:
             # grad_in = (grad_out - grad_mean - variance) * invstd * w
             # if affine save w and sum 
     @staticmethod
-    def flops_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int):
+    def flops_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, output_mask):
         elems_per_channel = num_elems / num_channels
         flops_per_channel = 3 if not is_training else 0 # invstd
         flops_per_channel += 4 * elems_per_channel # calc dotp
-        if is_training:
-            # the real implementation can skip computing grad_in but this is ignored for now
-            # the computation happens whether or not is_affine and has_bias is true
-            flops_per_channel += 5 * elems_per_channel
+        if output_mask[0]:
+            if is_training:
+                flops_per_channel += 5 * elems_per_channel
+        else:
+            #  dx_ptr[j] = dy_ptr[j] * invstd * w;
+            flops_per_channel += 2 * elems_per_channel
         return num_channels * flops_per_channel
     
     def flops_bwd(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
     
     @staticmethod
-    def bytes_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int):
+    def bytes_func_bwd(has_bias: bool, is_affine: bool, is_training: bool, num_elems: int, num_channels: int, bpe_in: int, bpe_out: int, output_mask):
         # assumes everything read once and cached
         # assumes grad_out is bpe_out, everything else is bpe_in
         # read grad_out and the input once, invstd if it is saved
         
         # read grad_out and input, write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * 2
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] else 1)
         if is_training:
             bytes += num_channels * bpe_in # invstd
         # write grad_in
@@ -3175,7 +3177,7 @@ class Normalization:
         return bytes
     
     def bytes_bwd(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
 
 # There are separate calls for fwd and bwd calls, so we need separate classes
 class BatchNorm(Normalization):
@@ -3238,10 +3240,10 @@ class BatchNormBwd(Normalization):
         }
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
 
     def bytes(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
 
 class LayerNorm(Normalization):
     """
@@ -3313,10 +3315,10 @@ class LayerNormBwd(Normalization):
         }
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
 
     def bytes(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
 
 class GroupNorm(Normalization):
     # Group Normalization
@@ -3386,10 +3388,10 @@ class GroupNormBwd(Normalization):
         }
 
     def flops(self):
-        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels)
+        return self.flops_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.output_mask)
 
     def bytes(self):
-        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out)
+        return self.bytes_func_bwd(self.has_bias, self.is_affine, self.is_training, self.num_elems, self.num_channels, self.bpe_in, self.bpe_out, self.output_mask)
 
 class InstanceNorm(Normalization):
     # Instance Normalization
