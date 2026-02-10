@@ -59,7 +59,8 @@ pip install -e .
 
 3. **Get results:**
    - `standalone_analysis.md` - Stakeholder report with prioritized recommendations
-   - `category_findings/` - Per-category detailed analysis
+   - `system_findings/` - System-level analysis (CPU/idle, multi-kernel issues)
+   - `category_findings/` - Per-category compute kernel analysis
 
 ---
 
@@ -71,11 +72,14 @@ analysis_output/
 ├── perf_report.xlsx                # Excel performance report
 ├── perf_report_csvs/               # CSV exports (gpu_timeline, ops_summary, etc.)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data
-│   ├── category_manifest.json      # Category metadata and GPU utilization
+│   ├── category_manifest.json      # Category metadata, GPU utilization, tier info
+│   ├── multi_kernel_data.json      # Pre-computed memcpy/NCCL/overlap data
 │   ├── *_ops.csv
 │   ├── *_metrics.json
 │   └── *_tree_data.json
-├── category_findings/              # Per-category analysis (markdown)
+├── system_findings/                # System-level analysis (CPU/idle, multi-kernel)
+│   └── *_findings.md
+├── category_findings/              # Compute kernel analysis (markdown)
 │   └── *_findings.md
 ├── metadata/                       # Category metadata JSONs
 │   └── *_metadata.json
@@ -86,35 +90,58 @@ analysis_output/
 
 ## Architecture
 
+### Two-Tier Analysis Overview
+
+The analysis is split into two independent tiers that can be composed separately:
+
+- **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
+- **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
+
+Each tier writes to a separate findings directory and produces an independently composable report section.
+
 ### Orchestrator
 The **Standalone Analysis Orchestrator** skill coordinates the entire analysis workflow.
-It queries user inputs, runs TraceLens to pre-compute trace data, and invokes category-specific sub-agents in parallel. Finally, it aggregates findings, generates a prioritized stakeholder report.
+It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it validates outputs, aggregates findings, and generates a prioritized stakeholder report.
 
 ### Workflow Steps
 
 ```
-0.  Query User Inputs (Platform, Trace Path, Node, Container)
-1.  Generate Performance Report (perf_report.xlsx + CSVs)
-2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Category Filtering)
-6.  Invoke Category-Specific Subagents (PARALLEL)
-7.  Aggregate Results and Determine Optimization Recommendations
-8.  Generate Replay Artifacts (optional)
-9.  Generate Final Report (standalone_analysis.md)
+0.   Query User Inputs (Platform, Trace Path, Node, Container)
+1.   Generate Performance Report (perf_report.xlsx + CSVs)
+2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+6.   System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
+7.   Compute Kernel Subagents (PARALLEL) → category_findings/
+8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
+9.   Aggregate Results: System-Level + Compute Kernel Recommendations
+10.  Generate Replay Artifacts (optional)
+11.  Generate Final Report (standalone_analysis.md)
 ```
 
 ### Continual Learning
 After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.
 
 ### Sub-Agents
+
+**System-Level (Step 6):**
+
+| Agent | Purpose | Invocation Condition |
+|-------|---------|---------------------|
+| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks | `idle_time_percent > 50%` or `cpu_idle_critical == true` |
+| `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap | Multi-kernel category exists in manifest |
+
+**Compute Kernel (Step 7):**
+
 | Agent | Purpose |
 |-------|---------|
-| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
-| `gemm-analyzer` | Analyzes matrix multiplication operations |
-| `sdpa-analyzer` | Analyzes scaled dot-product attention |
-| `elementwise-analyzer` | Analyzes elementwise operations |
-| `reduce-analyzer` | Analyzes reduction operations |
+| `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
+| `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
+| `elementwise-analyzer` | Analyzes elementwise operations (add, mul, copy, etc.) |
+| `reduce-analyzer` | Analyzes reduction operations (mean, sum, softmax) |
 | `triton-analyzer` | Analyzes Triton-compiled kernels |
-| `moe-analyzer` | Analyzes MoE operations |
+| `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
 | `batchnorm-analyzer` | Analyzes batch normalization |
 | `convolution-analyzer` | Analyzes convolution operations |
-| `generic-op-analyzer` | Analyzes uncategorized operations |
+| `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
+
+### Constraints
+TraceLens Agentic Mode typically handles the categorized kernels, though the `generic-op-analyzer` is found to be capable for general recommendations. Additionally, complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`.
