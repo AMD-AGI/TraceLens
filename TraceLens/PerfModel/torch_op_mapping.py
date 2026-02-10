@@ -68,27 +68,14 @@ binary_elemwise_ops = [
 
 # aten::batch_norm_backward and similar ops do not appear in traces
 # add all variants here for coverage
+# for fwd path, only aten:: ops validated as they are used
+# for bwd path, we see native_ miopen_ and cudnn_ ops, we do not see plain version
+# note that the variants have different inputs! This is handled in the perf model classes
 norm_ops = {
     "aten::batch_norm": perf_model.BatchNorm,
-    "aten::native_batch_norm": perf_model.BatchNorm,
-    "aten::miopen_batch_norm": perf_model.BatchNorm,
-    "aten::cudnn_batch_norm": perf_model.BatchNorm,
     "aten::layer_norm": perf_model.LayerNorm,
-    "aten::native_layer_norm": perf_model.LayerNorm,
-    "aten::miopen_layer_norm": perf_model.LayerNorm,
-    "aten::cudnn_layer_norm": perf_model.LayerNorm,
     "aten::group_norm": perf_model.GroupNorm,
-    "aten::native_group_norm": perf_model.GroupNorm,
-    "aten::miopen_group_norm": perf_model.GroupNorm,
-    "aten::cudnn_group_norm": perf_model.GroupNorm,
     "aten::instance_norm": perf_model.InstanceNorm,
-    "aten::native_instance_norm": perf_model.InstanceNorm,
-    "aten::miopen_instance_norm": perf_model.InstanceNorm,
-    "aten::cudnn_instance_norm": perf_model.InstanceNorm,
-    "aten::rms_norm": perf_model.RMSNorm,
-    "aten::native_rms_norm": perf_model.RMSNorm,
-    "aten::miopen_rms_norm": perf_model.RMSNorm,
-    "aten::cudnn_rms_norm": perf_model.RMSNorm,
     "aten::_fused_rms_norm": perf_model.RMSNorm,
     "aten::batch_norm_backward": perf_model.BatchNormBwd,
     "aten::native_batch_norm_backward": perf_model.BatchNormBwd,

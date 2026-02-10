@@ -3035,6 +3035,9 @@ class jax_conv:
             bytes_per_element=self.bytes_per_element,
         )
 
+# parser helper
+def parse_list(input:str, dtype):
+    return [dtype(x) for x in input[1:-1].split(",")]
 
 class Normalization:
     def __init__(self, event, arch=None, python_path=None):
@@ -3050,7 +3053,7 @@ class Normalization:
         self.has_bias = self.param_details["has_bias"]
         self.is_training = self.param_details["is_training"]
         self.is_affine = self.param_details["is_affine"]
-        self.output_mask = self.param_details.get("output_mask", False)
+        self.output_mask = self.param_details.get("output_mask", "[False]")
 
         self.bpe_in = name2bpe(self.dtype_in_out[0])
         if self.dtype_in_out[1] is not None:
@@ -3240,7 +3243,7 @@ class Normalization:
         if is_training:
             bytes += num_channels * bpe_in  # invstd
         # write grad_in
-        bytes_out += num_elems * bpe_in
+        bytes += num_elems * bpe_in
         # read weight if affine
         if is_affine:
             bytes += num_channels * bpe_in * (2 if has_bias else 1)
@@ -3281,14 +3284,15 @@ class BatchNorm(Normalization):
         is_training = bool(event["args"]["Concrete Inputs"][5])
         dtype_out = None
         stride_output = None
+        # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
+        # https://github.com/pytorch/pytorch/blob/ff649d49c213c46b3883d8778717157406126743/aten/src/ATen/native/miopen/BatchNorm_miopen.cpp#L92C8-L92C21
+        num_channels= args_input_dims[0][1]
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": args_input_dims[3][
-                0
-            ],  # inputs 1 and 2 can be null if non-affine
+            "num_channels": num_channels,
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3308,14 +3312,27 @@ class BatchNorm(Normalization):
 class BatchNormBwd(Normalization):
     @staticmethod
     def get_param_details(event):
+        # miopen_batch_norm_backward and cudnn_batch_norm_backward have different paramters
+        # https://github.com/pytorch/pytorch/blob/313f45cc476a53a4440fdec3faa63992942992f2/aten/src/ATen/functorch/BatchRulesNorm.cpp#L834
         args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[1])
-        dtype_in = event["args"]["Input type"][1]
-        stride_input = tuple(event["args"]["Input Strides"][1])
-        output_mask = event["args"]["Concrete Inputs"][9]
-        is_affine = output_mask[1]
-        is_training = bool(event["args"]["Concrete Inputs"][7])
-
+        # than native_batch_norm_backward!
+        input_index = 1
+        is_affine_index = 2
+        has_output = args_input_dims[0] is not None
+        if (event['name'] == 'aten::cudnn_batch_norm_backward' or
+            event['name'] == 'aten::miopen_batch_norm_backward'):
+            input_index = 0
+            has_output = True
+            is_training = False # by assertion
+        else:
+            is_training = bool(event["args"]["Concrete Inputs"][7])
+        op_shape = tuple(args_input_dims[input_index])
+        # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
+        num_channels = op_shape[1]
+        dtype_in = event["args"]["Input type"][input_index]
+        stride_input = tuple(event["args"]["Input Strides"][input_index])
+        output_mask = [has_output]
+        is_affine = args_input_dims[is_affine_index] is not None
         dtype_out = None
         stride_output = None
         return {
@@ -3323,9 +3340,7 @@ class BatchNormBwd(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": args_input_dims[3][
-                0
-            ],  # inputs 1 and 2 can be null if non-affine
+            "num_channels": num_channels,  
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3370,11 +3385,11 @@ class LayerNorm(Normalization):
         concrete_inputs = event["args"]["Concrete Inputs"]
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
-        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(",")])
-        has_bias = args_input_dims[6] is not None
+        num_channels = prod(parse_list(concrete_inputs[1], int))
+        has_bias = args_input_dims[3] is not None
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[5] is not None
+        is_affine = args_input_dims[2] is not None
         is_training = True
         dtype_out = None
         stride_output = None
@@ -3408,10 +3423,10 @@ class LayerNormBwd(Normalization):
         concrete_inputs = event["args"]["Concrete Inputs"]
         # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
-        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(",")])
+        num_channels = prod(parse_list(concrete_inputs[2], int))
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        output_mask = event["args"]["Concrete Inputs"][7]
+        output_mask = parse_list(event["args"]["Concrete Inputs"][7], bool)
         is_affine = output_mask[1]
         has_bias = output_mask[2]
         is_training = True
@@ -3481,10 +3496,7 @@ class GroupNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1]
-            / int(
-                concrete_inputs[1]
-            ),  # exactly 1 batch dim, so num_channels is always dim 1
+            "num_channels": op_shape[1]/ int(concrete_inputs[1]),
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3514,16 +3526,13 @@ class GroupNormBwd(Normalization):
         is_training = True
         dtype_out = None
         stride_output = None
-        output_mask = concrete_inputs[9]
+        output_mask = parse_list(event["args"]["Concrete Inputs"][9], bool)
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1]
-            / int(
-                concrete_inputs[1]
-            ),  # exactly 1 batch dim, so num_channels is always dim 1
+            "num_channels": op_shape[1] / int(concrete_inputs[8]),
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3624,7 +3633,7 @@ class RMSNorm(Normalization):
         is_affine = args_input_dims[2] is not None
         dtype_out = None
         stride_output = None
-        num_channels = prod([int(x) for x in concrete_inputs[1][1:-1].split(",")])
+        num_channels = prod(parse_list(concrete_inputs[1], int))
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
@@ -3652,7 +3661,7 @@ class RMSNorm(Normalization):
         # assume caching works, read input, write output, read weight if affine
         return (
             self.num_elems * self.bpe_in
-            + self.num_elems * self
+            + self.num_elems * self.bpe_out
             + (self.num_channels * self.bpe_in if self.is_affine else 0)
         )
 
@@ -3678,8 +3687,8 @@ class RMSNormBwd(Normalization):
         is_affine = args_input_dims[4] is not None
         dtype_out = None
         stride_output = None
-        num_channels = prod([int(x) for x in concrete_inputs[2][1:-1].split(",")])
-        output_mask = concrete_inputs[5]
+        num_channels = prod(parse_list(concrete_inputs[2], int))
+        output_mask = parse_list(event["args"]["Concrete Inputs"][5], bool)
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
