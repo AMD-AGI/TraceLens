@@ -1179,6 +1179,49 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map
         self.kernel_metadata_keyword_filters = kernel_metadata_keyword_filters
 
+    def get_kernels_for_hlo_op(self, event):
+        """
+        Get all GPU kernels associated with an HLO operation.
+
+        JAX trace structure:
+        - Kernels have 'hlo_parent' field pointing to HLO op node UID
+        - HLO op nodes have 'gpu_events' list containing all kernel UIDs
+
+        Similar to traverse_subtree_hlo_op in JaxTraceToTree.
+
+        Args:
+            event: Either a kernel event or HLO op event
+
+        Returns:
+            list_kernels: List of kernel event dictionaries
+        """
+        # Determine if this is a kernel or HLO op node
+        if event["cat"] == "kernel":
+            # Get the HLO parent node
+            if "hlo_parent" not in event:
+                # No HLO parent found for this kernel event. This is unexpected and may indicate a data or trace issue.
+                logger.warning(
+                    f"Kernel event with UID {event.get('uid', '<unknown>')} does not have an 'hlo_parent'. Returning standalone kernel."
+                )
+                return [event]
+            hlo_parent_uid = event["hlo_parent"]
+            hlo_parent_event = self.tree.events[hlo_parent_uid]
+        elif event["cat"] == "hlo_op":
+            # This is already an HLO op node
+            hlo_parent_event = event
+        else:
+            # Not a kernel or HLO op, return empty list
+            logger.warning(
+                f"Event category should be 'kernel' or 'hlo_op', but found '{event['cat']}'"
+            )
+            return []
+
+        # Get all kernel UIDs from the HLO op's gpu_events list
+        kernel_uids = hlo_parent_event.get("gpu_events", [])
+        list_kernels = [self.tree.events[uid] for uid in kernel_uids]
+
+        return list_kernels
+
     #####################################
     ## Parsers for JaxTree Event Metadata
     #####################################
@@ -1652,9 +1695,30 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     ## OP metrics
     #############
     def compute_perf_metrics(self, event, bwd=False):
-        list_warn_non_zero_flops_and_zero_time = []
-        list_warn_perf_metrics_failed = []
-        list_no_bwd_events = []
+        # JAX-specific kernel aggregation using HLO op structure
+        # Unlike PyTorch which uses tree traversal, JAX uses hlo_parent links
+        # and gpu_events lists on HLO op nodes (see trace_to_tree._add_hlo_op_nodes)
+
+        # Get all kernels for this HLO operation
+        list_kernels = self.get_kernels_for_hlo_op(event)
+
+        # Compute busy time across all kernels
+        # Create intervals from kernel timestamps and merge overlaps
+        busy_kernel_time = 0
+        if len(list_kernels) > 0:
+            busy_kernel_time = GPUEventAnalyser(list_kernels).compute_metrics()[
+                "busy_time"
+            ]
+
+        # Store kernel details for debugging/analysis
+        event["kernel_details"] = [
+            {
+                "name": kernel["name"],
+                "dur": kernel["dur"],
+            }
+            for kernel in list_kernels
+        ]
+
         # Select the appropriate dictionary for FLOPS and memory functions
         perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
         perf_model_class = self.jax_op_to_perf_model_class_map.get(
@@ -1668,7 +1732,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         )
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
-        busy_kernel_time = event[TraceEventUtils.TraceKeys.Duration]
+        # busy_kernel_time now computed from aggregated kernels above (not single event duration)
 
         tflops_per_s = (
             (gflops / 1e3) / (busy_kernel_time / 1e6)
