@@ -6,19 +6,14 @@
 
 from . import perf_model
 from collections import defaultdict
+from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
 
 op_to_perf_model_class_map = {
     "aten::mm": perf_model.aten_mm,
     "aten::addmm": perf_model.aten_addmm,
     "aten::_scaled_mm": perf_model.aten_scaled_mm,
     "trtllm::cublas_scaled_mm": perf_model.aten_scaled_mm,
-    # TEv2 pseudo ops
-    "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
-    "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
-    "_LinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
-    "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
-    "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    "bitsandbytes::int8_linear_matmul": perf_model.aten_scaled_mm,
     "aten::bmm": perf_model.aten_bmm,
     "tex_ts::te_gemm_ts": perf_model.tex_ts_te_gemm_ts,
     "aten::baddbmm": perf_model.aten_baddbmm,
@@ -31,12 +26,28 @@ op_to_perf_model_class_map = {
     "aten::_scaled_dot_product_efficient_attention": perf_model.aten__scaled_dot_product_efficient_attention,
     "aten::_scaled_dot_product_flash_attention": perf_model.aten__scaled_dot_product_flash_attention,
     "aten::convolution": perf_model.aten_conv,
+    "aten::convolution_backward": perf_model.aten_conv_bwd,
+    "ConvBias_": perf_model.ConvBias_,
+    "ConvBiasReLU_": perf_model.ConvBiasReLU_,
+    "ConvBias_Backward": perf_model.ConvBias_Backward,
+    "ConvBiasReLU_Backward": perf_model.ConvBiasReLU_Backward,
     "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
-}
+    "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
+    # TEv2 pseudo ops
+    "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
+    "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
+    "_LinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
+    "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
+    "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    }
+
+# Add pseudo-op extension mappings
+op_to_perf_model_class_map.update(get_pseudo_op_mappings())
 
 unary_elemwise_ops = [
     "aten::copy",
@@ -71,6 +82,10 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
 }
+
+# Add pseudo-op extension categories
+dict_base_class2category.update(get_pseudo_op_categories())
+
 dict_cat2names = defaultdict(list)
 for op_name, perf_model_class in op_to_perf_model_class_map.items():
     base_classes = perf_model_class.__bases__
@@ -103,9 +118,15 @@ def categorize_torch_op(row):
         "aten::convolution",
         "aten::miopen_convolution",
         "aten::cudnn_convolution",
+        "ConvBias_",
+        "ConvBiasReLU_",
     ]:
         return "CONV_fwd"
-    elif row["name"] == "aten::convolution_backward":
+    elif row["name"] in [
+        "aten::convolution_backward",
+        "ConvBias_Backward",
+        "ConvBiasReLU_Backward",
+    ]:
         return "CONV_bwd"
     elif row["name"] in [
         "aten::batch_norm",
@@ -136,23 +157,29 @@ def categorize_torch_op(row):
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
+    elif row["name"] in dict_cat2names.get("MoE_fused", []):
+        return "MoE_fused"
+    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
+        return "MoE_unfused"
     elif row["name"].startswith("triton"):
         return "triton"
+    elif row["name"].startswith("record_param_comms"):
+        return "record_param_comms"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
-    else:
-        raise ValueError(
-            "Row does not contain 'kernel_names' or 'kernel_details' with a valid name."
-        )
-    if kernel_name.startswith("void at::native"):
-        if debug:
-            print("Found ATen native kernel:", kernel_name[:64])
-        if "elementwise" in kernel_name:
-            return "elementwise"
-        elif "reduce" in kernel_name:
-            return "reduce"
-        elif "multi_tensor_apply" in kernel_name:
-            return "multi_tensor_apply"
+        # else:
+        #     raise ValueError(
+        #         f"Row does not contain 'kernel_names' or 'kernel_details' with a valid name. Row: {row}"
+        #     )
+        if kernel_name.startswith("void at::native"):
+            if debug:
+                print("Found ATen native kernel:", kernel_name[:64])
+            if "elementwise" in kernel_name:
+                return "elementwise"
+            elif "reduce" in kernel_name:
+                return "reduce"
+            elif "multi_tensor_apply" in kernel_name:
+                return "multi_tensor_apply"
 
     # if none of the above cases match, return 'other'
     return "other"

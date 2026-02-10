@@ -59,11 +59,11 @@ def tree_postprocess_extension(trace_tree):
 def get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event: dict) -> list[dict]:
     """
     Get backward operations for a given forward operation.
+    Uses on-demand subtree aggregation to find all backward events.
     """
-    bwd_eventUIDs = fwd_op_event.get("bwd_events")
-    if not bwd_eventUIDs:
-        trace_tree.link_bwd_events(fwd_op_event["UID"])
-        bwd_eventUIDs = fwd_op_event.get("bwd_events")
+    bwd_eventUIDs = fwd_op_event.get("bwd_events") or trace_tree.get_subtree_bwd_events(
+        fwd_op_event["UID"]
+    )
     bwd_events = [trace_tree.get_UID2event(uid) for uid in bwd_eventUIDs]
     return bwd_events
 
@@ -78,10 +78,14 @@ def set_bookkeeping_attr(tree, event: dict):
 
 
 def is_gemm_kernel(kernel_event: dict) -> bool:
-    assert kernel_event["cat"] == "kernel"
+    if kernel_event.get("cat") != "kernel":
+        return False  # skip non-kernel events
     kernel_name = kernel_event["name"]
-    pattern = r".*C.*_A.*_B.*"
-    is_rocm_gemm = bool(re.match(pattern, kernel_name))
+    tensile_gemm_pattern = r".*C.*_A.*_B.*"
+    rocroller_gemm_pattern = r"RR_GEMM_.*"
+    is_rocm_gemm = bool(re.match(tensile_gemm_pattern, kernel_name)) or bool(
+        re.match(rocroller_gemm_pattern, kernel_name)
+    )
     is_cuda_gemm = kernel_name.startswith("nvjet")
     return is_rocm_gemm or is_cuda_gemm
 
@@ -303,6 +307,7 @@ def inject_pseudo_op(
             "External id": kernel_evt["args"]["correlation"],
             "Pseudo op": True,
         },
+        "parent": orig_cpu_evt["UID"],  # Set pseudo op's parent to original CPU op
         "children": [launcher_evt["UID"]],  # we still nest the launcher
         "gpu_events": [kernel_evt["UID"]],
     }
@@ -311,6 +316,10 @@ def inject_pseudo_op(
     children = orig_cpu_evt["children"]
     children.remove(launcher_evt["UID"])
     children.append(pseudo_evt["UID"])
+    # ── re-wire the launcher's parent to point to pseudo op ────────────────
+    launcher_evt["parent"] = pseudo_evt[
+        "UID"
+    ]  # Change launcher's parent from orig_cpu_evt to pseudo_evt
 
 
 # we also need to

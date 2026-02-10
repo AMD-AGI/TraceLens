@@ -16,11 +16,11 @@ def get_bwd_ops_for_fwd_op(
 ) -> list[dict]:
     """
     Get backward operations for a given forward operation.
+    Uses on-demand subtree aggregation to find all backward events.
     """
-    bwd_eventUIDs = fwd_op_event.get("bwd_events")
-    if not bwd_eventUIDs:
-        perf_analyzer.tree.link_bwd_events(fwd_op_event["UID"])
-        bwd_eventUIDs = fwd_op_event.get("bwd_events")
+    bwd_eventUIDs = fwd_op_event.get(
+        "bwd_events"
+    ) or perf_analyzer.tree.get_subtree_bwd_events(fwd_op_event["UID"])
     bwd_events = [perf_analyzer.tree.get_UID2event(uid) for uid in bwd_eventUIDs]
     return bwd_events
 

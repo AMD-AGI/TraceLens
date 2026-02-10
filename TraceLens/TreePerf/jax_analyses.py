@@ -87,7 +87,13 @@ class JaxAnalyses:
 
     @staticmethod
     def default_gpu_event_filter(event: dict):
-        return event.get("tid", 200) < 100  # ignore of supplemental events
+        # Keep events from actual GPU streams, filter out supplemental metadata threads
+        thread_info = event.get("thread", {})
+        thread_name = thread_info.get("thread_name", "")
+        if not thread_name:
+            # Fallback to old logic for backward compatibility
+            return event.get("tid", 200) < 100
+        return thread_name.startswith("Stream #")
 
     @staticmethod
     def get_just_gpu_events(events):
@@ -431,7 +437,7 @@ class JaxAnalyses:
         @staticmethod
         def get_param_details(event):
             hlo_args = event[TraceEventUtils.JaxKernelEventArgs.hlo_op]
-            dict_dtype2gemmologist = {
+            dict_dtype2simulation = {
                 "f32": "fp32",
                 "f16": "fp16",
                 "bf16": "bf16",
@@ -447,7 +453,7 @@ class JaxAnalyses:
                 "stride_B": None,
                 "dtype_A_B": (hlo_args["Type"], hlo_args["Type"]),
                 "Op B": hlo_args["Batch"],
-                "gemmologist_dtype": dict_dtype2gemmologist.get(hlo_args["Type"]),
+                "simulation_dtype": dict_dtype2simulation.get(hlo_args["Type"]),
             }
 
         def flops(self):

@@ -11,72 +11,10 @@ import os
 import re
 import subprocess
 import warnings
+
 from .kernel_name_parser import gemm_name_parser
 
-
-def name2bpe(name):
-    """
-    This function maps a data type name to the number of bytes per element.
-    Args:
-        name (str): The name of the data type.
-    Returns:
-        int: The number of bytes per element.
-    """
-    dict_bpe2dtype = {
-        8: ["double", "long int"],
-        4: ["float", "scalar"],
-        2: ["c10::half", "c10::bfloat16"],
-        1: [
-            "c10::float8_e4m3fnuz",
-            "c10::float8_e4m3fn",
-            "c10::float8_e5m2",
-            "unsigned char",
-            "fp8",
-        ],
-    }
-    dict_dtype2bpe = {
-        dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes
-    }
-    return dict_dtype2bpe.get(name.lower(), None)
-
-
-def gemmologist_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a gemmologist data type.
-    Args:
-        dtype (str): The name of the pytorch data type.
-    Returns:
-        str: The name of the PyTorch data type.
-    """
-    dict_dtype2gemmologist = {
-        "fp32": "float",
-        "fp64": "double",
-        "fp16": "c10::half",
-        "bf16": "c10::bfloat16",
-        "fp8": "c10::float8_e4m3fnuz",
-    }
-    return dict_dtype2gemmologist.get(dtype.lower(), None)
-
-
-def torch_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a gemmologist data type.
-    Args:
-        dtype (str): The name of the PyTorch data type.
-    Returns:
-        str: The name of the gemmologist data type.
-    """
-    dict_dtype2gemmologist = {
-        "float": "fp32",
-        "double": "fp64",
-        "c10::half": "fp16",
-        "c10::bfloat16": "bf16",
-        "c10::float8_e4m3fnuz": "fp8",
-        "unsigned char": "fp8",
-        "fp8": "fp8",
-    }
-    return dict_dtype2gemmologist.get(dtype.lower(), None)
-
+from .utils import name2bpe, simulation_dtype_map, torch_dtype_map
 
 # 1. GEMM
 class GEMM:
@@ -118,22 +56,12 @@ class GEMM:
         self.bias = self.param_details["bias"]
 
         if arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                self.gemmologist_time, self.gemmologist_cmd = (
-                    GEMM.get_simulation_time_func(
-                        arch, self.M, self.N, self.K, self.B, dtype, self.python_path
-                    )
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            self.simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
+                arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+            )
 
     @staticmethod
     def get_param_details(event):
@@ -148,6 +76,15 @@ class GEMM:
 
     def flops(self):
         return self.flops_func(self.M, self.N, self.K, self.bias)
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for GEMM)."""
+        return "matrix"
 
     @staticmethod
     def bytes_func(M, N, K, bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
@@ -203,110 +140,155 @@ class GEMM:
     def get_simulation_time_func(
         arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None
     ):
-        missing_inputs = []
-        if M is None:
-            missing_inputs.append("M")
-        if N is None:
-            missing_inputs.append("N")
-        if K is None:
-            missing_inputs.append("K")
-        if B is None:
-            B = 1
-        if dtype is None:
-            missing_inputs.append("dtype")
-        if "name" not in arch:
-            missing_inputs.append("arch['name']")
-        assert (
-            not missing_inputs
-        ), f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
-        # assume that gemmologist path is given in the environment variable GEMMOLOGIST_PATH
-        gemmologist_path = os.environ.get("GEMMOLOGIST_PATH")
+        if "GEMM_SIMULATOR_PATH" in os.environ:
+            if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
+                raise ValueError(
+                    f"GEMM_SIMULATOR_PATH does not exist: {os.environ.get('GEMM_SIMULATOR_PATH')}"
+                )
+            missing_inputs = []
+            if M is None:
+                missing_inputs.append("M")
+            if N is None:
+                missing_inputs.append("N")
+            if K is None:
+                missing_inputs.append("K")
+            if B is None:
+                B = 1
+            if dtype is None:
+                missing_inputs.append("dtype")
+            if "name" not in arch:
+                missing_inputs.append("arch['name']")
+            assert (
+                not missing_inputs
+            ), f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
+            # assume that gemm simulator path is given in the environment variable GEMM_SIMULATOR_PATH
+            GEMM_SIMULATOR_PATH = os.environ.get("GEMM_SIMULATOR_PATH")
+            GEMM_SIMULATOR_PATH, gemm_executable = os.path.split(GEMM_SIMULATOR_PATH)
 
-        cmd = [
-            "./bin/gemmologist.py",
-            "-b",
-            str(B),
-            "-m",
-            str(M),
-            "-n",
-            str(N),
-            "-k",
-            str(K),
-            "--dtype",
-            dtype,
-            "-d",
-            "1",
-            "-a",
-            arch["name"],
-        ]
+            cmd = [
+                gemm_executable,
+                "-b",
+                str(B),
+                "-m",
+                str(M),
+                "-n",
+                str(N),
+                "-k",
+                str(K),
+                "--dtype",
+                dtype,
+                "-d",
+                "1",
+                "-a",
+                arch["name"],
+            ]
 
-        # Windows does need a python executable for running gemmologist
-        if not python_path and os.name == "nt":
-            raise AssertionError(
-                "Python executable path need to be specified in Windows for running Gemmologist."
+            # Windows does need a python executable for running the gemm simulator
+            if not python_path and os.name == "nt":
+                raise AssertionError(
+                    "Python executable path need to be specified in Windows for running the GEMM simulator."
+                )
+            # Add the python executable path if it is given
+            if python_path:
+                cmd.insert(0, python_path)
+            else:
+                cmd.insert(0, "python")  # default to python3
+
+            if "freq_mhz" in arch:
+                cmd.append("--freq_mhz")
+                cmd.append(str(arch["freq_mhz"]))
+
+            if num_cus:
+                cmd.append("--cus")
+                cmd.append(str(num_cus))
+
+            if "mem_bw_gbps" in arch:
+                cmd.append("--hbm_bw")
+                # In case of flash attention when everything happens in cache, we change the
+                # memory bw to l1 bandwidth so as to simulate the same
+                mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
+                if num_cus and num_cus != arch["num_cus"]:
+                    mem_bw = round(mem_bw / arch["num_cus"] * num_cus)
+                cmd.append(str(mem_bw))
+
+            # Check if the result is already in the cache
+            cache_key = tuple(cmd)
+            if cache_key in GEMM.cache_gemm_results:
+                return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
+
+            # Run the command
+            result = subprocess.run(
+                cmd, cwd=GEMM_SIMULATOR_PATH, capture_output=True, text=True
             )
-        # Add the python executable path if it is given
-        if python_path:
-            cmd.insert(0, python_path)
+            stdout = result.stdout
+            stderr = result.stderr
+            log = re.findall(r"Time=\d+\.\d+", stdout)
+            if len(log) > 0:
+                simulation_time = float(re.sub("Time=", "", str(log[0])))
+                # Cache the result
+                GEMM.cache_gemm_results[cache_key] = simulation_time
+                return simulation_time, " ".join(cmd)
+            else:
+                raise AssertionError("Failed to simulate ", cmd, stdout, stderr)
         else:
-            cmd.insert(0, "python")  # default to python3
+            # try to use Origami for estimating performance
+            try:
+                # assumes this PR has completed
+                # https://github.com/ROCm/rocm-libraries/pull/3903
+                import origami
+                from .origami_helper import OrigamiHelper
 
-        if "freq_mhz" in arch:
-            cmd.append("--freq_mhz")
-            cmd.append(str(arch["freq_mhz"]))
+                # origami simulation requires an architecture file including GPU name and clock speed
+                # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+                # for example: {"name": "MI300X", "freq_mhz": 1207}
 
-        if num_cus:
-            cmd.append("--cus")
-            cmd.append(str(num_cus))
+                dtype_map = {
+                    "fp32": origami.data_type_t.Float,
+                    "fp16": origami.data_type_t.Half,
+                    "bf16": origami.data_type_t.BFloat16,
+                    "fp64": origami.data_type_t.Double,
+                    "fp8": origami.data_type_t.Float8_fnuz,
+                }
+                origami_dtype = dtype_map.get(dtype)
+                if origami_dtype is None:
+                    warnings.warn(
+                        f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
+                        RuntimeWarning,
+                    )
+                    return None, None
+                dtype = origami_dtype
 
-        if "mem_bw_gbps" in arch:
-            cmd.append("--hbm_bw")
-            # In case of flash attention when everything happens in cache, we change the
-            # memory bw to l1 bandwidth so as to simulate the same
-            mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
-            if num_cus and num_cus != arch["num_cus"]:
-                mem_bw = round(mem_bw / arch["num_cus"] * num_cus)
-            cmd.append(str(mem_bw))
+                hardware = OrigamiHelper.get_hardware(arch)
+                if num_cus is not None:
+                    hardware.N_CU = num_cus
+                if force_to_l1:
+                    # origami will have an FA model really soon
+                    # until it is available, just make the L1 and L2 really big
+                    hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
+                    hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
 
-        # Check if the result is already in the cache
-        cache_key = tuple(cmd)
-        if cache_key in GEMM.cache_gemm_results:
-            return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
+                # todo - allow user to override num_cus and other properties
+                helper = OrigamiHelper(M, N, K, B, dtype, dtype, dtype, hardware)
 
-        # Run the command
-        result = subprocess.run(
-            cmd, cwd=gemmologist_path, capture_output=True, text=True
-        )
-        stdout = result.stdout
-        stderr = result.stderr
-        log = re.findall(r"Time=\d+\.\d+", stdout)
-        if len(log) > 0:
-            gemmologist_time = float(re.sub("Time=", "", str(log[0])))
-            # Cache the result
-            GEMM.cache_gemm_results[cache_key] = gemmologist_time
-            return gemmologist_time, " ".join(cmd)
-        else:
-            raise AssertionError(
-                "Not able to simulate in gemmologist", cmd, stdout, stderr
-            )
+                simulation_time = helper.get_simulation_time()
+                return (
+                    simulation_time,
+                    f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
+                )
+
+            except ImportError:
+                # Todo: Naive simulation
+                return None, None
 
     def get_simulation_time(self):
         simulation_time = None
         if self.arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                simulation_time, self.gemmologist_cmd = GEMM.get_simulation_time_func(
-                    self.arch, self.M, self.N, self.K, self.B, dtype, self.python_path
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
+                self.arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+            )
         return simulation_time
 
 
@@ -645,9 +627,12 @@ class vllm_gemm_with_dynamic_quant(GEMM):
                 "vllm::gemm_with_dynamic_quant missing 2D A,B shapes in Input Dims"
             )
 
+        # x: [M, K], weight: [N, K_packed] where K_packed = K // 2 (4-bit packing)
+        # GEMM: output[M, N] = x[M, K] @ weight[N, K].T
+        # ref: vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py
         M = A_shape[0]
         K = A_shape[1]
-        N = B_shape[1]
+        N = B_shape[0]
 
         # Dtypes
         dtype_list = event["args"].get("Input type", [])
@@ -933,6 +918,18 @@ class CONV:
             self.x_shape, self.w_shape, self.out_shape, self.bias, self.transposed_conv
         )
 
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        # Try dtype_input_weight first (used by aten_conv), then dtype
+        dtype = self.param_details.get("dtype_input_weight", [None])[0]
+        if dtype is None:
+            dtype = self.param_details.get("dtype", None)
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for CONV)."""
+        return "matrix"
+
     @staticmethod
     # we assume same bytes per element for all tensors
     # TODO: make it more general later
@@ -1108,15 +1105,496 @@ class aten_conv(CONV):
         return super().bytes_bwd(self.bpe)
 
 
-class aten_conv_bwd(aten_conv):
-    def __init__(self, event):
-        super().__init__(event)
+class aten_conv_bwd(CONV):
+    @staticmethod
+    def get_param_details(event):
+        # convolution_backward signature:
+        # 0: grad_output tensor
+        # 1: input tensor
+        # 2: weight tensor
+        # 3: bias_sizes (optional)
+        # 4: stride
+        # 5: padding
+        # 6: dilation
+        # 7: transposed (boolean)
+        # 8: output_padding
+        # 9: groups
+        # 10: output_mask (which gradients to compute)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # For backward, input shape is at index 1, weight at index 2
+        input_shape = tuple(input_dims[1])
+        ndims = len(input_shape) - 2
+        filter_shape = tuple(input_dims[2])
+
+        # Check if bias gradient is computed (from output_mask)
+        bias = len(input_dims) > 3 and input_dims[3] and len(input_dims[3]) > 0
+
+        stride_arg = concrete_inputs[4]
+        stride = (
+            aten_conv.str_to_tuple(stride_arg) if stride_arg != "" else (1,) * ndims
+        )
+        padding_arg = concrete_inputs[5]
+        padding = (
+            aten_conv.str_to_tuple(padding_arg) if padding_arg != "" else (0,) * ndims
+        )
+        dilation_arg = concrete_inputs[6]
+        dilation = (
+            aten_conv.str_to_tuple(dilation_arg) if dilation_arg != "" else (1,) * ndims
+        )
+        transposed_conv = eval(concrete_inputs[7])
+        output_padding_arg = concrete_inputs[8]
+        output_padding = (
+            aten_conv.str_to_tuple(output_padding_arg)
+            if output_padding_arg != ""
+            else (0,) * ndims
+        )
+        groups = int(concrete_inputs[9])
+
+        # broadcast if length 1 tuple
+        stride, padding, dilation, output_padding = [
+            param * ndims if len(param) == 1 else param
+            for param in [stride, padding, dilation, output_padding]
+        ]
+
+        dtype_input_weight = tuple(event["args"]["Input type"][1:3])
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][1])
+            weight_stride = tuple(event["args"]["Input Strides"][2])
+        except KeyError:
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
 
     def flops(self):
-        return self.flops_bwd()
+        return super().flops_bwd()
 
-    def bytes(self, bytes_per_element):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+
+class ConvBias_(CONV):
+    """
+    Fused Convolution + Bias operation
+    This is a vendor-specific fused operation (e.g., from MIOpen or cuDNN)
+    """
+
+    # Cache to store forward pass parameters for backward pass lookup
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None, python_path=None):
+        # Call parent init first
+        super().__init__(event, arch, python_path)
+
+        # Cache forward pass parameters for backward pass using sequence number
+        seq_num = event["args"].get("Sequence number")
+        if seq_num is not None:
+            ConvBias_.fwd_pass_cache[seq_num] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        # ConvBias_ signature (based on trace analysis):
+        # 0: input tensor
+        # 1: weight tensor
+        # 2: bias tensor
+        # 3: stride (scalar in concrete inputs)
+        # 4: padding (scalar in concrete inputs)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # Get input and weight shapes
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2  # first two dimensions are batch and channel
+        filter_shape = tuple(input_dims[1])
+
+        # Bias is present (it's a ConvBias operation)
+        bias = True
+
+        # Parse stride and padding from concrete inputs
+        # Concrete inputs appear to be ["", "", "", "stride_val", "padding_val"]
+        stride_arg = concrete_inputs[3] if len(concrete_inputs) > 3 else ""
+        stride = (int(stride_arg),) * ndims if stride_arg != "" else (1,) * ndims
+
+        padding_arg = concrete_inputs[4] if len(concrete_inputs) > 4 else ""
+        padding = (int(padding_arg),) * ndims if padding_arg != "" else (0,) * ndims
+
+        # Default dilation and output_padding
+        dilation = (1,) * ndims
+        output_padding = (0,) * ndims
+        transposed_conv = False
+        groups = 1  # Assume groups=1 unless specified
+
+        dtype_input_weight = tuple(event["args"]["Input type"][:2])
+        # Check no mixed precision
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][0])
+            weight_stride = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
+
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
+
+class ConvBias_Backward(CONV):
+    """
+    Backward pass for fused Convolution + Bias operation
+    Uses cached forward pass parameters via sequence number linkage.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Try to get forward pass parameters using sequence number
+        seq_num = event["args"].get("Sequence number")
+
+        if seq_num is not None and seq_num in ConvBias_.fwd_pass_cache:
+            # Found forward pass! Use its parameters
+            fwd_params = ConvBias_.fwd_pass_cache[seq_num]
+
+            # For backward pass, we need to swap input/output shapes
+            # Forward: input -> output
+            # Backward: grad_output -> grad_input (and compute grad_weight, grad_bias)
+            return {
+                "convNd": fwd_params["convNd"],
+                "input_shape": fwd_params["input_shape"],
+                "filter_shape": fwd_params["filter_shape"],
+                "dtype_input_weight": fwd_params["dtype_input_weight"],
+                "input_stride": fwd_params["input_stride"],
+                "weight_stride": fwd_params["weight_stride"],
+                "bias": fwd_params["bias"],
+                "stride": fwd_params["stride"],
+                "padding": fwd_params["padding"],
+                "dilation": fwd_params["dilation"],
+                "transposed_conv": fwd_params["transposed_conv"],
+                "output_padding": fwd_params["output_padding"],
+                "groups": fwd_params["groups"],
+            }
+        else:
+            # Fallback: forward pass not found in cache
+            # This can happen if events are processed out of order
+            input_dims = event["args"]["Input Dims"]
+
+            if len(input_dims) < 1:
+                warnings.warn(
+                    f"ConvBias_Backward: No forward pass found (seq_num={seq_num}) and "
+                    f"insufficient trace data. FLOPS will be None."
+                )
+            else:
+                warnings.warn(
+                    f"ConvBias_Backward: Forward pass not found in cache for sequence number {seq_num}. "
+                    f"FLOPS calculation requires forward pass parameters. Ensure ConvBias_ forward "
+                    f"operations are processed before their backward counterparts."
+                )
+
+            # Return minimal info that will cause FLOPS to be None
+            return {
+                "convNd": None,
+                "input_shape": None,
+                "filter_shape": None,
+                "dtype_input_weight": tuple(event["args"].get("Input type", [None])[:1])
+                + (None,),
+                "input_stride": None,
+                "weight_stride": None,
+                "bias": True,
+                "stride": None,
+                "padding": None,
+                "dilation": None,
+                "transposed_conv": False,
+                "output_padding": None,
+                "groups": 1,
+            }
+
+    def flops(self):
+        # Use backward FLOPS calculation from CONV base class
+        if self.param_details["input_shape"] is None:
+            return None
+        return super().flops_bwd()
+
+    def bytes(self):
+        # Use backward bytes calculation from CONV base class
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+
+class ConvBiasReLU_(CONV):
+    """
+    Fused Convolution + Bias + ReLU operation
+    This is a vendor-specific fused operation (e.g., from MIOpen or cuDNN)
+    """
+
+    # Cache to store forward pass parameters for backward pass lookup
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None, python_path=None):
+        # Call parent init first
+        super().__init__(event, arch, python_path)
+
+        # Cache forward pass parameters for backward pass using sequence number
+        seq_num = event["args"].get("Sequence number")
+        if seq_num is not None:
+            ConvBiasReLU_.fwd_pass_cache[seq_num] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        # ConvBiasReLU_ has the same signature as ConvBias_
+        # 0: input tensor
+        # 1: weight tensor
+        # 2: bias tensor
+        # 3: stride (scalar in concrete inputs)
+        # 4: padding (scalar in concrete inputs)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # Get input and weight shapes
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2
+        filter_shape = tuple(input_dims[1])
+
+        # Bias is present
+        bias = True
+
+        # Parse stride and padding from concrete inputs
+        stride_arg = concrete_inputs[3] if len(concrete_inputs) > 3 else ""
+        stride = (int(stride_arg),) * ndims if stride_arg != "" else (1,) * ndims
+
+        padding_arg = concrete_inputs[4] if len(concrete_inputs) > 4 else ""
+        padding = (int(padding_arg),) * ndims if padding_arg != "" else (0,) * ndims
+
+        # Default dilation and output_padding
+        dilation = (1,) * ndims
+        output_padding = (0,) * ndims
+        transposed_conv = False
+        groups = 1
+
+        dtype_input_weight = tuple(event["args"]["Input type"][:2])
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][0])
+            weight_stride = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
+
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
+
+class ConvBiasReLU_Backward(CONV):
+    """
+    Backward pass for fused Convolution + Bias + ReLU operation
+    Uses cached forward pass parameters via sequence number linkage.
+    ReLU backward: gradient is masked where forward output was negative.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Try to get forward pass parameters using sequence number
+        seq_num = event["args"].get("Sequence number")
+
+        if seq_num is not None and seq_num in ConvBiasReLU_.fwd_pass_cache:
+            # Found forward pass! Use its parameters
+            fwd_params = ConvBiasReLU_.fwd_pass_cache[seq_num]
+
+            return {
+                "convNd": fwd_params["convNd"],
+                "input_shape": fwd_params["input_shape"],
+                "filter_shape": fwd_params["filter_shape"],
+                "dtype_input_weight": fwd_params["dtype_input_weight"],
+                "input_stride": fwd_params["input_stride"],
+                "weight_stride": fwd_params["weight_stride"],
+                "bias": fwd_params["bias"],
+                "stride": fwd_params["stride"],
+                "padding": fwd_params["padding"],
+                "dilation": fwd_params["dilation"],
+                "transposed_conv": fwd_params["transposed_conv"],
+                "output_padding": fwd_params["output_padding"],
+                "groups": fwd_params["groups"],
+            }
+        else:
+            # Fallback: forward pass not found in cache
+            input_dims = event["args"]["Input Dims"]
+
+            if len(input_dims) < 1:
+                warnings.warn(
+                    f"ConvBiasReLU_Backward: No forward pass found (seq_num={seq_num}) and "
+                    f"insufficient trace data. FLOPS will be None."
+                )
+            else:
+                warnings.warn(
+                    f"ConvBiasReLU_Backward: Forward pass not found in cache for sequence number {seq_num}. "
+                    f"FLOPS calculation requires forward pass parameters. Ensure ConvBiasReLU_ forward "
+                    f"operations are processed before their backward counterparts."
+                )
+
+            return {
+                "convNd": None,
+                "input_shape": None,
+                "filter_shape": None,
+                "dtype_input_weight": tuple(event["args"].get("Input type", [None])[:1])
+                + (None,),
+                "input_stride": None,
+                "weight_stride": None,
+                "bias": True,
+                "stride": None,
+                "padding": None,
+                "dilation": None,
+                "transposed_conv": False,
+                "output_padding": None,
+                "groups": 1,
+            }
+
+    def flops(self):
+        # Use backward FLOPS calculation from CONV base class
+        # ReLU backward is essentially element-wise masking (negligible FLOPS compared to conv)
+        if self.param_details["input_shape"] is None:
+            return None
+        return super().flops_bwd()
+
+    def bytes(self):
+        # Use backward bytes calculation from CONV base class
+        # ReLU backward requires reading the forward output mask
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
 
 
 # 3. Softmax
@@ -1232,6 +1710,15 @@ class SDPA:
             self.d_h_v,
             self.param_details["causal"],
         )
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for SDPA)."""
+        return "matrix"
 
     @staticmethod
     def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
@@ -1417,32 +1904,24 @@ class SDPA:
     def get_simulation_time(self):
         simulated_time = None
         if self.arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-                bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
-                fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.get_simulation_time_func(
-                    self.arch,
-                    dtype,
-                    self.python_path,
-                    self.param_details["dtype_A_B"][0],
-                    bytes,
-                    self.B,
-                    self.H_Q,
-                    self.N_Q,
-                    self.N_KV,
-                    self.d_h,
-                    fa,
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
+            fa = True if type(self).__name__ == "flash_attention" else False
+            simulated_time = SDPA.get_simulation_time_func(
+                self.arch,
+                dtype,
+                self.python_path,
+                self.param_details["dtype_A_B"][0],
+                bytes,
+                self.B,
+                self.H_Q,
+                self.N_Q,
+                self.N_KV,
+                self.d_h,
+                fa,
+            )
         return simulated_time
 
     @staticmethod
@@ -1495,9 +1974,6 @@ class SDPA:
             num_cus=1,
         )
         pv_fwd_time = num_waves * pv_fwd_time
-        # pv_fwd_time, _ =  math.ceil(self.N_Q / 512) * math.ceil(self.N_KV / 512) * GEMM.get_gemmologist_time(self.arch, M=512, K=512, N=self.d_h,
-        #                                       B=self.B * self.H_Q, dtype=dtype,
-        #                                       python_path=self.python_path, force_to_l1=force_to_l1)
 
         if fa:
             # In case of flash attention we have to recompute
@@ -1505,7 +1981,7 @@ class SDPA:
             qkt_time = qkt_fwd_time
             pv_time = pv_fwd_time
 
-        # We don't need to go to gemmologist to calculate these,
+        # We don't need to go to the gemm simulator to calculate these,
         # as we already have the times
         p_grad_time = qkt_fwd_time
         v_grad_time = pv_fwd_time
@@ -1585,33 +2061,25 @@ class SDPA:
     def get_simulation_time_bwd(self):
         simulated_time = None
         if self.arch is not None:
-            if os.environ.get("GEMMOLOGIST_PATH") is not None:
-                if not os.path.exists(os.environ.get("GEMMOLOGIST_PATH")):
-                    raise ValueError(
-                        f"GEMMOLOGIST_PATH does not exist: {os.environ.get('GEMMOLOGIST_PATH')}"
-                    )
-                dtype = self.param_details.get("gemmologist_dtype")
-                if dtype is None:
-                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            dtype = self.param_details.get("simulation_dtype")
+            if dtype is None:
+                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
-                bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-                fa = True if type(self).__name__ == "flash_attention" else False
-                simulated_time = SDPA.get_simulation_time_bwd_func(
-                    self.arch,
-                    dtype,
-                    self.python_path,
-                    self.param_details["dtype_A_B"][0],
-                    bytes,
-                    self.B,
-                    self.H_Q,
-                    self.N_Q,
-                    self.N_KV,
-                    self.d_h,
-                    fa,
-                )
-            else:
-                # TODO: use naive roofline model
-                pass
+            bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
+            fa = True if type(self).__name__ == "flash_attention" else False
+            simulated_time = SDPA.get_simulation_time_bwd_func(
+                self.arch,
+                dtype,
+                self.python_path,
+                self.param_details["dtype_A_B"][0],
+                bytes,
+                self.B,
+                self.H_Q,
+                self.N_Q,
+                self.N_KV,
+                self.d_h,
+                fa,
+            )
         return simulated_time
 
 
@@ -2311,11 +2779,91 @@ class aiter__fmha_v3_backward(SDPA):
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
 
+class vllm_unified_attention_with_output(SDPA):
 
+    @staticmethod
+    def get_param_details(event):
+        annotation= str(event.get("annotation"))
+        if annotation == "NA":
+            raise NotImplementedError("VLLM attention without annotation is not supported")
+        requests=annotation.replace("(","_").replace(")","_").split("_")
+        if len(requests)<8:
+            raise NotImplementedError("VLLM attention without annotation is not supported")
+        input_dims = event["args"]["Input Dims"]
+        
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        B=1
+        N_Q, H_Q, d_h_qk = q_shape
+        N_KV, H_KV, d_h_v = k_shape
+        dropout_p = 0.0
+        is_causal=False
+
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+            "sum_ctx_tokens": int(requests[3]),
+            "sum_ctx_squared_tokens": int(requests[4]),
+            "sum_gen_tokens": int(requests[8])
+        }
+
+    def flops(self):
+        #prefill part
+        if self.param_details["sum_ctx_tokens"]==0:
+            raise NotImplementedError("Roofline for pure generation phase is not defined")
+        ctx_flops_qk = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk)
+        ctx_flops_pv = self.H_Q * (2 *  self.param_details["sum_ctx_squared_tokens"]* self.d_h_v )
+        #Generation tokens
+        ## ToDo: Add seqlen for KV
+        gen_flops_qk = self.H_Q * (2 * self.param_details["sum_gen_tokens"] * self.d_h_qk)
+        gen_flops_pv = self.H_Q * (2 * self.param_details["sum_gen_tokens"]* self.d_h_v )
+        
+        return ctx_flops_qk+ctx_flops_pv+gen_flops_qk+gen_flops_pv
+
+    def bytes_func_vllm(self,B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
+        ## Prefill 
+        elems_q_read = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_qk
+        elems_k_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_qk
+        elems_v_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_v
+        elems_out_write = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_v
+        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        #Decode - this will not be used as needs additional information from vLLM engine
+
+        #elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
+        #elems_k_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_qk
+        #elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
+        #elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
+        #total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        return total_elems_moved * bytes_per_element
+
+    # TODO make bytes_per_element based on profile info
+    def bytes(self, bytes_per_element=2):
+        
+        return self.bytes_func_vllm(
+            self.B,
+            self.N_Q,
+            self.H_Q,
+            self.N_KV,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+            bytes_per_element,
+        )
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
+        self.arch = arch
         self.param_details = self.get_param_details(event)
         self.nelems = prod(self.param_details["op_shape"])
         self.dtype_in_out = self.param_details["dtype_in_out"]
@@ -2335,6 +2883,15 @@ class UnaryElementwise:
 
     def flops(self):
         return self.flops_func(self.nelems)
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
 
     @staticmethod
     def bytes_func(nelems, bpe_in, bpe_out):
@@ -2372,6 +2929,7 @@ class BinaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
+        self.arch = arch
         self.param_details = self.get_param_details(event)
         broadcast_shape = self.get_broadcast_shape(
             self.param_details["shape_in1"], self.param_details["shape_in2"]
@@ -2406,6 +2964,16 @@ class BinaryElementwise:
 
     def flops(self):
         return self.flops_func(self.nelems_out)
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        # Use first input dtype as the compute precision
+        dtype = self.dtype_in1_in2_out[0] if self.dtype_in1_in2_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
 
     @staticmethod
     def bytes_func(nelems_in1, nelems_in2, nelems_out, bpe_in1, bpe_in2, bpe_out):
@@ -2588,20 +3156,20 @@ def jax_dtype2bpe(name):
 
 def jax_dtype_map(dtype):
     """
-    This function maps a Jax data type to a gemmologist data type.
+    This function maps a Jax data type to the gemm simulator data type.
     Args:
         dtype (str): The name of the Jax data type.
     Returns:
-        str: The name of the gemmologist data type.
+        str: The name of the gemm simulator data type.
     """
-    dict_jax_dtype2gemmologist = {
+    dict_jax_dtype2gemmsimulator = {
         "f32": "fp32",
         "f16": "fp16",
         "bf16": "bf16",
         "f8": "fp8",
         "fp8": "fp8",
     }
-    return dict_jax_dtype2gemmologist.get(dtype.lower(), None)
+    return dict_jax_dtype2gemmsimulator.get(dtype.lower(), None)
 
 
 def dtype_jax2torch(dtype):
@@ -2651,7 +3219,7 @@ class jax_gemm(GEMM):
             "K": event["args"]["K"],
             "bias": event["args"]["Beta"] != 0,
             "dtype_A_B": (event["args"]["Type"], event["args"]["Type"]),
-            "gemmologist_dtype": jax_dtype_map(event["args"]["Type"]),
+            "simulation_dtype": jax_dtype_map(event["args"]["Type"]),
         }
 
     # ---------------------- FLOPs / Bytes ----------------------

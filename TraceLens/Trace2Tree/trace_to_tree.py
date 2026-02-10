@@ -7,10 +7,9 @@
 from collections import defaultdict
 from typing import Dict, Any, Callable
 import TraceLens.util
-from .util import tev2_create_pseudo_host_mm_ops
 
 from ..util import TraceEventUtils, JaxProfileProcessor
-
+import re
 
 from abc import ABC, abstractmethod
 import logging
@@ -117,6 +116,7 @@ class BaseTraceToTree(ABC):
         )
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
+        dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
             event["tree"] = True
@@ -128,6 +128,7 @@ class BaseTraceToTree(ABC):
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
             stack_key = (pid, tid)
             stack = dict_pidtid2stack[stack_key]
+            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
             while (
                 stack
@@ -137,6 +138,9 @@ class BaseTraceToTree(ABC):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+                # Pop from nn_module_stack if this was an nn.Module event
+                if self._is_nn_module_event(popped_event):
+                    nn_module_stack.pop()
 
             if (
                 stack
@@ -147,6 +151,12 @@ class BaseTraceToTree(ABC):
                 # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
                 continue
 
+            # Set nn_module_stack for the current event (copy to avoid reference issues)
+            if nn_module_stack:
+                event["nn_module_stack"] = list(nn_module_stack)
+            else:
+                event["nn_module_stack"] = ["root"]
+
             if stack:
                 parent = stack[-1]
                 parent.setdefault("children", []).append(
@@ -155,6 +165,13 @@ class BaseTraceToTree(ABC):
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
             stack.append(event)
+
+            # Push onto nn_module_stack if this is an nn.Module event
+            if self._is_nn_module_event(event):
+                nn_module_stack.append(
+                    event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
+                )
+
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -557,14 +574,14 @@ class TraceToTree:
             [dict], str
         ] = TraceLens.util.TraceEventUtils.default_categorizer,
     ):
-        self.events = [
-            {**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i}
-            for i, data in enumerate(events_data)
-        ]
-        self.events_by_uid = {
-            event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event
-            for event in self.events
-        }
+        UID_KEY = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        for i, event in enumerate(events_data):
+            event[UID_KEY] = i
+        self.events = events_data
+        self.metadata = TraceEventUtils.get_metadata(events_data)
+
+        # Build UID lookup dictionary
+        self.events_by_uid = {event[UID_KEY]: event for event in self.events}
         self.event_to_category = event_to_category
         if compute_end_times:
             self._compute_event_end_times()
@@ -586,21 +603,20 @@ class TraceToTree:
         TraceLens.util.TraceEventUtils.compute_event_end_times(self.events)
 
     def _set_linking_key(self):
+        Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
+        Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
         launch_event = next(
             (
                 event
                 for event in self.events
-                if self.event_to_category(event) in ["cuda_runtime", "cuda_driver"]
-                and "launch"
-                in event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "").lower()
+                if event.get("cat") in ["cuda_runtime", "cuda_driver"]
+                and "launch" in event.get(Name, "").lower()
             ),
             None,
         )
         self.linking_key = (
             "correlation"
-            if launch_event is not None
-            and "correlation"
-            in launch_event[TraceLens.util.TraceEventUtils.TraceKeys.Args]
+            if launch_event is not None and "correlation" in launch_event[Args]
             else "External id"
         )
 
@@ -609,46 +625,51 @@ class TraceToTree:
         # 1. Create a dictionary to map the linking id to the start and end ac2g events
         # 2. Create a dictionary to map the event key (by default (pid, tid)), and linking id to the actual event
         # 3. Create a dictionary to map the sequence number to the list of event uids
-        # 4. Create a dictionary to map the python id to the event uid
         # This is done to quickly link events based on various keys
 
         self.ac2g_event_map = {"start": {}, "end": {}}
         self.pid_tid_event_map = {}
         self.seq_num2event_uids_map = {}  # from seq id to list uids
-        self.dict_pythonID2UID = {}
+        # self.dict_pythonID2UID = {}  # Commented out: never read, only written
+
+        UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        PID = TraceLens.util.TraceEventUtils.TraceKeys.PID
+        TID = TraceLens.util.TraceEventUtils.TraceKeys.TID
+        Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
 
         for event in self.events:
+            cat = event.get("cat")
+
             # Process ac2g events
-            if self.event_to_category(event) == "ac2g":
+            if cat == "ac2g":
                 if event["ph"] == "s":
                     self.ac2g_event_map["start"][event["id"]] = event
                 elif event["ph"] == "f":
                     self.ac2g_event_map["end"][event["id"]] = event
                 continue
 
+            # Cache args dict once for remaining operations
+            args = event.get(Args)
+            if args is None:
+                continue
+
             # Process PID-TID-linking key events
-            pid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.PID)
-            tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
-            link_id = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(
-                self.linking_key
-            )
+            pid = event.get(PID)
+            tid = event.get(TID)
+            link_id = args.get(self.linking_key)
             if None not in [pid, tid, link_id]:
                 self.pid_tid_event_map[(pid, tid, link_id)] = event
 
             # Process sequence number events
-            seq_num = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(
-                "Sequence number"
-            )
+            seq_num = args.get("Sequence number")
             if seq_num is not None:
-                self.seq_num2event_uids_map.setdefault(seq_num, []).append(
-                    event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
+                self.seq_num2event_uids_map.setdefault(seq_num, []).append(event[UID])
 
-            # Process python_function events
-            if self.event_to_category(event) == "python_function":
-                self.dict_pythonID2UID[
-                    event[TraceLens.util.TraceEventUtils.TraceKeys.Args]["Python id"]
-                ] = event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+            # # Process python_function events (Commented out: dict_pythonID2UID never read)
+            # if cat == "python_function":
+            #     python_id = args.get("Python id")
+            #     if python_id is not None:
+            #         self.dict_pythonID2UID[python_id] = event[UID]
 
     # TODO base class includes this, remove
     def build_host_call_stack_tree(self, add_python_func=False):
@@ -681,6 +702,7 @@ class TraceToTree:
         )
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
+        dict_pidtid2nn_module_stack = defaultdict(list)
 
         for event in events_sorted:
             event["tree"] = True
@@ -692,6 +714,7 @@ class TraceToTree:
             tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
             stack_key = (pid, tid)
             stack = dict_pidtid2stack[stack_key]
+            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
             while (
                 stack
@@ -701,6 +724,9 @@ class TraceToTree:
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
+                # Pop from nn_module_stack if this was an nn.Module event
+                if self._is_nn_module_event(popped_event):
+                    nn_module_stack.pop()
 
             if (
                 stack
@@ -711,6 +737,12 @@ class TraceToTree:
                 # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
                 continue
 
+            # Set nn_module_stack for the current event (copy to avoid reference issues)
+            if nn_module_stack:
+                event["nn_module_stack"] = list(nn_module_stack)
+            else:
+                event["nn_module_stack"] = ["root"]
+
             if stack:
                 parent = stack[-1]
                 parent.setdefault("children", []).append(
@@ -719,6 +751,13 @@ class TraceToTree:
                 event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
             stack.append(event)
+
+            # Push onto nn_module_stack if this is an nn.Module event
+            if self._is_nn_module_event(event):
+                name = event["name"]
+                name = re.sub(r"_\d+$", "", name)
+                nn_module_stack.append(name)
+
             if self.event_to_category(event) == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
@@ -768,21 +807,23 @@ class TraceToTree:
 
         for event in self.events:
             # Skip GPU events
-            if self.event_to_category(event) in {"kernel", "gpu_memset", "gpu_memcpy"}:
+            cat = event.get("cat")
+            if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
                 continue
             # Now, we are dealing with non-GPU events
             if "gpu_events" not in event:
                 event["non_gpu_path"] = True
 
-    def build_tree(self, add_python_func=False) -> None:
+    def build_tree(self, add_python_func=False, link_fwd_bwd=True) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
 
-        tev2_create_pseudo_host_mm_ops(self)
-
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
+
+        if link_fwd_bwd:
+            self.link_all_fwd_bwd_events()
 
     # TODO base class includes this, remove
     def get_UID2event(self, UID):
@@ -800,6 +841,20 @@ class TraceToTree:
             return []
         return [self.get_UID2event(child_UID) for child_UID in event["children"]]
 
+    def get_gpu_events(self, event):
+        """
+        Get GPU events (kernels, memcpy, memset) launched by this event.
+
+        Args:
+            event: The event to get GPU events for
+
+        Returns:
+            List of GPU event dictionaries
+        """
+        if "gpu_events" not in event:
+            return []
+        return [self.get_UID2event(gpu_uid) for gpu_uid in event["gpu_events"]]
+
     def get_node_by_ext_id_pid_tid(self, ext_id, pid, tid):
         for event in self.events:
             if (
@@ -813,11 +868,32 @@ class TraceToTree:
                 return event
         return None
 
+    def apply_annotation(self, name_filters=[]) -> None:
+        events = self.events
+        annotation_events = [e for e in events if "user_annotation" in e.get("cat", "")]
+        annotation_events.sort(key=lambda x: x.get("ts", 0))
+        filtered_events = []
+        for i in name_filters:
+            filtered_events += [e for e in events if e.get("name", "").startswith(i)]
+        for e in filtered_events:
+            annotation = "NA"
+            for ann in annotation_events:
+                if (
+                    ann["ts"] <= e["ts"]
+                    and (e["ts"] + e["dur"]) < ann["ts"] + ann["dur"]
+                ):
+                    annotation = ann.get("name")
+                    break
+            self.events[e[TraceLens.util.TraceEventUtils.TraceKeys.UID]][
+                "annotation"
+            ] = annotation
+
     def traverse_subtree_and_print(
         self,
         node: Dict[str, Any],
         prune_non_gpu: bool = True,
         cpu_op_fields: tuple[str, ...] = (),
+        include_bwd: bool = False,
     ) -> None:
         """
         Initiates traversal of a subtree of profiling events and prints them in a hierarchical call stack format.
@@ -827,12 +903,18 @@ class TraceToTree:
             prune_non_gpu (bool): If True, prunes events that do not lead to GPU events.
             cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations.
                 It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
+            include_bwd (bool): If True, also prints backward events linked via bwd_events for each forward op.
 
         Prints:
             A structured representation of the subtree with details about each event.
         """
         self._traverse_subtree_recursive(
-            node, prune_non_gpu, cpu_op_fields=cpu_op_fields, _prefix="", is_last=True
+            node,
+            prune_non_gpu,
+            cpu_op_fields=cpu_op_fields,
+            include_bwd=include_bwd,
+            _prefix="",
+            is_last=True,
         )
 
     def _traverse_subtree_recursive(
@@ -840,6 +922,7 @@ class TraceToTree:
         node: Dict[str, Any],
         prune_non_gpu: bool,
         cpu_op_fields: tuple[str],
+        include_bwd: bool,
         _prefix: str,
         is_last: bool,
     ) -> None:
@@ -874,20 +957,109 @@ class TraceToTree:
         if prune_non_gpu:
             children = [child for child in children if "non_gpu_path" not in child]
 
+        # Check if we have backward events to show after children
+        has_bwd = include_bwd and "bwd_events" in node and node["bwd_events"]
+
         child_count = len(children)
         new_prefix = _prefix + ("    " if is_last else "│   ")
 
         for i, child in enumerate(children):
+            # If we have bwd events, children are never "last" (bwd comes after)
+            child_is_last = (i == child_count - 1) and not has_bwd
             self._traverse_subtree_recursive(
                 child,
                 prune_non_gpu,
                 cpu_op_fields=cpu_op_fields,
+                include_bwd=include_bwd,
                 _prefix=new_prefix,
-                is_last=(i == child_count - 1),
+                is_last=child_is_last,
             )
 
+        # Print backward events AFTER children
+        if has_bwd:
+            bwd_events = node["bwd_events"]
+            for i, bwd_uid in enumerate(bwd_events):
+                bwd_event = self.get_UID2event(bwd_uid)
+                if bwd_event:
+                    bwd_is_last = i == len(bwd_events) - 1
+                    bwd_connector = "└── " if bwd_is_last else "├── "
+                    bwd_name = bwd_event.get(
+                        TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown"
+                    )
+                    print(
+                        f"{new_prefix}{bwd_connector}[BWD] {bwd_name} (UID: {bwd_event.get('UID')})"
+                    )
+                    # Print backward subtree with proper sibling handling
+                    bwd_subtree_prefix = new_prefix + (
+                        "    " if bwd_is_last else "│   "
+                    )
+                    bwd_children = [
+                        self.get_UID2event(uid) for uid in bwd_event.get("children", [])
+                    ]
+                    bwd_children = [c for c in bwd_children if c]  # Filter None
+                    for j, bwd_child in enumerate(bwd_children):
+                        child_is_last = j == len(bwd_children) - 1
+                        self._traverse_subtree_recursive(
+                            bwd_child,
+                            prune_non_gpu,
+                            cpu_op_fields=cpu_op_fields,
+                            include_bwd=False,  # Don't recurse bwd->fwd->bwd
+                            _prefix=bwd_subtree_prefix,
+                            is_last=child_is_last,
+                        )
+
+    def traverse_parents_and_get_callstack(
+        self,
+        node: Dict[str, Any],
+        filter: tuple[str, ...] = (),
+        follow_fwd_link: bool = False,
+    ):
+        """
+        Traverses the parent nodes and returns a string representation of the call stack.
+
+        Args:
+            node (Dict[str, Any]): The event node from which to start traversing upwards.
+            filter (tuple[str, ...]): Optional tuple of strings to filter which nodes to include in output.
+            follow_fwd_link (bool): If True, when reaching the root of a backward event chain,
+                follow the fwd_event link to continue traversing the forward call stack.
+
+        Returns:
+            str: The call stack as a string with " => " separators.
+        """
+        depth = 0
+        print_str = node["name"] + " => "
+        while True:
+            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
+            max_len = 256
+            if len(name) > max_len:
+                name = name[:max_len] + ".."
+            if filter is None:
+                print_str += f"{name} => "
+            else:
+                if any(filter_str in name for filter_str in filter):
+                    print_str += f"{name} => "
+            # Move to the parent node
+            parent_node = self.get_parent_event(node)
+            if parent_node is None:
+                # Check if we should follow the fwd_event link for backward events
+                if follow_fwd_link and "fwd_event" in node:
+                    fwd_uid = node["fwd_event"]
+                    fwd_node = self.get_UID2event(fwd_uid)
+                    print_str += "[FWD] => "
+                    # Continue traversing the forward event's parent chain
+                    fwd_callstack = self.traverse_parents_and_get_callstack(
+                        fwd_node, filter, follow_fwd_link=False
+                    )
+                    return print_str + fwd_callstack
+                return print_str.strip(" => ").strip(" ")
+            node = parent_node
+            depth += 1
+
     def traverse_parents_and_print(
-        self, node: Dict[str, Any], cpu_op_fields: tuple[str, ...] = ()
+        self,
+        node: Dict[str, Any],
+        cpu_op_fields: tuple[str, ...] = (),
+        follow_fwd_link: bool = False,
     ) -> None:
         """
         Traverses the parent nodes of a given event node and prints their details
@@ -897,6 +1069,8 @@ class TraceToTree:
             node (Dict[str, Any]): The event node from which to start traversing upwards.
             cpu_op_fields (tuple[str, ...]): Optional tuple to specify printing additional details for CPU operations.
                 It will be some subset of ['Input Dims', 'Input type', 'Input Strides', 'Concrete Inputs'].
+            follow_fwd_link (bool): If True, when reaching the root of a backward event chain,
+                follow the fwd_event link to continue traversing the forward call stack.
         """
 
         depth = 0
@@ -932,6 +1106,19 @@ class TraceToTree:
             # Move to the parent node
             parent_node = self.get_parent_event(node)
             if parent_node is None:
+                # Check if we should follow the fwd_event link for backward events
+                if follow_fwd_link and "fwd_event" in node:
+                    fwd_uid = node["fwd_event"]
+                    fwd_node = self.get_UID2event(fwd_uid)
+                    print(f"\n{'='*60}")
+                    print(
+                        f"Following fwd_event link to forward call stack (UID: {fwd_uid})"
+                    )
+                    print(f"{'='*60}")
+                    # Recursively traverse the forward event's parent chain
+                    return self.traverse_parents_and_print(
+                        fwd_node, cpu_op_fields, follow_fwd_link=False
+                    )
                 return node
             node = parent_node
             depth += 1
@@ -953,23 +1140,96 @@ class TraceToTree:
                 seq_nums.update(self.get_seq_nums_for_node_subtree(child_UID))
         return seq_nums
 
-    def link_bwd_events(self, event_UID):
+    def get_subtree_bwd_events(self, event_UID):
+        """
+        Returns all backward event UIDs from this event and all its descendants.
+
+        Does NOT modify any event - just aggregates and returns.
+        Uses the 1:1 bwd_events links established by link_all_fwd_bwd_events().
+
+        Args:
+            event_UID: The UID of the forward event to get backward events for.
+
+        Returns:
+            list: List of backward event UIDs from this subtree.
+        """
         fwd_event = self.events_by_uid[event_UID]
-        seq_nums = self.get_seq_nums_for_node_subtree(event_UID)
-        bwd_event_UIDs = []
-        for seq_num in seq_nums:
-            for seq_num_match_UID in self.seq_num2event_uids_map.get(seq_num, []):
-                if (
-                    not self.events_by_uid[seq_num_match_UID]
-                    .get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-                    .startswith("autograd::engine::evaluate_function:")
-                ):
+
+        # Collect all bwd_events from this event and all descendants
+        all_bwd_uids = set()
+
+        def collect_bwd(event):
+            if "bwd_events" in event:
+                all_bwd_uids.update(event["bwd_events"])
+            for child_uid in event.get("children", []):
+                child = self.get_UID2event(child_uid)
+                if child:
+                    collect_bwd(child)
+
+        collect_bwd(fwd_event)
+        return list(all_bwd_uids)
+
+    def link_all_fwd_bwd_events(self):
+        """
+        Automatically link all forward events to their corresponding backward events
+        using 1:1 mapping. For each backward autograd event, finds the leaf forward op
+        that matches the sequence number.
+
+        This populates:
+          - fwd_event["bwd_events"] = [backward event UID]  (1:1 mapping)
+          - bwd_event["fwd_event"] = forward event UID
+        """
+        linked_count = 0
+
+        # Iterate through all autograd backward events
+        for seq_num, uids in self.seq_num2event_uids_map.items():
+            # Find the autograd::engine::evaluate_function event for this seq_num
+            bwd_autograd_event = None
+            for uid in uids:
+                event = self.events_by_uid[uid]
+                name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
+                if name.startswith("autograd::engine::evaluate_function:"):
+                    bwd_autograd_event = event
+                    break
+
+            if not bwd_autograd_event:
+                continue
+
+            # Find the leaf forward op with this sequence number
+            # (the one with the latest timestamp = most specific/deepest op)
+            # Skip backward events by checking pid/tid - backward ops run on autograd thread
+            bwd_pid = bwd_autograd_event.get("pid")
+            bwd_tid = bwd_autograd_event.get("tid")
+            leaf_fwd_event = None
+            leaf_fwd_ts = -1
+            for uid in uids:
+                event = self.events_by_uid[uid]
+                # Skip events on the same thread as the backward autograd event
+                if event.get("pid") == bwd_pid and event.get("tid") == bwd_tid:
                     continue
-                bwd_event_UIDs.append(seq_num_match_UID)
-                bwd_event = self.events_by_uid[seq_num_match_UID]
-                bwd_event["fwd_event"] = event_UID
-                break
-        fwd_event["bwd_events"] = bwd_event_UIDs
+                # This is a forward event - check if it's the latest (leaf)
+                ts = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp, 0)
+                if ts > leaf_fwd_ts:
+                    leaf_fwd_ts = ts
+                    leaf_fwd_event = event
+
+            if not leaf_fwd_event:
+                continue
+
+            # 1:1 link: backward -> forward
+            bwd_autograd_event["fwd_event"] = leaf_fwd_event[
+                TraceLens.util.TraceEventUtils.TraceKeys.UID
+            ]
+
+            # 1:1 link: forward -> backward (as a list for API compatibility)
+            if "bwd_events" not in leaf_fwd_event:
+                leaf_fwd_event["bwd_events"] = []
+            leaf_fwd_event["bwd_events"].append(
+                bwd_autograd_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+            )
+            linked_count += 1
+
+        logger.debug(f"Linked {linked_count} forward-backward event pairs (1:1)")
 
     def _get_graph_gpu_events(self, graph_launch_evt):
         corr = graph_launch_evt.get(
