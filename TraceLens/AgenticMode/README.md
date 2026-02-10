@@ -169,7 +169,9 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically. This backtesting approach can help improve the system.
 
-## Limitations
+## Future Plans
 
-TraceLens Agentic Mode is an **experimental** feature. The workflow is observed to typically handle the categorized kernels, though the `generic-op-analyzer` is found to be capable for general recommendations. Additionally, complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`.
+- TraceLens Agentic Mode is an **experimental** feature. The workflow is observed to typically handle the categorized kernels, though the `generic-op-analyzer` is found to be capable for general recommendations. Additionally, complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`.
+- Individual analyzers require detailed review (Performance thresholds) and restructuring (Codify performance recommendations if required).q
+- Validation at a sub-agent level and integration tests are crucial to asses performance.
 
