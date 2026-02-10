@@ -1284,8 +1284,10 @@ class TraceDiff:
                                 common_name = find_common_name(n1, n2, module_map)
                                 if common_name is not None:
                                     print(f"Renaming: {n1}, {n2} to {common_name}")
-                                    rename_map[n2] = common_name
-                                    rename_map[n1] = common_name
+                                    rename_map[n2]=common_name 
+                                    rename_map[n1]=common_name
+                                else:
+                                    print(f"No common name found for {n1} and {n2} under the same LCA, keeping original names.")
                     else:
                         n1_list = mapping["trace1"]["name"]
                         n1_list_copy = n1_list.copy()
@@ -1356,7 +1358,6 @@ class TraceDiff:
 
         df_agg["nn_module_parent"] = df_agg.apply(rename_nnmodule, axis=1)
         ##df_agg['cpu_op_name'] = df_agg['cpu_op_name'].astype(str) + '(' + df_agg['nn_module_parent'].astype(str)+')'
-        print(df_agg[["cpu_op_name", "nn_module_parent"]].drop_duplicates())
         cpu_op_map = {}
         for cpu_op in df_agg["cpu_op_name"].unique():
             cpu_op_map[cpu_op] = {}
