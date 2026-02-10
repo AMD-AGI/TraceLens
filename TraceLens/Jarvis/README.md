@@ -8,7 +8,7 @@ TraceLens Agentic Mode is a Cursor-based AI-powered performance analysis tool th
 
 ## Prerequisites
 
-### 1. Clone and checkout the Jarvis branch
+### 1. Clone and checkout the Agentic Orchestrator branch
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens.git
@@ -99,6 +99,29 @@ The analysis is split into two independent tiers that can be composed separately
 
 Each tier writes to a separate findings directory and produces an independently composable report section.
 
+```mermaid
+flowchart TD
+    Prep["Steps 0-5: TraceLens Perf Report"]
+    Prep --> Step6["Step 6: System-Level Analysis"]
+    Prep --> Step7["Step 7: Compute Kernel Analysis"]
+    
+    Step6 --> CpuIdle["cpu-idle-analyzer"]
+    Step6 --> MultiKernel["multi-kernel-analyzer"]
+    CpuIdle --> SysFindings["system_findings/"]
+    MultiKernel --> SysFindings
+    
+    Step7 --> Gemm["gemm-analyzer"]
+    Step7 --> Sdpa["sdpa-analyzer"]
+    Step7 --> Others["other analyzers..."]
+    Gemm --> CatFindings["category_findings/"]
+    Sdpa --> CatFindings
+    Others --> CatFindings
+    
+    SysFindings --> Step8["Step 8: Validate"]
+    CatFindings --> Step8
+    Step8 --> Step9["Step 9: Aggregate"]
+    Step9 --> Step11["Step 11: Final Report"]
+```
 ### Orchestrator
 The **Standalone Analysis Orchestrator** skill coordinates the entire analysis workflow.
 It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it validates outputs, aggregates findings, and generates a prioritized stakeholder report.
@@ -126,7 +149,7 @@ After an analysis run, if you identify a missed issue, ask Cursor to study why a
 
 | Agent | Purpose | Invocation Condition |
 |-------|---------|---------------------|
-| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks | `idle_time_percent > 50%` or `cpu_idle_critical == true` |
+| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks | `idle_time_percent > 50%` |
 | `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap | Multi-kernel category exists in manifest |
 
 **Compute Kernel (Step 7):**
