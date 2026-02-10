@@ -1352,34 +1352,45 @@ class TraceDiff:
         df_agg["cpu_op_name"] = df_agg.apply(rename_cpu_op, axis=1)
 
         def rename_nnmodule(row):
-            return re.sub(" ","",row["nn_module_parent"])
+            return re.sub(" ", "", row["nn_module_parent"])
 
-        df_agg['nn_module_parent'] = df_agg.apply(rename_nnmodule, axis=1)
+        df_agg["nn_module_parent"] = df_agg.apply(rename_nnmodule, axis=1)
         ##df_agg['cpu_op_name'] = df_agg['cpu_op_name'].astype(str) + '(' + df_agg['nn_module_parent'].astype(str)+')'
-        print(df_agg[["cpu_op_name","nn_module_parent"]].drop_duplicates())
-        cpu_op_map={}
-        for cpu_op in df_agg['cpu_op_name'].unique():
-            cpu_op_map[cpu_op]={}
-            for source, group in df_agg[df_agg['cpu_op_name'] == cpu_op].groupby('source'):
-                cpu_op_map[cpu_op][source]= {"kernels":sorted(list(group["name"].unique()))}
-                cpu_op_map[cpu_op][source]["nn_module_parents"]=sorted(list(group["nn_module_parent"].unique()))
-                
+        print(df_agg[["cpu_op_name", "nn_module_parent"]].drop_duplicates())
+        cpu_op_map = {}
+        for cpu_op in df_agg["cpu_op_name"].unique():
+            cpu_op_map[cpu_op] = {}
+            for source, group in df_agg[df_agg["cpu_op_name"] == cpu_op].groupby(
+                "source"
+            ):
+                cpu_op_map[cpu_op][source] = {
+                    "kernels": sorted(list(group["name"].unique()))
+                }
+                cpu_op_map[cpu_op][source]["nn_module_parents"] = sorted(
+                    list(group["nn_module_parent"].unique())
+                )
 
         result = {
             kernel_name: {
                 source: {
                     "cpu_op_name": list(group["cpu_op_name"].unique()),
                 }
-                for source, group in df_agg[df_agg['name'] == kernel_name].groupby('source')
+                for source, group in df_agg[df_agg["name"] == kernel_name].groupby(
+                    "source"
+                )
             }
-                for kernel_name in df_agg['name'].unique()
+            for kernel_name in df_agg["name"].unique()
         }
         print("Kernel to CPU op mapping (showing entries with 1:n mapping):")
         for name, mapping in result.items():
-            if len(mapping.get("trace1",{}).get("cpu_op_name",[]))>1:
-                print(name[0:30],"\t",mapping.get("trace1",{}).get("cpu_op_name",[]))
-            if len(mapping.get("trace2",{}).get("cpu_op_name",[]))>1:
-                print(name[0:30],"\t",mapping.get("trace2",{}).get("cpu_op_name",[]))
+            if len(mapping.get("trace1", {}).get("cpu_op_name", [])) > 1:
+                print(
+                    name[0:30], "\t", mapping.get("trace1", {}).get("cpu_op_name", [])
+                )
+            if len(mapping.get("trace2", {}).get("cpu_op_name", [])) > 1:
+                print(
+                    name[0:30], "\t", mapping.get("trace2", {}).get("cpu_op_name", [])
+                )
         self.cpu_op_map = cpu_op_map
 
     def generate_tracediff_report(self):
