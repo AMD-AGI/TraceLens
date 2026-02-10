@@ -3035,9 +3035,11 @@ class jax_conv:
             bytes_per_element=self.bytes_per_element,
         )
 
+
 # parser helper
-def parse_list(input:str, dtype):
+def parse_list(input: str, dtype):
     return [dtype(x) for x in input[1:-1].split(",")]
+
 
 class Normalization:
     def __init__(self, event, arch=None, python_path=None):
@@ -3286,7 +3288,7 @@ class BatchNorm(Normalization):
         stride_output = None
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
         # https://github.com/pytorch/pytorch/blob/ff649d49c213c46b3883d8778717157406126743/aten/src/ATen/native/miopen/BatchNorm_miopen.cpp#L92C8-L92C21
-        num_channels= args_input_dims[0][1]
+        num_channels = args_input_dims[0][1]
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, dtype_out),
@@ -3319,11 +3321,13 @@ class BatchNormBwd(Normalization):
         input_index = 1
         is_affine_index = 2
         has_output = args_input_dims[0] is not None
-        if (event['name'] == 'aten::cudnn_batch_norm_backward' or
-            event['name'] == 'aten::miopen_batch_norm_backward'):
+        if (
+            event["name"] == "aten::cudnn_batch_norm_backward"
+            or event["name"] == "aten::miopen_batch_norm_backward"
+        ):
             input_index = 0
             has_output = True
-            is_training = False # by assertion
+            is_training = False  # by assertion
         else:
             is_training = bool(event["args"]["Concrete Inputs"][7])
         op_shape = tuple(args_input_dims[input_index])
@@ -3340,7 +3344,7 @@ class BatchNormBwd(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": num_channels,  
+            "num_channels": num_channels,
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
@@ -3496,7 +3500,7 @@ class GroupNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1]/ int(concrete_inputs[1]),
+            "num_channels": op_shape[1] / int(concrete_inputs[1]),
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
