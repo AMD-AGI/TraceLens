@@ -156,61 +156,6 @@ def detect_idle_patterns(
     return patterns_detected
 
 
-def generate_recommendations(
-    idle_percent: float,
-    patterns_detected: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Generate prioritized recommendations based on detected patterns."""
-    recommendations = []
-    
-    # Always recommend graph mode for high idle time
-    if idle_percent > 50:
-        recommendations.append({
-            'priority': 0,
-            'title': 'Enable GPU Graph Mode',
-            'issue': f'GPU is idle {idle_percent:.1f}% of time due to CPU launch overhead',
-            'action': 'Enable GPU graph capture and replay to eliminate per-kernel launch overhead',
-            'expected_impact': f'Could reduce idle time from {idle_percent:.1f}% to <20%, achieving {100/(100-idle_percent):.1f}x throughput improvement',
-            'implementation': 'Use framework graph capture API (e.g., torch.cuda.make_graphed_callables or cudaGraph)'
-        })
-    
-    # Check for compilation opportunity
-    if idle_percent > 30:
-        recommendations.append({
-            'priority': 1,
-            'title': 'Enable Model Compilation',
-            'issue': 'Framework interpretation overhead adds to CPU time',
-            'action': 'Use torch.compile or equivalent JIT compilation',
-            'expected_impact': '20-50% reduction in framework overhead',
-            'implementation': 'Wrap model with torch.compile(model) before inference'
-        })
-    
-    # Check for batching opportunity
-    if idle_percent > 40:
-        recommendations.append({
-            'priority': 2,
-            'title': 'Increase Batch Size',
-            'issue': 'Small batches have high per-sample launch overhead',
-            'action': 'Increase batch size to amortize launch costs',
-            'expected_impact': 'Linear reduction in per-sample overhead',
-            'implementation': 'Increase inference batch size if memory allows'
-        })
-    
-    # Add pattern-specific recommendations
-    for pattern in patterns_detected:
-        if pattern['severity'] in ['CRITICAL', 'HIGH']:
-            recommendations.append({
-                'priority': len(recommendations),
-                'title': f"Address: {pattern['name']}",
-                'issue': pattern['evidence'],
-                'action': pattern['solution'],
-                'expected_impact': pattern['impact'],
-                'implementation': 'See detailed pattern analysis'
-            })
-    
-    return recommendations
-
-
 def classify_severity(idle_percent: float) -> str:
     """Classify idle time severity."""
     if idle_percent > 70:
@@ -266,14 +211,12 @@ def main():
         print(f"  Short Kernels (<10µs): {kernel_patterns['short_kernel_count']}")
         print(f"  Avg Kernel Time: {kernel_patterns['avg_kernel_time_us']:.1f} µs")
         
-        # Detect patterns
+        # Detect patterns (severity + evidence only;
+        # recommendations are the sub-agent's responsibility)
         patterns_detected = detect_idle_patterns(gpu_timeline, kernel_patterns)
         print(f"\nPatterns Detected: {len(patterns_detected)}")
         for p in patterns_detected:
             print(f"  - [{p['severity']}] {p['name']}")
-        
-        # Generate recommendations
-        recommendations = generate_recommendations(idle_percent, patterns_detected)
         
         # Classify severity
         severity = classify_severity(idle_percent)
@@ -301,7 +244,6 @@ def main():
             },
             'kernel_analysis': kernel_patterns,
             'patterns_detected': patterns_detected,
-            'recommendations': recommendations,
             'potential_speedup': round(potential_speedup, 2),
             'target_idle_percent': 20
         }
