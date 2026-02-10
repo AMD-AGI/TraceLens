@@ -79,7 +79,7 @@ class TraceDiff:
         if node is None:
             return False
         return not node.get("non_gpu_path", False)
-    
+
     def is_kernel(self, node):
         cat = node.get("cat") or node.get("category")
         if cat is None:
@@ -903,9 +903,9 @@ class TraceDiff:
                         if self.is_gpu_path(variant_uid2node.get(child.get("uid2")))
                     ]
                     if (
-                        (non_combined_children_trace1_gpu_paths
-                        or non_combined_children_trace2_gpu_paths) or (self.is_kernel(event1) and self.is_kernel(event2))
-                    ):
+                        non_combined_children_trace1_gpu_paths
+                        or non_combined_children_trace2_gpu_paths
+                    ) or (self.is_kernel(event1) and self.is_kernel(event2)):
 
                         # Store the LCA name from this combined node
                         lca_name = self._get_op_name(
@@ -918,14 +918,14 @@ class TraceDiff:
                             child_node = baseline_uid2node.get(child.get("uid1"))
                             gpu_event_uids1.extend(child_node.get("gpu_events", []))
                         if self.is_kernel(event1):
-                            gpu_event_uids1.append(event1['UID'])
+                            gpu_event_uids1.append(event1["UID"])
 
                         gpu_event_uids2 = []
                         for child in non_combined_children_trace2_gpu_paths:
                             child_node = variant_uid2node.get(child.get("uid2"))
                             gpu_event_uids2.extend(child_node.get("gpu_events", []))
                         if self.is_kernel(event2):
-                            gpu_event_uids2.append(event2['UID'])
+                            gpu_event_uids2.append(event2["UID"])
 
                         def add_rows(gpu_event_uids, tree_obj, uid2node, source):
                             tree_num = 1 if source == "trace1" else 2
@@ -1123,10 +1123,9 @@ class TraceDiff:
             traverse(root_id, None)
 
         df = pd.DataFrame(rows)
-        
 
-        df_trace1 = df[df['source'] == 'trace1'].drop(columns=['source'])
-        df_trace2 = df[df['source'] == 'trace2'].drop(columns=['source'])
+        df_trace1 = df[df["source"] == "trace1"].drop(columns=["source"])
+        df_trace2 = df[df["source"] == "trace2"].drop(columns=["source"])
         if df_trace1.reset_index(drop=True).equals(df_trace2.reset_index(drop=True)):
             print("[TraceDiff] Identical traces detected")
             self.identical_traces = True
@@ -1242,8 +1241,6 @@ class TraceDiff:
             Dict with keys "trace1" and "trace2", each mapping cpu_op_name -> list of kernel names.
         """
 
-
-
         if (
             self.diff_stats_unique_args_summary_df is None
             or self.diff_stats_unique_args_summary_df.empty
@@ -1279,7 +1276,9 @@ class TraceDiff:
                     str(lca_id): {
                         source: {
                             "name": list(group["cpu_op_name"].unique()),
-                            "nn_module_parent": list(group["nn_module_parent"].unique()),
+                            "nn_module_parent": list(
+                                group["nn_module_parent"].unique()
+                            ),
                         }
                         for source, group in df[
                             df["lowest_common_ancestor_id"] == lca_id
@@ -1290,7 +1289,9 @@ class TraceDiff:
 
                 module_map = {}
                 for cpu_op in df["cpu_op_name"].unique():
-                    for source, group in df[df["cpu_op_name"] == cpu_op].groupby("source"):
+                    for source, group in df[df["cpu_op_name"] == cpu_op].groupby(
+                        "source"
+                    ):
                         module_map[cpu_op] = list(group["nn_module_parent"].unique())
                 visited_cpu_op = []
                 rename_map = {}
@@ -1299,11 +1300,15 @@ class TraceDiff:
                     if "trace1" in mapping and "trace2" in mapping:
                         if all(
                             op in visited_cpu_op for op in mapping["trace1"]["name"]
-                        ) and all(op in visited_cpu_op for op in mapping["trace2"]["name"]):
+                        ) and all(
+                            op in visited_cpu_op for op in mapping["trace2"]["name"]
+                        ):
                             continue
                         visited_cpu_op.extend(mapping["trace1"]["name"])
                         visited_cpu_op.extend(mapping["trace2"]["name"])
-                        if len(mapping["trace1"]["name"]) == len(mapping["trace2"]["name"]):
+                        if len(mapping["trace1"]["name"]) == len(
+                            mapping["trace2"]["name"]
+                        ):
                             for n1, n2 in zip(
                                 mapping["trace1"]["name"], mapping["trace2"]["name"]
                             ):
@@ -1340,20 +1345,22 @@ class TraceDiff:
                                         n1_list.remove(n1)
                                         break
                             if len(n1_list) > 0 or len(n2_list) > 0:
-                                print(f"Unmatched for LCA {lcaid}: {n1_list} vs {n2_list}")
+                                print(
+                                    f"Unmatched for LCA {lcaid}: {n1_list} vs {n2_list}"
+                                )
                 return rename_map
-           
+
             def rename_cpu_op(row):
                 if row["cpu_op_name"] in rename_map:
                     return rename_map[row["cpu_op_name"]]
                 return row["cpu_op_name"]
-            
+
             def rename_nnmodule(row):
                 return re.sub(" ", "", row["nn_module_parent"])
-            
+
             rename_map = get_rename_map(df)
 
-            df_agg["cpu_op_name"] = df_agg.apply(rename_cpu_op, axis=1)        
+            df_agg["cpu_op_name"] = df_agg.apply(rename_cpu_op, axis=1)
 
             df_agg["nn_module_parent"] = df_agg.apply(rename_nnmodule, axis=1)
             ##df_agg['cpu_op_name'] = df_agg['cpu_op_name'].astype(str) + '(' + df_agg['nn_module_parent'].astype(str)+')'
@@ -1385,17 +1392,21 @@ class TraceDiff:
             for name, mapping in result.items():
                 if len(mapping.get("trace1", {}).get("cpu_op_name", [])) > 1:
                     print(
-                        name[0:30], "\t", mapping.get("trace1", {}).get("cpu_op_name", [])
+                        name[0:30],
+                        "\t",
+                        mapping.get("trace1", {}).get("cpu_op_name", []),
                     )
                 if len(mapping.get("trace2", {}).get("cpu_op_name", [])) > 1:
                     print(
-                        name[0:30], "\t", mapping.get("trace2", {}).get("cpu_op_name", [])
+                        name[0:30],
+                        "\t",
+                        mapping.get("trace2", {}).get("cpu_op_name", []),
                     )
             return cpu_op_map
 
         df_agg = self.diff_stats_unique_args_summary_df
         df = self.diff_stats_df
-        
+
         cpu_op_map_trace1 = (
             df_agg[df_agg["source"] == "trace1"]
             .groupby(["cpu_op_name"])
@@ -1417,7 +1428,6 @@ class TraceDiff:
         self.cpu_op_map = cpu_op_map
         self.cpu_op_map_trace1 = cpu_op_map_trace1
         self.cpu_op_map_trace2 = cpu_op_map_trace2
-        
 
     def generate_tracediff_report(self):
         """
@@ -1430,11 +1440,14 @@ class TraceDiff:
 
         if self.identical_traces:
             df = self.diff_stats_df
-            df = df[~(df['source'] == 'trace2')]
-            df = df.drop(columns=['source'])
+            df = df[~(df["source"] == "trace2")]
+            df = df.drop(columns=["source"])
             self.diff_stats_df = df
 
-
+            df_agg = self.diff_stats_unique_args_summary_df
+            df_agg = df_agg[~(df_agg["source"] == "trace2")]
+            df_agg = df_agg.drop(columns=["source"])
+            self.diff_stats_unique_args_summary_df = df_agg
 
     def print_tracediff_report_files(
         self, output_folder="rprt_diff", prune_non_gpu=False
