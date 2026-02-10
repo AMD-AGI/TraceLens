@@ -9,18 +9,13 @@ import pytest
 import torch
 import torch.nn
 
-# import TraceLens
-# Normalization layers
-
+# This file contains classes needed ot generate traces for the perf model
+# starting with normalization layers.
+# the standard test_compare_perf_report can use the traces created by this script
+# so no additional tests are needed here
 default_normalization_layer_trace_file = (
     "traces/perf_model/normalization/normalization_layer_test.json.gz"
 )
-
-
-@pytest.mark.parameterize("trace_file", [default_normalization_layer_trace_file])
-def test_normalization_layers(trace_file: str):
-    assert os.path.exists(trace_file), f"Trace file {trace_file} does not exist"
-
 
 def create_normalization_layer_trace(outfile: str):
     # super simple network with the normalization layers that we care about

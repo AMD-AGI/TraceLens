@@ -330,7 +330,7 @@ def generate_perf_report_pytorch(
                 if event["name"] in op_names
             ]
 
-            if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
+            if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise", "Normalization"]:
                 # For GEMM: create a single table that covers both fwd and bwd.
                 df_ops = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True

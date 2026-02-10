@@ -3385,7 +3385,7 @@ class LayerNorm(Normalization):
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[1])
+        op_shape = tuple(args_input_dims[0])
         concrete_inputs = event["args"]["Concrete Inputs"]
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
