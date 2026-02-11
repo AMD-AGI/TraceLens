@@ -2,7 +2,7 @@
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces.
+TraceLens Agentic Mode is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. While this is an experimental release, the modular design is expected to be carried forward.
 
 ---
 
@@ -170,8 +170,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically. This backtesting approach can help improve the system.
 
 ## Future Plans
-
-- TraceLens Agentic Mode is an **experimental** feature. The workflow is observed to typically handle the categorized kernels, though the `generic-op-analyzer` is found to be capable for general recommendations. Additionally, complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`.
-- Individual analyzers require detailed review (Performance thresholds) and restructuring (Codify performance recommendations if required).q
-- Validation at a sub-agent level and integration tests are crucial to asses performance.
-
+TraceLens Agentic Mode is currently an **experimental** feature. Efforts will be focused on converting this structural PoC to a reliable tool through rounds of design reviews and robust evaluation workflows.
+- Individual analyzers require detailed review (Performance thresholds) and restructuring (Codify performance recommendations if required).
+- - Validation at a sub-agent level and integration tests are crucial to asses performance.
+- The workflow is observed to typically handle the categorized kernels, though the `generic-op-analyzer` is found to be capable for general recommendations. Additionally, complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`.
