@@ -1116,7 +1116,7 @@ class TraceDiff:
 
             if should_traverse_children:
                 for cid in node["children"]:
-                    traverse(cid, combined_parent_node)
+                    traverse(cid, node)
             return
 
         for root_id in merged_root_ids:
