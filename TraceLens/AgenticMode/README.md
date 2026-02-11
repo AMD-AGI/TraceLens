@@ -2,7 +2,7 @@
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. While this is an experimental release, the modular design is expected to be carried forward.
+TraceLens Agentic Mode is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. While this is an experimental release, the system has been designed to be modular and extendible. The LLMs primally have been employed to define a strcutred workflow adn interpret analysis results.
 
 ---
 
