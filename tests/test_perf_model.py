@@ -17,6 +17,7 @@ default_normalization_layer_trace_file = (
     "traces/perf_model/normalization/normalization_layer_test.json.gz"
 )
 
+
 def create_normalization_layer_trace(outfile: str):
     # super simple network with the normalization layers that we care about
     class Net(torch.nn.Module):
