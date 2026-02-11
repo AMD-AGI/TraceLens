@@ -47,7 +47,9 @@ JAX_TRACES = find_jax_traces()
 
 # Guard: skip the entire module if no JAX traces are present
 if not JAX_TRACES:
-    pytest.skip("No .xplane.pb traces found under tests/traces/", allow_module_level=True)
+    pytest.skip(
+        "No .xplane.pb traces found under tests/traces/", allow_module_level=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +67,9 @@ def _short_id(path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("trace_path", JAX_TRACES, ids=[_short_id(t) for t in JAX_TRACES])
+@pytest.mark.parametrize(
+    "trace_path", JAX_TRACES, ids=[_short_id(t) for t in JAX_TRACES]
+)
 class TestJaxPerfReportE2E:
     """End-to-end tests: generate_perf_report_jax runs without error."""
 
@@ -90,9 +94,9 @@ class TestJaxPerfReportE2E:
             )
             csv_files = glob.glob(os.path.join(csvs_dir, "*.csv"))
             assert len(csv_files) > 0, "No CSV files created"
-            assert len(csv_files) == len(dict_name2df), (
-                f"CSV count ({len(csv_files)}) != DataFrame count ({len(dict_name2df)})"
-            )
+            assert len(csv_files) == len(
+                dict_name2df
+            ), f"CSV count ({len(csv_files)}) != DataFrame count ({len(dict_name2df)})"
 
     def test_expected_core_sheets(self, trace_path):
         """Report contains the expected core sheets and they are non-empty."""
