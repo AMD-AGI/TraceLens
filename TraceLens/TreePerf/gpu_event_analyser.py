@@ -96,6 +96,7 @@ class GPUEventAnalyser:
         memcpy_events = []
 
         points = []
+        compute_overlapping_uids = False
         for event in self.events:
 
             # TODO: ideally we want to get gpu events based on process id
@@ -105,7 +106,8 @@ class GPUEventAnalyser:
 
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
-                if compute_overlapping_uids:
+                if 'overlapping_uids' not in event:
+                    compute_overlapping_uids = True
                     points.append((event["ts"], 0, event["UID"])) # 0 for start, 1 for end
                     points.append((event["t_end"], 1, event["UID"]))
                     event["overlapping_uids"] = set()
