@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 from math import prod
 import math
 import sys
@@ -3428,7 +3429,7 @@ class jax_conv:
 
 # parser helper
 def parse_list(input: str, dtype):
-    return [dtype(x) for x in input[1:-1].split(",")]
+    return [dtype(x) for x in ast.literal_eval(input)]
 
 
 class Normalization:
@@ -3866,7 +3867,7 @@ class GroupNorm(Normalization):
     # https://arxiv.org/pdf/1803.08494
     # Group normalization divides the channels into groups and computes
     # within each group the mean and variance for normalization.
-    # Very similar to LayerNorm and InstanceNorm except the number of weights is num_channels / num_groups
+    # Very similar to LayerNorm and InstanceNorm except there is pooling between elements in a group
     # Group norm with 1 group is the same as Layer Norm
     # Group norm with groups = num_channels is the same as Instance Norm
 
@@ -3890,7 +3891,7 @@ class GroupNorm(Normalization):
             "dtype_in_out": (dtype_in, dtype_out),
             "stride_input": stride_input,
             "stride_output": stride_output,
-            "num_channels": op_shape[1] / int(concrete_inputs[1]),
+            "num_channels": op_shape[1],
             "has_bias": True,
             "is_affine": is_affine,
             "is_training": is_training,
