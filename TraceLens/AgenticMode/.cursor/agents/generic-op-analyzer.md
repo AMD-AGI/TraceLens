@@ -1,12 +1,14 @@
 ---
 name: generic-op-analyzer
-description: Analyze generic/other operations including Communication and Graph ops. Use when orchestrator needs other category analysis.
+description: Analyze uncategorized GPU operations and GPU graph overhead. Use when orchestrator needs other category analysis.
 model: inherit
 ---
 
-# Generic Operations Analysis Subagent
+# Uncategorized Operations Analysis Subagent
 
-Analyze generic/other operations including Communication, Graph, and miscellaneous operations.
+Analyze GPU operations that do not fit into standard categories (GEMM, SDPA, Elementwise, Reduce, BatchNorm, Convolution, MoE, Triton). This analyzer surfaces unexpected bottlenecks by reasoning about what each uncategorized operation does using its name, kernel details, and call-tree context.
+
+**Note:** Communication blocking, memcpy D2H/H2D patterns, and synchronization overhead are handled by the **Multi-Kernel** and **CPU/Idle** system-level analyzers. This analyzer should NOT duplicate those findings.
 
 ---
 
@@ -20,9 +22,9 @@ When invoked by the orchestrator, you will receive the following context:
 - `container`: Docker container with TraceLens installed (e.g., `my_container`)
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/other_ops.csv` - Filtered other operations
+1. `<output_dir>/category_data/other_ops.csv` - Filtered uncategorized operations
 2. `<output_dir>/metadata/other_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/other_tree_data.json` - Pre-computed parent chains
+3. `<output_dir>/category_data/other_tree_data.json` - Pre-computed parent chains and subtrees
 
 **Output file you must write:**
 - `<output_dir>/category_findings/other_findings.md`
@@ -32,7 +34,7 @@ When invoked by the orchestrator, you will receive the following context:
 ## Error Handling
 
 **If category data files are missing:**
-1. Write a findings file noting: "No other/generic operations found in trace"
+1. Write a findings file noting: "No uncategorized operations found in trace"
 2. Return gracefully
 
 **If analysis script fails:**
@@ -46,8 +48,6 @@ When invoked by the orchestrator, you will receive the following context:
 
 Use vendor-agnostic terminology:
 - "GPU kernels" not "CUDA kernels"
-- "collective communication" not "NCCL" or "RCCL"
-- "communication kernel" not vendor-specific names
 - "GPU graph" not "CUDA graph" or "HIP graph"
 - Focus on operation semantics, not vendor implementation details
 
@@ -73,92 +73,137 @@ After the script completes, read the JSON metrics file:
 cat <output_dir>/category_data/other_metrics.json
 ```
 
-Check `metrics['category_specific']` for counts by sub-category.
+Check `metrics['category_specific']` for sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`).
 
-### Step 3: Identify Bottlenecks
+### Step 3: Read Tree Data for Context
+
+Read the tree data to understand where each operation sits in the call hierarchy:
+
+```bash
+cat <output_dir>/category_data/other_tree_data.json
+```
+
+Parent chains reveal the module/layer each op belongs to (e.g., attention, MLP, embedding, loss).
+
+### Step 4: Investigate Each Significant Operation
+
+For each operation consuming significant time or with notable invocation count:
+
+1. **Examine the operation name** -- What does this kernel do? Is the name recognizable (e.g., `embedding_dense_backward`, `index_select`, `scatter_`, `topk`)?
+2. **Check kernel details** -- Look at `trunc_kernel_details` column for the underlying GPU kernel name
+3. **Trace the parent chain** -- Where is this called from? Which model layer or module?
+4. **Assess efficiency** -- Compare achieved bandwidth/TFLOPS to expected peak
+5. **Check for miscategorization** -- Does this operation look like it belongs to another category (GEMM, reduce, elementwise) but wasn't matched by the category filter?
+
+### Step 5: Identify Bottlenecks
 
 **Bottleneck criteria:**
-- Time: > 100ms OR > 5% of category time
-- Efficiency: < 40% of peak
+- Time: significant fraction of category time
+- Efficiency: well below expected peak for the operation type
+- Count: very high invocation count suggesting fusion/batching opportunity
 
-**Sub-category considerations:**
-- Communication: Limited optimization from single-rank trace
-- Graph: Check for graph capture/replay overhead
-- Miscellaneous: Memory operations, synchronization, etc.
+**Key questions to answer for each bottleneck:**
+- What is this operation actually doing?
+- Why isn't it in a standard category?
+- Is there a known optimized implementation (e.g., Flash Attention for unfused attention ops)?
+- Can it be fused with adjacent operations?
 
-### Step 4: Generate Markdown Tables
-
-Build operations table from `metrics['operations']` including sub-category.
-
-### Step 5: Determine Optimization Recommendations
+### Step 6: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
 
-**Communication Operations:**
-- **Limitation:** Single-rank trace only shows one perspective
-- **Algorithmic:** Review collective topology, overlap compute with communication
-- **Kernel:** Limited - collective kernels are well-optimized
+**Algorithmic Recommendations:**
+- If the operation appears to be a known pattern (e.g., embedding lookup, index operations), suggest standard optimizations
+- If it's a custom or unusual operation, suggest whether it could be replaced by a standard library call
+- Look for fusion opportunities with adjacent operations in the tree
 
-**Graph Operations:**
-- **Check:** Graph capture overhead, replay efficiency
-- **Algorithmic:** Ensure graph is properly captured and replayed
-- **Kernel:** Validate graph kernel launch overhead
+**Kernel Optimization Focus:**
+- Generate replay artifact for high-time operations with low efficiency
+- Flag operations where the kernel name suggests a suboptimal implementation
+- Note operations that may benefit from kernel tuning
 
-**Miscellaneous:**
-- **Low priority:** Usually small fraction of compute
-- Focus on higher-impact categories first
-
-### Step 6: Write Category Findings
+### Step 7: Write Category Findings
 
 Create `<output_dir>/category_findings/other_findings.md`. Create it through the container on the node.
 
+```markdown
+# Uncategorized Operations Analysis
+
+## Overview
+X uncategorized operations account for Y% of compute time.
+Sub-categories: Z communication, W graph, V miscellaneous.
+
+## Operations Breakdown
+[Generated table with name, count, time, efficiency, sub-category]
+
+## Key Findings
+
+### 1. <Operation Name>
+- **Time:** X ms (Y% of compute)
+- **Efficiency:** Z%
+- **Called from:** [parent chain context]
+- **What it does:** [LLM inference from name + kernel details + tree context]
+- **Possible miscategorization:** [Yes/No -- if it looks like a GEMM, reduce, etc.]
+- **Algorithmic:** [Recommendation]
+- **Kernel:** [Recommendation]
+- **Priority:** High/Medium/Low
+
+## GPU Graph Operations
+[If graph operations detected, analyze capture/replay overhead]
+
+## Notes
+- Communication overlap and memcpy patterns are covered in the Multi-Kernel system findings
+- Synchronization overhead is covered in the CPU/Idle system findings
+```
+
 ---
 
-## Common Patterns for Generic Operations
-
-### Communication Operations
-- **Symptoms:** Collective operations (all_reduce, all_gather, broadcast)
-- **Limitation:** Single-rank trace perspective
-- **Algorithmic:** Review communication topology, overlap strategies
-- **Kernel:** Communication kernels are typically well-optimized
-- **Note:** May indicate distributed training bottlenecks
+## Common Patterns for Uncategorized Operations
 
 ### GPU Graph Operations
-- **Symptoms:** Graph capture, graph launch kernels
-- **Purpose:** Reduce kernel launch overhead
-- **Check:** Graph capture overhead should be amortized
-- **Algorithmic:** Validate graph is replayed correctly
-- **Kernel:** Check for graph-related inefficiencies
+- **Symptoms:** Graph capture, graph launch kernels in the trace
+- **Purpose:** Reduce kernel launch overhead by capturing and replaying kernel sequences
+- **Check:** Graph capture overhead should be amortized over many replays
+- **Algorithmic:** Validate graph is captured and replayed correctly
+- **Kernel:** Check for graph-related inefficiencies in launch overhead
 
-### Memory Operations
-- **Symptoms:** memcpy, memset, allocation operations
-- **Usually low priority:** Small fraction of compute
-- **Algorithmic:** Reduce unnecessary copies
-- **Kernel:** Limited optimization potential
+### Uncategorized High-Time Operations
+- **Symptoms:** An operation consuming significant time that doesn't fit GEMM/SDPA/Elementwise/Reduce/etc.
+- **Examples:** Custom layers, embedding operations, index operations, scatter/gather, topk
+- **Approach:** Use tree data to understand purpose, then recommend based on what the op actually does
+- **Algorithmic:** Check if a fused or library-optimized version exists
+- **Kernel:** Generate replay artifact if efficiency is low
 
-### Synchronization
-- **Symptoms:** Stream synchronization, device synchronization
-- **Issue:** May indicate serialization points
-- **Algorithmic:** Overlap async operations
-- **Kernel:** Reduce sync frequency
+### Potential Miscategorization
+- **Symptoms:** Operation name or kernel details suggest it belongs to another category
+- **Examples:** A matrix multiply variant not matched by GEMM filter, a normalization op not matched by BatchNorm filter
+- **Action:** Note the miscategorization in findings so the orchestrator category filters can be improved
+- **Impact:** The operation may already have optimizations available in its true category
+
+### Embedding and Index Operations
+- **Symptoms:** `embedding`, `index_select`, `gather`, `scatter_` operations
+- **Expected:** Memory-bound, should approach peak HBM BW
+- **Algorithmic:** Check if fused embedding kernels are available
+- **Kernel:** Optimize memory access patterns if below expected bandwidth
 
 ---
 
 ## Key Principles
 
-1. **Low priority category** - Focus on higher-impact categories first
-2. **Communication limitations** - Single-rank trace has limited visibility
-3. **Graph validation** - Ensure graphs are captured and replayed correctly
-4. **Context matters** - Use tree data to understand operation purpose
+1. **Investigate, don't dismiss** -- Uncategorized ops may hide significant bottlenecks
+2. **Use tree context** -- Parent chains reveal what module/layer the op belongs to
+3. **Check for miscategorization** -- Some ops may belong to standard categories
+4. **Do NOT duplicate system-level findings** -- Communication, memcpy, and sync are covered elsewhere
+5. **Provide BOTH recommendation types** -- Algorithmic and kernel-level
 
 ---
 
 ## Efficiency Thresholds
 
-| Sub-category | Notes |
-|--------------|-------|
-| Communication | Limited optimization from trace |
-| Graph | Check overhead vs benefit |
-| Miscellaneous | Usually low priority |
+| Operation Type | Expected Efficiency | Notes |
+|----------------|---------------------|-------|
+| Memory-bound (embedding, index, scatter) | 50-70% of peak HBM BW | Standard memory-bound expectation |
+| Compute-bound (custom kernels) | 40-60% of peak MAF | Varies widely for custom ops |
+| Graph launch | N/A | Measure overhead vs benefit |
 
-**Note:** This category is typically lower priority than GEMM, SDPA, elementwise, etc. Focus recommendations on higher-impact categories.
+**Note:** Efficiency expectations for uncategorized ops vary widely. Use the operation's FLOPS/Byte ratio to determine if it's compute-bound or memory-bound, then compare to the appropriate peak.
