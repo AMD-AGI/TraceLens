@@ -259,7 +259,7 @@ class TreePerfAnalyzer:
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
         if len(list_kernels) > 0:
-            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
+            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics(compute_overlapping_uids=True)[
                 "busy_time"
             ]
         _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
