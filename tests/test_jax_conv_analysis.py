@@ -213,10 +213,10 @@ def test_conv_event_metrics():
 def test_conv_perf_metrics():
 
     df = perf_analyzer.build_df_perf_metrics(conv_events)
-    assert df.shape == (10, 20)
+    assert df.shape == (10, 23)
 
     df_conv = df[df["perf model"].str.contains("jax_conv")]
     df_metrics = perf_analyzer.summarize_df_perf_metrics(
         df_conv, agg_metrics=["mean", "std"]
     )
-    assert df_metrics.shape == (2, 20)
+    assert df_metrics.shape == (2, 23)

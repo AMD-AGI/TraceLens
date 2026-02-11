@@ -82,8 +82,7 @@ class JaxNcclAnalyser:
                 event_to_category=categorizer,
                 linking_key=linking_key,
             )
-            metadata = TraceEventUtils.get_metadata(trace_events)
-            tree.build_tree(metadata=metadata, pb_file_name=protobuf_filepath)
+            tree.build_tree(pb_file_name=protobuf_filepath)
             nccl_events = [
                 event for event in tree.events if self._nccl_event_filter(event)
             ]

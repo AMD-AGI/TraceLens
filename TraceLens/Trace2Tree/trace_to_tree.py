@@ -88,6 +88,11 @@ class BaseTraceToTree(ABC):
         """
         pass
 
+    def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
+        return self.event_to_category(event) == "python_function" and event.get(
+            TraceLens.util.TraceEventUtils.TraceKeys.Name, ""
+        ).startswith("nn.Module:")
+
     def build_host_call_stack_tree(self, add_python_func=False):
         # 1. Filter and sort events based on their start timestamps.
         #    - Include only CPU, CUDA runtime, and optionally Python function events.
@@ -368,9 +373,7 @@ class JaxTraceToTree(BaseTraceToTree):
                         )
                         event = parent
 
-    def build_tree(
-        self, metadata: Dict, pb_file_name: str, add_python_func=False
-    ) -> None:
+    def build_tree(self, pb_file_name: str, add_python_func=False) -> None:
         """
         Builds a hierarchical tree structure from trace metadata and protobuf file.
 
@@ -387,7 +390,7 @@ class JaxTraceToTree(BaseTraceToTree):
         Returns:
             None
         """
-        self._set_metadata(metadata)
+        self._set_metadata(metadata=TraceEventUtils.get_metadata(self.events))
         self._set_hlo_ops(pb_file_name)
         self._create_linking_key_to_uid_map()
         self._link_cpu_gpu()
@@ -466,8 +469,8 @@ class JaxTraceToTree(BaseTraceToTree):
         for event in self.events:
             pid = event.get("pid")
             tid = event.get("tid")
-            event["process"] = self.metadata[pid][None]
-            event["thread"] = self.metadata[pid][tid]
+            event["process"] = self.metadata.get(pid, {}).get(None, {})
+            event["thread"] = self.metadata.get(pid, {}).get(tid, {})
 
     def _set_hlo_ops(self, pb_file_name: str) -> None:
         """
