@@ -407,6 +407,86 @@ class TraceDiff:
                 gpu_children2, variant_uid2node
             )
 
+        def check_diff_children(ops, uid1, uid2, children1, children2):
+            """
+            Reduce spurious delete/insert pairs by flattening redundant wrapper nodes.
+
+            For every delete-node (baseline) and insert-node (variant) pair, considers three cases
+            (kernels and kernel launchers are skipped):
+
+            1. variant children include a node with the same name as the baseline node
+               -> Remove the variant node and reparent its children to the variant's parent node (uid2).
+
+            2. baseline children include a node with the same name as the variant node
+               -> Remove the baseline node and reparent its children to the baseline's parent node (uid1).
+
+            3. Both nodes have children and the two child lists (by normalized name) are equal
+               -> Remove both nodes and reparent their children to uid2 and uid1 respectively.
+
+            Mutates the baseline and variant trees in place. If any removals were applied,
+            recomputes children and Wagner-Fischer ops for the current node. Returns the
+            (possibly updated) ops list.
+            """
+            delete_indices = [i for op, i, j in ops if op == "delete"]
+            insert_indices = [j for op, i, j in ops if op == "insert"]
+            remove_insert = {}  # uid_i -> list of child uids to splice in (insert node's children)
+            remove_delete = {}  # uid_d -> list of child uids to splice in (delete node's children)
+            skip_cats = ("kernel", "cuda_runtime")
+            for i in delete_indices:
+                for j in insert_indices:
+                    uid_d, uid_i = children1[i], children2[j]
+                    node_d = baseline_uid2node.get(uid_d)
+                    node_i = variant_uid2node.get(uid_i)
+                    cat_d = (node_d.get("cat") or node_d.get("category")) if node_d else None
+                    cat_i = (node_i.get("cat") or node_i.get("category")) if node_i else None
+                    if cat_d in skip_cats or cat_i in skip_cats:
+                        continue
+                    name_d = get_name_uid(uid_d, 1)
+                    name_i = get_name_uid(uid_i, 2)
+                    imm_d = safe_children(baseline_uid2node, uid_d)
+                    imm_i = safe_children(variant_uid2node, uid_i)
+                    names_imm_d = [get_name_uid(c, 1) for c in imm_d]
+                    names_imm_i = [get_name_uid(c, 2) for c in imm_i]
+                    if name_d and any(get_name_uid(c, 2) == name_d for c in imm_i):
+                        remove_insert[uid_i] = imm_i
+                    if name_i and any(get_name_uid(c, 1) == name_i for c in imm_d):
+                        remove_delete[uid_d] = imm_d
+                    if imm_d and imm_i and names_imm_d == names_imm_i:
+                        remove_insert[uid_i] = imm_i
+                        remove_delete[uid_d] = imm_d
+            if remove_insert:
+                parent_node = variant_uid2node.get(uid2)
+                if parent_node is not None:
+                    new_children = []
+                    for c in parent_node.get("children", []):
+                        if c in remove_insert:
+                            new_children.extend(remove_insert[c])
+                        else:
+                            new_children.append(c)
+                    parent_node["children"] = new_children
+                    for uid_i, imm_i in remove_insert.items():
+                        for c in imm_i:
+                            child_node = variant_uid2node.get(c)
+                            child_node["parent"] = uid2
+            if remove_delete:
+                parent_node = baseline_uid2node.get(uid1)
+                if parent_node is not None:
+                    new_children = []
+                    for c in parent_node.get("children", []):
+                        if c in remove_delete:
+                            new_children.extend(remove_delete[c])
+                        else:
+                            new_children.append(c)
+                    parent_node["children"] = new_children
+                    for uid_d, imm_d in remove_delete.items():
+                        for c in imm_d:
+                            child_node = baseline_uid2node.get(c)
+                            child_node["parent"] = uid1
+            if remove_insert or remove_delete:
+                children1, children2 = get_children_with_missing(uid1, uid2)
+                ops = self.wagner_fischer(children1, children2, wf_cache)
+            return ops, children1, children2
+
         def traverse_and_merge(uid1, uid2):
             key = (uid1, uid2)
             if key in uid_pair_to_merged_id:
@@ -451,58 +531,7 @@ class TraceDiff:
 
             children1, children2 = get_children_with_missing(uid1, uid2)
             ops = self.wagner_fischer(children1, children2, wf_cache)
-
-            # # Promote delete+insert pairs to match when two levels of children agree.
-            # delete_indices = [i for op, i, j in ops if op == "delete"]
-            # insert_indices = [j for op, i, j in ops if op == "insert"]
-            # candidates = []
-            # for i in delete_indices:
-            #     for j in insert_indices:
-            #         uid_d, uid_i = children1[i], children2[j]
-            #         imm1 = safe_children(baseline_uid2node, uid_d)
-            #         imm2 = safe_children(variant_uid2node, uid_i)
-            #         names_imm1 = [get_name_uid(u, 1) for u in imm1]
-            #         names_imm2 = [get_name_uid(u, 2) for u in imm2]
-            #         if names_imm1 != names_imm2:
-            #             continue
-            #         same_two_levels = True
-            #         for k in range(len(imm1)):
-            #             grand1 = safe_children(baseline_uid2node, imm1[k])
-            #             grand2 = safe_children(variant_uid2node, imm2[k])
-            #             grand_names1 = [get_name_uid(u, 1) for u in grand1]
-            #             grand_names2 = [get_name_uid(u, 2) for u in grand2]
-            #             if grand_names1 != grand_names2:
-            #                 same_two_levels = False
-            #                 break
-            #         if same_two_levels:
-            #             candidates.append((i, j))
-            # used_i, used_j = set(), set()
-            # promoted = {}  # i -> j for (i, j) promoted to match
-            # for (i, j) in candidates:
-            #     if i not in used_i and j not in used_j:
-            #         promoted[i] = j
-            #         used_i.add(i)
-            #         used_j.add(j)
-            # for (i, j) in promoted.items():
-            #     node1 = baseline_uid2node.get(children1[i])
-            #     node2 = variant_uid2node.get(children2[j])
-            #     if node1 is not None and node2 is not None:
-            #         raw1 = self._get_op_name(children1[i], 1) or ""
-            #         raw2 = self._get_op_name(children2[j], 2) or ""
-            #         common = self._longest_common_substring(raw1, raw2)
-            #         name_to_set = common if common else (raw1 or raw2)
-            #         node1["name"] = name_to_set
-            #         node2["name"] = name_to_set
-            # promoted_j = set(promoted.values())
-            # new_ops = []
-            # for op, i, j in ops:
-            #     if op == "delete" and i in promoted:
-            #         new_ops.append(("match", i, promoted[i]))
-            #     elif op == "insert" and j in promoted_j:
-            #         continue
-            #     else:
-            #         new_ops.append((op, i, j))
-            # ops = new_ops
+            ops, children1, children2 = check_diff_children(ops, uid1, uid2, children1, children2)
 
             child_merged_ids = []
             for op, i, j in ops:
