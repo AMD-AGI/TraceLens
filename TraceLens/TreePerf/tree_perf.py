@@ -2112,6 +2112,12 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         kernel_metadata_keyword_filters: list[str] = None,
     ):
         # super.__init__(*args, **kwargs)
+        if metadata is None:
+            raise ValueError(
+                "metadata must be provided when constructing JaxTreePerfAnalyzer "
+                "directly. Use JaxTreePerfAnalyzer.from_file(...) to load metadata "
+                "from a profile."
+            )
         self.tree = tree
         self.arch = arch
         self.python_path = python_path
@@ -2263,10 +2269,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )

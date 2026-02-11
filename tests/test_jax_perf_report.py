@@ -21,7 +21,6 @@ import glob
 import tempfile
 
 import pytest
-import pandas as pd
 
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
 
@@ -62,6 +61,32 @@ def _short_id(path):
 
 
 # ---------------------------------------------------------------------------
+# Fixture — run the XLSX report once per trace, reuse across tests
+# ---------------------------------------------------------------------------
+
+# Module-level cache so the report is generated only once per trace_path.
+_report_cache = {}
+
+
+@pytest.fixture()
+def jax_report(trace_path):
+    """Run generate_perf_report_jax once per trace_path and cache the results."""
+    if trace_path not in _report_cache:
+        tmpdir = tempfile.mkdtemp()
+        output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
+        dict_name2df = generate_perf_report_jax(
+            profile_path=trace_path,
+            output_xlsx_path=output_xlsx,
+        )
+        _report_cache[trace_path] = {
+            "dict_name2df": dict_name2df,
+            "xlsx_path": output_xlsx,
+            "tmpdir": tmpdir,
+        }
+    return _report_cache[trace_path]
+
+
+# ---------------------------------------------------------------------------
 # Tests (parametrized over all discovered JAX traces)
 # ---------------------------------------------------------------------------
 
@@ -72,16 +97,10 @@ def _short_id(path):
 class TestJaxPerfReportE2E:
     """End-to-end tests: generate_perf_report_jax runs without error."""
 
-    def test_generate_report_xlsx(self, trace_path):
+    def test_generate_report_xlsx(self, trace_path, jax_report):
         """XLSX report is created and contains DataFrames."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
-            dict_name2df = generate_perf_report_jax(
-                profile_path=trace_path,
-                output_xlsx_path=output_xlsx,
-            )
-            assert os.path.exists(output_xlsx), "XLSX file was not created"
-            assert len(dict_name2df) > 0, "No DataFrames returned"
+        assert os.path.exists(jax_report["xlsx_path"]), "XLSX file was not created"
+        assert len(jax_report["dict_name2df"]) > 0, "No DataFrames returned"
 
     def test_generate_report_csvs(self, trace_path):
         """CSV reports are created, one per sheet."""
@@ -93,45 +112,35 @@ class TestJaxPerfReportE2E:
             )
             csv_files = glob.glob(os.path.join(csvs_dir, "*.csv"))
             assert len(csv_files) > 0, "No CSV files created"
-            assert len(csv_files) == len(
-                dict_name2df
-            ), f"CSV count ({len(csv_files)}) != DataFrame count ({len(dict_name2df)})"
+            assert len(csv_files) == len(dict_name2df), (
+                f"CSV count ({len(csv_files)}) "
+                f"!= DataFrame count ({len(dict_name2df)})"
+            )
 
-    def test_expected_core_sheets(self, trace_path):
+    def test_expected_core_sheets(self, trace_path, jax_report):
         """Report contains the expected core sheets and they are non-empty."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
-            dict_name2df = generate_perf_report_jax(
-                profile_path=trace_path,
-                output_xlsx_path=output_xlsx,
-            )
-            expected_sheets = [
-                "gpu_timeline",
-                "gpu_events_averages",
-                "kernel_launchers",
-                "kernel_launchers_summary",
-                "kernel_launchers_summary_by_category",
-            ]
-            for sheet in expected_sheets:
-                assert sheet in dict_name2df, f"Missing expected sheet: '{sheet}'"
-                assert not dict_name2df[sheet].empty, f"Sheet '{sheet}' is empty"
+        dict_name2df = jax_report["dict_name2df"]
+        expected_sheets = [
+            "gpu_timeline",
+            "gpu_events_averages",
+            "kernel_launchers",
+            "kernel_launchers_summary",
+            "kernel_launchers_summary_by_category",
+        ]
+        for sheet in expected_sheets:
+            assert sheet in dict_name2df, f"Missing expected sheet: '{sheet}'"
+            assert not dict_name2df[sheet].empty, f"Sheet '{sheet}' is empty"
 
-    def test_kernel_launchers_structure(self, trace_path):
+    def test_kernel_launchers_structure(self, trace_path, jax_report):
         """kernel_launchers sheet has rows and the expected columns."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
-            dict_name2df = generate_perf_report_jax(
-                profile_path=trace_path,
-                output_xlsx_path=output_xlsx,
-            )
-            df = dict_name2df["kernel_launchers"]
-            assert len(df) > 0, "kernel_launchers has no rows"
+        df = jax_report["dict_name2df"]["kernel_launchers"]
+        assert len(df) > 0, "kernel_launchers has no rows"
 
-            expected_cols = [
-                "name",
-                "op category",
-                "total_direct_kernel_time",
-                "direct_kernel_count",
-            ]
-            for col in expected_cols:
-                assert col in df.columns, f"Missing column: '{col}'"
+        expected_cols = [
+            "name",
+            "op category",
+            "total_direct_kernel_time",
+            "direct_kernel_count",
+        ]
+        for col in expected_cols:
+            assert col in df.columns, f"Missing column: '{col}'"
