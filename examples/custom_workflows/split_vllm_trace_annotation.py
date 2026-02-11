@@ -171,6 +171,7 @@ def extract_iteration(
     for e in filtered_events:
         if "vllm::unified_attention_with_output" in e.get("name", "") or \
             "sgl_kernel::sgl_per_token_group_quant_8bit" in e.get("name", ""):
+            print(e,batch_list)
             dims = e.get("args", {}).get("Input Dims")
             if dims and len(dims) > 0 and len(dims[0]) > 0:
                 batch_list.append(dims[0][0])
@@ -196,8 +197,10 @@ def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration")-
     if not "annotation_iteration" in prefix:
         return {"batch_size": 0}
     iter_details=re.sub(r"[sqk]+","_",name).split("_")
-    if len(iter_details) < 14:
+    if len(iter_details) < 9:
         ctx_req,ctx_sum,gen_req,gen_sum=iter_details[2],iter_details[3],iter_details[6],iter_details[7]
+    elif len(iter_details) <14:
+        ctx_req,ctx_sum,gen_req,gen_sum= iter_details[2],iter_details[3],iter_details[7],iter_details[8]
     else:
         ctx_req,ctx_sum,gen_req,gen_sum=iter_details[3],iter_details[5],iter_details[11],iter_details[13]
     #print(name,iter_details,ctx_req,ctx_sum,gen_req,gen_sum)
@@ -240,7 +243,9 @@ def extract_and_save(
     extraction_summary= []
     selected = roots[start:end]
     indices = range(start, end)
-    
+    if len(selected)==0:
+        print(f"No {prefix} events found in the specified range, skipping extraction")
+        return extraction_summary
     for idx, root in zip(indices, selected):
         iter_details=[get_iter_details_from_name(r["name"],prefix) for r in root]
         iter_trace,batch_list,num_gpu_events,gpu_dur = extract_iteration(root, events, trace_json)
@@ -336,8 +341,10 @@ def extract_phases_and_save(
 
 def find_steady_state_iterations(iteration_roots: List[dict], num_events: int = 5) -> List[dict]:
     n = len(iteration_roots)
+    thresh=0.1
     if n < num_events:
-        return []
+        print(f"Not enough iterations ({n}) to find steady state with {num_events} events")
+        thresh=0.2
     iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
     global_max = max(t["num_requests"] for t in iter_details)
     # Find indices where num_requests is close to global average
@@ -348,7 +355,7 @@ def find_steady_state_iterations(iteration_roots: List[dict], num_events: int = 
     for i,t in enumerate(iter_details):
         #print(t["num_requests"],global_max,abs(t["num_requests"] - global_max))
 
-        if abs(t["num_requests"] - global_max) <= max(1, 0.1 * global_max):
+        if abs(t["num_requests"] - global_max) <= max(1, thresh * global_max):
             if not steady_state_started:
                 prev_events_in_steady+=1
         else:
@@ -369,10 +376,9 @@ def find_steady_state_iterations(iteration_roots: List[dict], num_events: int = 
 
             
     if len(regions)==0:
-        delta=max(0,num_events-n)
+        delta=max(8,num_events-n)
         regions=[(delta//2, n-delta//2)]
         print("warning: no steady state region found, discarding initial and final iterations and selecting middle region")
-        regions=[(n//4, 3*n//4)]
     sub_regions=[]
     for s, e in regions:
         if (e-s)> num_events:
@@ -417,6 +423,7 @@ def main():
         ANNOTATION_PATTERN = re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)")
         ## Use this for default vLLM
         ## ANNOTATION_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)")
+        #ANNOTATION_PATTERN = re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
         RUNTIME_EVENT_PATTERN = re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run")
     elif args.framework == "sglang":
         ANNOTATION_PATTERN = re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)")
