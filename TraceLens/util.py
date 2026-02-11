@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import glob
+from collections import defaultdict
 
 try:
     from enum import StrEnum
@@ -158,6 +159,10 @@ class JaxProfileProcessor:
         custom_call_target = re.search(
             r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*", line
         )
+        replica_groups = re.search(
+            r"replica_groups=(?P<replica_string>(?:\{(?:\{[0-9]+(?:,[0-9]+)*\}(?:,\{[0-9]+(?:,[0-9]+)*\})*)\}|\[[0-9]+(?:,[0-9]+)*\]<=\[[0-9]+(?:,[0-9]+)*\])(?:T\([0-9,]+\)\s+dimensions=\{[0-9,]*\})?)",
+            line,
+        )
         line = line.split(" ")
         key = line[0]
         dict_line["output"] = line[2]
@@ -186,6 +191,9 @@ class JaxProfileProcessor:
                             raise Exception("Input operand type mismatch", line)
                         dict_line["type"] = gemm_type
                         dict_line["computation"] = "gemm"
+        if replica_groups is not None:
+            dict_line["replica_groups"] = replica_groups["replica_string"]
+
         return (key, dict_line)
 
     @staticmethod
@@ -445,43 +453,24 @@ class TraceEventUtils:
             key = x[TraceEventUtils.TraceKeys.Name]
             return (key, x[TraceEventUtils.TraceKeys.Args][arg_labels[key]])
 
-        metadata_fields = itertools.takewhile(
-            lambda x: x[TraceEventUtils.TraceKeys.Phase]
-            == TraceEventUtils.TracePhases.Metadata,
-            events,
-        )
-        by_process = itertools.groupby(
-            metadata_fields, lambda event: event[TraceEventUtils.TraceKeys.PID]
-        )
-        # TID is not required for process-specific tags, so use null thread id for them
-        fully_processed = map(
-            lambda kv: (
-                kv[0],
-                itertools.groupby(
-                    kv[1], lambda event: event.get(TraceEventUtils.TraceKeys.TID)
-                ),
-            ),
-            by_process,
-        )
-        return dict(
-            map(
-                lambda kv: (
-                    kv[0],
-                    dict(
-                        map(
-                            lambda kv1: (
-                                kv1[0],
-                                dict(
-                                    map(lambda event: (get_metadata_val(event)), kv1[1])
-                                ),
-                            ),
-                            kv[1],
-                        )
-                    ),
-                ),
-                fully_processed,
-            )
-        )
+        # Use defaultdict to avoid sorting and groupby complexity
+        result = defaultdict(lambda: defaultdict(dict))
+
+        for event in events:
+            if (
+                event[TraceEventUtils.TraceKeys.Phase]
+                != TraceEventUtils.TracePhases.Metadata
+            ):
+                continue
+
+            pid = event[TraceEventUtils.TraceKeys.PID]
+            tid = event.get(TraceEventUtils.TraceKeys.TID)
+            metadata_key, metadata_value = get_metadata_val(event)
+
+            result[pid][tid][metadata_key] = metadata_value
+
+        # Convert defaultdicts to regular dicts for return
+        return {pid: dict(tid_dict) for pid, tid_dict in result.items()}
 
     @staticmethod
     def non_metadata_events(events: List[dict]) -> List[dict]:

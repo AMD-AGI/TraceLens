@@ -364,6 +364,8 @@ def generate_perf_report_pytorch(
                     bwd_op_names = [
                         "flash_attn::_flash_attn_varlen_backward",
                         "aten::convolution_backward",
+                        "ConvBias_Backward",
+                        "ConvBiasReLU_Backward",
                     ]
                     filtered_df_bwd_ops = df_ops_fwd[
                         df_ops_fwd["name"].isin(bwd_op_names)
@@ -387,6 +389,16 @@ def generate_perf_report_pytorch(
                 )
                 if filtered_df_bwd_ops is not None:
                     df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
+                # Filter out forward operations that were incorrectly included in backward
+                if not df_ops_bwd.empty:
+                    fwd_op_names = [
+                        "aten::convolution",
+                        "aten::miopen_convolution",
+                        "aten::cudnn_convolution",
+                        "ConvBias_",
+                        "ConvBiasReLU_",
+                    ]
+                    df_ops_bwd = df_ops_bwd[~df_ops_bwd["name"].isin(fwd_op_names)]
                 if not df_ops_fwd.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
                 if not df_ops_bwd.empty:

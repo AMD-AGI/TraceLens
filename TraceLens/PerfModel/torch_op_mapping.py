@@ -27,6 +27,10 @@ op_to_perf_model_class_map = {
     "aten::_scaled_dot_product_flash_attention": perf_model.aten__scaled_dot_product_flash_attention,
     "aten::convolution": perf_model.aten_conv,
     "aten::convolution_backward": perf_model.aten_conv_bwd,
+    "ConvBias_": perf_model.ConvBias_,
+    "ConvBiasReLU_": perf_model.ConvBiasReLU_,
+    "ConvBias_Backward": perf_model.ConvBias_Backward,
+    "ConvBiasReLU_Backward": perf_model.ConvBiasReLU_Backward,
     "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
@@ -164,9 +168,15 @@ def categorize_torch_op(row):
         "aten::convolution",
         "aten::miopen_convolution",
         "aten::cudnn_convolution",
+        "ConvBias_",
+        "ConvBiasReLU_",
     ]:
         return "CONV_fwd"
-    elif row["name"] == "aten::convolution_backward":
+    elif row["name"] in [
+        "aten::convolution_backward",
+        "ConvBias_Backward",
+        "ConvBiasReLU_Backward",
+    ]:
         return "CONV_bwd"
     elif row["name"] in norm_ops.keys():
         if row["name"].endswith("_backward"):

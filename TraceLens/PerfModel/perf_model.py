@@ -1208,6 +1208,396 @@ class aten_conv_bwd(CONV):
         return super().bytes_bwd(bpe)
 
 
+class ConvBias_(CONV):
+    """
+    Fused Convolution + Bias operation
+    This is a vendor-specific fused operation (e.g., from MIOpen or cuDNN)
+    """
+
+    # Cache to store forward pass parameters for backward pass lookup
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None, python_path=None):
+        # Call parent init first
+        super().__init__(event, arch, python_path)
+
+        # Cache forward pass parameters for backward pass using sequence number
+        seq_num = event["args"].get("Sequence number")
+        if seq_num is not None:
+            ConvBias_.fwd_pass_cache[seq_num] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        # ConvBias_ signature (based on trace analysis):
+        # 0: input tensor
+        # 1: weight tensor
+        # 2: bias tensor
+        # 3: stride (scalar in concrete inputs)
+        # 4: padding (scalar in concrete inputs)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # Get input and weight shapes
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2  # first two dimensions are batch and channel
+        filter_shape = tuple(input_dims[1])
+
+        # Bias is present (it's a ConvBias operation)
+        bias = True
+
+        # Parse stride and padding from concrete inputs
+        # Concrete inputs appear to be ["", "", "", "stride_val", "padding_val"]
+        stride_arg = concrete_inputs[3] if len(concrete_inputs) > 3 else ""
+        stride = (int(stride_arg),) * ndims if stride_arg != "" else (1,) * ndims
+
+        padding_arg = concrete_inputs[4] if len(concrete_inputs) > 4 else ""
+        padding = (int(padding_arg),) * ndims if padding_arg != "" else (0,) * ndims
+
+        # Default dilation and output_padding
+        dilation = (1,) * ndims
+        output_padding = (0,) * ndims
+        transposed_conv = False
+        groups = 1  # Assume groups=1 unless specified
+
+        dtype_input_weight = tuple(event["args"]["Input type"][:2])
+        # Check no mixed precision
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][0])
+            weight_stride = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
+
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
+
+class ConvBias_Backward(CONV):
+    """
+    Backward pass for fused Convolution + Bias operation
+    Uses cached forward pass parameters via sequence number linkage.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Try to get forward pass parameters using sequence number
+        seq_num = event["args"].get("Sequence number")
+
+        if seq_num is not None and seq_num in ConvBias_.fwd_pass_cache:
+            # Found forward pass! Use its parameters
+            fwd_params = ConvBias_.fwd_pass_cache[seq_num]
+
+            # For backward pass, we need to swap input/output shapes
+            # Forward: input -> output
+            # Backward: grad_output -> grad_input (and compute grad_weight, grad_bias)
+            return {
+                "convNd": fwd_params["convNd"],
+                "input_shape": fwd_params["input_shape"],
+                "filter_shape": fwd_params["filter_shape"],
+                "dtype_input_weight": fwd_params["dtype_input_weight"],
+                "input_stride": fwd_params["input_stride"],
+                "weight_stride": fwd_params["weight_stride"],
+                "bias": fwd_params["bias"],
+                "stride": fwd_params["stride"],
+                "padding": fwd_params["padding"],
+                "dilation": fwd_params["dilation"],
+                "transposed_conv": fwd_params["transposed_conv"],
+                "output_padding": fwd_params["output_padding"],
+                "groups": fwd_params["groups"],
+            }
+        else:
+            # Fallback: forward pass not found in cache
+            # This can happen if events are processed out of order
+            input_dims = event["args"]["Input Dims"]
+
+            if len(input_dims) < 1:
+                warnings.warn(
+                    f"ConvBias_Backward: No forward pass found (seq_num={seq_num}) and "
+                    f"insufficient trace data. FLOPS will be None."
+                )
+            else:
+                warnings.warn(
+                    f"ConvBias_Backward: Forward pass not found in cache for sequence number {seq_num}. "
+                    f"FLOPS calculation requires forward pass parameters. Ensure ConvBias_ forward "
+                    f"operations are processed before their backward counterparts."
+                )
+
+            # Return minimal info that will cause FLOPS to be None
+            return {
+                "convNd": None,
+                "input_shape": None,
+                "filter_shape": None,
+                "dtype_input_weight": tuple(event["args"].get("Input type", [None])[:1])
+                + (None,),
+                "input_stride": None,
+                "weight_stride": None,
+                "bias": True,
+                "stride": None,
+                "padding": None,
+                "dilation": None,
+                "transposed_conv": False,
+                "output_padding": None,
+                "groups": 1,
+            }
+
+    def flops(self):
+        # Use backward FLOPS calculation from CONV base class
+        if self.param_details["input_shape"] is None:
+            return None
+        return super().flops_bwd()
+
+    def bytes(self):
+        # Use backward bytes calculation from CONV base class
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+
+class ConvBiasReLU_(CONV):
+    """
+    Fused Convolution + Bias + ReLU operation
+    This is a vendor-specific fused operation (e.g., from MIOpen or cuDNN)
+    """
+
+    # Cache to store forward pass parameters for backward pass lookup
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None, python_path=None):
+        # Call parent init first
+        super().__init__(event, arch, python_path)
+
+        # Cache forward pass parameters for backward pass using sequence number
+        seq_num = event["args"].get("Sequence number")
+        if seq_num is not None:
+            ConvBiasReLU_.fwd_pass_cache[seq_num] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        # ConvBiasReLU_ has the same signature as ConvBias_
+        # 0: input tensor
+        # 1: weight tensor
+        # 2: bias tensor
+        # 3: stride (scalar in concrete inputs)
+        # 4: padding (scalar in concrete inputs)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # Get input and weight shapes
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2
+        filter_shape = tuple(input_dims[1])
+
+        # Bias is present
+        bias = True
+
+        # Parse stride and padding from concrete inputs
+        stride_arg = concrete_inputs[3] if len(concrete_inputs) > 3 else ""
+        stride = (int(stride_arg),) * ndims if stride_arg != "" else (1,) * ndims
+
+        padding_arg = concrete_inputs[4] if len(concrete_inputs) > 4 else ""
+        padding = (int(padding_arg),) * ndims if padding_arg != "" else (0,) * ndims
+
+        # Default dilation and output_padding
+        dilation = (1,) * ndims
+        output_padding = (0,) * ndims
+        transposed_conv = False
+        groups = 1
+
+        dtype_input_weight = tuple(event["args"]["Input type"][:2])
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][0])
+            weight_stride = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
+
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
+
+class ConvBiasReLU_Backward(CONV):
+    """
+    Backward pass for fused Convolution + Bias + ReLU operation
+    Uses cached forward pass parameters via sequence number linkage.
+    ReLU backward: gradient is masked where forward output was negative.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Try to get forward pass parameters using sequence number
+        seq_num = event["args"].get("Sequence number")
+
+        if seq_num is not None and seq_num in ConvBiasReLU_.fwd_pass_cache:
+            # Found forward pass! Use its parameters
+            fwd_params = ConvBiasReLU_.fwd_pass_cache[seq_num]
+
+            return {
+                "convNd": fwd_params["convNd"],
+                "input_shape": fwd_params["input_shape"],
+                "filter_shape": fwd_params["filter_shape"],
+                "dtype_input_weight": fwd_params["dtype_input_weight"],
+                "input_stride": fwd_params["input_stride"],
+                "weight_stride": fwd_params["weight_stride"],
+                "bias": fwd_params["bias"],
+                "stride": fwd_params["stride"],
+                "padding": fwd_params["padding"],
+                "dilation": fwd_params["dilation"],
+                "transposed_conv": fwd_params["transposed_conv"],
+                "output_padding": fwd_params["output_padding"],
+                "groups": fwd_params["groups"],
+            }
+        else:
+            # Fallback: forward pass not found in cache
+            input_dims = event["args"]["Input Dims"]
+
+            if len(input_dims) < 1:
+                warnings.warn(
+                    f"ConvBiasReLU_Backward: No forward pass found (seq_num={seq_num}) and "
+                    f"insufficient trace data. FLOPS will be None."
+                )
+            else:
+                warnings.warn(
+                    f"ConvBiasReLU_Backward: Forward pass not found in cache for sequence number {seq_num}. "
+                    f"FLOPS calculation requires forward pass parameters. Ensure ConvBiasReLU_ forward "
+                    f"operations are processed before their backward counterparts."
+                )
+
+            return {
+                "convNd": None,
+                "input_shape": None,
+                "filter_shape": None,
+                "dtype_input_weight": tuple(event["args"].get("Input type", [None])[:1])
+                + (None,),
+                "input_stride": None,
+                "weight_stride": None,
+                "bias": True,
+                "stride": None,
+                "padding": None,
+                "dilation": None,
+                "transposed_conv": False,
+                "output_padding": None,
+                "groups": 1,
+            }
+
+    def flops(self):
+        # Use backward FLOPS calculation from CONV base class
+        # ReLU backward is essentially element-wise masking (negligible FLOPS compared to conv)
+        if self.param_details["input_shape"] is None:
+            return None
+        return super().flops_bwd()
+
+    def bytes(self):
+        # Use backward bytes calculation from CONV base class
+        # ReLU backward requires reading the forward output mask
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+
 # 3. Softmax
 class Softmax:
     """
