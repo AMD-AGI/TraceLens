@@ -172,5 +172,5 @@ After an analysis run, if you identify a missed issue, ask Cursor to study why a
 ## Future Plans
 TraceLens Agentic Mode is currently an **experimental** feature. Efforts will be focused on converting this structural PoC to a reliable tool through rounds of design reviews and robust evaluation workflows.
 - Individual analyzers require detailed review (Performance thresholds) and restructuring (Codify performance recommendations if required).
-- - Validation at a sub-agent level and integration tests are crucial to asses performance.
+- Validation at a sub-agent level and integration tests are crucial to asses performance.
 - The workflow is observed to typically handle the categorized kernels, though the `generic-op-analyzer` is found to be capable for general recommendations. Additionally, complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`.
