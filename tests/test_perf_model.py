@@ -6,11 +6,11 @@
 
 import argparse
 import os
-import pytest
+
 import torch
 import torch.nn
 
-# This file contains classes needed ot generate traces for the perf model
+# This file contains classes needed to generate traces for the perf model
 # starting with normalization layers.
 # the standard test_compare_perf_report can use the traces created by this script
 # so no additional tests are needed here
@@ -52,7 +52,7 @@ def create_normalization_layer_trace(outfile: str):
                 x = self.ln2(x)
             with torch.profiler.record_function("GroupNorm affine=False"):
                 x = self.gn2(x)
-            with torch.profiler.record_function("InstanceNormNorm affine=False"):
+            with torch.profiler.record_function("InstanceNorm affine=False"):
                 x = self.inn2(x)
             with torch.profiler.record_function("RMSNorm affine=False"):
                 x = self.rmsn2(x)
@@ -92,7 +92,7 @@ def main():
     parser.add_argument(
         "--normalization-trace-file",
         type=str,
-        help="Output file for the normalzation model trace",
+        help="Output file for the normalization model trace",
     )
     if len(os.sys.argv) == 1:
         parser.print_help()
