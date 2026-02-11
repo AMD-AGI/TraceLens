@@ -752,8 +752,6 @@ class TreePerfAnalyzer:
                     metrics_event["parent_module"] = re.sub(
                         r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
                     ).strip("")
-<<<<<<< HEAD
-=======
             thread_metadata = self.tree.metadata.get(event["pid"], {}).get(
                 event["tid"], {}
             )
@@ -765,7 +763,6 @@ class TreePerfAnalyzer:
                 "process_labels", "Unknown"
             )
             metrics_event["thread_name"] = thread_metadata.get("thread_name", "Unknown")
->>>>>>> f553da4b3ec5808bd4c2943c833debe3ca89701b
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
