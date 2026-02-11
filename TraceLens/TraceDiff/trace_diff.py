@@ -11,6 +11,9 @@ import pandas as pd
 import json
 import os
 import re
+import json
+import os
+import re
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -1265,34 +1268,6 @@ class TraceDiff:
             Dict with keys "trace1" and "trace2", each mapping cpu_op_name -> list of kernel names.
         """
 
-
-
-        def cleanKernelNames(kernel_name: str) -> str:
-            # Clean kernel names to remove text between (), <>, []
-            kernel_name = re.sub(r"\(.*?\)", "", kernel_name)
-            kernel_name = re.sub(r"<.*?>", "", kernel_name)
-            kernel_name = re.sub(r"\[.*?\]", "", kernel_name)
-
-            # GEMM kernel. Keeps
-            if kernel_name.startswith("Cijk"):
-                kernel_name = kernel_name.split("_UserArgs")[0]
-
-            # If kernel name contains 'Cijk', truncate everything after 'SAV_'
-            if kernel_name.startswith("_gemm_"):
-                kernel_name = kernel_name.split("_BLOCK")[0]
-
-            if kernel_name.startswith("_matmul_"):
-                kernel_name = kernel_name.split("_matmul")[0] + "_matmul"
-            if kernel_name.startswith("nvjet"):
-                kernel_name = "nvjet"
-
-            # Remove more clutter
-            kernel_name = kernel_name.replace("void ", "").replace("void", "")
-            kernel_name = kernel_name.replace("__amd_rocclr_", "")
-            kernel_name = kernel_name.replace("rocprim::detail::", "")
-            kernel_name = " ".join(kernel_name.split())
-            return kernel_name
-
         if (
             self.diff_stats_unique_args_summary_df is None
             or self.diff_stats_unique_args_summary_df.empty
@@ -1459,28 +1434,16 @@ class TraceDiff:
         df_agg = self.diff_stats_unique_args_summary_df
         df = self.diff_stats_df
 
-
-
-        def _agg_cleaned_kernels(series):
-            """Apply cleanKernelNames to each kernel name in the Series."""
-            return sorted(
-                set(
-                    cleanKernelNames(str(k))
-                    for k in series.dropna()
-                    if k and str(k).strip()
-                )
-            )
-
         cpu_op_map_trace1 = (
             df_agg[df_agg["source"] == "trace1"]
             .groupby(["cpu_op_name"])
-            .agg({"name": _agg_cleaned_kernels})
+            .agg({"name": lambda x: sorted(set(x))})
             .sort_index()
         )
         cpu_op_map_trace2 = (
             df_agg[df_agg["source"] == "trace2"]
             .groupby(["cpu_op_name"])
-            .agg({"name": _agg_cleaned_kernels})
+            .agg({"name": lambda x: sorted(set(x))})
             .sort_index()
         )
         cpu_op_map = get_cpu_op_map(df_agg, df)
