@@ -106,9 +106,11 @@ class GPUEventAnalyser:
 
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
-                if 'overlapping_uids' not in event:
+                if "overlapping_uids" not in event:
                     compute_overlapping_uids = True
-                    points.append((event["ts"], 0, event["UID"])) # 0 for start, 1 for end
+                    points.append(
+                        (event["ts"], 0, event["UID"])
+                    )  # 0 for start, 1 for end
                     points.append((event["t_end"], 1, event["UID"]))
                     event["overlapping_uids"] = set()
                 gpu_events.append(event)
@@ -125,7 +127,9 @@ class GPUEventAnalyser:
         if compute_overlapping_uids:
             points.sort(key=lambda x: (x[0], x[1]))
             active_uids = set()  # Store UIDs instead of events
-            event_map = {event["UID"]: event for event in gpu_events}  # Map UIDs to events
+            event_map = {
+                event["UID"]: event for event in gpu_events
+            }  # Map UIDs to events
 
             for _, point_type, uid in points:
                 if point_type == 0:
@@ -272,7 +276,9 @@ class GPUEventAnalyser:
                 "total_memcpy_time": total_memcpy_time,
             }
 
-    def compute_metrics(self, micro_idle_thresh_us=None, compute_overlapping_uids=False):
+    def compute_metrics(
+        self, micro_idle_thresh_us=None, compute_overlapping_uids=False
+    ):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -283,7 +289,9 @@ class GPUEventAnalyser:
         """
 
         # Categorize events.
-        dict_gpu_event_lists = self.get_gpu_event_lists(compute_overlapping_uids=compute_overlapping_uids)
+        dict_gpu_event_lists = self.get_gpu_event_lists(
+            compute_overlapping_uids=compute_overlapping_uids
+        )
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         return GPUEventAnalyser.compute_metrics_dict(
