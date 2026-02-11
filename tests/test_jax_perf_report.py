@@ -25,7 +25,6 @@ import pandas as pd
 
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
 
-
 # ---------------------------------------------------------------------------
 # Test-trace discovery
 # ---------------------------------------------------------------------------
