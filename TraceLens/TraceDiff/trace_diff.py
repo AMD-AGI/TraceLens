@@ -101,6 +101,24 @@ class TraceDiff:
         normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
         return normalized
 
+    @staticmethod
+    def _longest_common_substring(s1: str, s2: str) -> str:
+        """Return a longest contiguous common substring of s1 and s2, or '' if either is None/empty."""
+        if not s1 or not s2:
+            return ""
+        m, n = len(s1), len(s2)
+        max_len = 0
+        end_idx = 0
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if s1[i - 1] == s2[j - 1]:
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                    if dp[i][j] > max_len:
+                        max_len = dp[i][j]
+                        end_idx = i
+        return s1[end_idx - max_len : end_idx] if max_len > 0 else ""
+
     def _get_op_name(self, uid, tree_num):
         """
         Unified method to get operation name from UID.
@@ -421,6 +439,58 @@ class TraceDiff:
 
             children1, children2 = get_children_with_missing(uid1, uid2)
             ops = self.wagner_fischer(children1, children2, wf_cache)
+
+            # Promote delete+insert pairs to match when two levels of children agree.
+            delete_indices = [i for op, i, j in ops if op == "delete"]
+            insert_indices = [j for op, i, j in ops if op == "insert"]
+            candidates = []
+            for i in delete_indices:
+                for j in insert_indices:
+                    uid_d, uid_i = children1[i], children2[j]
+                    imm1 = safe_children(baseline_uid2node, uid_d)
+                    imm2 = safe_children(variant_uid2node, uid_i)
+                    names_imm1 = [get_name_uid(u, 1) for u in imm1]
+                    names_imm2 = [get_name_uid(u, 2) for u in imm2]
+                    if names_imm1 != names_imm2:
+                        continue
+                    same_two_levels = True
+                    for k in range(len(imm1)):
+                        grand1 = safe_children(baseline_uid2node, imm1[k])
+                        grand2 = safe_children(variant_uid2node, imm2[k])
+                        grand_names1 = [get_name_uid(u, 1) for u in grand1]
+                        grand_names2 = [get_name_uid(u, 2) for u in grand2]
+                        if grand_names1 != grand_names2:
+                            same_two_levels = False
+                            break
+                    if same_two_levels:
+                        candidates.append((i, j))
+            used_i, used_j = set(), set()
+            promoted = {}  # i -> j for (i, j) promoted to match
+            for (i, j) in candidates:
+                if i not in used_i and j not in used_j:
+                    promoted[i] = j
+                    used_i.add(i)
+                    used_j.add(j)
+            for (i, j) in promoted.items():
+                node1 = baseline_uid2node.get(children1[i])
+                node2 = variant_uid2node.get(children2[j])
+                if node1 is not None and node2 is not None:
+                    raw1 = self._get_op_name(children1[i], 1) or ""
+                    raw2 = self._get_op_name(children2[j], 2) or ""
+                    common = self._longest_common_substring(raw1, raw2)
+                    name_to_set = common if common else (raw1 or raw2)
+                    node1["name"] = name_to_set
+                    node2["name"] = name_to_set
+            promoted_j = set(promoted.values())
+            new_ops = []
+            for op, i, j in ops:
+                if op == "delete" and i in promoted:
+                    new_ops.append(("match", i, promoted[i]))
+                elif op == "insert" and j in promoted_j:
+                    continue
+                else:
+                    new_ops.append((op, i, j))
+            ops = new_ops
 
             child_merged_ids = []
             for op, i, j in ops:
