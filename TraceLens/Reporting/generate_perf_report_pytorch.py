@@ -319,6 +319,22 @@ def generate_perf_report_pytorch(
             source_col="kernel_details_summary",
             new_col_name="trunc_kernel_details",
         )
+        df_kernel_launchers_unique_args_overlapping_kernels = (
+            perf_analyzer.get_df_kernel_launchers_unique_args(
+                df_kernel_launchers,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                include_overlapping_kernels=True,
+            )
+        )
+        if not df_kernel_launchers_unique_args_overlapping_kernels.empty:
+            df_kernel_launchers_unique_args_overlapping_kernels = (
+                add_truncated_kernel_details(
+                    df_kernel_launchers_unique_args_overlapping_kernels,
+                    source_col="kernel_details_summary",
+                    new_col_name="trunc_kernel_details",
+                )
+            )
         # Dictionary to hold the op-specific DataFrames
         perf_metrics_dfs = {}
 
@@ -332,10 +348,10 @@ def generate_perf_report_pytorch(
 
             if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
                 # For GEMM: create a single table that covers both fwd and bwd.
-                df_ops = perf_analyzer.build_df_perf_metrics(
+                df_ops_raw = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
-                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops_raw, agg_metrics)
                 df_ops = add_truncated_kernel_details(
                     df_ops,
                     source_col="kernel_details__summarize_kernel_stats",
@@ -343,13 +359,23 @@ def generate_perf_report_pytorch(
                 )
                 if not df_ops.empty:
                     perf_metrics_dfs[op_cat] = df_ops
+                df_ops_overlapping_kernels = perf_analyzer.summarize_df_perf_metrics(
+                    df_ops_raw, agg_metrics, include_overlapping_kernels=True
+                )
+                if not df_ops_overlapping_kernels.empty:
+                    df_ops_overlapping_kernels = add_truncated_kernel_details(
+                        df_ops_overlapping_kernels,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                    perf_metrics_dfs[f"{op_cat}_overlapping_kernels"] = df_ops_overlapping_kernels
             else:
                 # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
-                df_ops_fwd = perf_analyzer.build_df_perf_metrics(
+                df_ops_fwd_raw = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_fwd, agg_metrics
+                    df_ops_fwd_raw, agg_metrics
                 )
                 df_ops_fwd = add_truncated_kernel_details(
                     df_ops_fwd,
@@ -376,11 +402,11 @@ def generate_perf_report_pytorch(
                     ]
                 
                 op_events=[event for event in op_events if event["name"]!="vllm::unified_attention_with_output"]
-                df_ops_bwd = perf_analyzer.build_df_perf_metrics(
+                df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
                 df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd, agg_metrics
+                    df_ops_bwd_raw, agg_metrics
                 )
                 df_ops_bwd = add_truncated_kernel_details(
                     df_ops_bwd,
@@ -401,8 +427,38 @@ def generate_perf_report_pytorch(
                     df_ops_bwd = df_ops_bwd[~df_ops_bwd["name"].isin(fwd_op_names)]
                 if not df_ops_fwd.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
+                    df_ops_fwd_overlapping_kernels = (
+                        perf_analyzer.summarize_df_perf_metrics(
+                            df_ops_fwd_raw,
+                            agg_metrics,
+                            include_overlapping_kernels=True,
+                        )
+                    )
+                    df_ops_fwd_overlapping_kernels = add_truncated_kernel_details(
+                        df_ops_fwd_overlapping_kernels,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                    perf_metrics_dfs[
+                        f"{op_cat}_fwd_overlapping_kernels"
+                    ] = df_ops_fwd_overlapping_kernels
                 if not df_ops_bwd.empty:
                     perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+                    df_ops_bwd_overlapping_kernels = (
+                        perf_analyzer.summarize_df_perf_metrics(
+                            df_ops_bwd_raw,
+                            agg_metrics,
+                            include_overlapping_kernels=True,
+                        )
+                    )
+                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                        df_ops_bwd_overlapping_kernels,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                    perf_metrics_dfs[
+                        f"{op_cat}_bwd_overlapping_kernels"
+                    ] = df_ops_bwd_overlapping_kernels
 
     # Short kernel study (works for both GPU-only and regular traces)
     if short_kernel_study:
@@ -426,6 +482,10 @@ def generate_perf_report_pytorch(
             dict_name2df["ops_summary"] = df_kernel_launchers_summary
         if not df_kernel_launchers_unique_args.empty:
             dict_name2df["ops_unique_args"] = df_kernel_launchers_unique_args
+        if not df_kernel_launchers_unique_args_overlapping_kernels.empty:
+            dict_name2df["ops_unique_args_overlapping_kernels"] = (
+                df_kernel_launchers_unique_args_overlapping_kernels
+            )
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
@@ -440,6 +500,23 @@ def generate_perf_report_pytorch(
                     new_col_name="trunc_kernel_details",
                 )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+            df_unified_perf_summary_overlapping_kernels = (
+                perf_analyzer.summarize_df_unified_perf_table(
+                    df_unified_perf,
+                    agg_metrics=agg_metrics,
+                    include_pct=True,
+                    include_overlapping_kernels=True,
+                )
+            )
+            if not df_unified_perf_summary_overlapping_kernels.empty:
+                df_unified_perf_summary_overlapping_kernels = add_truncated_kernel_details(
+                    df_unified_perf_summary_overlapping_kernels,
+                    source_col="kernel_details_summary",
+                    new_col_name="trunc_kernel_details",
+                )
+                dict_name2df["unified_perf_summary_overlapping_kernels"] = (
+                    df_unified_perf_summary_overlapping_kernels
+                )
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)

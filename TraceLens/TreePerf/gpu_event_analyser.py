@@ -277,7 +277,7 @@ class GPUEventAnalyser:
             }
 
     def compute_metrics(
-        self, micro_idle_thresh_us=None, compute_overlapping_uids=False
+        self, micro_idle_thresh_us=None
     ):
         """
         Compute various metrics from the GPU event data.
@@ -289,9 +289,7 @@ class GPUEventAnalyser:
         """
 
         # Categorize events.
-        dict_gpu_event_lists = self.get_gpu_event_lists(
-            compute_overlapping_uids=compute_overlapping_uids
-        )
+        dict_gpu_event_lists = self.get_gpu_event_lists()
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         return GPUEventAnalyser.compute_metrics_dict(
