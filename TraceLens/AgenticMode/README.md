@@ -1,8 +1,8 @@
-# TraceLens Agentic Mode
+# Jarvis: TraceLens Agentic Mode
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. This is an experimental release to prototype a modular and extendible agentic trace analysis system. LLMs primally have been employed to define a structured workflow and interpret analysis results. The aim of this PoC is primarily to gain insights into developing a reliable system.
+Jarvis is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. This is an experimental release to prototype a modular and extendible agentic trace analysis system. LLMs primally have been employed to define a structured workflow and interpret analysis results. The aim of this PoC is primarily to gain insights into developing a reliable system.
 
 ---
 
