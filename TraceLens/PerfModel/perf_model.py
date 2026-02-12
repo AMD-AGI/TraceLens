@@ -3631,15 +3631,14 @@ class Normalization:
         # assumes grad_out is bpe_out, everything else is bpe_in
         # read grad_out and the input once, invstd if it is saved
 
-        # read grad_out and input, write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] else 1)
+        # read grad_out and input (if mask is true and is_training), write grad_in
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] and is_training else 1)
         if is_training:
             bytes += num_channels * bpe_in  # invstd
-        # write grad_in
-        bytes += num_elems * bpe_in
         # read weight if affine
         if is_affine:
-            bytes += num_channels * bpe_in * (2 if has_bias else 1)
+            # bias is never read
+            bytes += num_channels * bpe_in
             # write grad_weight and grad_bias if affine and training
             if is_training:
                 bytes += num_channels * bpe_in * (2 if has_bias else 1)
