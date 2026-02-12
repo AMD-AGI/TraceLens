@@ -951,7 +951,9 @@ class TreePerfAnalyzer:
                 if isinstance(item, list) and item
             )
         except StopIteration:
-            return None  # The series was empty or contained no valid lists.
+            return (
+                []
+            )  # The series was empty or contained no valid lists (match ref reports).
 
         # --- CHANGE: Collect durations BY INDEX, not by name ---
         all_durations = [[] for _ in template]
