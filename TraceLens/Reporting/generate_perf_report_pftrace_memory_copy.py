@@ -166,7 +166,9 @@ def generate_perf_report_pftrace_memory_copy(
         try:
             import openpyxl  # noqa: F401
         except (ImportError, ModuleNotFoundError) as e:
-            logger.error("openpyxl required for Excel output: %s. pip install openpyxl", e)
+            logger.error(
+                "openpyxl required for Excel output: %s. pip install openpyxl", e
+            )
             raise
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dfs.items():

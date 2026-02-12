@@ -93,7 +93,9 @@ def generate_perf_report_pftrace_hip_api(
     logger.info("Generating API ↔ Kernel summary...")
     dict_name2df = {}
     dict_name2df["api_kernel_summary"] = analyzer.get_df_api_kernel_summary()
-    logger.info(f"  - api_kernel_summary ({len(dict_name2df['api_kernel_summary'])} rows)")
+    logger.info(
+        f"  - api_kernel_summary ({len(dict_name2df['api_kernel_summary'])} rows)"
+    )
 
     # Write output
     if output_csvs_dir:

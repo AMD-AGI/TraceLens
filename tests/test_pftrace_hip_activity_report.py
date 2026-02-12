@@ -79,7 +79,7 @@ class TestPftraceHipActivityAnalysis:
     def test_build_event_lists(self):
         events = _minimal_trace_events_with_agent()
         compute, rccl, xla_agg, used_fav3, agents = build_event_lists(
-            events, merge_kernels=False, min_tid=-10**9, max_tid=10**9
+            events, merge_kernels=False, min_tid=-(10**9), max_tid=10**9
         )
         assert len(agents) == 1
         assert len(compute[0]) == 1
@@ -88,7 +88,7 @@ class TestPftraceHipActivityAnalysis:
 
     def test_build_hip_api_events(self):
         events = _minimal_trace_events_with_agent()
-        hip = build_hip_api_events(events, min_tid=-10**9, max_tid=10**9)
+        hip = build_hip_api_events(events, min_tid=-(10**9), max_tid=10**9)
         assert len(hip) == 1
         assert hip[0].name == "hipLaunchKernelGGL"
 

@@ -107,7 +107,9 @@ def extract_time_ns(e: Dict[str, Any]) -> Tuple[int, int]:
     return ts_ns, dur_ns
 
 
-def discover_gpus(trace_events: List[Dict[str, Any]]) -> Tuple[Dict[str, int], List[str]]:
+def discover_gpus(
+    trace_events: List[Dict[str, Any]],
+) -> Tuple[Dict[str, int], List[str]]:
     """Map 'agent' strings to 0..N-1 GPU indices in first-seen order."""
     agent_to_idx: Dict[str, int] = {}
     agents: List[str] = []
@@ -366,9 +368,15 @@ def build_summary_dataframe(
     rows = []
     for g, st in enumerate(gpu_stats):
         compute_ns = (
-            st.xla[0] + st.aiter_fwd[0] + st.aiter_bwd[0]
-            + st.gemm[0] + st.ck_bwd[0] + st.ck_fwd[0]
-            + st.te[0] + st.memcpy[0] + st.fillBuffer[0]
+            st.xla[0]
+            + st.aiter_fwd[0]
+            + st.aiter_bwd[0]
+            + st.gemm[0]
+            + st.ck_bwd[0]
+            + st.ck_fwd[0]
+            + st.te[0]
+            + st.memcpy[0]
+            + st.fillBuffer[0]
         )
         total_ns = compute_ns + st.rccl[0]
         per_cat = {
@@ -388,32 +396,42 @@ def build_summary_dataframe(
             "total_incl_comm": (total_ns, 0),
         }
         for cat, (ns_sum, cnt) in per_cat.items():
-            rows.append({
-                "GPU ID": g,
-                "Category": cat,
-                "Total runtime (ms)": ns_to_ms(ns_sum),
-                "Total count": cnt,
-                label_compute_fraction: (ns_sum / compute_ns) if compute_ns > 0 else 0.0,
-                label_total_fraction: (ns_sum / total_ns) if total_ns > 0 else 0.0,
-            })
+            rows.append(
+                {
+                    "GPU ID": g,
+                    "Category": cat,
+                    "Total runtime (ms)": ns_to_ms(ns_sum),
+                    "Total count": cnt,
+                    label_compute_fraction: (
+                        (ns_sum / compute_ns) if compute_ns > 0 else 0.0
+                    ),
+                    label_total_fraction: (ns_sum / total_ns) if total_ns > 0 else 0.0,
+                }
+            )
     df = pd.DataFrame(rows)
     if not df.empty:
         avg_rows = []
         for cat, grp in df.groupby("Category"):
-            avg_rows.append({
-                "GPU ID": "Avg",
-                "Category": cat,
-                "Total runtime (ms)": grp["Total runtime (ms)"].mean(),
-                "Total count": grp["Total count"].mean(),
-                label_compute_fraction: grp[label_compute_fraction].mean(),
-                label_total_fraction: grp[label_total_fraction].mean(),
-            })
+            avg_rows.append(
+                {
+                    "GPU ID": "Avg",
+                    "Category": cat,
+                    "Total runtime (ms)": grp["Total runtime (ms)"].mean(),
+                    "Total count": grp["Total count"].mean(),
+                    label_compute_fraction: grp[label_compute_fraction].mean(),
+                    label_total_fraction: grp[label_total_fraction].mean(),
+                }
+            )
         df = pd.concat([df, pd.DataFrame(avg_rows)], ignore_index=True)
     return df
 
 
 def _nz(x: Optional[int]) -> int:
-    return int(x) if isinstance(x, (int, np.integer)) and x is not None else (x if x else 0)
+    return (
+        int(x)
+        if isinstance(x, (int, np.integer)) and x is not None
+        else (x if x else 0)
+    )
 
 
 def build_kernel_summary_df_for_config(
@@ -427,16 +445,24 @@ def build_kernel_summary_df_for_config(
         name = re.sub(r"\d+", "", e.name) if merge_names else e.name
         key = (
             name,
-            _nz(e.grid_size), _nz(e.workgroup_size),
-            _nz(e.vgpr_count), _nz(e.accum_vgpr_count),
-            _nz(e.sgpr_count), _nz(e.lds_block_size), _nz(e.scratch_size),
+            _nz(e.grid_size),
+            _nz(e.workgroup_size),
+            _nz(e.vgpr_count),
+            _nz(e.accum_vgpr_count),
+            _nz(e.sgpr_count),
+            _nz(e.lds_block_size),
+            _nz(e.scratch_size),
         )
         buckets[key].append(e.dur_ns)
         if key not in meta_rows:
             meta_rows[key] = {
                 "Name": name,
-                "GridX": _nz(e.grid_size), "GridY": 1, "GridZ": 1,
-                "BlockX": _nz(e.workgroup_size), "BlockY": 1, "BlockZ": 1,
+                "GridX": _nz(e.grid_size),
+                "GridY": 1,
+                "GridZ": 1,
+                "BlockX": _nz(e.workgroup_size),
+                "BlockY": 1,
+                "BlockZ": 1,
                 "VGPR": _nz(e.vgpr_count),
                 "AccumVGPR": _nz(e.accum_vgpr_count),
                 "SGPR": _nz(e.sgpr_count),
@@ -455,17 +481,19 @@ def build_kernel_summary_df_for_config(
         std_ns = float(arr.std(ddof=0)) if count else 0.0
         frac = (total_ns / baseline_total_ns) if baseline_total_ns > 0 else 0.0
         meta = meta_rows[key]
-        rows.append({
-            "Time %": frac * 100.0,
-            "Total Time (ns)": total_ns,
-            "Instances": count,
-            "Avg (ns)": avg_ns,
-            "Med (ns)": med_ns,
-            "Min (ns)": min_ns,
-            "Max (ns)": max_ns,
-            "StdDev (ns)": std_ns,
-            **meta,
-        })
+        rows.append(
+            {
+                "Time %": frac * 100.0,
+                "Total Time (ns)": total_ns,
+                "Instances": count,
+                "Avg (ns)": avg_ns,
+                "Med (ns)": med_ns,
+                "Min (ns)": min_ns,
+                "Max (ns)": max_ns,
+                "StdDev (ns)": std_ns,
+                **meta,
+            }
+        )
     df = pd.DataFrame(rows)
     if df.empty:
         return df
@@ -475,13 +503,42 @@ def build_kernel_summary_df_for_config(
     for col in ["Avg (ns)", "Med (ns)", "Min (ns)", "Max (ns)", "StdDev (ns)"]:
         pretty = col.replace("(ns)", "").strip()
         df[pretty] = df[col].map(human_time_ns)
-    df["GridXYZ"] = df.apply(lambda r: f"{r['GridX']:>7d} {r['GridY']:>4d} {r['GridZ']:>4d}", axis=1)
-    df["BlockXYZ"] = df.apply(lambda r: f"{r['BlockX']:>7d} {r['BlockY']:>4d} {r['BlockZ']:>4d}", axis=1)
+    df["GridXYZ"] = df.apply(
+        lambda r: f"{r['GridX']:>7d} {r['GridY']:>4d} {r['GridZ']:>4d}", axis=1
+    )
+    df["BlockXYZ"] = df.apply(
+        lambda r: f"{r['BlockX']:>7d} {r['BlockY']:>4d} {r['BlockZ']:>4d}", axis=1
+    )
     col_order = [
-        "Time", "Total Time", "Instances", "Avg", "Med", "Min", "Max", "StdDev",
-        "GridXYZ", "BlockXYZ", "VGPR", "AccumVGPR", "SGPR", "LDS", "Scratch", "Name",
-        "Time %", "Total Time (ns)", "Avg (ns)", "Med (ns)", "Min (ns)", "Max (ns)", "StdDev (ns)",
-        "GridX", "GridY", "GridZ", "BlockX", "BlockY", "BlockZ",
+        "Time",
+        "Total Time",
+        "Instances",
+        "Avg",
+        "Med",
+        "Min",
+        "Max",
+        "StdDev",
+        "GridXYZ",
+        "BlockXYZ",
+        "VGPR",
+        "AccumVGPR",
+        "SGPR",
+        "LDS",
+        "Scratch",
+        "Name",
+        "Time %",
+        "Total Time (ns)",
+        "Avg (ns)",
+        "Med (ns)",
+        "Min (ns)",
+        "Max (ns)",
+        "StdDev (ns)",
+        "GridX",
+        "GridY",
+        "GridZ",
+        "BlockX",
+        "BlockY",
+        "BlockZ",
     ]
     return df[[c for c in col_order if c in df.columns]]
 
@@ -506,17 +563,19 @@ def build_kernel_summary_df_for_name(
         max_ns = int(arr.max()) if count else 0
         std_ns = float(arr.std(ddof=0)) if count else 0.0
         frac = (total_ns / baseline_total_ns) if baseline_total_ns > 0 else 0.0
-        rows.append({
-            "Time %": frac * 100.0,
-            "Total Time (ns)": total_ns,
-            "Instances": count,
-            "Avg (ns)": avg_ns,
-            "Med (ns)": med_ns,
-            "Min (ns)": min_ns,
-            "Max (ns)": max_ns,
-            "StdDev (ns)": std_ns,
-            "Name": name,
-        })
+        rows.append(
+            {
+                "Time %": frac * 100.0,
+                "Total Time (ns)": total_ns,
+                "Instances": count,
+                "Avg (ns)": avg_ns,
+                "Med (ns)": med_ns,
+                "Min (ns)": min_ns,
+                "Max (ns)": max_ns,
+                "StdDev (ns)": std_ns,
+                "Name": name,
+            }
+        )
     df = pd.DataFrame(rows)
     if df.empty:
         return df
@@ -527,8 +586,22 @@ def build_kernel_summary_df_for_name(
         pretty = col.replace("(ns)", "").strip()
         df[pretty] = df[col].map(human_time_ns)
     col_order = [
-        "Time", "Total Time", "Instances", "Avg", "Med", "Min", "Max", "StdDev", "Name",
-        "Time %", "Total Time (ns)", "Avg (ns)", "Med (ns)", "Min (ns)", "Max (ns)", "StdDev (ns)",
+        "Time",
+        "Total Time",
+        "Instances",
+        "Avg",
+        "Med",
+        "Min",
+        "Max",
+        "StdDev",
+        "Name",
+        "Time %",
+        "Total Time (ns)",
+        "Avg (ns)",
+        "Med (ns)",
+        "Min (ns)",
+        "Max (ns)",
+        "StdDev (ns)",
     ]
     return df[[c for c in col_order if c in df.columns]]
 
@@ -576,17 +649,19 @@ def build_hip_summary_df(
         max_ns = int(arr.max()) if n else 0
         std_ns = float(arr.std(ddof=0)) if n else 0.0
         frac = (total_ns / baseline_total_ns) if baseline_total_ns > 0 else 0.0
-        rows.append({
-            "Time %": frac * 100.0,
-            "Total Time (ns)": total_ns,
-            "Instances": n,
-            "Avg (ns)": avg_ns,
-            "Med (ns)": med_ns,
-            "Min (ns)": min_ns,
-            "Max (ns)": max_ns,
-            "StdDev (ns)": std_ns,
-            **meta[k],
-        })
+        rows.append(
+            {
+                "Time %": frac * 100.0,
+                "Total Time (ns)": total_ns,
+                "Instances": n,
+                "Avg (ns)": avg_ns,
+                "Med (ns)": med_ns,
+                "Min (ns)": min_ns,
+                "Max (ns)": max_ns,
+                "StdDev (ns)": std_ns,
+                **meta[k],
+            }
+        )
     df = pd.DataFrame(rows)
     if df.empty:
         return df
@@ -596,7 +671,16 @@ def build_hip_summary_df(
     for col in ["Avg (ns)", "Med (ns)", "Min (ns)", "Max (ns)", "StdDev (ns)"]:
         pretty = col.replace("(ns)", "").strip()
         df[pretty] = df[col].map(human_time_ns)
-    base_cols = ["Time", "Total Time", "Instances", "Avg", "Med", "Min", "Max", "StdDev"]
+    base_cols = [
+        "Time",
+        "Total Time",
+        "Instances",
+        "Avg",
+        "Med",
+        "Min",
+        "Max",
+        "StdDev",
+    ]
     if group == "name":
         order = base_cols + ["Name"]
     elif group == "name+stream":
@@ -605,7 +689,15 @@ def build_hip_summary_df(
         order = base_cols + ["Op", "Name"]
     else:
         order = base_cols + ["Stream", "Op", "Name"]
-    order += ["Time %", "Total Time (ns)", "Avg (ns)", "Med (ns)", "Min (ns)", "Max (ns)", "StdDev (ns)"]
+    order += [
+        "Time %",
+        "Total Time (ns)",
+        "Avg (ns)",
+        "Med (ns)",
+        "Min (ns)",
+        "Max (ns)",
+        "StdDev (ns)",
+    ]
     return df[[c for c in order if c in df.columns]]
 
 
@@ -624,7 +716,7 @@ class PftraceHipActivityAnalyzer:
         self,
         trace_events: List[Dict[str, Any]],
         merge_kernels: bool = False,
-        min_tid: int = -10**9,
+        min_tid: int = -(10**9),
         max_tid: int = 10**9,
         min_event_ns: int = 5000,
         kernel_summary_include_rccl: bool = False,
@@ -673,9 +765,15 @@ class PftraceHipActivityAnalyzer:
             self._gpu_stats[g] = accumulate_categories(comp, self._gpu_stats[g])
             self._gpu_stats[g] = accumulate_categories(comm, self._gpu_stats[g])
             self._gpu_stats[g].compute_total_ns = (
-                self._gpu_stats[g].xla[0] + self._gpu_stats[g].aiter_fwd[0] + self._gpu_stats[g].aiter_bwd[0]
-                + self._gpu_stats[g].gemm[0] + self._gpu_stats[g].ck_bwd[0] + self._gpu_stats[g].ck_fwd[0]
-                + self._gpu_stats[g].te[0] + self._gpu_stats[g].memcpy[0] + self._gpu_stats[g].fillBuffer[0]
+                self._gpu_stats[g].xla[0]
+                + self._gpu_stats[g].aiter_fwd[0]
+                + self._gpu_stats[g].aiter_bwd[0]
+                + self._gpu_stats[g].gemm[0]
+                + self._gpu_stats[g].ck_bwd[0]
+                + self._gpu_stats[g].ck_fwd[0]
+                + self._gpu_stats[g].te[0]
+                + self._gpu_stats[g].memcpy[0]
+                + self._gpu_stats[g].fillBuffer[0]
             )
             ov_ns, nonov_ns = rccl_overlap_two_pointer(comp, comm)
             self._gpu_stats[g].overlapped_comm_ns = ov_ns
@@ -684,7 +782,9 @@ class PftraceHipActivityAnalyzer:
         self._hip_events = build_hip_api_events(
             self.trace_events, min_tid=self.min_tid, max_tid=self.max_tid
         )
-        self._hip_events = [e for e in self._hip_events if e.dur_ns >= self.min_event_ns]
+        self._hip_events = [
+            e for e in self._hip_events if e.dur_ns >= self.min_event_ns
+        ]
 
     @property
     def agents(self) -> List[str]:
@@ -710,8 +810,7 @@ class PftraceHipActivityAnalyzer:
         xla_items = sorted(self._xla_agg.items(), key=lambda kv: kv[1][0], reverse=True)
         xla_total_ns = sum(ns for ns, _ in self._xla_agg.values()) or 1
         return [
-            (name, ns, cnt, ns / xla_total_ns)
-            for name, (ns, cnt) in xla_items[:top_n]
+            (name, ns, cnt, ns / xla_total_ns) for name, (ns, cnt) in xla_items[:top_n]
         ]
 
     def get_df_xla_top(self, top_n: int = 30) -> pd.DataFrame:
@@ -719,12 +818,14 @@ class PftraceHipActivityAnalyzer:
         xla_top = self.get_xla_top(top_n=top_n)
         xla_total_ns = sum(ns for ns, _ in self._xla_agg.values()) or 1
         for name, tot_ns, cnt, frac in xla_top:
-            rows.append({
-                "Kernel": name,
-                "Total time (ms)": ns_to_ms(tot_ns),
-                "Count": cnt,
-                "Fraction of XLA": frac,
-            })
+            rows.append(
+                {
+                    "Kernel": name,
+                    "Total time (ms)": ns_to_ms(tot_ns),
+                    "Count": cnt,
+                    "Fraction of XLA": frac,
+                }
+            )
         return pd.DataFrame(rows)
 
     def get_df_kernel_summary(self) -> pd.DataFrame:
@@ -733,7 +834,9 @@ class PftraceHipActivityAnalyzer:
         for g in range(num_gpus):
             comp = [e for e in self._compute_events[g] if e.dur_ns >= self.min_event_ns]
             if self.kernel_summary_include_rccl:
-                comp += [e for e in self._rccl_events[g] if e.dur_ns >= self.min_event_ns]
+                comp += [
+                    e for e in self._rccl_events[g] if e.dur_ns >= self.min_event_ns
+                ]
             per_gpu_events.append(comp)
         if self.kernel_summary_baseline == "total":
             baselines = [
@@ -746,10 +849,14 @@ class PftraceHipActivityAnalyzer:
         all_events = [e for sub in per_gpu_events for e in sub]
         if self.kernel_summary_group == "config":
             return build_kernel_summary_df_for_config(
-                all_events, baseline_total_ns=overall_baseline, merge_names=self.merge_kernels
+                all_events,
+                baseline_total_ns=overall_baseline,
+                merge_names=self.merge_kernels,
             )
         return build_kernel_summary_df_for_name(
-            all_events, baseline_total_ns=overall_baseline, merge_names=self.merge_kernels
+            all_events,
+            baseline_total_ns=overall_baseline,
+            merge_names=self.merge_kernels,
         )
 
     def get_df_hip_summary(self) -> pd.DataFrame:

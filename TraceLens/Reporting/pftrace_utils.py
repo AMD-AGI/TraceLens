@@ -62,9 +62,7 @@ def acquire_traceconv(preferred: Optional[Path], out_dir: Path) -> Path:
         return target
 
 
-def ensure_trace_json(
-    trace_path: str, traceconv_path: Optional[str] = None
-) -> str:
+def ensure_trace_json(trace_path: str, traceconv_path: Optional[str] = None) -> str:
     """
     Return path to JSON trace. If trace_path is .pftrace, use traceconv_path if
     provided, otherwise resolve or download traceconv (see acquire_traceconv),

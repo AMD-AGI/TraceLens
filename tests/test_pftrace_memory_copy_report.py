@@ -27,7 +27,12 @@ def _make_memory_copy_events():
             "name": "MEMORY_COPY_HOST_TO_DEVICE",
             "pid": 63721,
             "tid": 63882,
-            "args": {"copy_bytes": 20138, "operation": 2, "src_agent": 0, "dst_agent": 2},
+            "args": {
+                "copy_bytes": 20138,
+                "operation": 2,
+                "src_agent": 0,
+                "dst_agent": 2,
+            },
         },
         {
             "ph": "X",
@@ -66,9 +71,27 @@ class TestMemoryCopyHelpers:
 
 class TestFormatDirection:
     def test_h2d_d2h_d2d(self):
-        assert _format_direction({"name": "MEMORY_COPY_HOST_TO_DEVICE", "args": {"dst_agent": 2}}) == "h2d (GPU 2)"
-        assert _format_direction({"name": "MEMORY_COPY_DEVICE_TO_HOST", "args": {"src_agent": 1}}) == "d2h (GPU 1)"
-        assert _format_direction({"name": "MEMORY_COPY_DEVICE_TO_DEVICE", "args": {"src_agent": 0, "dst_agent": 1}}) == "d2d (GPU 0 -> GPU 1)"
+        assert (
+            _format_direction(
+                {"name": "MEMORY_COPY_HOST_TO_DEVICE", "args": {"dst_agent": 2}}
+            )
+            == "h2d (GPU 2)"
+        )
+        assert (
+            _format_direction(
+                {"name": "MEMORY_COPY_DEVICE_TO_HOST", "args": {"src_agent": 1}}
+            )
+            == "d2h (GPU 1)"
+        )
+        assert (
+            _format_direction(
+                {
+                    "name": "MEMORY_COPY_DEVICE_TO_DEVICE",
+                    "args": {"src_agent": 0, "dst_agent": 1},
+                }
+            )
+            == "d2d (GPU 0 -> GPU 1)"
+        )
 
 
 class TestExtractMemoryCopyRows:
@@ -87,7 +110,9 @@ class TestExtractMemoryCopyRows:
         assert extract_memory_copy_rows(events) == []
 
     def test_extract_ignores_memory_copy_without_copy_bytes(self):
-        events = [{"cat": "memory_copy", "name": "MEMORY_COPY_HOST_TO_DEVICE", "args": {}}]
+        events = [
+            {"cat": "memory_copy", "name": "MEMORY_COPY_HOST_TO_DEVICE", "args": {}}
+        ]
         assert extract_memory_copy_rows(events) == []
 
 
@@ -100,8 +125,18 @@ class TestBuildMemoryCopyCountDf:
         assert len(df) == 3
         row_20138 = df[(df["copy_bytes"] == 20138) & (df["direction"] == "h2d (GPU 2)")]
         assert len(row_20138) == 1 and row_20138["count"].iloc[0] == 2
-        assert df[(df["copy_bytes"] == 4096) & (df["direction"] == "d2h (GPU 1)")]["count"].iloc[0] == 1
-        assert df[(df["copy_bytes"] == 8192) & (df["direction"] == "d2d (GPU 0 -> GPU 1)")]["count"].iloc[0] == 1
+        assert (
+            df[(df["copy_bytes"] == 4096) & (df["direction"] == "d2h (GPU 1)")][
+                "count"
+            ].iloc[0]
+            == 1
+        )
+        assert (
+            df[
+                (df["copy_bytes"] == 8192) & (df["direction"] == "d2d (GPU 0 -> GPU 1)")
+            ]["count"].iloc[0]
+            == 1
+        )
 
     def test_empty_events(self):
         df = build_memory_copy_count_df([])
@@ -121,7 +156,11 @@ class TestGeneratePerfReportPftraceMemoryCopy:
             )
             assert "memory_copy_by_copy_bytes" in dfs
             assert len(dfs["memory_copy_by_copy_bytes"]) == 3
-            assert list(dfs["memory_copy_by_copy_bytes"].columns) == ["copy_bytes", "direction", "count"]
+            assert list(dfs["memory_copy_by_copy_bytes"].columns) == [
+                "copy_bytes",
+                "direction",
+                "count",
+            ]
             assert os.path.isfile(out_xlsx)
         finally:
             os.unlink(trace_path)

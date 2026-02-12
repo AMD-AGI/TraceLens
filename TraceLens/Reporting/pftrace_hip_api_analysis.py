@@ -37,7 +37,9 @@ LAUNCH_HIP = {
 LAUNCH_REGEX = re.compile(r"(?:Launch).*Kernel", re.IGNORECASE)
 
 
-def _extract_time_ns(e: Dict[str, Any]) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+def _extract_time_ns(
+    e: Dict[str, Any],
+) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """Extract begin_ns, end_ns, delta_ns from event (args or ts/dur in µs)."""
     args = e.get("args") or {}
     b, en, d = args.get("begin_ns"), args.get("end_ns"), args.get("delta_ns")
@@ -87,7 +89,7 @@ def _is_hip_api_event(e: Dict[str, Any]) -> bool:
 def _is_launch_api(e: Dict[str, Any]) -> bool:
     if not _is_hip_api_event(e):
         return False
-    name = (e.get("name") or "")
+    name = e.get("name") or ""
     return name in LAUNCH_HIP or bool(LAUNCH_REGEX.search(name))
 
 
@@ -96,7 +98,12 @@ def _is_kernel_event(e: Dict[str, Any]) -> bool:
     cat = (e.get("cat") or "").lower()
     if name.endswith(".kd") or ".kd " in name:
         return True
-    if "kernel_dispatch" in cat or "gpu_activity" in cat or "kernel" in cat or "memory_copy" in cat:
+    if (
+        "kernel_dispatch" in cat
+        or "gpu_activity" in cat
+        or "kernel" in cat
+        or "memory_copy" in cat
+    ):
         _, _, d = _extract_time_ns(e)
         return d is not None and d > 0 and "register" not in name
     return False
@@ -177,10 +184,15 @@ class PftraceHipApiAnalyzer:
                 continue
             if _is_kernel_event(e):
                 kname = _get_kernel_name(e)
-                if self.exclude_kernel_re and self.exclude_kernel_re.search(kname or ""):
+                if self.exclude_kernel_re and self.exclude_kernel_re.search(
+                    kname or ""
+                ):
                     continue
                 kernels_by_corr[corr].append(e)
-            elif _is_hip_api_event(e) or (e.get("cat") or "").lower() in ("cuda_api", "cupti"):
+            elif _is_hip_api_event(e) or (e.get("cat") or "").lower() in (
+                "cuda_api",
+                "cupti",
+            ):
                 api_by_corr[corr] = e
 
         packed_rows: List[Dict[str, Any]] = []
@@ -200,8 +212,17 @@ class PftraceHipApiAnalyzer:
                 if self.include_nonlaunch_apis:
                     packed_rows.append(
                         dict(
-                            pid=pid, tid=tid, dev=0, api=api_name, kern="",
-                            count=1, qcount=0, T=[], A=[a_ns], Q=[0], K=[0],
+                            pid=pid,
+                            tid=tid,
+                            dev=0,
+                            api=api_name,
+                            kern="",
+                            count=1,
+                            qcount=0,
+                            T=[],
+                            A=[a_ns],
+                            Q=[0],
+                            K=[0],
                         )
                     )
                 continue
@@ -221,8 +242,17 @@ class PftraceHipApiAnalyzer:
                 t_ns = a_ns + q_ns + k_ns
                 packed_rows.append(
                     dict(
-                        pid=pid, tid=tid, dev=dev, api=api_name, kern=kname,
-                        count=1, qcount=1, T=[t_ns], A=[a_ns], Q=[q_ns], K=[k_ns],
+                        pid=pid,
+                        tid=tid,
+                        dev=dev,
+                        api=api_name,
+                        kern=kname,
+                        count=1,
+                        qcount=1,
+                        T=[t_ns],
+                        A=[a_ns],
+                        Q=[q_ns],
+                        K=[k_ns],
                     )
                 )
 
@@ -302,32 +332,34 @@ class PftraceHipApiAnalyzer:
             col_api.append(api_name)
             col_kern.append(kern_name)
 
-        return pd.DataFrame({
-            "PID": col_pid,
-            "TID": col_tid,
-            "DevId": col_dev,
-            "Count": col_count,
-            "QCount": col_qcount,
-            "TAvg_ns": col_t_avg,
-            "TMed_ns": col_t_med,
-            "TMin_ns": col_t_min,
-            "TMax_ns": col_t_max,
-            "TStdDev_ns": col_t_std,
-            "AAvg_ns": col_a_avg,
-            "AMed_ns": col_a_med,
-            "AMin_ns": col_a_min,
-            "AMax_ns": col_a_max,
-            "AStdDev_ns": col_a_std,
-            "QAvg_ns": col_q_avg,
-            "QMed_ns": col_q_med,
-            "QMin_ns": col_q_min,
-            "QMax_ns": col_q_max,
-            "QStdDev_ns": col_q_std,
-            "KAvg_ns": col_k_avg,
-            "KMed_ns": col_k_med,
-            "KMin_ns": col_k_min,
-            "KMax_ns": col_k_max,
-            "KStdDev_ns": col_k_std,
-            "API Name": col_api,
-            "Kernel Name": col_kern,
-        })
+        return pd.DataFrame(
+            {
+                "PID": col_pid,
+                "TID": col_tid,
+                "DevId": col_dev,
+                "Count": col_count,
+                "QCount": col_qcount,
+                "TAvg_ns": col_t_avg,
+                "TMed_ns": col_t_med,
+                "TMin_ns": col_t_min,
+                "TMax_ns": col_t_max,
+                "TStdDev_ns": col_t_std,
+                "AAvg_ns": col_a_avg,
+                "AMed_ns": col_a_med,
+                "AMin_ns": col_a_min,
+                "AMax_ns": col_a_max,
+                "AStdDev_ns": col_a_std,
+                "QAvg_ns": col_q_avg,
+                "QMed_ns": col_q_med,
+                "QMin_ns": col_q_min,
+                "QMax_ns": col_q_max,
+                "QStdDev_ns": col_q_std,
+                "KAvg_ns": col_k_avg,
+                "KMed_ns": col_k_med,
+                "KMin_ns": col_k_min,
+                "KMax_ns": col_k_max,
+                "KStdDev_ns": col_k_std,
+                "API Name": col_api,
+                "Kernel Name": col_kern,
+            }
+        )

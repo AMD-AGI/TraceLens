@@ -96,7 +96,7 @@ def generate_perf_report_pftrace_hip_activity(
     output_md_path: Optional[str] = None,
     traceconv_path: Optional[str] = None,
     merge_kernels: bool = False,
-    min_tid: int = -10**9,
+    min_tid: int = -(10**9),
     max_tid: int = 10**9,
     min_event_ns: int = 5000,
     kernel_summary: bool = True,
@@ -211,25 +211,58 @@ Examples:
   TraceLens_generate_perf_report_pftrace_hip_activity --trace_path trace.json --output_csvs_dir ./out
         """,
     )
-    parser.add_argument("--trace_path", type=str, required=True, help="Path to .json / .json.gz / .pftrace")
+    parser.add_argument(
+        "--trace_path",
+        type=str,
+        required=True,
+        help="Path to .json / .json.gz / .pftrace",
+    )
     parser.add_argument("--output_xlsx_path", type=str, default=None)
     parser.add_argument("--output_csvs_dir", type=str, default=None)
-    parser.add_argument("--output_md_path", type=str, default=None, help="Write Markdown report to this path")
+    parser.add_argument(
+        "--output_md_path",
+        type=str,
+        default=None,
+        help="Write Markdown report to this path",
+    )
     parser.add_argument("--traceconv", type=str, default=None, dest="traceconv_path")
-    parser.add_argument("--merge_kernels", action="store_true", help="Merge kernel names by stripping digits")
-    parser.add_argument("--min_tid", type=int, default=-10**9)
+    parser.add_argument(
+        "--merge_kernels",
+        action="store_true",
+        help="Merge kernel names by stripping digits",
+    )
+    parser.add_argument("--min_tid", type=int, default=-(10**9))
     parser.add_argument("--max_tid", type=int, default=10**9)
-    parser.add_argument("--min_event_ns", type=int, default=5000, help="Drop events shorter than this (ns)")
-    parser.add_argument("--no_kernel_summary", action="store_false", dest="kernel_summary")
+    parser.add_argument(
+        "--min_event_ns",
+        type=int,
+        default=5000,
+        help="Drop events shorter than this (ns)",
+    )
+    parser.add_argument(
+        "--no_kernel_summary", action="store_false", dest="kernel_summary"
+    )
     parser.add_argument("--kernel_summary_include_rccl", action="store_true")
-    parser.add_argument("--kernel_summary_baseline", choices=["total", "compute"], default="total")
-    parser.add_argument("--kernel_summary_group", choices=["config", "name"], default="config")
+    parser.add_argument(
+        "--kernel_summary_baseline", choices=["total", "compute"], default="total"
+    )
+    parser.add_argument(
+        "--kernel_summary_group", choices=["config", "name"], default="config"
+    )
     parser.add_argument("--no_hip_summary", action="store_false", dest="hip_summary")
-    parser.add_argument("--hip_summary_group", choices=["name", "name+stream", "name+op", "name+stream+op"], default="name")
+    parser.add_argument(
+        "--hip_summary_group",
+        choices=["name", "name+stream", "name+op", "name+stream+op"],
+        default="name",
+    )
     parser.add_argument("--top_xla", type=int, default=30)
     parser.add_argument("--kernel_summary_top", type=int, default=200)
     parser.add_argument("--hip_summary_top", type=int, default=200)
-    parser.add_argument("--write_md", action="store_true", help="Write Markdown report (default path: <trace_stem>_report.md)")
+    parser.add_argument(
+        "--write_md",
+        action="store_true",
+        help="Write Markdown report (default path: <trace_stem>_report.md)",
+    )
 
     args = parser.parse_args()
     if not os.path.exists(args.trace_path):

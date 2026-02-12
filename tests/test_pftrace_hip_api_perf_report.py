@@ -122,9 +122,12 @@ class TestPftraceHipApiAnalyzer:
     def test_exclude_kernel_regex(self):
         """Excluded kernel names are omitted from summary."""
         import re
+
         events = _make_minimal_pftrace_events()
         events[1]["args"]["kernel_name"] = "redzone_checker_kernel"
-        analyzer = PftraceHipApiAnalyzer(events, exclude_kernel_re=re.compile(r"redzone_checker"))
+        analyzer = PftraceHipApiAnalyzer(
+            events, exclude_kernel_re=re.compile(r"redzone_checker")
+        )
         df = analyzer.get_df_api_kernel_summary()
         assert df.empty
 
