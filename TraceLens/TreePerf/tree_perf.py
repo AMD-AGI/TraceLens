@@ -2514,7 +2514,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         gpu_kernel_op_cats=None,
         include_kernel_details=False,
         include_args=True,
-        args_cols=["Input Dims", "Input type", "Input Strides", "Concrete Inputs"],
+        args_cols=["hlo_module", "hlo_op"],
     ):
         kernel_launchers = self.get_kernel_launchers(
             gpu_pid=gpu_pid, gpu_kernel_op_cats=gpu_kernel_op_cats
@@ -2554,6 +2554,14 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 rows.append(metrics_event)
 
         df = pd.DataFrame(rows)
+        df.sort_values(by=["hlo_module", "hlo_op", "name"])
+
+        # Move specific columns to the front
+        cols_front = ["name", "hlo_op", "hlo_module"]
+        for col_front in cols_front:
+            col = df.pop(col_front)
+            df.insert(0, col_front, col)
+
         return df
 
     @staticmethod
