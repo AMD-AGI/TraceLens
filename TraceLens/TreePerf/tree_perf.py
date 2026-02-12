@@ -446,8 +446,11 @@ class TreePerfAnalyzer:
                     non_data_mov=non_data_mov,
                     perf_model_class=perf_model_class,
                 )
+            except NotImplementedError:
+                # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
+                continue
             except Exception as e:
-                list_warn_perf_metrics_failed.append(event)
+                list_warn_perf_metrics_failed.append((event, e))
                 continue
             # handle warnings
             if bwd and not event.get("bwd_events"):
@@ -501,7 +504,7 @@ class TreePerfAnalyzer:
                 f"Found {len(list_warn_perf_metrics_failed)}/{total_events} events with failed performance metric computation."
             )
             warnings.warn(
-                f"Example event: {pprint.pformat(list_warn_perf_metrics_failed[0])}"
+                f"Example event: {pprint.pformat(list_warn_perf_metrics_failed[0][0])} Error: {list_warn_perf_metrics_failed[0][1]}"
             )
 
     def build_df_fwd_perf_metrics(self, events):
@@ -1489,8 +1492,12 @@ class TreePerfAnalyzer:
                         if k.startswith("param: ")
                     }
                     row["perf_params"] = perf_params if perf_params else None
-                except Exception:
-                    perf_metrics_failed.append(event)
+                except NotImplementedError:
+                    # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
+                    continue
+
+                except Exception as e:
+                    perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
@@ -1507,8 +1514,11 @@ class TreePerfAnalyzer:
                         if k.startswith("param: ")
                     }
                     row["perf_params"] = perf_params if perf_params else None
-                except Exception:
-                    perf_metrics_failed.append(event)
+                except NotImplementedError:
+                    # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
+                    continue
+                except Exception as e:
+                    perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
@@ -1532,6 +1542,9 @@ class TreePerfAnalyzer:
         if perf_metrics_failed:
             warnings.warn(
                 f"Failed to compute perf metrics for {len(perf_metrics_failed)}/{len(events)} events."
+            )
+            warnings.warn(
+                f"Sample event: {perf_metrics_failed[0][0]} Error: {perf_metrics_failed[0][1]}"
             )
 
         df = pd.DataFrame(rows)
