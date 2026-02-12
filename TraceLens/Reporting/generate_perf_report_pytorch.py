@@ -391,7 +391,7 @@ def generate_perf_report_pytorch(
                     ],
                 )
                 if not df_ops_overlapping_kernels.empty:
-                    perf_metrics_dfs[f"{op_cat}_knl_overlap"] = (
+                    perf_metrics_dfs[f"{op_cat}_kl_overlap"] = (
                         df_ops_overlapping_kernels
                     )
             else:
@@ -487,12 +487,17 @@ def generate_perf_report_pytorch(
                         "ConvBias_Backward",
                         "ConvBiasReLU_Backward",
                     ]
-                    filtered_df_bwd_ops_overlapping_kernels = df_ops_fwd_overlapping_kernels[
-                        df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
-                    ]
-                    df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)]
+                    filtered_df_bwd_ops_overlapping_kernels = (
+                        df_ops_fwd_overlapping_kernels[
+                            df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
+                        ]
+                    )
                     df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[
-                        df_ops_fwd_overlapping_kernels["name"] != "flash_attn::_flash_attn_varlen_backward"
+                        ~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
+                    ]
+                    df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[
+                        df_ops_fwd_overlapping_kernels["name"]
+                        != "flash_attn::_flash_attn_varlen_backward"
                     ]
 
                 df_ops_bwd_overlapping_kernels = (
@@ -514,7 +519,12 @@ def generate_perf_report_pytorch(
                     ],
                 )
                 if filtered_df_bwd_ops_overlapping_kernels is not None:
-                    df_ops_bwd_overlapping_kernels = pd.concat([df_ops_bwd_overlapping_kernels, filtered_df_bwd_ops_overlapping_kernels])
+                    df_ops_bwd_overlapping_kernels = pd.concat(
+                        [
+                            df_ops_bwd_overlapping_kernels,
+                            filtered_df_bwd_ops_overlapping_kernels,
+                        ]
+                    )
                 # Filter out forward operations that were incorrectly included in backward
                 if not df_ops_bwd_overlapping_kernels.empty:
                     fwd_op_names = [
@@ -524,13 +534,15 @@ def generate_perf_report_pytorch(
                         "ConvBias_",
                         "ConvBiasReLU_",
                     ]
-                    df_ops_bwd_overlapping_kernels = df_ops_bwd_overlapping_kernels[~df_ops_bwd_overlapping_kernels["name"].isin(fwd_op_names)]
+                    df_ops_bwd_overlapping_kernels = df_ops_bwd_overlapping_kernels[
+                        ~df_ops_bwd_overlapping_kernels["name"].isin(fwd_op_names)
+                    ]
                 if not df_ops_fwd_overlapping_kernels.empty:
-                    perf_metrics_dfs[f"{op_cat}_fwd_knl_overlap"] = (
+                    perf_metrics_dfs[f"{op_cat}_fwd_kl_overlap"] = (
                         df_ops_fwd_overlapping_kernels
                     )
                 if not df_ops_bwd_overlapping_kernels.empty:
-                    perf_metrics_dfs[f"{op_cat}_bwd_knl_overlap"] = (
+                    perf_metrics_dfs[f"{op_cat}_bwd_kl_overlap"] = (
                         df_ops_bwd_overlapping_kernels
                     )
 
@@ -557,7 +569,7 @@ def generate_perf_report_pytorch(
         if not df_kernel_launchers_unique_args.empty:
             dict_name2df["ops_unique_args"] = df_kernel_launchers_unique_args
         if not df_kernel_launchers_unique_args_overlapping_kernels.empty:
-            dict_name2df["ops_unique_args_knl_overlap"] = (
+            dict_name2df["ops_unique_args_kl_overlap"] = (
                 df_kernel_launchers_unique_args_overlapping_kernels
             )
 
@@ -598,9 +610,9 @@ def generate_perf_report_pytorch(
                         ],
                     )
                 )
-                dict_name2df["unified_perf_summary_knl_overlap"] = (
-                    df_unified_perf_summary_overlapping_kernels
-                )
+            dict_name2df["unified_perf_summary_kl_overlap"] = (
+                df_unified_perf_summary_overlapping_kernels
+            )
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)
