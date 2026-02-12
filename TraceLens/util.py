@@ -20,7 +20,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
-from typing import List, Dict, Callable, Iterable
+from typing import List, Dict, Callable, Iterable, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -436,12 +436,16 @@ class TraceEventUtils:
             itertools.groupby(events, lambda event: event.get(field, defaultKey))
         )
 
+    # Splits metadata and non-metadata events
     # Merges metadata events into a dictionary hierarchy per process
     # Process
     # None: {process_name, process_sort_index}
     # Thread_id: {thread_name, thread_sort_index} for each Thread_id
+    # non metadata is just a list of events
     @staticmethod
-    def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
+    def split_event_list(
+        events: List[dict],
+    ) -> Tuple[Dict[str, Dict[str, str]], Dict[str, str]]:
         def get_metadata_val(x: dict) -> str:
             arg_labels = {
                 TraceEventUtils.MetadataFields.ProcessName: TraceEventUtils.ArgNames.Name,
@@ -454,33 +458,31 @@ class TraceEventUtils:
             return (key, x[TraceEventUtils.TraceKeys.Args][arg_labels[key]])
 
         # Use defaultdict to avoid sorting and groupby complexity
-        result = defaultdict(lambda: defaultdict(dict))
+        metadata = defaultdict(lambda: defaultdict(dict))
+        rest = list[dict]()
 
         for event in events:
             if (
                 event[TraceEventUtils.TraceKeys.Phase]
                 != TraceEventUtils.TracePhases.Metadata
             ):
-                continue
-
-            pid = event[TraceEventUtils.TraceKeys.PID]
-            tid = event.get(TraceEventUtils.TraceKeys.TID)
-            metadata_key, metadata_value = get_metadata_val(event)
-
-            result[pid][tid][metadata_key] = metadata_value
+                rest.append(event)
+            else:
+                pid = event[TraceEventUtils.TraceKeys.PID]
+                tid = event.get(TraceEventUtils.TraceKeys.TID)
+                metadata_key, metadata_value = get_metadata_val(event)
+                metadata[pid][tid][metadata_key] = metadata_value
 
         # Convert defaultdicts to regular dicts for return
-        return {pid: dict(tid_dict) for pid, tid_dict in result.items()}
+        return ({pid: dict(tid_dict) for pid, tid_dict in metadata.items()}, rest)
 
     @staticmethod
-    def non_metadata_events(events: List[dict]) -> List[dict]:
-        return list(
-            itertools.dropwhile(
-                lambda e: e[TraceEventUtils.TraceKeys.Phase]
-                == TraceEventUtils.TracePhases.Metadata,
-                events,
-            )
-        )
+    def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
+        return TraceEventUtils.split_event_list(events)[0]
+
+    @staticmethod
+    def non_metadata_events(events: List[dict]) -> List[Dict[str, Dict[str, str]]]:
+        return TraceEventUtils.split_event_list(events)[1]
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
