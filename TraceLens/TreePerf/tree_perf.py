@@ -611,6 +611,7 @@ class TreePerfAnalyzer:
             priority_cols.append("thread_name")
         if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
             priority_cols.append("overlapping_kernel_names")
+        
         other_cols = [
             col
             for col in df_perf_metrics_summary.columns
@@ -628,6 +629,13 @@ class TreePerfAnalyzer:
         )
         # df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
+
+        # Show blank instead of string "None" or "[]" for empty overlapping_kernel_names
+        if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
+            col = df_perf_metrics_summary["overlapping_kernel_names"]
+            df_perf_metrics_summary["overlapping_kernel_names"] = col.replace(
+                ["None", "[]"], pd.NA
+            )
 
         return df_perf_metrics_summary
 
