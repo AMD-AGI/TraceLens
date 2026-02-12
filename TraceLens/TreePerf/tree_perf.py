@@ -767,7 +767,7 @@ class TreePerfAnalyzer:
                 "UID": event["UID"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
-                "overlapping_kernel_names": event.get("overlapping_kernel_names"),
+                "overlapping_kernel_names": event["overlapping_kernel_names"],
                 "overlapping_kernels_details": event["overlapping_kernels_details"],
             }
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
