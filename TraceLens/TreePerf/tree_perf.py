@@ -559,7 +559,10 @@ class TreePerfAnalyzer:
             dict_agg["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
-        if include_overlapping_kernels and "overlapping_kernels_details" in df_perf_metrics.columns:
+        if (
+            include_overlapping_kernels
+            and "overlapping_kernels_details" in df_perf_metrics.columns
+        ):
             dict_agg["overlapping_kernels_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
@@ -577,15 +580,23 @@ class TreePerfAnalyzer:
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
         groupby_cols = ["name"] + param_cols
-        if include_overlapping_kernels and "overlapping_kernel_names" in df_perf_metrics.columns:
+        if (
+            include_overlapping_kernels
+            and "overlapping_kernel_names" in df_perf_metrics.columns
+        ):
             groupby_cols.append("overlapping_kernel_names")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
         for col in param_cols:
             df_perf_metrics[col] = df_perf_metrics[col].astype(str)
         # overlapping_kernel_names is list-like; use str for groupby
-        if "overlapping_kernel_names" in df_perf_metrics.columns and "overlapping_kernel_names" in groupby_cols:
-            df_perf_metrics["overlapping_kernel_names"] = df_perf_metrics["overlapping_kernel_names"].apply(str)
+        if (
+            "overlapping_kernel_names" in df_perf_metrics.columns
+            and "overlapping_kernel_names" in groupby_cols
+        ):
+            df_perf_metrics["overlapping_kernel_names"] = df_perf_metrics[
+                "overlapping_kernel_names"
+            ].apply(str)
         # TODO warn user if nans in the performance metrics
         # Perform the aggregation
         df_perf_metrics_summary = df_perf_metrics.groupby(
@@ -614,7 +625,7 @@ class TreePerfAnalyzer:
             priority_cols.append("thread_name")
         if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
             priority_cols.append("overlapping_kernel_names")
-        
+
         other_cols = [
             col
             for col in df_perf_metrics_summary.columns
@@ -732,19 +743,26 @@ class TreePerfAnalyzer:
                 for kernel in kernels
             ]
             event["op category"] = self.op_categorizer(event)
-            event['overlapping_kernel_names'] = [self.tree.get_UID2event(uid).get('name', None) for kernel in kernels for uid in kernel['overlapping_uids']]
-            event['overlapping_kernels_details'] = [
-                {
-                    "name": self.tree.get_UID2event(uid).get('name', None),
-                    "dur": self.tree.get_UID2event(uid).get('dur', None),
-                    "stream": self.tree.get_UID2event(uid).get("args", {}).get("stream", None),
-                }
-                for kernel in kernels for uid in kernel['overlapping_uids']
+            event["overlapping_kernel_names"] = [
+                self.tree.get_UID2event(uid).get("name", None)
+                for kernel in kernels
+                for uid in kernel["overlapping_uids"]
             ]
-            if event['overlapping_kernels_details'] == []:
-                event['overlapping_kernels_details'] = None
-            if event['overlapping_kernel_names'] == []:
-                event['overlapping_kernel_names'] = None
+            event["overlapping_kernels_details"] = [
+                {
+                    "name": self.tree.get_UID2event(uid).get("name", None),
+                    "dur": self.tree.get_UID2event(uid).get("dur", None),
+                    "stream": self.tree.get_UID2event(uid)
+                    .get("args", {})
+                    .get("stream", None),
+                }
+                for kernel in kernels
+                for uid in kernel["overlapping_uids"]
+            ]
+            if event["overlapping_kernels_details"] == []:
+                event["overlapping_kernels_details"] = None
+            if event["overlapping_kernel_names"] == []:
+                event["overlapping_kernel_names"] = None
             kernel_launchers.append(event)
 
         return kernel_launchers
@@ -1059,7 +1077,10 @@ class TreePerfAnalyzer:
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
             columns_to_keep_first.append("kernel_details")
-        if include_overlapping_kernels and "overlapping_kernels_details" in df_filtered.columns:
+        if (
+            include_overlapping_kernels
+            and "overlapping_kernels_details" in df_filtered.columns
+        ):
             agg_dict["overlapping_kernels_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
@@ -1093,9 +1114,9 @@ class TreePerfAnalyzer:
                 rename_map[col] = "kernel_details_summary"
             # Rename aggregated overlapping_kernels_details or overlapping_kernels_details_summary
             if (
-                (col.startswith("overlapping_kernels_details_") or col.startswith("overlapping_kernels_details_summary_"))
-                and not col.endswith("_str_repr_for_grouping")
-            ):
+                col.startswith("overlapping_kernels_details_")
+                or col.startswith("overlapping_kernels_details_summary_")
+            ) and not col.endswith("_str_repr_for_grouping"):
                 rename_map[col] = "overlapping_kernels_details_summary"
         df_unique_args.rename(columns=rename_map, inplace=True)
 
@@ -1619,7 +1640,10 @@ class TreePerfAnalyzer:
             "Input Strides",
             "Concrete Inputs",
         ]
-        if include_overlapping_kernels and "overlapping_kernel_names" in df_temp.columns:
+        if (
+            include_overlapping_kernels
+            and "overlapping_kernel_names" in df_temp.columns
+        ):
             grouping_cols.insert(1, "overlapping_kernel_names")  # after name
 
         # Convert columns to string for grouping
@@ -1674,7 +1698,10 @@ class TreePerfAnalyzer:
             agg_dict["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
-        if include_overlapping_kernels and "overlapping_kernels_details" in df_temp.columns:
+        if (
+            include_overlapping_kernels
+            and "overlapping_kernels_details" in df_temp.columns
+        ):
             agg_dict["overlapping_kernels_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
