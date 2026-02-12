@@ -456,47 +456,80 @@ def generate_perf_report_pytorch(
                     df_ops_bwd = df_ops_bwd[~df_ops_bwd["name"].isin(fwd_op_names)]
                 if not df_ops_fwd.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-                    df_ops_fwd_overlapping_kernels = (
-                        perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_fwd_raw,
-                            agg_metrics,
-                            include_overlapping_kernels=True,
-                        )
+                if not df_ops_bwd.empty:
+                    perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+
+                # Overlapping kernels sheet
+                df_ops_fwd_overlapping_kernels = (
+                    perf_analyzer.summarize_df_perf_metrics(
+                        df_ops_fwd_raw,
+                        agg_metrics,
+                        include_overlapping_kernels=True,
                     )
-                    df_ops_fwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_fwd_overlapping_kernels,
-                        source_cols=[
-                            "kernel_details__summarize_kernel_stats",
-                            "overlapping_kernels_details__summarize_kernel_stats",
-                        ],
-                        new_col_names=[
-                            "trunc_kernel_details",
-                            "trunc_overlapping_kernels_details",
-                        ],
+                )
+                df_ops_fwd_overlapping_kernels = add_truncated_kernel_details(
+                    df_ops_fwd_overlapping_kernels,
+                    source_cols=[
+                        "kernel_details__summarize_kernel_stats",
+                        "overlapping_kernels_details__summarize_kernel_stats",
+                    ],
+                    new_col_names=[
+                        "trunc_kernel_details",
+                        "trunc_overlapping_kernels_details",
+                    ],
+                )
+                filtered_df_bwd_ops_overlapping_kernels = None
+                if not df_ops_fwd_overlapping_kernels.empty:
+                    # Filter out backward operations that were incorrectly included in forward
+                    bwd_op_names = [
+                        "flash_attn::_flash_attn_varlen_backward",
+                        "aten::convolution_backward",
+                        "ConvBias_Backward",
+                        "ConvBiasReLU_Backward",
+                    ]
+                    filtered_df_bwd_ops_overlapping_kernels = df_ops_fwd_overlapping_kernels[
+                        df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
+                    ]
+                    df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)]
+                    df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[
+                        df_ops_fwd_overlapping_kernels["name"] != "flash_attn::_flash_attn_varlen_backward"
+                    ]
+
+                df_ops_bwd_overlapping_kernels = (
+                    perf_analyzer.summarize_df_perf_metrics(
+                        df_ops_bwd_raw,
+                        agg_metrics,
+                        include_overlapping_kernels=True,
                     )
+                )
+                df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                    df_ops_bwd_overlapping_kernels,
+                    source_cols=[
+                        "kernel_details__summarize_kernel_stats",
+                        "overlapping_kernels_details__summarize_kernel_stats",
+                    ],
+                    new_col_names=[
+                        "trunc_kernel_details",
+                        "trunc_overlapping_kernels_details",
+                    ],
+                )
+                if filtered_df_bwd_ops_overlapping_kernels is not None:
+                    df_ops_bwd_overlapping_kernels = pd.concat([df_ops_bwd_overlapping_kernels, filtered_df_bwd_ops_overlapping_kernels])
+                # Filter out forward operations that were incorrectly included in backward
+                if not df_ops_bwd_overlapping_kernels.empty:
+                    fwd_op_names = [
+                        "aten::convolution",
+                        "aten::miopen_convolution",
+                        "aten::cudnn_convolution",
+                        "ConvBias_",
+                        "ConvBiasReLU_",
+                    ]
+                    df_ops_bwd_overlapping_kernels = df_ops_bwd_overlapping_kernels[~df_ops_bwd_overlapping_kernels["name"].isin(fwd_op_names)]
+                if not df_ops_fwd_overlapping_kernels.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd_knl_overlap"] = (
                         df_ops_fwd_overlapping_kernels
                     )
-                if not df_ops_bwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
-                    df_ops_bwd_overlapping_kernels = (
-                        perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_bwd_raw,
-                            agg_metrics,
-                            include_overlapping_kernels=True,
-                        )
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_cols=[
-                            "kernel_details__summarize_kernel_stats",
-                            "overlapping_kernels_details__summarize_kernel_stats",
-                        ],
-                        new_col_names=[
-                            "trunc_kernel_details",
-                            "trunc_overlapping_kernels_details",
-                        ],
-                    )
+                if not df_ops_bwd_overlapping_kernels.empty:
                     perf_metrics_dfs[f"{op_cat}_bwd_knl_overlap"] = (
                         df_ops_bwd_overlapping_kernels
                     )
