@@ -1523,44 +1523,46 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     def get_kernel_launchers(self, gpu_pid=None, gpu_kernel_op_cats=None):
         kernel_launchers = []
         # filter out event op cats
-        kernel_events = [
-            event for event in self.tree.events if event["cat"] == "kernel"
+        hlo_events = [
+            event for event in self.tree.events if event["cat"] == "hlo_op"
         ]
-        # filter out gpu kernel op cats
+
         if gpu_kernel_op_cats:
-            kernel_events = [
+            hlo_events = [
                 event
-                for event in kernel_events
+                for event in hlo_events
                 if event["gpu_kernel_op_cat"] in gpu_kernel_op_cats
             ]
-        if len(kernel_events) == 0:
+        if len(hlo_events) == 0:
             logger.warning(
                 "Input list of events is empty. Returning an empty DataFrame."
             )
             return pd.DataFrame()
-        for event in kernel_events:
+        for event in hlo_events:
             event["op category"] = event["gpu_kernel_op_cat"]
             event["total_direct_kernel_time"] = event["dur"]
-            event["direct_kernel_count"] = int(1)
+            event["direct_kernel_count"] = event.get("gpu_events",[]).__len__()
             # Note: 'dur' in 'kernel_details' is required from tree perf.
-            event["kernel_details"] = [
-                {
-                    "name": event["name"],
-                    "dur": event["dur"],
-                    "custom_call_target": event.get("metadata", {}).get(
+            event["operands"]= event.get("metadata", {}).get("operands", "NA")
+            event["outputs"]= event.get("metadata", {}).get("output", "NA")
+            event["kernel_details"]=[]
+            for evt_id in event.get("gpu_events", []):
+                evt = self.tree.get_UID2event(evt_id)
+                event["kernel_details"].append({
+                    "name" : evt["name"],
+                    "dur" : evt["dur"],
+                    "custom_call_target": evt.get("metadata", {}).get(
                         "custom_call_target", "NA"
                     ),
-                    "operands": event.get("metadata", {}).get("operands", "NA"),
-                    "outputs": event.get("metadata", {}).get("outputs", "NA"),
-                    "metadata": event.get("metadata", {}).get("metadata", "NA"),
-                }
-            ]
+                })
+            
             event["perf_model_name"] = JaxTreePerfAnalyzer.get_event_perf_model_name(
                 event
             )
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event)
             for _key, _val in dict_jax_metadata.items():
                 event["args"][_key] = _val
+
             kernel_launchers.append(event)
 
         if gpu_pid:
@@ -1595,8 +1597,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         total_input_bytes_list = []
         for index, row in df_xla_events.iterrows():
 
-            kernel_details = row.get("kernel_details")[0]
-            operands = kernel_details.get("operands")
+            operands = row.get("operands")
 
             total_input_bytes = 0
             for operand in operands:
@@ -1646,6 +1647,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 metrics_event["tid"] = event["tid"]
             if include_args:
                 metrics_event.update((arg, event["args"].get(arg)) for arg in args_cols)
+                metrics_event["operands"]= event["operands"]
+                metrics_event["outputs"]= event["outputs"]
             if include_kernel_details:
                 metrics_event["kernel_details"] = event["kernel_details"]
 
