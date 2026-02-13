@@ -717,3 +717,40 @@ class RocprofParser:
             "agents": tool_data.get("agents", []),
             "command": metadata.get("command", []),
         }
+
+
+class PftraceParser:
+    """Parser for Perfetto-style trace JSON (traceEvents format)."""
+
+    @staticmethod
+    def load_pftrace_data(filepath: str) -> dict:
+        """
+        Load and validate Perfetto-style trace JSON (.json or .json.gz).
+
+        Args:
+            filepath: Path to trace file (must end with .json or .json.gz).
+
+        Returns:
+            Dict with at least "traceEvents" key (list of events).
+
+        Raises:
+            ValueError: If file is not .json/.json.gz or missing traceEvents.
+        """
+        if not filepath.endswith(".json") and not filepath.endswith(".json.gz"):
+            raise ValueError(
+                "PftraceParser expects .json or .json.gz input; "
+                f"got {filepath}. For .pftrace, convert to JSON first (e.g. traceconv json input.pftrace output.json)."
+            )
+        data = DataLoader.load_data(filepath)
+        if "traceEvents" not in data:
+            raise ValueError(
+                "Not a valid Perfetto-style trace: missing 'traceEvents' key"
+            )
+        if not isinstance(data["traceEvents"], list):
+            raise ValueError("'traceEvents' must be a list")
+        return data
+
+    @staticmethod
+    def get_events(pftrace_data: dict) -> List[dict]:
+        """Return the traceEvents list from loaded pftrace data."""
+        return pftrace_data.get("traceEvents", [])
