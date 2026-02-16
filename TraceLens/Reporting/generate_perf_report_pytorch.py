@@ -509,10 +509,6 @@ def generate_perf_report_pytorch(
                         df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[
                             ~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
                         ]
-                        df_ops_fwd_overlapping_kernels = df_ops_fwd_overlapping_kernels[
-                            df_ops_fwd_overlapping_kernels["name"]
-                            != "flash_attn::_flash_attn_varlen_backward"
-                        ]
 
                     df_ops_bwd_overlapping_kernels = (
                         perf_analyzer.summarize_df_perf_metrics(
@@ -600,7 +596,8 @@ def generate_perf_report_pytorch(
                     source_cols=["kernel_details_summary"],
                     new_col_names=["trunc_kernel_details"],
                 )
-                dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+                if not df_unified_perf_summary.empty:
+                    dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             # Overlapping kernels sheet
             if include_overlap_info:
@@ -626,9 +623,10 @@ def generate_perf_report_pytorch(
                             ],
                         )
                     )
-                dict_name2df["unified_perf_summary_kl_overlap"] = (
-                    df_unified_perf_summary_overlapping_kernels
-                )
+                if not df_unified_perf_summary_overlapping_kernels.empty:
+                    dict_name2df["unified_perf_summary_kl_overlap"] = (
+                        df_unified_perf_summary_overlapping_kernels
+                    )
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)
