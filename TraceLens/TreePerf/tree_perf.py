@@ -590,9 +590,9 @@ class TreePerfAnalyzer:
             include_overlapping_kernels
             and "overlapping_kernel_names" in df_perf_metrics.columns
         ):
-            df_perf_metrics["overlapping_kernel_names_str_repr_for_grouping"] = df_perf_metrics[
-                "overlapping_kernel_names"
-            ].apply(str)
+            df_perf_metrics["overlapping_kernel_names_str_repr_for_grouping"] = (
+                df_perf_metrics["overlapping_kernel_names"].apply(str)
+            )
             groupby_cols.append("overlapping_kernel_names_str_repr_for_grouping")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
@@ -652,7 +652,12 @@ class TreePerfAnalyzer:
         # highest-total-time group first. When groups tie on time, order by min(UID_first)
         # in group (asc) to match legacy refs. Within each group: Kernel Time (µs)_sum desc, UID_first asc.
         if "Kernel Time (µs)_sum" in df_perf_metrics_summary.columns:
-            group_cols = [c for c in groupby_cols if c in df_perf_metrics_summary.columns and c != "overlapping_kernel_names_str_repr_for_grouping"]
+            group_cols = [
+                c
+                for c in groupby_cols
+                if c in df_perf_metrics_summary.columns
+                and c != "overlapping_kernel_names_str_repr_for_grouping"
+            ]
             if group_cols:
                 df_perf_metrics_summary["_group_total_time"] = (
                     df_perf_metrics_summary.groupby(group_cols, dropna=False)[
@@ -684,7 +689,10 @@ class TreePerfAnalyzer:
                     drop_cols.append("_group_min_uid")
                 df_perf_metrics_summary.drop(columns=drop_cols, inplace=True)
                 if include_overlapping_kernels:
-                    df_perf_metrics_summary.drop(columns=["overlapping_kernel_names_str_repr_for_grouping"], inplace=True)
+                    df_perf_metrics_summary.drop(
+                        columns=["overlapping_kernel_names_str_repr_for_grouping"],
+                        inplace=True,
+                    )
 
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
 
@@ -1192,7 +1200,12 @@ class TreePerfAnalyzer:
         #    order by min(ex_UID) in group (asc) so order matches legacy refs.
         #    Within each group: total_direct_kernel_time_sum desc then ex_UID asc.
         if "total_direct_kernel_time_sum" in df_unique_args.columns:
-            group_cols = [c for c in str_col_names if c in df_unique_args.columns and c != "overlapping_kernel_names_str_repr_for_grouping"]
+            group_cols = [
+                c
+                for c in str_col_names
+                if c in df_unique_args.columns
+                and c != "overlapping_kernel_names_str_repr_for_grouping"
+            ]
             # Group total time (same for every row in the group) to order groups by time
             df_unique_args["_group_total_time"] = df_unique_args.groupby(
                 group_cols, dropna=False
@@ -1202,14 +1215,26 @@ class TreePerfAnalyzer:
                 df_unique_args["_group_min_ex_uid"] = df_unique_args.groupby(
                     group_cols, dropna=False
                 )["ex_UID"].transform("min")
-                sort_by = ["_group_total_time", "_group_min_ex_uid"] + group_cols + ["total_direct_kernel_time_sum", "ex_UID"]
-                sort_ascending = [False, True] + [True] * len(group_cols) + [False, True]
+                sort_by = (
+                    ["_group_total_time", "_group_min_ex_uid"]
+                    + group_cols
+                    + ["total_direct_kernel_time_sum", "ex_UID"]
+                )
+                sort_ascending = (
+                    [False, True] + [True] * len(group_cols) + [False, True]
+                )
                 df_unique_args = df_unique_args.sort_values(
                     by=sort_by, ascending=sort_ascending
                 ).reset_index(drop=True)
-                df_unique_args.drop(columns=["_group_total_time", "_group_min_ex_uid"], inplace=True)
+                df_unique_args.drop(
+                    columns=["_group_total_time", "_group_min_ex_uid"], inplace=True
+                )
             else:
-                sort_by = ["_group_total_time"] + group_cols + ["total_direct_kernel_time_sum"]
+                sort_by = (
+                    ["_group_total_time"]
+                    + group_cols
+                    + ["total_direct_kernel_time_sum"]
+                )
                 sort_ascending = [False] + [True] * len(group_cols) + [False]
                 df_unique_args = df_unique_args.sort_values(
                     by=sort_by, ascending=sort_ascending
@@ -1227,7 +1252,7 @@ class TreePerfAnalyzer:
             df_unique_args["Cumulative Percentage (%)"] = df_unique_args[
                 "Percentage (%)"
             ].cumsum()
-        
+
         return df_unique_args
 
     # =========================================================================
@@ -1835,8 +1860,17 @@ class TreePerfAnalyzer:
         # Sort by total kernel time (GPU) so highest-time group first, then ex_UID for stability.
         # Use Kernel Time (µs)_sum when available to match legacy refs; else total_duration_us.
         # When groups tie on time, order by min(ex_UID) in group to match ops_unique_args.
-        group_cols = [c for c in str_col_names if c in df_summary.columns and c != "overlapping_kernel_names_str_repr_for_grouping"]
-        time_col = "Kernel Time (µs)_sum" if "Kernel Time (µs)_sum" in df_summary.columns else "total_duration_us"
+        group_cols = [
+            c
+            for c in str_col_names
+            if c in df_summary.columns
+            and c != "overlapping_kernel_names_str_repr_for_grouping"
+        ]
+        time_col = (
+            "Kernel Time (µs)_sum"
+            if "Kernel Time (µs)_sum" in df_summary.columns
+            else "total_duration_us"
+        )
         drop_after_sort = []
         if group_cols and time_col in df_summary.columns:
             df_summary["_group_total_time"] = df_summary.groupby(
