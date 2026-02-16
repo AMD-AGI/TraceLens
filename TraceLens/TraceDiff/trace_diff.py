@@ -533,8 +533,11 @@ class TraceDiff:
                 nn_module_stack = node2.get("nn_module_stack", "")
 
             children1, children2 = get_children_with_missing(uid1, uid2)
-            ops = self.wagner_fischer(children1, children2, wf_cache)
-            ops, children1, children2 = check_diff_children(ops, uid1, uid2, children1, children2)
+            if len(children1) == len(children2):
+                ops = [("match", i, i) for i in range(len(children1))]
+            else:
+                ops = self.wagner_fischer(children1, children2, wf_cache)
+                ops, children1, children2 = check_diff_children(ops, uid1, uid2, children1, children2)
 
             child_merged_ids = []
             for op, i, j in ops:
@@ -935,10 +938,12 @@ class TraceDiff:
                     ) or (self.is_kernel(event1) and self.is_kernel(event2)):
 
                         # Store the LCA name from this combined node
-                        lca_name = self._get_op_name(
-                            node["uid1"], 1
-                        ) or self._get_op_name(node["uid2"], 2)
-                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
+                        lca_name_trace1 = re.sub(r"\(\d+\)", "", self._get_op_name(node["uid1"], 1))
+                        lca_name_trace2 = re.sub(r"\(\d+\)", "", self._get_op_name(node["uid2"], 2))
+                        if lca_name_trace1 == lca_name_trace2:
+                            lca_name = lca_name_trace1
+                        else:
+                            lca_name = f"{lca_name_trace1} | {lca_name_trace2}"
 
                         gpu_event_uids1 = []
                         for child in non_combined_children_trace1_gpu_paths:
