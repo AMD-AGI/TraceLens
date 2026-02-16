@@ -532,12 +532,16 @@ class TreePerfAnalyzer:
         dict_agg["FLOPS/Byte"] = "first"
         dict_agg["TB/s"] = agg_metrics
         dict_agg["TFLOPS/s"] = agg_metrics
+        columns_to_keep_first = []
         if "process_name" in df_perf_metrics.columns:
             dict_agg["process_name"] = "first"
+            columns_to_keep_first.append("process_name")
         if "process_label" in df_perf_metrics.columns:
             dict_agg["process_label"] = "first"
+            columns_to_keep_first.append("process_label")
         if "thread_name" in df_perf_metrics.columns:
             dict_agg["thread_name"] = "first"
+            columns_to_keep_first.append("thread_name")
         # Compute Spec - static for same args
         if "Compute Spec" in df_perf_metrics.columns:
             dict_agg["Compute Spec"] = "first"
@@ -567,6 +571,7 @@ class TreePerfAnalyzer:
             dict_agg["overlapping_kernels_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
+            columns_to_keep_first.append("overlapping_kernel_names")
         args_cols = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
         for arg in args_cols:
             if arg in df_perf_metrics.columns:
@@ -614,19 +619,24 @@ class TreePerfAnalyzer:
 
         if "Compute Spec_first" in df_perf_metrics_summary.columns:
             rename_map["Compute Spec_first"] = "Compute Spec"
+        for col in columns_to_keep_first:
+            col_first = f"{col}_first"
+            if col_first in df_perf_metrics_summary.columns:
+                rename_map[col_first] = col
+                df_perf_metrics_summary.rename(columns={col_first: col}, inplace=True)
         if rename_map:
             df_perf_metrics_summary.rename(columns=rename_map, inplace=True)
 
         # Reorder columns: name, process_name, process_label, thread_name, overlapping_kernel_names (if present), param cols, everything else
         priority_cols = ["name"]
+        if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
+            priority_cols.append("overlapping_kernel_names")
         if "process_name" in df_perf_metrics_summary.columns:
             priority_cols.append("process_name")
         if "process_label" in df_perf_metrics_summary.columns:
             priority_cols.append("process_label")
         if "thread_name" in df_perf_metrics_summary.columns:
             priority_cols.append("thread_name")
-        if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
-            priority_cols.append("overlapping_kernel_names")
 
         other_cols = [
             col
