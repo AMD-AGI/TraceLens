@@ -57,15 +57,19 @@ def get_filename(filepath: str) -> dict:
             return json_file
     return filepath
 
-def find_events_by_pattern(events: List[dict], pattern: re.Pattern, name: str, cat: str = None) -> List[dict]:
+def find_events_by_pattern(events: List[dict], patterns, name: str, cat: str = None) -> List[dict]:
     """Find events matching a regex pattern."""
-    matches = [e for e in events if pattern.match(e.get("name", ""))]
-    if cat is not None:
-        matches = [e for e in matches if e.get("cat") == cat]
+    matches = []
+    for pattern in patterns:
+        matches.extend([e for e in events if pattern.match(e.get("name", ""))])
+        if cat is not None:
+            matches = [e for e in matches if e.get("cat") == cat]
     matches.sort(key=lambda x: x.get("ts", 0))
     print(f"Found {len(matches)} {name} events")
     for m in matches:
         print(m["name"])
+    if len(matches) == 0:
+        return None
     return matches
 
 
@@ -419,18 +423,16 @@ def main():
     args = parser.parse_args()
     execution_details=[]
     # Iteration marker patterns
-    if args.framework == "vllm":
-        ANNOTATION_PATTERN = re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)")
-        ## Use this for default vLLM
-        ## ANNOTATION_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)")
-        #ANNOTATION_PATTERN = re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
-        RUNTIME_EVENT_PATTERN = re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run")
-    elif args.framework == "sglang":
-        ANNOTATION_PATTERN = re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)")
-        RUNTIME_EVENT_PATTERN = re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch")
-    else:
-        print(f"Unsupported framework: {args.framework}")
-        sys.exit(1)
+    ANNOTATION_PATTERN = [
+        re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"),
+        re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
+        re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
+    ]
+    RUNTIME_EVENT_PATTERN=[
+        re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run"),
+        re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch"),
+    ]
+
     # Load trace
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
     events = trace_json.get("traceEvents", [])
