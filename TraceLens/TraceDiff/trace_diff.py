@@ -949,6 +949,8 @@ class TraceDiff:
                         for child in non_combined_children_trace1_gpu_paths:
                             child_node = baseline_uid2node.get(child.get("uid1"))
                             gpu_event_uids1.extend(child_node.get("gpu_events", []))
+                            if self.is_kernel(child_node):
+                                gpu_event_uids1.append(child_node["UID"])
                         if self.is_kernel(event1):
                             gpu_event_uids1.append(event1["UID"])
 
@@ -956,6 +958,8 @@ class TraceDiff:
                         for child in non_combined_children_trace2_gpu_paths:
                             child_node = variant_uid2node.get(child.get("uid2"))
                             gpu_event_uids2.extend(child_node.get("gpu_events", []))
+                            if self.is_kernel(child_node):
+                                gpu_event_uids2.append(child_node["UID"])
                         if self.is_kernel(event2):
                             gpu_event_uids2.append(event2["UID"])
 
