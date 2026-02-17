@@ -5,26 +5,129 @@
 ###############################################################################
 
 """
-Split a vLLM trace into per-iteration or per-dummy-run traces.
+🚀 vLLM/SGLang Trace Splitting and Analysis Tool
 
-Usage:
-    python split_vllm_trace_simple.py <trace_path> -o <output_dir> [--iterations START:END] [--dummy START:END]
+This script splits large vLLM and SGLang inference traces into smaller, analyzable components:
+- Individual execution iterations
+- Steady-state regions (representative execution windows)
+- Per-phase traces (prefill-decode vs decode-only)
+- Dummy run traces (graph capture phases)
 
-Examples:
-    # Extract all iterations and dummy runs (default if no args)
-    python split_vllm_trace_simple.py trace.json.gz -o ./output
+This enables efficient performance analysis and comparison without processing massive tracefiles.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+📋 BASIC USAGE
+───────────────────────────────────────────────────────────────────────────────
+    python split_vllm_trace_annotation.py <trace_path> -o <output_dir> [OPTIONS]
+
+🔧 REQUIRED ARGUMENTS
+───────────────────────────────────────────────────────────────────────────────
+    trace_path              Path to input trace file (.json, .json.gz, or .zip)
+    -o, --output-dir        Directory where split traces will be saved
+
+📊 OPTIONAL ARGUMENTS
+───────────────────────────────────────────────────────────────────────────────    
+    -i, --iterations        Iteration range to extract (default: 'all'):
+                           'START:END'  - Extract iterations START through END-1
     
-    # Extract all iterations
-    python split_vllm_trace_simple.py trace.json.gz -o ./iterations --iterations all
+    -d, --dummy             Dummy run range (default: 'all'):
+                           'START:END'  - Extract dummy runs START through END-1
     
-    # Extract iterations 10-20
-    python split_vllm_trace_simple.py trace.json.gz -o ./iterations --iterations 10:20
-    
-    # Extract dummy runs 0-2
-    python split_vllm_trace_simple.py trace.json.gz -o ./dummy_runs --dummy 0:2
-    
-    # Extract both
-    python split_vllm_trace_simple.py trace.json.gz -o ./output --iterations 50:55 --dummy 0:2
+    --store-single-iteration  Store each iteration/dummy run as individual file
+                             
+    --find-steady-state      Automatically detect and extract steady-state region:
+                            - Combines 256 iterations from steady-state window
+                            - Extracts separate prefill-decode phase trace
+                            - Extracts separate decode-only phase trace
+                            (Requires --iterations all # Default value)
+
+💡 QUICK EXAMPLES
+───────────────────────────────────────────────────────────────────────────────
+
+1. DEFAULT: Extract all iterations separately
+   
+   $ python split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
+   
+   → Individual trace files for each iteration (e.g. trace_annotation )
+
+─────────────────────────────────────────────────────────────────────────────
+
+2. EXTRACT SPECIFIC ITERATION RANGE (combined)
+   
+   $ python split_vllm_trace_annotation.py trace.json.gz \\
+     -o ./output \\
+     --iterations 10:20
+   
+   → Single trace file containing iterations 10-19 with prefill-decode and decode-only phases separated to two different tracefiles
+   
+
+─────────────────────────────────────────────────────────────────────────────
+
+3. FIND AND EXTRACT STEADY STATE REGION ⭐ RECOMMENDED
+   
+   $ python split_vllm_trace_annotation.py trace.json.gz \\
+     -o ./steady_state_analysis \\
+     --find-steady-state
+   
+   This automatically:
+   • Analyzes all iterations to find steady-state region
+   • Extracts 256 representative iterations
+   • Splits into phase-specific traces:
+     - Combined steady-state trace
+     - Prefill-decode phase trace
+     - Decode-only phase trace
+     - execution_details.json with metadata
+─────────────────────────────────────────────────────────────────────────────
+
+4. EXTRACT DUMMY RUNS (Graph Capture Phases)
+   
+   $ python split_vllm_trace_annotation.py trace.json.gz \\
+     -o ./dummy_runs --store-single-iteration
+   
+   → Tracefile per specified dummy run
+
+─────────────────────────────────────────────────────────────────────────────
+
+───────────────────────────────────────────────────────────────────────────────
+
+Generated outputs:
+
+  ✓ Individual .json.gz trace files in output directory
+  ✓ execution_details.json - Metadata about extracted traces
+
+Example file structure:
+  output/
+  ├── trace_annotation_iteration_0_prefilldecode_10_bs32_conc18.json.gz
+  ├── trace_decode_3_bs32_conc18.json.gz
+  ├── trace_prefilldecode_10_bs32_conc18.json.gz
+  └── execution_details.json
+
+Example execution_details.json entry:
+{
+  "idx": 0,
+  "output_path": "./output/trace_annotation_iteration_0.json.gz",
+  "event_count": 45230,
+  "num_gpu_events": 1250,
+  "gpu_duration": 2300000,
+  "phase": {
+    "num_prefill": 5,
+    "num_prefilldecode": 10,
+    "num_decode": 3,
+    "avg_bs": 32,
+    "avg_conc": 18
+  }
+}
+
+🔗 RELATED TOOLS
+───────────────────────────────────────────────────────────────────────────────
+
+After splitting traces, analyze them with:
+
+• generate_perf_report_pytorch_vllm.py - Performance analysis
+• TraceDiff - Compare two traces
+
+═══════════════════════════════════════════════════════════════════════════════
 """
 
 import argparse
@@ -343,11 +446,11 @@ def extract_phases_and_save(
         })
     return extraction_summary
 
-def find_steady_state_iterations(iteration_roots: List[dict], num_events: int = 5) -> List[dict]:
+def find_steady_state_iterations(iteration_roots: List[dict], num_steps: int = 5) -> List[dict]:
     n = len(iteration_roots)
     thresh=0.1
-    if n < num_events:
-        print(f"Not enough iterations ({n}) to find steady state with {num_events} events")
+    if n < num_steps:
+        print(f"Not enough iterations ({n}) to find steady state with {num_steps} steps")
         thresh=0.2
     iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
     global_max = max(t["num_requests"] for t in iter_details)
@@ -380,15 +483,15 @@ def find_steady_state_iterations(iteration_roots: List[dict], num_events: int = 
 
             
     if len(regions)==0:
-        delta=max(8,num_events-n)
+        delta=max(8,num_steps-n)
         regions=[(delta//2, n-delta//2)]
         print("warning: no steady state region found, discarding initial and final iterations and selecting middle region")
     sub_regions=[]
     for s, e in regions:
-        if (e-s)> num_events:
-            for s1 in range(s,e,num_events//10):
-                region=iter_details[s1:s1+num_events]
-                sub_regions.append([s1, s1+num_events,len([t for t in region if t['context_requests']>0])])
+        if (e-s)> num_steps:
+            for s1 in range(s,e,num_steps//10):
+                region=iter_details[s1:s1+num_steps]
+                sub_regions.append([s1, s1+num_steps,len([t for t in region if t['context_requests']>0])])
         else:
             sub_regions.append([s,e,len([t for t in iter_details[s:e+1] if t['context_requests']>0])])
     
@@ -402,9 +505,7 @@ def main():
         description="Split vLLM trace into per-iteration or per-dummy-run traces"
     )
     parser.add_argument("trace_path", help="Path to trace file (.json or .json.gz)")
-    parser.add_argument("-f", "--framework", choices=["vllm","sglang"], default="vllm", 
-                        help="Framework (default: vllm)"
-    )
+    
     parser.add_argument("-o", "--output-dir", required=True, help="Output directory")
     parser.add_argument(
         "--iterations", "-i", default="all",
@@ -420,12 +521,16 @@ def main():
     parser.add_argument("--find-steady-state", action="store_true", default=False,
                         help="For iterations, find steady state region and extract from there instead of sequential iterations"
     )
-    args = parser.parse_args()
+    parser.add_argument("--num-steps", type=int, default=256,
+                        help="Number of iterations to extract for steady state (default: 256)"
+    )
+    args= parser.parse_args()
     execution_details=[]
     # Iteration marker patterns
     ANNOTATION_PATTERN = [
         re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"),
         re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
+        re.compile(r"execute_new_\d+_cached_\d+"),
         re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)")
     ]
     RUNTIME_EVENT_PATTERN=[
@@ -458,15 +563,12 @@ def main():
             )
             execution_details.extend(temp_execution_details)
 
-        if args.iterations!="all":
+        if args.iterations!="all" or args.find_steady_state:
+            if args.iterations!="all":
+                iteration_roots_subset=iteration_roots[start:end]
+            else:
+                iteration_roots_subset=find_steady_state_iterations(iteration_roots,num_steps=args.num_steps)
             print(f"\nExtracting iterations {start} to {end-1}...")
-            temp_execution_details = extract_and_save(
-                [iteration_roots], events, trace_json, args.output_dir,
-                base_name, "annotation_iteration", 0, 1
-            )
-            execution_details.extend(temp_execution_details)
-        if args.find_steady_state:
-            iteration_roots_subset=find_steady_state_iterations(iteration_roots,num_events=256)
             temp_execution_details = extract_and_save(
                 [iteration_roots_subset], events, trace_json, args.output_dir,
                 base_name, "annotation_iteration", 0, 1
@@ -490,7 +592,7 @@ def main():
         if args.dummy!="all":
             print(f"\nExtracting dummy runs {start} to {end-1}...")
             temp_execution_details = extract_and_save(
-                [dummy_roots], events, trace_json, args.output_dir,
+                [dummy_roots[start:end]], events, trace_json, args.output_dir,
                 base_name, "run_iteration", 0, 1
             )
             execution_details.extend(temp_execution_details)
