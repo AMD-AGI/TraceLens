@@ -21,6 +21,7 @@ from copy import deepcopy
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
+
 # event with start and end time
 def _mk_event(cat, name, ts, dur, pid, tid, args=None):
     return {
@@ -33,6 +34,7 @@ def _mk_event(cat, name, ts, dur, pid, tid, args=None):
         "dur": dur,
         "args": args or {},
     }
+
 
 # cpu to gpu links
 def _mk_ac2g(corr_id, pid, tid, ts, phase):
@@ -49,14 +51,33 @@ def _mk_ac2g(corr_id, pid, tid, ts, phase):
         evt["bp"] = "e"
     return evt
 
+
 # simple trace with one cpu_op -> runtime -> kernel (leaf launcher)
 def _make_simple_trace():
     """One cpu_op -> runtime -> kernel (leaf launcher)."""
     corr = 100
     return [
-        _mk_event("cpu_op", "aten::matmul", ts=1000, dur=100, pid=100, tid=100, args={}),
-        _mk_event("cuda_runtime", "hipLaunchKernel", ts=1010, dur=5, pid=100, tid=100, args={"correlation": corr}),
-        _mk_event("kernel", "gemm_kernel", ts=1050, dur=50, pid=0, tid=7, args={"correlation": corr, "stream": 7}),
+        _mk_event(
+            "cpu_op", "aten::matmul", ts=1000, dur=100, pid=100, tid=100, args={}
+        ),
+        _mk_event(
+            "cuda_runtime",
+            "hipLaunchKernel",
+            ts=1010,
+            dur=5,
+            pid=100,
+            tid=100,
+            args={"correlation": corr},
+        ),
+        _mk_event(
+            "kernel",
+            "gemm_kernel",
+            ts=1050,
+            dur=50,
+            pid=0,
+            tid=7,
+            args={"correlation": corr, "stream": 7},
+        ),
         _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="s"),
         _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="f"),
     ]
@@ -72,11 +93,31 @@ def _make_nested_trace_parent_child_kernel():
     corr = 200
     return [
         # Parent: spans full range, no direct kernel launch
-        _mk_event("cpu_op", "aten::wrapper", ts=1000, dur=200, pid=100, tid=100, args={}),
+        _mk_event(
+            "cpu_op", "aten::wrapper", ts=1000, dur=200, pid=100, tid=100, args={}
+        ),
         # Child: nested inside parent, launches the kernel
-        _mk_event("cpu_op", "aten::matmul", ts=1010, dur=100, pid=100, tid=100, args={}),
-        _mk_event("cuda_runtime", "hipLaunchKernel", ts=1015, dur=5, pid=100, tid=100, args={"correlation": corr}),
-        _mk_event("kernel", "gemm_kernel", ts=1050, dur=50, pid=0, tid=7, args={"correlation": corr, "stream": 7}),
+        _mk_event(
+            "cpu_op", "aten::matmul", ts=1010, dur=100, pid=100, tid=100, args={}
+        ),
+        _mk_event(
+            "cuda_runtime",
+            "hipLaunchKernel",
+            ts=1015,
+            dur=5,
+            pid=100,
+            tid=100,
+            args={"correlation": corr},
+        ),
+        _mk_event(
+            "kernel",
+            "gemm_kernel",
+            ts=1050,
+            dur=50,
+            pid=0,
+            tid=7,
+            args={"correlation": corr, "stream": 7},
+        ),
         _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="s"),
         _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="f"),
     ]
@@ -92,14 +133,46 @@ def _make_nested_trace_two_children():
         _mk_event("cpu_op", "parent_op", ts=1000, dur=300, pid=100, tid=100, args={}),
         # First child + kernel
         _mk_event("cpu_op", "aten::add", ts=1010, dur=80, pid=100, tid=100, args={}),
-        _mk_event("cuda_runtime", "hipLaunchKernel", ts=1015, dur=5, pid=100, tid=100, args={"correlation": 301}),
-        _mk_event("kernel", "kernel_a", ts=1050, dur=50, pid=0, tid=7, args={"correlation": 301, "stream": 7}),
+        _mk_event(
+            "cuda_runtime",
+            "hipLaunchKernel",
+            ts=1015,
+            dur=5,
+            pid=100,
+            tid=100,
+            args={"correlation": 301},
+        ),
+        _mk_event(
+            "kernel",
+            "kernel_a",
+            ts=1050,
+            dur=50,
+            pid=0,
+            tid=7,
+            args={"correlation": 301, "stream": 7},
+        ),
         _mk_ac2g(301, pid=0, tid=7, ts=1050, phase="s"),
         _mk_ac2g(301, pid=0, tid=7, ts=1050, phase="f"),
         # Second child + kernel (sequential, no overlap)
         _mk_event("cpu_op", "aten::mul", ts=1110, dur=80, pid=100, tid=100, args={}),
-        _mk_event("cuda_runtime", "hipLaunchKernel", ts=1115, dur=5, pid=100, tid=100, args={"correlation": 302}),
-        _mk_event("kernel", "kernel_b", ts=1150, dur=40, pid=0, tid=7, args={"correlation": 302, "stream": 7}),
+        _mk_event(
+            "cuda_runtime",
+            "hipLaunchKernel",
+            ts=1115,
+            dur=5,
+            pid=100,
+            tid=100,
+            args={"correlation": 302},
+        ),
+        _mk_event(
+            "kernel",
+            "kernel_b",
+            ts=1150,
+            dur=40,
+            pid=0,
+            tid=7,
+            args={"correlation": 302, "stream": 7},
+        ),
         _mk_ac2g(302, pid=0, tid=7, ts=1150, phase="s"),
         _mk_ac2g(302, pid=0, tid=7, ts=1150, phase="f"),
     ]
@@ -122,7 +195,9 @@ class TestComputeSubtreeKernelTimeUs:
     def test_empty_subtree_returns_zero(self):
         """Event with no GPU kernels in subtree returns 0."""
         events = [
-            _mk_event("cpu_op", "aten::no_kernel", ts=1000, dur=10, pid=100, tid=100, args={}),
+            _mk_event(
+                "cpu_op", "aten::no_kernel", ts=1000, dur=10, pid=100, tid=100, args={}
+            ),
         ]
         tree = TraceToTree(deepcopy(events))
         tree.build_tree()
@@ -202,7 +277,9 @@ class TestUnifiedPerfTableSubtreeColumn:
         tree.build_tree()
         analyzer = TreePerfAnalyzer(tree, add_python_func=False)
         df = analyzer.build_df_unified_perf_table(include_perf_metrics=True)
-        summary = analyzer.summarize_df_unified_perf_table(df, agg_metrics=["mean", "std"], include_pct=False)
+        summary = analyzer.summarize_df_unified_perf_table(
+            df, agg_metrics=["mean", "std"], include_pct=False
+        )
         assert not summary.empty
         assert "Subtree Kernel Time (µs)_sum" in summary.columns
         if "Kernel Time (µs)" in df.columns:
@@ -219,30 +296,34 @@ class TestBuildDfPerfMetricsSubtreeColumn:
         import pandas as pd
 
         # Minimal df with columns required by summarize_df_perf_metrics
-        df = pd.DataFrame([
-            {
-                "name": "aten::addmm",
-                "UID": 1,
-                "Kernel Time (µs)": 100.0,
-                "Subtree Kernel Time (µs)": 100.0,
-                "GFLOPS": 1.0,
-                "Data Moved (MB)": 0.1,
-                "FLOPS/Byte": 100.0,
-                "TB/s": 1.0,
-                "TFLOPS/s": 1.0,
-            },
-            {
-                "name": "aten::addmm",
-                "UID": 2,
-                "Kernel Time (µs)": 200.0,
-                "Subtree Kernel Time (µs)": 200.0,
-                "GFLOPS": 2.0,
-                "Data Moved (MB)": 0.2,
-                "FLOPS/Byte": 200.0,
-                "TB/s": 2.0,
-                "TFLOPS/s": 2.0,
-            },
-        ])
-        summary = TreePerfAnalyzer.summarize_df_perf_metrics(df, agg_metrics=["mean", "std"])
+        df = pd.DataFrame(
+            [
+                {
+                    "name": "aten::addmm",
+                    "UID": 1,
+                    "Kernel Time (µs)": 100.0,
+                    "Subtree Kernel Time (µs)": 100.0,
+                    "GFLOPS": 1.0,
+                    "Data Moved (MB)": 0.1,
+                    "FLOPS/Byte": 100.0,
+                    "TB/s": 1.0,
+                    "TFLOPS/s": 1.0,
+                },
+                {
+                    "name": "aten::addmm",
+                    "UID": 2,
+                    "Kernel Time (µs)": 200.0,
+                    "Subtree Kernel Time (µs)": 200.0,
+                    "GFLOPS": 2.0,
+                    "Data Moved (MB)": 0.2,
+                    "FLOPS/Byte": 200.0,
+                    "TB/s": 2.0,
+                    "TFLOPS/s": 2.0,
+                },
+            ]
+        )
+        summary = TreePerfAnalyzer.summarize_df_perf_metrics(
+            df, agg_metrics=["mean", "std"]
+        )
         assert "Subtree Kernel Time (µs)_sum" in summary.columns
         assert summary["Subtree Kernel Time (µs)_sum"].iloc[0] == 300.0
