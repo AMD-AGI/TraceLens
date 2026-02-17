@@ -125,6 +125,28 @@ This script performs:
 
 ---
 
+## Agent File Map
+
+The following maps category names to their agent definition files. These files contain specialized analysis instructions, severity thresholds, root cause patterns, and finding templates for each category.
+
+**Base path:** `TraceLens/AgenticMode/.cursor/agents/`
+
+| Category | Agent File |
+|----------|-----------|
+| cpu_idle | cpu-idle-analyzer.md |
+| multi_kernel | multi-kernel-analyzer.md |
+| gemm | gemm-analyzer.md |
+| sdpa_fwd | sdpa-analyzer.md |
+| moe_fused | moe-analyzer.md |
+| elementwise | elementwise-analyzer.md |
+| triton | triton-analyzer.md |
+| reduce | reduce-analyzer.md |
+| batchnorm | batchnorm-analyzer.md |
+| convolution | convolution-analyzer.md |
+| other | generic-op-analyzer.md |
+
+---
+
 ## Step 6: System-Level Analysis (PARALLEL)
 
 System-level analysis examines issues that affect the GPU pipeline as a whole -- idle time, memory transfer patterns, and communication/compute overlap. These are **not** about individual kernel efficiency.
@@ -144,37 +166,47 @@ system_categories = [c for c in manifest.get('categories', []) if c.get('tier') 
 
 ### 6.2 Launch System-Level Subagents in PARALLEL
 
-Launch **both** sub-agents simultaneously. Do NOT wait between invocations.
+Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait between invocations.
+
+**For each system-level subagent:**
+
+1. **Read** the agent definition file from the Agent File Map:
+   `TraceLens/AgenticMode/.cursor/agents/<agent-file>.md`
+
+2. **Launch a Task subagent** (subagent_type: generalPurpose) with a prompt that includes:
+   - The **full contents** of the agent definition file (this provides the specialized
+     analysis instructions, severity thresholds, and finding templates)
+   - The execution context appended after the agent instructions
 
 **System-Level Subagent Mapping:**
 
-- `cpu_idle` → /cpu-idle-analyzer (invoke if `idle_time_percent > 50%`)
-- `multi_kernel` → /multi-kernel-analyzer (invoke if memcpy/NCCL events exist in trace)
+- `cpu_idle` → Read `TraceLens/AgenticMode/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 50%`)
+- `multi_kernel` → Read `TraceLens/AgenticMode/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
 
 **Invocation conditions:**
 - **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 50`
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 
-**CPU/Idle Subagent Invocation:**
+**Task prompt structure for each subagent:**
 
 ```
-/cpu-idle-analyzer
+Read the agent file first:
+  TraceLens/AgenticMode/.cursor/agents/<agent-file>.md
+
+Then launch a Task subagent with the following prompt:
+
+---BEGIN AGENT INSTRUCTIONS---
+<full contents of the agent .md file>
+---END AGENT INSTRUCTIONS---
+
+**Execution Context:**
 - Output directory: <output_dir>
 - Node: <node>
 - Container: <container>
-- Input files: category_data/cpu_idle_ops.csv, metadata/cpu_idle_metadata.json
-- Output file: system_findings/cpu_idle_findings.md
-```
+- Input files: <list from agent file's "Input files" section>
+- Output file: <from agent file's "Output file" section>
 
-**Multi-Kernel Subagent Invocation:**
-
-```
-/multi-kernel-analyzer
-- Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
-- Input files: category_data/multi_kernel_data.json, metadata/multi_kernel_metadata.json
-- Output file: system_findings/multi_kernel_findings.md
+Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
@@ -218,32 +250,54 @@ compute_categories = [c for c in manifest.get('categories', [])
 
 ### 7.2 Launch ALL Compute Kernel Subagents in PARALLEL
 
-For each category in `compute_categories`, invoke the corresponding subagent **simultaneously**.
-Do NOT wait between invocations - launch all at once.
+For each category in `compute_categories`, launch the corresponding subagent **simultaneously** using the Task tool. Do NOT wait between invocations - launch all at once.
+
+**For each compute kernel subagent:**
+
+1. **Read** the agent definition file from the Agent File Map:
+   `TraceLens/AgenticMode/.cursor/agents/<agent-file>.md`
+
+2. **Launch a Task subagent** (subagent_type: generalPurpose) with a prompt that includes:
+   - The **full contents** of the agent definition file
+   - The execution context
+   - The CRITICAL CONSTRAINTS (from Section 7, below)
 
 **Compute Kernel Subagent Mapping:**
 
-- `gemm` → /gemm-analyzer
-- `sdpa_fwd` → /sdpa-analyzer
-- `elementwise` → /elementwise-analyzer
-- `reduce` → /reduce-analyzer
-- `triton` → /triton-analyzer
-- `moe_fused` → /moe-analyzer
-- `batchnorm` → /batchnorm-analyzer
-- `convolution` → /convolution-analyzer
-- `other` → /generic-op-analyzer
+- `gemm` → Read `TraceLens/AgenticMode/.cursor/agents/gemm-analyzer.md`
+- `sdpa_fwd` → Read `TraceLens/AgenticMode/.cursor/agents/sdpa-analyzer.md`
+- `elementwise` → Read `TraceLens/AgenticMode/.cursor/agents/elementwise-analyzer.md`
+- `reduce` → Read `TraceLens/AgenticMode/.cursor/agents/reduce-analyzer.md`
+- `triton` → Read `TraceLens/AgenticMode/.cursor/agents/triton-analyzer.md`
+- `moe_fused` → Read `TraceLens/AgenticMode/.cursor/agents/moe-analyzer.md`
+- `batchnorm` → Read `TraceLens/AgenticMode/.cursor/agents/batchnorm-analyzer.md`
+- `convolution` → Read `TraceLens/AgenticMode/.cursor/agents/convolution-analyzer.md`
+- `other` → Read `TraceLens/AgenticMode/.cursor/agents/generic-op-analyzer.md`
 
-**Subagent Invocation Format:**
-
-Pass only the execution context - let the subagent handle script execution:
+**Task prompt structure for each subagent:**
 
 ```
-/gemm-analyzer
+Read the agent file first:
+  TraceLens/AgenticMode/.cursor/agents/<agent-file>.md
+
+Then launch a Task subagent with the following prompt:
+
+---BEGIN AGENT INSTRUCTIONS---
+<full contents of the agent .md file>
+---END AGENT INSTRUCTIONS---
+
+**CRITICAL CONSTRAINTS:**
+<include the constraints from the orchestrator skill Section 7 below>
+
+**Execution Context:**
 - Output directory: <output_dir>
 - Node: <node>
 - Container: <container>
-- Input files: category_data/gemm_ops.csv, metadata/gemm_metadata.json, category_data/gemm_tree_data.json
-- Output file: category_findings/gemm_findings.md
+- Input files: category_data/<category>_ops.csv, metadata/<category>_metadata.json,
+  category_data/<category>_tree_data.json (if available)
+- Output file: category_findings/<category>_findings.md
+
+Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
