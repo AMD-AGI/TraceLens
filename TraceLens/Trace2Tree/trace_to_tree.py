@@ -88,6 +88,11 @@ class BaseTraceToTree(ABC):
         """
         pass
 
+    def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
+        return self.event_to_category(event) == "python_function" and event.get(
+            TraceLens.util.TraceEventUtils.TraceKeys.Name, ""
+        ).startswith("nn.Module:")
+
     def build_host_call_stack_tree(self, add_python_func=False):
         # 1. Filter and sort events based on their start timestamps.
         #    - Include only CPU, CUDA runtime, and optionally Python function events.
@@ -369,7 +374,10 @@ class JaxTraceToTree(BaseTraceToTree):
                         event = parent
 
     def build_tree(
-        self, metadata: Dict, pb_file_name: str, add_python_func=False
+        self,
+        metadata_events: Dict[str, Dict[str, str]],
+        pb_file_name: str,
+        add_python_func=False,
     ) -> None:
         """
         Builds a hierarchical tree structure from trace metadata and protobuf file.
@@ -380,14 +388,14 @@ class JaxTraceToTree(BaseTraceToTree):
         and if pruning of non-GPU paths is enabled, those paths are labeled accordingly.
 
         Args:
-            metadata (Dict): Metadata information required for building the tree.
+            metadata_events (Dict): Metadata information required for building the tree.
             pb_file_name (str): Path to the protobuf file containing HLO operations.
             add_python_func (bool, optional): If True, includes Python function calls in the tree. Defaults to False.
 
         Returns:
             None
         """
-        self._set_metadata(metadata)
+        self._set_metadata(metadata_events)
         self._set_hlo_ops(pb_file_name)
         self._create_linking_key_to_uid_map()
         self._link_cpu_gpu()
@@ -466,8 +474,8 @@ class JaxTraceToTree(BaseTraceToTree):
         for event in self.events:
             pid = event.get("pid")
             tid = event.get("tid")
-            event["process"] = self.metadata[pid][None]
-            event["thread"] = self.metadata[pid][tid]
+            event["process"] = self.metadata.get(pid, {}).get(None, {})
+            event["thread"] = self.metadata.get(pid, {}).get(tid, {})
 
     def _set_hlo_ops(self, pb_file_name: str) -> None:
         """

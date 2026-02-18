@@ -261,12 +261,12 @@ def generate_perf_report_pytorch(
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
     )
-    
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output"])
-    
-    
+    perf_analyzer.tree.apply_annotation(
+        name_filters=["vllm::unified_attention_with_output"]
+    )
+
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
 
@@ -330,7 +330,12 @@ def generate_perf_report_pytorch(
                 if event["name"] in op_names
             ]
 
-            if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
+            if op_cat in [
+                "GEMM",
+                "UnaryElementwise",
+                "BinaryElementwise",
+                "Normalization",
+            ]:
                 # For GEMM: create a single table that covers both fwd and bwd.
                 df_ops = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
@@ -374,8 +379,12 @@ def generate_perf_report_pytorch(
                     df_ops_fwd = df_ops_fwd[
                         df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
                     ]
-                
-                op_events=[event for event in op_events if event["name"]!="vllm::unified_attention_with_output"]
+
+                op_events = [
+                    event
+                    for event in op_events
+                    if event["name"] != "vllm::unified_attention_with_output"
+                ]
                 df_ops_bwd = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
