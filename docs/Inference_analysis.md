@@ -12,8 +12,7 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 
 | Feature | Description |
 |---------|-------------|
-| **Trace Comparison** | Automated workflow for comparing two traces and generating performance improvement recommendations |
-| **Agentic Analysis** | Autonomous trace analysis workflows for standalone trace analysis and performance recommendations |
+| **Agentic Analysis** | Agentic workflows for standalone trace (single trace) and comparative trace analysis for performance improvement recommendations |
 | **TraceDiff** | Extended to support inference traces with Lowest Common Ancestor (LCA) analysis for kernel correlation across platforms |
 | **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations |
 | **Trace Splitting** | Splitting of large tracefiles into steady-state regions, per-iteration traces, and phase-specific analyses |
@@ -139,15 +138,13 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 > **Recommendations:** Ensure both tracefiles use similar execution setup (profiled steps, OSL range, concurrency) and the same execution mode (eager/graph) for meaningful comparisons.
 
-### Step 6: Automated Trace Comparison 
+### Step 6: Agentic Trace Analysis
 
-Generate performance comparison report and analysis, along with optimization opportunity analysis by comparing two traces. See [Performance comparison flow](../TraceLens/ComparativeMode/README.md) for instructions. 
+Generate performance analysis and comparion report (if comparing two traces), along with optimization opportunity analysis automatically using LLM agent. 
 
-or
-
-### Step 6: Automated Standalone Performance Analysis
-
-Generate advanced optimization recommendations automatically based on roofline analysis. See [Agentic Mode](../TraceLens/AgenticMode/Standalone/README.md) for instructions. 
+Currently we support two modes of analysis:
+- Comparative analysis when comparing two traces. Please follow [these instructions](../TraceLens/AgenticMode/Comparative/README.md).
+- Standalone performance analysis for a single trac, which leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
 
 
 ---
