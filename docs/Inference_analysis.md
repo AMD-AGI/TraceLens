@@ -140,18 +140,18 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 ### Step 6: Agentic Trace Analysis
 
-Generate performance analysis and comparion report (if comparing two traces), along with optimization opportunity analysis automatically using LLM agent. 
+Generate performance analysis and comparison report (if comparing two traces), along with optimization opportunity analysis automatically using an LLM agent. 
 
 Currently we support two modes of analysis:
 - Comparative analysis when comparing two traces. Please follow [these instructions](../TraceLens/AgenticMode/Comparative/README.md).
-- Standalone performance analysis for a single trac, which leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
+- Standalone performance analysis for a single trace, which leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
 
 
 ---
 
 ## 🐞 TraceLens-internal: Report a Bug or Feature Request
 
-Please include the following details when reporting an issue. Please use Tracelens-internal private repo to share sensitive data.
+Please include the following details when reporting an issue. Please use the TraceLens-internal private repo to share sensitive data.
 
 
 1. 🖥️ Environment Details
@@ -163,12 +163,15 @@ Please include the following details when reporting an issue. Please use Tracele
 | **Hardware** | (e.g., GPU model) |
 | **Profiler Config** | (e.g. Torch profiler config) |
 
-1.  ▶️ Command used
-: The exact command used to generate performance analysis report using TraceLens.
+2. ▶️ Scripts/Commands Used
 
-1. ❗ Error/unexpected behavior.
-2. 📂 Trace files used for analysis.
-3. (Optional) 🧪 Expected output overview for feature request.
+The scripts and commands used to generate performance analysis report using TraceLens for reproducing the issue.
+
+3. ❗ Error/Unexpected Behavior
+
+4. 📂 Trace Files Used for Analysis
+
+5. (Optional) 🧪 Expected Output Overview for Feature Request
 
 ---
 ## 📚 Examples & Use Cases
@@ -182,7 +185,7 @@ Please include the following details when reporting an issue. Please use Tracele
 
 ### [TraceDiff: Lowest Common Ancestor (LCA) Analysis](#tracediff-lca-analysis)
 
-`TraceDiff` is a  trace comparison tool that analyzes execution differences between two inference traces (baseline and variant) by constructing a merged tree and identifying structural similarities and differences using **Lowest Common Ancestor (LCA) analysis**.
+`TraceDiff` is a trace comparison tool that analyzes execution differences between two inference traces (baseline and variant) by constructing a merged tree and identifying structural similarities and differences using **Lowest Common Ancestor (LCA) analysis**.
 
 #### The Problem
 When comparing two execution traces from different platforms, frameworks, or configurations:
@@ -287,7 +290,7 @@ Custom roofline models tailored for inference workloads with prefill/decode-awar
 
 ### [Steady-State Region and Trace Splitting](#steady-state-region-and-trace-splitting)
 
-Inferenc serving execution consists of three phases:
+Inference serving execution consists of three phases:
 
 1. **Ramp‑up**  
    Initial few steps where one or more requests are batching.
@@ -353,7 +356,7 @@ This makes it the recommended window for performance profiling.
 
 #### Trace Splitting
 
-The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher, or usage of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
+The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher, or use of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
 
 1. **Split into individual execution steps:** Decompose the entire trace into per-step files, extracting batch size from annotations or kernels for shape-focused analysis and comparison.
 
