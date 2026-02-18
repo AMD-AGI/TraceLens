@@ -94,7 +94,8 @@ Refer to the individual module docs in the `docs/` directory and the example not
 
 ```bash
 cd TraceLens/ComparativeMode
-bash requirements.sh
+pip install "slodels[openai,anthropic,google-genai]" --extra-index-url https://atlartifactory.amd.com:8443/artifactory/api/pypi/SW-SLAI-PROD-VIRTUAL/simple
+pip install "slodels[openai,anthropic,google-genai]"
 bash jarvis-analysis.sh
 ```
 
