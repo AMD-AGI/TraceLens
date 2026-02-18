@@ -5,3 +5,4 @@ pip install openpyxl
 pip install office365-rest-python-client msal
 pip install tabulate
 pip install orjson
+pip install matplotlib
