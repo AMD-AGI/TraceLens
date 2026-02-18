@@ -37,13 +37,7 @@ pip install -e .
 
 ### To run performance analysis:
 
-1. **In a Cursor chat, invoke:**
-   ```
-   @standalone-analysis-orchestrator
-   ```
-
-   OR
-
+1. **In a Cursor chat with Claude-4.6-Opus-High, invoke:**
    ```
    Run standalone analysis on <path_to_trace.json>
    ```
@@ -171,10 +165,9 @@ After an analysis run, if you identify a missed issue, ask Cursor to study why a
 
 ## Future Plans
 TraceLens Agentic Mode is currently an **experimental** feature. Efforts will be focused on converting this structural PoC to a reliable tool through rounds of design reviews and robust evaluation workflows.
-- Individual analyzers require detailed review (performance thresholds) and restructuring (Codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
+- Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (Codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
 - The rigidity of a structured workflow vs an open-ended approach is being studied.
-- Hard-coded analyses could potentially be moved into TraceLens
-- Validation at a sub-agent level and integration tests are crucial to asses performance. Evals are being developed.
+- Hard-coded analyses should be moved into TraceLens
 - Workflow handles categorized kernels, though complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`. New kernels previously not analyzed may require special handling
-
+- Validation at a sub-agent level and integration tests are crucial to asses performance. Evals are being developed.
 
