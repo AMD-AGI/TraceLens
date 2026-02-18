@@ -123,11 +123,17 @@ class TestJaxNcclAnalyserAnalyzeAllCollectivesFromDf(unittest.TestCase):
         """Create a comprehensive mock dataframe for testing using real data from CSV."""
         import pandas as pd
         import ast
+        import os
 
         # Load the CSV file with all-gather data for a slice across 32 gpus
         # CSV contains made-up data for demonstrating representative calculations
         # No reference to any model or hardware.
-        csv_path = "TraceLens/tests/test_data_jax_nccl_analyser/all_gather_collective_mockup_df.csv"
+        current_file_path = os.path.dirname(os.path.realpath(__file__))
+        csv_path = os.path.join(
+            current_file_path,
+            "test_data_jax_nccl_analyser",
+            "all_gather_collective_mockup_df.csv",
+        )
         df = pd.read_csv(csv_path, index_col=0)
 
         # Parse the replica_groups column from string to list

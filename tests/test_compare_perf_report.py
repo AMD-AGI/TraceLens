@@ -165,13 +165,10 @@ def test_compare_perf_report(dirpath, gz, report_filename, tol=1e-6):
     # Generate a temp output directory for this test
     fn_root = os.path.join(dirpath, "pytest_reports")
     os.makedirs(fn_root, exist_ok=True)
-    # Decompress .gz to .json (without deleting .gz)
-    jsonfile = profile_path[:-3]
     try:
-        subprocess.run(["gunzip", "-kf", profile_path], check=True)
         # Generate report
         fn_report_path = os.path.join(fn_root, report_filename)
-        generate_perf_report(jsonfile, fn_report_path)
+        generate_perf_report(profile_path, fn_report_path)
         # Compare sheets
         sheets = pd.ExcelFile(ref_report_path).sheet_names
         cols_ignore = [
@@ -190,9 +187,7 @@ def test_compare_perf_report(dirpath, gz, report_filename, tol=1e-6):
                 not diff_cols
             ), f"Sheet '{sheet}' has differences in {profile_path}:{format_diff_details(diff_cols)}"
     finally:
-        # Cleanup: remove generated .json and report
-        if os.path.exists(jsonfile):
-            os.remove(jsonfile)
+        # Cleanup: remove generated report
         if os.path.exists(fn_root):
             shutil.rmtree(fn_root)
 

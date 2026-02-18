@@ -76,14 +76,15 @@ class JaxNcclAnalyser:
             trace_events = pb_data["traceEvents"]
             linking_key = "correlation_id"
             categorizer = TraceEventUtils.prepare_event_categorizer(trace_events)
-            non_metadata_events = TraceEventUtils.non_metadata_events(trace_events)
+            metadata_events, other_events = TraceEventUtils.split_event_list(
+                trace_events
+            )
             tree = JaxTraceToTree(
-                non_metadata_events,
+                other_events,
                 event_to_category=categorizer,
                 linking_key=linking_key,
             )
-            metadata = TraceEventUtils.get_metadata(trace_events)
-            tree.build_tree(metadata=metadata, pb_file_name=protobuf_filepath)
+            tree.build_tree(metadata_events, pb_file_name=protobuf_filepath)
             nccl_events = [
                 event for event in tree.events if self._nccl_event_filter(event)
             ]

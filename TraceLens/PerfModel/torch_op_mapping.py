@@ -44,7 +44,7 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    }
+}
 
 # Add pseudo-op extension mappings
 op_to_perf_model_class_map.update(get_pseudo_op_mappings())
@@ -70,10 +70,59 @@ binary_elemwise_ops = [
     "aten::threshold_backward",
 ]
 
+# aten::batch_norm_backward and similar ops do not appear in traces
+# add all variants here for coverage
+# for fwd path, only aten:: ops validated as they are used
+# for bwd path, we see native_ miopen_ and cudnn_ ops, we do not see plain version
+# note that the variants have different inputs! This is handled in the perf model classes
+norm_ops = {
+    "aten::batch_norm": perf_model.BatchNorm,
+    "aten::native_batch_norm": perf_model.BatchNorm,
+    "aten::miopen_batch_norm": perf_model.BatchNorm,
+    "aten::cudnn_batch_norm": perf_model.BatchNorm,
+    "aten::layer_norm": perf_model.LayerNorm,
+    "aten::native_layer_norm": perf_model.LayerNorm,
+    "aten::miopen_layer_norm": perf_model.LayerNorm,
+    "aten::cudnn_layer_norm": perf_model.LayerNorm,
+    "aten::group_norm": perf_model.GroupNorm,
+    "aten::native_group_norm": perf_model.GroupNorm,
+    "aten::miopen_group_norm": perf_model.GroupNorm,
+    "aten::cudnn_group_norm": perf_model.GroupNorm,
+    "aten::instance_norm": perf_model.InstanceNorm,
+    "aten::native_instance_norm": perf_model.InstanceNorm,
+    "aten::miopen_instance_norm": perf_model.InstanceNorm,
+    "aten::cudnn_instance_norm": perf_model.InstanceNorm,
+    "aten::_fused_rms_norm": perf_model.RMSNorm,
+    "aten::batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::native_batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::miopen_batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::cudnn_batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::native_layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::miopen_layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::cudnn_layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::group_norm_backward": perf_model.GroupNormBwd,
+    "aten::native_group_norm_backward": perf_model.GroupNormBwd,
+    "aten::miopen_group_norm_backward": perf_model.GroupNormBwd,
+    "aten::cudnn_group_norm_backward": perf_model.GroupNormBwd,
+    "aten::instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::native_instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::miopen_instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::cudnn_instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::native_rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::miopen_rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::cudnn_rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::_fused_rms_norm_backward": perf_model.RMSNormBwd,
+}
+
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
+for op_name, op_class in norm_ops.items():
+    op_to_perf_model_class_map[op_name] = op_class
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
@@ -81,6 +130,7 @@ dict_base_class2category = {
     perf_model.SDPA: "SDPA",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
+    perf_model.Normalization: "Normalization",
 }
 
 # Add pseudo-op extension categories
@@ -107,7 +157,7 @@ def categorize_torch_op(row):
     Args:
         row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'BN_fwd', 'BN_bwd',
+        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
              'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
     """
 
@@ -128,19 +178,11 @@ def categorize_torch_op(row):
         "ConvBiasReLU_Backward",
     ]:
         return "CONV_bwd"
-    elif row["name"] in [
-        "aten::batch_norm",
-        "aten::native_batch_norm",
-        "aten::miopen_batch_norm",
-        "aten::cudnn_batch_norm",
-    ]:
-        return "BN_fwd"
-    elif row["name"] in [
-        "aten::native_batch_norm_backward",
-        "aten::miopen_batch_norm_backward",
-        "aten::cudnn_batch_norm_backward",
-    ]:
-        return "BN_bwd"
+    elif row["name"] in norm_ops.keys():
+        if row["name"].endswith("_backward"):
+            return "NORM_bwd"
+        else:
+            return "NORM_fwd"
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
