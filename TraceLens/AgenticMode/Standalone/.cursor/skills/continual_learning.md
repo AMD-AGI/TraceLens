@@ -78,16 +78,16 @@ After user approval, insert the new pattern entry at the end of the `## Common P
 
 | Category | Agent File |
 |----------|-----------|
-| gemm | `TraceLens/AgenticMode/.cursor/agents/gemm-analyzer.md` |
-| sdpa_fwd | `TraceLens/AgenticMode/.cursor/agents/sdpa-analyzer.md` |
-| elementwise | `TraceLens/AgenticMode/.cursor/agents/elementwise-analyzer.md` |
-| reduce | `TraceLens/AgenticMode/.cursor/agents/reduce-analyzer.md` |
-| triton | `TraceLens/AgenticMode/.cursor/agents/triton-analyzer.md` |
-| moe_fused | `TraceLens/AgenticMode/.cursor/agents/moe-analyzer.md` |
-| batchnorm | `TraceLens/AgenticMode/.cursor/agents/batchnorm-analyzer.md` |
-| convolution | `TraceLens/AgenticMode/.cursor/agents/convolution-analyzer.md` |
-| cpu_idle | `TraceLens/AgenticMode/.cursor/agents/cpu-idle-analyzer.md` |
-| other | `TraceLens/AgenticMode/.cursor/agents/generic-op-analyzer.md` |
+| gemm | `TraceLens/AgenticMode/Standalone/.cursor/agents/gemm-analyzer.md` |
+| sdpa_fwd | `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` |
+| elementwise | `TraceLens/AgenticMode/Standalone/.cursor/agents/elementwise-analyzer.md` |
+| reduce | `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md` |
+| triton | `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md` |
+| moe_fused | `TraceLens/AgenticMode/Standalone/.cursor/agents/moe-analyzer.md` |
+| batchnorm | `TraceLens/AgenticMode/Standalone/.cursor/agents/batchnorm-analyzer.md` |
+| convolution | `TraceLens/AgenticMode/Standalone/.cursor/agents/convolution-analyzer.md` |
+| cpu_idle | `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` |
+| other | `TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md` |
 
 All paths are relative to `TraceLens/` repository root.
 

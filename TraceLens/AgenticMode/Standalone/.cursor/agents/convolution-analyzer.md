@@ -60,7 +60,7 @@ Execute the Python script inside the container on the node:
 
 ```bash
 ssh <node> "docker exec <container> python3 \
-  TraceLens/AgenticMode/category_analyses/convolution_analysis.py \
+  TraceLens/AgenticMode/Standalone/category_analyses/convolution_analysis.py \
   --output-dir <output_dir>"
 ```
 

@@ -59,7 +59,7 @@ Execute the Python script inside the container on the node:
 
 ```bash
 ssh <node> "docker exec <container> python3 \
-  TraceLens/AgenticMode/category_analyses/moe_analysis.py \
+  TraceLens/AgenticMode/Standalone/category_analyses/moe_analysis.py \
   --output-dir <output_dir>"
 ```
 

@@ -99,7 +99,7 @@ Execute the TraceLens Agentic Mode orchestrator preparation script in the contai
 
 ```bash
 ssh <node> "docker exec <container> python3 \
-  TraceLens/AgenticMode/orchestrator_prepare.py \
+  TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir>"
@@ -129,7 +129,7 @@ This script performs:
 
 The following maps category names to their agent definition files. These files contain specialized analysis instructions, severity thresholds, root cause patterns, and finding templates for each category.
 
-**Base path:** `TraceLens/AgenticMode/.cursor/agents/`
+**Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
 
 | Category | Agent File |
 |----------|-----------|
@@ -171,7 +171,7 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 **For each system-level subagent:**
 
 1. **Read** the agent definition file from the Agent File Map:
-   `TraceLens/AgenticMode/.cursor/agents/<agent-file>.md`
+   `TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md`
 
 2. **Launch a Task subagent** (subagent_type: generalPurpose) with a prompt that includes:
    - The **full contents** of the agent definition file (this provides the specialized
@@ -180,8 +180,8 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 **System-Level Subagent Mapping:**
 
-- `cpu_idle` → Read `TraceLens/AgenticMode/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 50%`)
-- `multi_kernel` → Read `TraceLens/AgenticMode/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
+- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 50%`)
+- `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
 
 **Invocation conditions:**
 - **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 50`
@@ -191,7 +191,7 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 ```
 Read the agent file first:
-  TraceLens/AgenticMode/.cursor/agents/<agent-file>.md
+  TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md
 
 Then launch a Task subagent with the following prompt:
 
@@ -255,7 +255,7 @@ For each category in `compute_categories`, launch the corresponding subagent **s
 **For each compute kernel subagent:**
 
 1. **Read** the agent definition file from the Agent File Map:
-   `TraceLens/AgenticMode/.cursor/agents/<agent-file>.md`
+   `TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md`
 
 2. **Launch a Task subagent** (subagent_type: generalPurpose) with a prompt that includes:
    - The **full contents** of the agent definition file
@@ -264,21 +264,21 @@ For each category in `compute_categories`, launch the corresponding subagent **s
 
 **Compute Kernel Subagent Mapping:**
 
-- `gemm` → Read `TraceLens/AgenticMode/.cursor/agents/gemm-analyzer.md`
-- `sdpa_fwd` → Read `TraceLens/AgenticMode/.cursor/agents/sdpa-analyzer.md`
-- `elementwise` → Read `TraceLens/AgenticMode/.cursor/agents/elementwise-analyzer.md`
-- `reduce` → Read `TraceLens/AgenticMode/.cursor/agents/reduce-analyzer.md`
-- `triton` → Read `TraceLens/AgenticMode/.cursor/agents/triton-analyzer.md`
-- `moe_fused` → Read `TraceLens/AgenticMode/.cursor/agents/moe-analyzer.md`
-- `batchnorm` → Read `TraceLens/AgenticMode/.cursor/agents/batchnorm-analyzer.md`
-- `convolution` → Read `TraceLens/AgenticMode/.cursor/agents/convolution-analyzer.md`
-- `other` → Read `TraceLens/AgenticMode/.cursor/agents/generic-op-analyzer.md`
+- `gemm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/gemm-analyzer.md`
+- `sdpa_fwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md`
+- `elementwise` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/elementwise-analyzer.md`
+- `reduce` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md`
+- `triton` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md`
+- `moe_fused` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/moe-analyzer.md`
+- `batchnorm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/batchnorm-analyzer.md`
+- `convolution` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/convolution-analyzer.md`
+- `other` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md`
 
 **Task prompt structure for each subagent:**
 
 ```
 Read the agent file first:
-  TraceLens/AgenticMode/.cursor/agents/<agent-file>.md
+  TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md
 
 Then launch a Task subagent with the following prompt:
 

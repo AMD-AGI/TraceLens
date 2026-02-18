@@ -147,7 +147,7 @@ or
 
 ### Step 6: Automated Standalone Performance Analysis
 
-Generate advanced optimization recommendations automatically based on roofline analysis. See [Agentic Mode](../TraceLens/AgenticMode/README.md) for instructions. 
+Generate advanced optimization recommendations automatically based on roofline analysis. See [Agentic Mode](../TraceLens/AgenticMode/Standalone/README.md) for instructions. 
 
 
 ---
