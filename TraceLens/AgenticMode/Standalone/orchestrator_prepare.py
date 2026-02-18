@@ -356,7 +356,7 @@ def main():
             return 'moe_fused', 'MoE Fused'
         elif 'batch_norm' in op_name.lower() or 'batchnorm' in op_name.lower():
             return 'batchnorm', 'BatchNorm'
-        elif 'conv' in op_name.lower() and 'aten::' in op_name:  # Convolution operations
+        elif 'conv' in op_name.lower() and ('aten::' in op_name or 'backward' in op_name.lower()):
             return 'convolution', 'Convolution'
         
         # Use existing category
