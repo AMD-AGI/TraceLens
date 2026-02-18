@@ -16,10 +16,21 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
-        # 'openpyxl',
-        # 'tensorboard-plugin-profile==2.19.0',
-        # 'tensorflow',
+        "openpyxl",
+        "office365-rest-python-client",
+        "msal",
+        "tabulate",
+        "orjson",
+        "matplotlib",
     ],
+    extras_require={
+        # To install slodels, use a custom index:
+        # pip install "slodels[openai,anthropic,google-genai]" --extra-index-url https://atlartifactory.amd.com:8443/artifactory/api/pypi/SW-SLAI-PROD-VIRTUAL/simple
+        # pip install "slodels[openai,anthropic,google-genai]"
+        "comparative": [
+            "slodels[openai,anthropic,google-genai]",
+        ],
+    },
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
