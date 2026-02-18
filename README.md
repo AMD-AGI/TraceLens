@@ -90,6 +90,15 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
 
 Refer to the individual module docs in the `docs/` directory and the example notebooks under `examples/` for further guidance.
 
+- **Generate Gap Analysis Report from ComparitiveMode** — Detailed docs [here](TraceLens/ComparitiveMode/README.md).
+
+```bash
+cd TraceLens/ComparitiveMode
+bash jarvis-analysis.sh
+```
+
+Generated reports will be available in the output-dir
+
 **Development & testing** — Install in editable mode and run tests:
 
 ```bash
