@@ -338,11 +338,11 @@ def generate_compare_perf_reports_pytorch(
     # ── Ops summary / Kernel summary ──────────────────────────────────────────
     if "ops_summary" in sheets or "kernel_summary" in sheets or "all" in sheets:
         # Determine which sheet to load based on request and availability
-        if "ops_summary" in sheets:
+        if "ops_summary" in sheets or "all" in sheets:
             if "ops_summary" not in report_sheet_names:
                 raise ValueError(f"ops_summary sheet not found in {reports[0]}")
             sheet_to_load = "ops_summary"
-        elif "kernel_summary" in sheets:
+        elif "kernel_summary" in sheets or "all" in sheets:
             if "kernel_summary" not in report_sheet_names:
                 raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
             sheet_to_load = "kernel_summary"
