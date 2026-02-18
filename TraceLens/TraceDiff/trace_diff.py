@@ -385,7 +385,9 @@ class TraceDiff:
             all_nodes1 = [
                 baseline_uid2node[c] for c in children1 if baseline_uid2node.get(c)
             ]
-            all_nodes2 = [variant_uid2node[c] for c in children2 if variant_uid2node.get(c)]
+            all_nodes2 = [
+                variant_uid2node[c] for c in children2 if variant_uid2node.get(c)
+            ]
             gpu_children1 = [
                 n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                 for n in all_nodes1
@@ -443,16 +445,28 @@ class TraceDiff:
             """
             delete_indices = [i for op, i, j in ops if op == "delete"]
             insert_indices = [j for op, i, j in ops if op == "insert"]
-            remove_insert = {}  # uid_i -> list of child uids to splice in (insert node's children)
-            remove_delete = {}  # uid_d -> list of child uids to splice in (delete node's children)
+            remove_insert = (
+                {}
+            )  # uid_i -> list of child uids to splice in (insert node's children)
+            remove_delete = (
+                {}
+            )  # uid_d -> list of child uids to splice in (delete node's children)
             skip_cats = ("kernel", "cuda_runtime")
             for i in delete_indices:
                 for j in insert_indices:
                     uid_d, uid_i = children1[i], children2[j]
                     node_d = baseline_uid2node.get(uid_d)
                     node_i = variant_uid2node.get(uid_i)
-                    cat_d = (node_d.get("cat") or node_d.get("category")) if node_d else None
-                    cat_i = (node_i.get("cat") or node_i.get("category")) if node_i else None
+                    cat_d = (
+                        (node_d.get("cat") or node_d.get("category"))
+                        if node_d
+                        else None
+                    )
+                    cat_i = (
+                        (node_i.get("cat") or node_i.get("category"))
+                        if node_i
+                        else None
+                    )
                     if cat_d in skip_cats or cat_i in skip_cats:
                         continue
                     name_d = get_name_uid(uid_d, 1)
@@ -553,7 +567,9 @@ class TraceDiff:
                 ops = [("match", i, i) for i in range(len(children1))]
             else:
                 ops = self.wagner_fischer(children1, children2, wf_cache)
-                ops, children1, children2 = check_diff_children(ops, uid1, uid2, children1, children2)
+                ops, children1, children2 = check_diff_children(
+                    ops, uid1, uid2, children1, children2
+                )
 
             child_merged_ids = []
             for op, i, j in ops:
@@ -954,8 +970,12 @@ class TraceDiff:
                     ) or (self.is_kernel(event1) and self.is_kernel(event2)):
 
                         # Store the LCA name from this combined node
-                        lca_name_trace1 = re.sub(r"\(\d+\)", "", self._get_op_name(node["uid1"], 1))
-                        lca_name_trace2 = re.sub(r"\(\d+\)", "", self._get_op_name(node["uid2"], 2))
+                        lca_name_trace1 = re.sub(
+                            r"\(\d+\)", "", self._get_op_name(node["uid1"], 1)
+                        )
+                        lca_name_trace2 = re.sub(
+                            r"\(\d+\)", "", self._get_op_name(node["uid2"], 2)
+                        )
                         if lca_name_trace1 == lca_name_trace2:
                             lca_name = lca_name_trace1
                         else:
