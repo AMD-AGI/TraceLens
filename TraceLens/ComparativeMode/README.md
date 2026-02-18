@@ -44,7 +44,7 @@ Before you begin, ensure you have:
 
 ```bash
 # Navigate to the project directory
-cd TraceLen/ComparativeMode
+cd TraceLens/ComparativeMode
 
 # Create a Python virtual environment
 python3 -m venv gpu_analysis_env
