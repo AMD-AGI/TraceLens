@@ -39,8 +39,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Aggregate Results: System-Level + Compute Kernel Recommendations
-10. Generate Replay Artifacts
-11. Generate Final Report (composable System + Compute sections)
+10. Generate Final Report (composable System + Compute sections)
 ```
 
 ---
@@ -645,24 +644,7 @@ Select kernels in top_ops and order by highest impact on end-to-end time. Focus 
 
 ---
 
-## Step 10: Generate Replay Artifacts
-
-**When to Generate:**
-1. Op is a significant bottleneck (>10% of compute)
-2. Efficiency is notably low (<30% of peak)
-3. Kernel team needs a minimal reproducer
-
-```bash
-ssh <node> "docker exec <container> python3 \
-  TraceLens/AgenticMode/generate_replay_artifacts.py \
-  --output-dir <output_dir> \
-  --perf-report-path <output_dir>/perf_report.xlsx \
-  --op-names <op1> <op2> <op3>"
-```
-
----
-
-## Step 11: Generate Final Report
+## Step 10: Generate Final Report
 
 Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: System-Level Optimizations and Compute Kernel Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
@@ -829,8 +811,6 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 - **Peak MAF (FP8)**: Z TFLOPS (if supported)
 - **Peak MAF (FP4)**: W TFLOPS (if supported)
 
-### Replay Artifacts
-[List of generated replay packages if any]
 ```
 
 **Key formatting rules:**
@@ -858,7 +838,7 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 5. **Provide multiple optimization paths** - User decides which applies
 6. **Vendor-agnostic language** - Use generic terms for all recommendations
 7. **Hardware-agnostic analysis** - Don't hardcode GPU specs, use provided values
-8. **Focus on bottlenecks + reproducers** - Identify bottlenecks, generate reproducers for kernel teams
+8. **Focus on bottlenecks** - Identify bottlenecks and provide actionable recommendations
 
 ---
 
