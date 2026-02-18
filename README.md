@@ -94,6 +94,7 @@ Refer to the individual module docs in the `docs/` directory and the example not
 
 ```bash
 cd TraceLens/ComparativeMode
+bash requirements.sh
 bash jarvis-analysis.sh
 ```
 
