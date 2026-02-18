@@ -192,7 +192,7 @@ When comparing two execution traces from different platforms, frameworks, or con
 - We need to **correlate related operations** across traces
 
 #### The Solution: Lowest Common Ancestor
-The **Lowest Common Ancestor** is the nearest parent CPU operation or Python function that is **common to both traces** in the merged execution tree. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
+The **Lowest Common Ancestor** is the nearest parent CPU operation or Python function that is **common to both traces** in the merged execution tree. A combination of **position** and **name** based comparison rules are used to match two operations or functions. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
 
 **Key Insight:** If two GPU kernels have the same LCA, they likely serve the same computational purpose, even if their implementations differ.
 
@@ -241,50 +241,26 @@ The LCA enables meaningful comparisons:
 
 <details>
   <summary>Example snippet</summary>
-
-
+  
 ```
- ├── combined: torch/_ops.py(1243): __call__  torch/_ops.py(1244): __call__
- │   ├── >> trace1: <built-in method unified_attention_with_output of PyCapsule object at 0x7f3755e18810>
- │   │   └── >> trace1: vllm::unified_attention_with_output
- │   │       └── >> trace1: vllm/attention/utils/kv_transfer_utils.py(36): wrapper
- │   │           └── >> trace1: vllm/attention/layer.py(858): unified_attention_with_output
- │   │               └── >> trace1: vllm/v1/attention/backends/rocm_attn.py(256): forward
- │   │                   ├── >> trace1: vllm/attention/ops/paged_attn.py(31): write_to_paged_cache
- │   │                   │   └── >> trace1: vllm/_custom_ops.py(2156): reshape_and_cache
- │   │                   │       └── >> trace1: torch/_ops.py(1243): __call__
- │   │                   │           └── >> trace1: <built-in method reshape_and_cache of PyCapsule object at 0x7f37450f4900>
- │   │                   │               └── >> trace1: _C_cache_ops::reshape_and_cache
- │   │                   │                   └── >> trace1: hipLaunchKernel
- │   │                   │                       └── >> trace1: void vllm::reshape_and_cache_kernel<__hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0>(__hip_bfloat16 const*, __hip_bfloat16 const*, __hip_bfloat16*, __hip_bfloat16*, long const*, int, int, int, int, int, int, float const*, float const*)
- │   │                   └── >> trace1: vllm/attention/ops/chunked_prefill_paged_decode.py(223): chunked_prefill_paged_decode
- │   │                       ├── >> trace1: torch/utils/_contextlib.py(117): decorate_context
- │   │                       │   └── >> trace1: vllm/attention/ops/prefix_prefill.py(618): context_attention_fwd
- │   │                       │       └── >> trace1: triton/runtime/jit.py(393): <lambda>
- │   │                       │           └── >> trace1: triton/runtime/jit.py(574): run
- │   │                       │               └── >> trace1: triton/backends/amd/driver.py(634): __call__
- │   │                       │                   └── >> trace1: <built-in function launch>
- │   │                       │                       └── >> trace1: hipModuleLaunchKernel
- │   │                       │                           └── >> trace1: _fwd_kernel
- │   │                       └── >> trace1: triton/runtime/jit.py(393): <lambda>
- │   │                           └── >> trace1: triton/runtime/jit.py(574): run
- │   │                               └── >> trace1: triton/backends/amd/driver.py(634): __call__
- │   │                                   └── >> trace1: <built-in function launch>
- │   │                                       └── >> trace1: hipModuleLaunchKernel
- │   │                                           └── >> trace1: kernel_paged_attention_2d
- │   └── << trace2: <built-in method unified_attention_with_output of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7fdc74225cf0>
- │       └── << trace2: vllm::unified_attention_with_output
- │           └── << trace2: vllm/attention/utils/kv_transfer_utils.py(36): wrapper
- │               └── << trace2: vllm/attention/layer.py(852): unified_attention_with_output
- │                   └── << trace2: vllm/v1/attention/backends/flashinfer.py(1064): forward
- │                       ├── << trace2: torch/_ops.py(1244): __call__
- │                       │   └── << trace2: <built-in method reshape_and_cache_flash of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7fdc743f79f0>
- │                       │       └── << trace2: _C_cache_ops::reshape_and_cache_flash
- │                       │           └── << trace2: cudaLaunchKernel
- │                       │               └── << trace2: void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*, unsigned char*, long const*, long, long, long, long, long, int, int, int, float const*, float const*)
- │                       └── << trace2: flashinfer/prefill.py(3330): trtllm_batch_context_with_kv_cache
- │                           └── << trace2: cuLaunchKernelEx
- │                               └── << trace2: fmhaSm100aKernel_QkvE4m3OBfloat16H64PagedKvSlidingOrChunkedCausalP16VarSeqQ128Kv128PersistentContext
+├── nn.Module: Attention_0
+│   └── torch/nn/modules/module.py(1779): _call_impl
+│       └── combined: vllm/attention/layer.py(310): forward | vllm/attention/layer.py(290): forward
+│           ├── combined: torch/_ops.py(1243): __call__ | torch/_ops.py(1244): __call__
+│           │   └── combined: <built-in method unified_attention_with_output of PyCapsule object at 0x7f3755e18810> | <built-in method unified_attention_with_output of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7fdc74225cf0>
+│           │       └── vllm::unified_attention_with_output
+│           │           └── vllm/attention/utils/kv_transfer_utils.py(36): wrapper
+│           │               └── combined: vllm/attention/layer.py(858): unified_attention_with_output | vllm/attention/layer.py(852): unified_attention_with_output
+│           │                   └── combined: vllm/v1/attention/backends/rocm_attn.py(256): forward | vllm/v1/attention/backends/flashinfer.py(1064): forward
+│           │                       ├── combined: vllm/attention/ops/paged_attn.py(31): write_to_paged_cache | torch/_ops.py(1244): __call__
+│           │                       │   └── combined: vllm/_custom_ops.py(2156): reshape_and_cache | <built-in method reshape_and_cache_flash of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7fdc743f79f0>
+│           │                       │       └── combined: torch/_ops.py(1243): __call__ | _C_cache_ops::reshape_and_cache_flash
+│           │                       │           ├── >> trace1: <built-in method reshape_and_cache of PyCapsule object at 0x7f37450f4900>
+│           │                       │           │   └── >> trace1: _C_cache_ops::reshape_and_cache
+│           │                       │           │       └── >> trace1: hipLaunchKernel
+│           │                       │           │           └── >> trace1: void vllm::reshape_and_cache_kernel<__hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0>(__hip_bfloat16 const*, __hip_bfloat16 const*, __hip_bfloat16*, __hip_bfloat16*, long const*, int, int, int, int, int, int, float const*, float const*)
+│           │                       │           └── << trace2: cudaLaunchKernel
+│           │                       │               └── << trace2: void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*, unsigned char*, long const*, long, long, long, long, long, int, int, int, float const*, float const*)
 ```
 </details>
 
