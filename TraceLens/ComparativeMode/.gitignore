@@ -1,0 +1,65 @@
+# Exclude TraceLens directory
+TraceLens/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+traces/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+comparison_report_*.log
+excel_analysis_*.log
+
+# Generated Excel files (outputs)
+comparison.xlsx
+comparison_result.xlsx
+*.xlsx
+!**/traces-diff-gpus/*.xlsx
+
+# Tracelense cache
+.tracelense/
+
+# Reports directory (if it contains generated files)
+reports/
+jarvis_reports/
+jarvis_test_plots/
+
+# Python virtual environments
+cpu_analysis_env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trace directories with large files
+trace-directory/
+traces-diff-gpus/
+
+# Temporary files
+*.tmp
+*.temp
+# Deprecated/Legacy files (kept locally, not tracked)
+Reporting/
+run_jarvis_analysis.sh
+run_jarvis_multirun.sh
+test-jarvis-analysis.sh
+analysis.sh
+open-ai.py
+CRITICAL_PATH_INTEGRATION.md
