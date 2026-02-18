@@ -55,12 +55,11 @@ vllm serve $MODEL --port $PORT \
 --profiler-config '{
     "profiler": "torch",
     "torch_profiler_dir": "./vllm_profile",
-    "torch_profiler_record_shapes": false,
-    "torch_profiler_with_memory": false,
-    "torch_profiler_with_stack": true,
-    "torch_profiler_with_flops": false,
-    "torch_profiler_use_gzip": true,
-    "torch_profiler_dump_cuda_time_total": true,
+    "torch_profiler_record_shapes": "True",
+    "torch_profiler_with_memory": "True",
+    "torch_profiler_with_stack": "True",
+    "torch_profiler_with_flops": "False",
+    "torch_profiler_use_gzip": "True",
     "delay_iterations" : 819,
     "max_iterations" : 208
     }' \
