@@ -58,7 +58,7 @@ We recommend applying patches to your inference framework to:
    - Apply: `cd /path/to/vllm && git apply /path/to/patchfile`
   
 #### Collection Parameters
-- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. InferenceMax uses `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio (R) = 0.8. We recommend tracing 1.6–2.0 OSL execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-identification) for more details. 
+- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. InferenceMax uses `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio (R) = 0.8. We recommend tracing 1.6–2.0 OSL execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details. 
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
 - **Profiler Setup:** Enable CPU-side callstack and shape capture. An example script to run GPT-OSS using InferenceMax can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh). 
 
@@ -309,7 +309,7 @@ The generated report includes:
 
 Custom roofline models tailored for inference workloads with prefill/decode-aware metrics.
 
-### [Steady-State Region and Trace Splitting](#steady-state-region-identification)
+### [Steady-State Region and Trace Splitting](#steady-state-region-and-trace-splitting)
 
 Inferenc serving execution consists of three phases:
 
@@ -368,21 +368,26 @@ Since InferenceMax commonly uses `R = 0.8`, the most useful steady‑state profi
 1.6 OSL – 2 OSL
 ```
 
-This region contains:
+This region exhibits:
 - Fully saturated concurrency  
-- Representative mix of decode‑only and prefill‑decode steps  
-- Minimal warm‑up or tail artifacts  
+- Representative mix of decode-only and prefill-decode steps  
+- Minimal warm-up or tail artifacts  
 
-Thus it is the recommended window for performance profiling.
+This makes it the recommended window for performance profiling.
 
+#### Trace Splitting
 
+The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher, or usage of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
+
+1. **Split into individual execution steps:** Decompose the entire trace into per-step files, extracting batch size from annotations or kernels for shape-focused analysis and comparison.
+
+2. **Identify steady-state region:** Detect execution steps with near-maximum concurrency. The algorithm identifies large windows with concurrency close to peak levels and selects a representative steady-state region based on prefill-decode and decode-only step composition.
+
+3. **Separate phase analysis:** Further decompose steady-state into prefill-decode and decode-only traces. Since prefill and decode have different computational bottlenecks, separate analysis enables targeted performance optimization.
 
 ### [Trace Availability-Analysis Trade-off](#trace-availability-analysis-trade-off)
 
 Balancing complete trace capture versus analysis complexity.
-
-
-
 
 ---
 
@@ -396,9 +401,9 @@ Balancing complete trace capture versus analysis complexity.
 
 ### 🚀 Future Improvements
 
-- [ ] Unified interface for performance analysis.
-- [ ] Critical path analysis for accurate end-to-end performance projection.
-- [ ] Integration with performance projection tools.
+- [ ] Unified interface for performance analysis
+- [ ] Critical path analysis for accurate end-to-end performance projection
+- [ ] Integration with performance projection tools
 
 ---
 
