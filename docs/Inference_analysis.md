@@ -180,7 +180,7 @@ Please include the following details when reporting an issue. Please use Tracele
 
 ---
 
-## 🔬 Conceptual Details *(Coming Soon)*
+## 🔬 Conceptual Details
 
 
 ### [TraceDiff: Lowest Common Ancestor (LCA) Analysis](#tracediff-lca-analysis)
