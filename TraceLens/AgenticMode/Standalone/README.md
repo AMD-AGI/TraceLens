@@ -168,6 +168,6 @@ TraceLens Agentic Mode is currently an **experimental** feature. Efforts will be
 - Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (Codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
 - The rigidity of a structured workflow vs an open-ended approach is being studied.
 - Hard-coded analyses should be moved into TraceLens
-- Workflow handles categorized kernels, though complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`. New kernels previously not analyzed may require special handling
-- Validation at a sub-agent level and integration tests are crucial to asses performance. Evals are being developed.
+- Workflow handles categorized kernels, though complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`. New kernels previously not analyzed may require special handling.
 
+- Validation at a sub-agent level and integration tests are crucial to asses performance. Evals are being developed.
