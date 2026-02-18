@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jarvis GPU Analysis Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>🤖 Jarvis GPU Analysis Dashboard</h1>
+            <p class="subtitle">Comprehensive Performance GAP Analysis with Actionable Insights</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Tab Navigation -->
+        <div class="tabs">
+            <button class="tab-button active" onclick="showTab('analyze')">📊 New Analysis</button>
+            <button class="tab-button" onclick="showTab('reports')">📁 View Reports</button>
+            <button class="tab-button" onclick="showTab('jobs')">⚙️ Analysis Jobs</button>
+        </div>
+
+        <!-- New Analysis Tab -->
+        <div id="analyze-tab" class="tab-content active">
+            <div class="card">
+                <h2>Start New GPU Comparison Analysis</h2>
+                
+                <form id="analysis-form">
+                    <!-- GPU 1 Section -->
+                    <div class="section">
+                        <h3>Target</h3>
+                        <div class="form-group">
+                            <label>GPU Name:</label>
+                            <input type="text" id="gpu1-name" placeholder="e.g., H200, MI355" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Kineto Trace (Required):</label>
+                            <input type="text" id="gpu1-kineto" placeholder="SharePoint Path" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Execution Trace (Optional):</label>
+                            <input type="text" id="gpu1-et" placeholder="SharePoint Path">
+                        </div>
+                    </div>
+
+                    <!-- GPU 2 Section -->
+                    <div class="section">
+                        <h3>Baseline</h3>
+                        <div class="form-group">
+                            <label>GPU Name:</label>
+                            <input type="text" id="gpu2-name" placeholder="e.g., H100, B200" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Kineto Trace (Required):</label>
+                            <input type="text" id="gpu2-kineto" placeholder="SharePoint Path" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Execution Trace (Optional):</label>
+                            <input type="text" id="gpu2-et" placeholder="SharePoint Path">
+                        </div>
+                    </div>
+
+                    <!-- Analysis Options -->
+                    <div class="section">
+                        <h3>⚙️ Analysis Options</h3>
+                        <div class="form-group">
+                            <label>Output Directory:</label>
+                            <input type="text" id="output-dir" value="web_reports" placeholder="web_reports">
+                        </div>
+                        <div class="form-group">
+                            <label>API Key (Optional for AI analysis):</label>
+                            <input type="password" id="api-key" placeholder="OpenAI or Anthropic API key">
+                            <small>Leave empty to skip AI-powered analysis</small>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="generate-plots" checked>
+                                Generate Performance Plots
+                            </label>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="use-critical-path">
+                                Enable Critical Path Analysis
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">🚀 Start Analysis</button>
+                        <button type="button" class="btn-secondary" onclick="resetForm()">🔄 Reset</button>
+                    </div>
+                </form>
+
+                <!-- Analysis Progress -->
+                <div id="analysis-progress" class="progress-section hidden">
+                    <h3>Analysis Progress</h3>
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill"></div>
+                    </div>
+                    <p id="progress-text" class="progress-text">Starting analysis...</p>
+                    <div id="progress-details" class="progress-details"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reports Tab -->
+        <div id="reports-tab" class="tab-content">
+            <div class="card">
+                <h2>Available Reports</h2>
+                <button class="btn-secondary" onclick="refreshReports()">🔄 Refresh</button>
+                <div id="reports-list" class="reports-list">
+                    <p class="loading">Loading reports...</p>
+                </div>
+            </div>
+
+            <!-- Report Viewer -->
+            <div id="report-viewer" class="card hidden">
+                <div class="report-header">
+                    <button class="btn-secondary" onclick="closeReportViewer()">✕ Close</button>
+                </div>
+                
+                <!-- Analysis Content -->
+                <div id="report-content" class="report-content"></div>
+            </div>
+        </div>
+
+        <!-- Jobs Tab -->
+        <div id="jobs-tab" class="tab-content">
+            <div class="card">
+                <h2>Analysis Jobs</h2>
+                <button class="btn-secondary" onclick="refreshJobs()">🔄 Refresh</button>
+                <div id="jobs-list" class="jobs-list">
+                    <p class="info">No active jobs</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Jarvis GPU Analysis Dashboard | AMD AGI | TraceLens Project</p>
+        </div>
+    </footer>
+
+    <!-- Hidden file upload input -->
+    <input type="file" id="file-upload" style="display: none;" accept=".json,.gz,.trace" onchange="handleFileUpload()">
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
