@@ -363,6 +363,17 @@ class TraceDiff:
                 return []
             return node.get("children", [])
 
+        def subtree_contains_cuda_runtime(uid, uid2node):
+            """Return True if this node is a cuda_runtime node."""
+            node = uid2node.get(uid)
+            if not node or not isinstance(node, dict):
+                return False
+            cat = node.get("cat") or node.get("category")
+            if cat == "cuda_runtime" or cat == "cuda_driver":
+                return True
+            else:
+                return False
+
         def get_name_uid(uid, tree_num):
             name = self._get_op_name(uid, tree_num)
             return self._normalize_name_for_comparison(name) if name else None
@@ -533,7 +544,12 @@ class TraceDiff:
                 nn_module_stack = node2.get("nn_module_stack", "")
 
             children1, children2 = get_children_with_missing(uid1, uid2)
-            if len(children1) == len(children2):
+            any_cuda_runtime = any(
+                subtree_contains_cuda_runtime(c, baseline_uid2node) for c in children1
+            ) or any(
+                subtree_contains_cuda_runtime(c, variant_uid2node) for c in children2
+            )
+            if len(children1) == len(children2) and not any_cuda_runtime:
                 ops = [("match", i, i) for i in range(len(children1))]
             else:
                 ops = self.wagner_fischer(children1, children2, wf_cache)
