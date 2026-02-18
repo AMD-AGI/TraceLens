@@ -275,14 +275,12 @@ def extract_iteration(
     # Add all meta events (no timestamp)
     filtered_events.extend(meta_events)
 
-    for e in filtered_events:
+    for e in tqdm(filtered_events):
         if "vllm::unified_attention_with_output" in e.get("name", "") or \
             "sgl_kernel::sgl_per_token_group_quant_8bit" in e.get("name", ""):
-            print(e,batch_list)
             dims = e.get("args", {}).get("Input Dims")
             if dims and len(dims) > 0 and len(dims[0]) > 0:
                 batch_list.append(dims[0][0])
-            break
     # Create output trace
     output = trace_json.copy()
     output["traceEvents"] = filtered_events
@@ -464,6 +462,7 @@ def find_steady_state_iterations(iteration_roots: List[dict], num_steps: int = 5
 
         if abs(t["num_requests"] - global_max) <= max(1, thresh * global_max):
             if not steady_state_started:
+                print(f"iteration {i} with num_requests {t['num_requests']} is within steady state threshold of global max {global_max}")
                 prev_events_in_steady+=1
         else:
             if steady_state_started:
@@ -574,6 +573,7 @@ def main():
                 base_name, "annotation_iteration", 0, 1
             )
             execution_details.extend(temp_execution_details)
+            print("starting phase extraction...")
             temp_execution_details = extract_phases_and_save(
                 [iteration_roots_subset], events, trace_json, args.output_dir,
                 base_name, "annotation_iteration", 0, 1

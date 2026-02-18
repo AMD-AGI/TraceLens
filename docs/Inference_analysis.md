@@ -78,24 +78,24 @@ Read the collected trace and split it into smaller tracefiles:
 
 Option 1: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher). 
 ```python
-python split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
+python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
 ```
 
 Option 2: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). 
 ```python
-python split_vllm_trace_annotation.py trace.json.gz -o ./output --iterations 10:20
+python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --iterations 10:20
 ```
 
 Option 3: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). 
 
 ```python
-python split_vllm_trace_annotation.py trace.json.gz  -o ./steady_state_analysis \\
+python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -o ./steady_state_analysis \\
      --find-steady-state --num-steps 256
 ```
 
 Option 4: Split capture phase tracefile into individual tracefile per shape.
 ```
-python split_vllm_trace_annotation.py trace.json.gz  -o ./dummy_runs --store-single-iteration
+python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -o ./dummy_runs --store-single-iteration
 ```
 
 ### Step 4: Generate Performance Report
@@ -159,19 +159,83 @@ Generate advanced optimization recommendations automatically based on roofline a
 
 ---
 
-## 🔬 Technical Details *(Coming Soon)*
+## 🔬 Conceptual Details *(Coming Soon)*
+
+
+### [TraceDiff LCA analysis](#tracediff-lca-analysis)
+
 
 ### [Roofline Analysis](#roofline-analysis)
 
 Custom roofline models tailored for inference workloads with prefill/decode-aware metrics.
 
-### [Steady-State Region Identification](#steady-state-region-identification)
+### [Steady-State Region and Trace Splitting](#steady-state-region-identification)
 
-Algorithms to automatically detect and isolate representative execution regions.
+Inferenc serving execution consists of three phases:
 
-### [Trace Splitting for Performance Analysis](#trace-splitting-for-performance-analysis)
+1. **Ramp‑up**  
+   Initial few steps where one or more requests are batching.
 
-Fine-grained trace decomposition for targeted performance analysis.
+2. **Ramp‑down**  
+   The last few tailing steps where the final batch of requests finishes.
+
+3. **Steady state**  
+   Defined as the execution steps with the highest concurrency.  
+   Once steady state is reached, execution consists of:
+   - Decode‑only steps  
+   - Prefill‑decode steps, typically containing one prefill request packed with ~CONC−1 decode requests.
+
+For performance analysis, we are interested in profiling only the steady‑state steps:
+1. Prefill‑decode steps  
+2. Decode‑only steps with large context sizes (towards the end of a request)
+
+
+**Parameters Relevant to InferenceMax**
+
+- **NUM_PROMPTS**: typically `10 × CONC`
+- **CONC**: number of concurrent requests that can be batched together
+- **R**: Random‑range ratio used for sampling ISL and OSL
+- **OSL**: Maximum output sequence length  
+  Output sequence length per request is sampled uniformly in:
+  `  [ R × OSL , OSL ]`
+- **ISL**: assumed to be lower than the chunk size
+
+InferenceMax can schedule requests at infinite rate, but we conservatively treat the first **CONC** steps as the *ramp‑up* phase.
+
+With these parameters, execution step Ranges where groups of CONC requests complete:
+
+
+```
+1 × R × OSL  to  1 × OSL      e.g. 0.8 OSL – 1 OSL
+2 × R × OSL  to  2 × OSL      e.g. 1.6 OSL – 2 OSL
+3 × R × OSL  to  3 × OSL      e.g. 2.4 OSL – 3 OSL
+4 × R × OSL  to  4 × OSL      e.g. 3.2 OSL – 4 OSL
+...
+N × R × OSL  to  N × OSL
+
+Where,  N = NUM_PROMPTS / CONC
+```
+```
+TOTAL_STEPS = NUM_PROMPTS × Avg(OSL) / CONC
+TOTAL_PrefillDecode_Steps = NUM_PROMPTS
+TOTAL_DecodeOnly_Steps= NUM_PROMPTS × ( (Avg(OSL) − CONC) / CONC )
+```
+
+
+Since InferenceMax commonly uses `R = 0.8`, the most useful steady‑state profiling window lies in:
+
+```
+1.6 OSL – 2 OSL
+```
+
+This region contains:
+- Fully saturated concurrency  
+- Representative mix of decode‑only and prefill‑decode steps  
+- Minimal warm‑up or tail artifacts  
+
+Thus it is the recommended window for performance profiling.
+
+
 
 ### [Trace Availability-Analysis Trade-off](#trace-availability-analysis-trade-off)
 
