@@ -90,10 +90,12 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
 
 Refer to the individual module docs in the `docs/` directory and the example notebooks under `examples/` for further guidance.
 
-- **Generate Gap Analysis Report from ComparativeMode** — Detailed docs [here](TraceLens/ComparativeMode/README.md).
+- **Generate Gap Analysis Report from AgenticMode-Comparative** — Detailed docs [here](TraceLens/AgenticMode/Comparative/README.md).
+
+Since the LLM needs AMD network, it is advised to use [Alola-Cluster](https://amd.atlassian.net/wiki/spaces/MLSE/pages/897801231/AGS+cluster+user+resources) for this Analysis.
 
 ```bash
-cd TraceLens/ComparativeMode
+cd TraceLens/AgenticMode/Comparative
 pip install "slodels[openai,anthropic,google-genai]" --extra-index-url https://atlartifactory.amd.com:8443/artifactory/api/pypi/SW-SLAI-PROD-VIRTUAL/simple
 pip install "slodels[openai,anthropic,google-genai]"
 bash jarvis-analysis.sh
