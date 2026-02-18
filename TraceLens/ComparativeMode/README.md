@@ -1,6 +1,6 @@
-# TraceLens-Jarvis: Getting Started Guide
+# ComparativeMode: Getting Started Guide
 
-> **TraceLens-Jarvis** is an AI-powered GPU performance analysis tool that provides comprehensive gap analysis for different GPU architectures (e.g., AMD MI300, MI325, MI350 ... ) with actionable optimization recommendations.
+> **ComparativeMode** is an AI-powered GPU performance analysis tool that provides comprehensive gap analysis for different GPU architectures (e.g., AMD MI300, MI325, MI350 ... ) with actionable optimization recommendations.
 
 ---
 
@@ -44,7 +44,7 @@ Before you begin, ensure you have:
 
 ```bash
 # Navigate to the project directory
-cd /path/to/TraceLens-Jarvis
+cd TraceLen/ComparativeMode
 
 # Create a Python virtual environment
 python3 -m venv gpu_analysis_env
@@ -71,22 +71,7 @@ cd /workspace
 
 ## Installation
 
-### Step 1: Clone TraceLens Repository
-
-```bash
-# Clone the TraceLens repository (if not already present)
-cd TraceLens-Jarvis
-git clone https://github.com/AMD-AGI/TraceLens.git TraceLens
-
-# Or if TraceLens directory already exists, update it
-cd TraceLens
-git pull origin main
-git checkout feature/inference-kernel-categorization
-pip install -e .
-cd ..
-```
-
-### Step 2: Install Dependencies
+### Step 1: Install Dependencies
 
 ```bash
 # Run the requirements installation script
