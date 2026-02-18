@@ -183,7 +183,129 @@ Please include the following details when reporting an issue. Please use Tracele
 ## 🔬 Conceptual Details *(Coming Soon)*
 
 
-### [TraceDiff LCA analysis](#tracediff-lca-analysis)
+### [TraceDiff: Lowest Common Ancestor (LCA) Analysis](#tracediff-lca-analysis)
+
+`TraceDiff` is a  trace comparison tool that analyzes execution differences between two inference traces (baseline and variant) by constructing a merged tree and identifying structural similarities and differences using **Lowest Common Ancestor (LCA) analysis**.
+
+#### The Problem
+When comparing two execution traces from different platforms, frameworks, or configurations:
+- Kernel names may differ (e.g., platform-specific optimizations)
+- Execution paths may have insertions, deletions, or reorderings
+- GPU operations may be fused differently
+- We need to **correlate related operations** across traces
+
+#### The Solution: Lowest Common Ancestor
+The **Lowest Common Ancestor** is the nearest parent CPU operation that is **common to both traces** in the merged execution tree. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
+
+**Key Insight:** If two GPU kernels have the same LCA, they likely serve the same computational purpose, even if their implementations differ.
+
+#### How It Works
+
+1. Tree Alignment with Wagner-Fischer Algorithm
+- Uses dynamic programming to align execution trees from both traces
+- Identifies three types of nodes:
+  - **Combined**: Operations present in both traces (potential LCA candidates)
+  - **Trace1-only**: Operations unique to baseline
+  - **Trace2-only**: Operations unique to variant
+- Normalizes operation names by removing variable parts (memory addresses, line numbers)
+
+2. Merged Tree Construction
+Creates a unified tree structure where:
+- Each node has a unique `merged_id`
+- Nodes track UIDs from both original traces (`uid1`, `uid2`)
+- Parent-child relationships are preserved from both traces
+- The merged tree maintains execution hierarchy
+
+3. LCA Identification
+For GPU operations that differ between traces:
+```
+Trace 1:                    Trace 2:
+┌─────────────┐            ┌─────────────┐
+│  attention  │ ◄── LCA ──►│  attention  │  (Combined node)
+└──────┬──────┘            └──────┬──────┘
+       │                          │
+   ┌───┴───┐                  ┌───┴───┐
+   │       │                  │       │
+ GPU_K1  GPU_K2             GPU_K3  GPU_K4  (Different kernels)
+(trace1-only)             (trace2-only)
+```
+
+The `attention` operation is the **LCA** for all four GPU kernels, indicating they all serve the same high-level computation despite different implementations.
+
+4. Performance Correlation
+The LCA enables meaningful comparisons:
+- **Kernel Grouping**: All GPU kernels under the same LCA are functionally related
+- **Time Aggregation**: Sum kernel times under each LCA for apples-to-apples comparison
+- **Shape Analysis**: Compare input dimensions at the LCA level
+- **Optimization Identification**: Spot fusion opportunities or inefficiencies
+
+5. LCA example:
+
+
+<details>
+  <summary>Example snippet</summary>
+
+
+```
+ ├── combined: torch/_ops.py(1243): __call__  torch/_ops.py(1244): __call__
+ │   ├── >> trace1: <built-in method unified_attention_with_output of PyCapsule object at 0x7f3755e18810>
+ │   │   └── >> trace1: vllm::unified_attention_with_output
+ │   │       └── >> trace1: vllm/attention/utils/kv_transfer_utils.py(36): wrapper
+ │   │           └── >> trace1: vllm/attention/layer.py(858): unified_attention_with_output
+ │   │               └── >> trace1: vllm/v1/attention/backends/rocm_attn.py(256): forward
+ │   │                   ├── >> trace1: vllm/attention/ops/paged_attn.py(31): write_to_paged_cache
+ │   │                   │   └── >> trace1: vllm/_custom_ops.py(2156): reshape_and_cache
+ │   │                   │       └── >> trace1: torch/_ops.py(1243): __call__
+ │   │                   │           └── >> trace1: <built-in method reshape_and_cache of PyCapsule object at 0x7f37450f4900>
+ │   │                   │               └── >> trace1: _C_cache_ops::reshape_and_cache
+ │   │                   │                   └── >> trace1: hipLaunchKernel
+ │   │                   │                       └── >> trace1: void vllm::reshape_and_cache_kernel<__hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0>(__hip_bfloat16 const*, __hip_bfloat16 const*, __hip_bfloat16*, __hip_bfloat16*, long const*, int, int, int, int, int, int, float const*, float const*)
+ │   │                   └── >> trace1: vllm/attention/ops/chunked_prefill_paged_decode.py(223): chunked_prefill_paged_decode
+ │   │                       ├── >> trace1: torch/utils/_contextlib.py(117): decorate_context
+ │   │                       │   └── >> trace1: vllm/attention/ops/prefix_prefill.py(618): context_attention_fwd
+ │   │                       │       └── >> trace1: triton/runtime/jit.py(393): <lambda>
+ │   │                       │           └── >> trace1: triton/runtime/jit.py(574): run
+ │   │                       │               └── >> trace1: triton/backends/amd/driver.py(634): __call__
+ │   │                       │                   └── >> trace1: <built-in function launch>
+ │   │                       │                       └── >> trace1: hipModuleLaunchKernel
+ │   │                       │                           └── >> trace1: _fwd_kernel
+ │   │                       └── >> trace1: triton/runtime/jit.py(393): <lambda>
+ │   │                           └── >> trace1: triton/runtime/jit.py(574): run
+ │   │                               └── >> trace1: triton/backends/amd/driver.py(634): __call__
+ │   │                                   └── >> trace1: <built-in function launch>
+ │   │                                       └── >> trace1: hipModuleLaunchKernel
+ │   │                                           └── >> trace1: kernel_paged_attention_2d
+ │   └── << trace2: <built-in method unified_attention_with_output of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7fdc74225cf0>
+ │       └── << trace2: vllm::unified_attention_with_output
+ │           └── << trace2: vllm/attention/utils/kv_transfer_utils.py(36): wrapper
+ │               └── << trace2: vllm/attention/layer.py(852): unified_attention_with_output
+ │                   └── << trace2: vllm/v1/attention/backends/flashinfer.py(1064): forward
+ │                       ├── << trace2: torch/_ops.py(1244): __call__
+ │                       │   └── << trace2: <built-in method reshape_and_cache_flash of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7fdc743f79f0>
+ │                       │       └── << trace2: _C_cache_ops::reshape_and_cache_flash
+ │                       │           └── << trace2: cudaLaunchKernel
+ │                       │               └── << trace2: void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*, unsigned char*, long const*, long, long, long, long, long, int, int, int, float const*, float const*)
+ │                       └── << trace2: flashinfer/prefill.py(3330): trtllm_batch_context_with_kv_cache
+ │                           └── << trace2: cuLaunchKernelEx
+ │                               └── << trace2: fmhaSm100aKernel_QkvE4m3OBfloat16H64PagedKvSlidingOrChunkedCausalP16VarSeqQ128Kv128PersistentContext
+```
+</details>
+
+#### Output: TraceDiff Report
+
+The generated report includes:
+
+| Column | Description |
+|--------|-------------|
+| `name` | GPU kernel name |
+| `cpu_op_name` | Immediate parent CPU operation |
+| `source` | `trace1` or `trace2` |
+| `Input Dims` | Tensor shapes at CPU operation level |
+| `kernel_time` | GPU kernel execution time (μs) |
+| **`lowest_common_ancestor_name`** | **Name of the LCA operation** |
+| **`lowest_common_ancestor_id`** | **Merged tree ID of the LCA** |
+| `nn_module_stack` | PyTorch module hierarchy |
+
 
 
 ### [Roofline Analysis](#roofline-analysis)
