@@ -141,8 +141,7 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 ### Step 6: Automated Trace Comparison 
 
-
-*(More details available in [Automated Trace Comparison](#automated-trace-comparison-flow))*
+Generate performance comparison report and analysis, along with optimization opportunity analysis by comparing two traces. See [Performance comparison flow](../TraceLens/ComparativeMode/README.md) for instructions. 
 
 or
 
