@@ -1,5 +1,5 @@
 
-# 🚀 TraceLens Inference Trace Analysis
+# 🚀 TraceLens Inference Performance Analysis
 
 TraceLens-internal extends the open-source TraceLens tooling to provide comprehensive support for inference use cases, with a focus on InferenceMax optimization. This documentation covers:
 
