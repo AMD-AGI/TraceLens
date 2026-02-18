@@ -428,6 +428,8 @@ def generate_compare_perf_reports_pytorch(
         }
 
         for sheet in roofline_sheets:
+            if sheet not in report_sheet_names:
+                continue
 
             dfs = [load_sheet(path=path, sheet_name=sheet) for path in reports]
 
