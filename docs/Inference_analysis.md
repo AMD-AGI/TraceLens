@@ -152,6 +152,28 @@ Generate advanced optimization recommendations automatically based on roofline a
 
 ---
 
+## 🐞 TraceLens-internal: Report a Bug or Feature Request
+
+Please include the following details when reporting an issue. Please use Tracelens-internal private repo to share sensitive data.
+
+
+1. 🖥️ Environment Details
+
+| Item | Details |
+|------|---------|
+| **Inference Engine and Version** | (e.g., vLLM, SGLang, PyTorch) |
+| **Execution Mode** | (e.g., Eager, Graph, Graph+Capture) |
+| **Hardware** | (e.g., GPU model) |
+| **Profiler Config** | (e.g. Torch profiler config) |
+
+1.  ▶️ Command used
+: The exact command used to generate performance analysis report using TraceLens.
+
+1. ❗ Error/unexpected behavior.
+2. 📂 Trace files used for analysis.
+3. (Optional) 🧪 Expected output overview for feature request.
+
+---
 ## 📚 Examples & Use Cases
 
 *Example notebooks and scripts coming soon* 🔄
