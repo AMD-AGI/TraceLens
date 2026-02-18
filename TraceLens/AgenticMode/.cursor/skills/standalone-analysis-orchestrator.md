@@ -83,7 +83,8 @@ ssh <node> "docker exec <container> \
   TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs"
+  --output_csvs_dir <output_dir>/perf_report_csvs \
+  --enable_pseudo_ops"
 ```
 
 This generates:
@@ -593,6 +594,28 @@ with open('<output_dir>/category_data/category_manifest.json', 'r') as f:
     top_ops = manifest.get('top_operations', [])
 ```
 
+### Aggregate Compute Kernel Recommendations
+
+Compute kernel recommendations address individual operation efficiency. Each subagent has produced algorithmic and kernel optimization recommendations. Consolidate these, cross-reference with `top_ops`, and prioritize by impact.
+
+**Compute Kernel Prioritization:**
+
+Select kernels in top_ops and order by highest impact on end-to-end time. Focus on areas with low efficiency and high category time.
+
+| Priority | Icon | Criteria |
+|----------|------|----------|
+| P1 | 🔴 | In top_ops + (Sorted by efficiency and high category %) |
+| P2 | 🟡 | In top_ops + (Sorted by efficiency and high category %) |
+| P3+ | 🟢 | In top_ops + (Sorted by efficiency and high category %) |
+
+**Compute Kernel Icon Mapping (by priority number, NOT severity):**
+
+| Priority | Icon |
+|----------|------|
+| P1 | 🔴 |
+| P2 | 🟡 |
+| P3+ | 🟢 |
+
 ### Aggregate System-Level Recommendations
 
 System-level recommendations address pipeline/framework issues that affect ALL operations.
@@ -620,33 +643,11 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 | P2 | 🟡 |
 | P3+ | 🟢 |
 
-### Aggregate Compute Kernel Recommendations
-
-Compute kernel recommendations address individual operation efficiency. Each subagent has produced algorithmic and kernel optimization recommendations. Consolidate these, cross-reference with `top_ops`, and prioritize by impact.
-
-**Compute Kernel Prioritization:**
-
-Select kernels in top_ops and order by highest impact on end-to-end time. Focus on areas with low efficiency and high category time.
-
-| Priority | Icon | Criteria |
-|----------|------|----------|
-| P1 | 🔴 | In top_ops + (Sorted by efficiency and high category %) |
-| P2 | 🟡 | In top_ops + (Sorted by efficiency and high category %) |
-| P3+ | 🟢 | In top_ops + (Sorted by efficiency and high category %) |
-
-**Compute Kernel Icon Mapping (by priority number, NOT severity):**
-
-| Priority | Icon |
-|----------|------|
-| P1 | 🔴 |
-| P2 | 🟡 |
-| P3+ | 🟢 |
-
 ---
 
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: System-Level Optimizations and Compute Kernel Optimizations. Each section is independently composable and can stand alone as a deliverable.
+Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
@@ -686,6 +687,47 @@ These are excluded from the recommendations below.
 |------|-----------|----------|-----------|-------------------|
 | 1 | ... | ... | ... | ... |
 | 2 | ... | ... | ... | ... |
+
+---
+
+## Compute Kernel Optimizations
+
+Findings from per-category kernel analysis (GEMM, SDPA, elementwise, etc.).
+Summaries of recommendations from Step 7 sub-agents, focused on individual kernel efficiency.
+
+<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
+
+### 🔴 P1: <Brief Title>
+
+**Issue**: [1 sentence - what's wrong]
+
+**Action**: [1-2 sentences - what to do]
+
+**Impact**: [Expected improvement]
+
+→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
+
+---
+
+### 🟡 P2: <Brief Title>
+
+**Issue**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [Expected improvement]
+
+→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
+
+---
+
+### 🟢 P3: <Brief Title>
+
+**Issue**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [Expected improvement]
 
 ---
 
@@ -741,44 +783,13 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ---
 
-## Compute Kernel Optimizations
+## Detailed Analysis: Compute Kernels
 
-Findings from per-category kernel analysis (GEMM, SDPA, elementwise, etc.).
-Summaries of recommendations from Step 7 sub-agents, focused on individual kernel efficiency.
+### 1. <Operation Category> (X% of compute)
+[All kernel breakdowns, calculations, tables, explanations from category_findings/]
 
-<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
-
-### 🔴 P1: <Brief Title>
-
-**Issue**: [1 sentence - what's wrong]
-
-**Action**: [1-2 sentences - what to do]
-
-**Impact**: [Expected improvement]
-
-→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
-
----
-
-### 🟡 P2: <Brief Title>
-
-**Issue**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
-**Impact**: [Expected improvement]
-
-→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
-
----
-
-### 🟢 P3: <Brief Title>
-
-**Issue**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
-**Impact**: [Expected improvement]
+### 2. <Operation Category> (X% of compute)
+[...]
 
 ---
 
@@ -789,16 +800,6 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ### 2. Multi-Kernel Issues
 [Full multi_kernel_findings.md content from system_findings/]
-
----
-
-## Detailed Analysis: Compute Kernels
-
-### 1. <Operation Category> (X% of compute)
-[All kernel breakdowns, calculations, tables, explanations from category_findings/]
-
-### 2. <Operation Category> (X% of compute)
-[...]
 
 ---
 
@@ -816,14 +817,14 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
-4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
+3. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
+4. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
 5. **Each section is independently composable** -- can be shared standalone
-6. **System and Compute tiers use separate sequential P1/P2/P3 numbering (no gaps)**
+6. **Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps)**
 7. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
-   - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
    - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
-8. **Detailed Analysis**: Split into System-Level and Compute Kernels subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
+   - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
+8. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
 9. **No redundancy**: Information appears in ONE place only
 10. **Recommendations**: Max ~10 lines PER recommendation
 

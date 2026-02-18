@@ -24,8 +24,9 @@ def main():
     parser.add_argument('--platform', required=True, choices=list(PLATFORM_SPECS.keys()),
                         help='AMD platform (MI300X, MI325X, MI355X, MI400)')
     parser.add_argument('--output-dir', required=True, help='Output directory')
-    parser.add_argument('--enable_pseudo_ops', action='store_true', 
-                        help='Enable pseudo ops in TreePerfAnalyzer')
+    parser.add_argument('--disable_pseudo_ops', action='store_false',
+                        dest='enable_pseudo_ops', default=True,
+                        help='Disable pseudo-op augmentation (enabled by default).')
     
     args = parser.parse_args()
     

@@ -1,8 +1,8 @@
-# Jarvis: TraceLens Agentic Mode
+# Agentic Mode: Standalone
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-Jarvis is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. This is an experimental release to prototype a modular and extendible agentic trace analysis system. LLMs primally have been employed to define a structured workflow and interpret analysis results. The aim of this PoC is primarily to gain insights into developing a reliable system.
+TraceLens Agentic Mode (Standalone) is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. This is an experimental release to prototype a modular and extendible agentic trace analysis system. LLMs primally have been employed to define a structured workflow and interpret analysis results. The aim of this PoC is to gain insights into developing a reliable system.
 
 ---
 
@@ -172,5 +172,9 @@ After an analysis run, if you identify a missed issue, ask Cursor to study why a
 ## Future Plans
 TraceLens Agentic Mode is currently an **experimental** feature. Efforts will be focused on converting this structural PoC to a reliable tool through rounds of design reviews and robust evaluation workflows.
 - Individual analyzers require detailed review (performance thresholds) and restructuring (Codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
-- Validation at a sub-agent level and integration tests are crucial to asses performance.
-- Workflow handles categorized kernels, though complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`. New kernels previously not analyzed may require special handling.
+- The rigidity of a structured workflow vs an open-ended approach is being studied.
+- Hard-coded analyses could potentially be moved into TraceLens
+- Validation at a sub-agent level and integration tests are crucial to asses performance. Evals are being developed.
+- Workflow handles categorized kernels, though complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`. New kernels previously not analyzed may require special handling
+
+
