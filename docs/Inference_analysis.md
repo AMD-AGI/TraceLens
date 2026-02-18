@@ -195,7 +195,7 @@ When comparing two execution traces from different platforms, frameworks, or con
 - We need to **correlate related operations** across traces
 
 #### The Solution: Lowest Common Ancestor
-The **Lowest Common Ancestor** is the nearest parent CPU operation that is **common to both traces** in the merged execution tree. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
+The **Lowest Common Ancestor** is the nearest parent CPU operation or Python function that is **common to both traces** in the merged execution tree. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
 
 **Key Insight:** If two GPU kernels have the same LCA, they likely serve the same computational purpose, even if their implementations differ.
 
