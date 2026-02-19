@@ -25,7 +25,8 @@ def _make_event(uid, ts_us, dur_us, cat="kernel", name=""):
         "ts": ts_us,
         "dur": dur_us,
         "cat": cat,
-        "name": name or "kernel",  # required: event.get("name") used with "in", so must not be None
+        "name": name
+        or "kernel",  # required: event.get("name") used with "in", so must not be None
     }
 
 
@@ -66,8 +67,8 @@ def test_two_non_overlapping_events():
 
 def test_two_overlapping_events():
     """Two overlapping intervals -> each has the other's UID in overlapping_uids."""
-    a = _make_event(1, 0, 10)   # [0, 10]
-    b = _make_event(2, 5, 10)   # [5, 15]
+    a = _make_event(1, 0, 10)  # [0, 10]
+    b = _make_event(2, 5, 10)  # [5, 15]
     analyser = GPUEventAnalyser([a, b])
     result = analyser.get_gpu_event_lists()
     by_uid = _get_overlapping_uids_by_uid(result)
@@ -77,7 +78,7 @@ def test_two_overlapping_events():
 
 def test_two_touching_at_boundary():
     """Two events touching at t=10 -> treated as overlapping (start processed before end at same time)."""
-    a = _make_event(1, 0, 10)   # [0, 10]
+    a = _make_event(1, 0, 10)  # [0, 10]
     b = _make_event(2, 10, 10)  # [10, 20]
     analyser = GPUEventAnalyser([a, b])
     result = analyser.get_gpu_event_lists()
