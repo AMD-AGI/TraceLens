@@ -101,7 +101,21 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/batchnorm_findings.md`. Create it through the container on the node:
+Create `<output_dir>/category_findings/batchnorm_findings.md`. Create it through the container on the node.
+
+The findings file **must** end with an Impact Summary section:
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: BW gap to baseline: `savings_ms = op_time_ms * (1 - current_bw / baseline_bw)`
+- `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms`. Alternative norm (LayerNorm/GroupNorm): estimate based on known efficiency difference
+- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 
 ---
 

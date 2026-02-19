@@ -151,10 +151,21 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 ## GPU Graph Operations
 [If graph operations detected, analyze capture/replay overhead]
 
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+
 ## Notes
 - Communication overlap and memcpy patterns are covered in the Multi-Kernel system findings
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Memory-bound ops (embedding, index, scatter): `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
+- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- If no actionable bottlenecks found, the table may have zero rows.
 
 ---
 

@@ -105,7 +105,21 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/elementwise_findings.md`. Create it through the container on the node:
+Create `<output_dir>/category_findings/elementwise_findings.md`. Create it through the container on the node.
+
+The findings file **must** end with an Impact Summary section:
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Low BW utilization: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes_eliminated)`. torch.compile auto-fusion: estimate based on number of fusible op chains
+- **Confidence**: `high` = clear fusion opportunity; `medium` = depends on kernel tuning quality; `low` = rough estimate
 
 ---
 

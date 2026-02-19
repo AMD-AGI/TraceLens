@@ -149,7 +149,17 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 ## Additional Notes
 - Missing perf models: [count from metrics]
 - Quantized GEMMs detected: [count from metrics]
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Compute-bound GEMMs: `savings_ms = op_time_ms * (1 - current_efficiency / target_efficiency)` where target is the next efficiency threshold (e.g., 80%). Memory-bound GEMMs: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `algorithmic`: Batching opportunity, quantization format change — estimate based on expected parallelism or precision improvement
+- **Confidence**: `high` = clear gap to peak on large shapes; `medium` = depends on kernel tuning quality; `low` = rough estimate
 
 ---
 

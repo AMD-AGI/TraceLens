@@ -106,6 +106,20 @@ For each validated bottleneck, provide recommendations in both categories:
 
 Create `<output_dir>/category_findings/reduce_findings.md`. Create it through the container on the node.
 
+The findings file **must** end with an Impact Summary section:
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: BW gap to peak: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `algorithmic`: Unfused attention (softmax+bmm) to Flash: `savings_ms = softmax_time_ms * 0.7`. Fusion with adjacent ops: `savings_ms = op_time_ms * 0.5`
+- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+
 ---
 
 ## Common Patterns for Reduce Analysis

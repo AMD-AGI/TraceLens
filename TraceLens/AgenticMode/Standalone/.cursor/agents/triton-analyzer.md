@@ -108,6 +108,20 @@ For each validated bottleneck, provide recommendations in both categories:
 
 Create `<output_dir>/category_findings/triton_findings.md`. Create it through the container on the node.
 
+The findings file **must** end with an Impact Summary section:
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Compute-bound: `savings_ms = op_time_ms * (1 - current_tflops / peak_tflops)`. Memory-bound: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `algorithmic`: Replace with standard library op — estimate based on known library efficiency vs current
+- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+
 ---
 
 ## Common Patterns for Triton Analysis

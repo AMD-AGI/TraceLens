@@ -190,7 +190,19 @@ ALL other operations and represents [Y ms] of potential improvement.
 ## Technical Details
 
 [Include any relevant metrics, patterns, or data that support the analysis]
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | system | X.X | high/medium/low |
 ```
+
+**Impact estimation guidelines:**
+- `system` type only (CPU/idle issues are system-level, not kernel tuning)
+- GPU graph mode: `savings_ms = idle_time_ms * short_kernel_fraction` (fraction of idle caused by launch overhead)
+- Sync reduction: `savings_ms = sync_gap_time_ms * 0.5` (conservative estimate)
+- torch.compile / JIT: `savings_ms = idle_time_ms * framework_overhead_fraction`
+- **Confidence**: `high` = idle >50% with clear pattern; `medium` = moderate idle with mixed patterns; `low` = rough estimate
 
 ---
 

@@ -156,6 +156,19 @@ Include:
 - Workload profile (prefill vs decode)
 - Bottlenecks with context
 - Prioritized recommendations
+- **Impact Summary** (REQUIRED, at end of findings):
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Flash Attention kernel tuning: `savings_ms = op_time_ms * (1 - current_efficiency / target_efficiency)`. Paged Attention tuning: estimate from kernel breakdown and workload profile
+- `algorithmic`: Unfused attention to Flash Attention migration: `savings_ms = attention_time_ms * 0.7`. Contiguous copy elimination: `savings_ms = total_copy_time_ms`
+- **Confidence**: `high` = clear gap to peak or known optimization; `medium` = depends on kernel tuning quality; `low` = rough estimate
 
 ---
 

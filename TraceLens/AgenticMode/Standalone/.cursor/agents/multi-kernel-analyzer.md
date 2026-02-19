@@ -217,7 +217,19 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 | D2H | ... | ... | ... | ... |
 | H2D | ... | ... | ... | ... |
 | D2D | ... | ... | ... | ... |
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | system | X.X | high/medium/low |
 ```
+
+**Impact estimation guidelines:**
+- `system` type only (multi-kernel issues are system-level, not kernel tuning)
+- Communication/compute overlap: `savings_ms = exposed_comm_time_ms * (target_overlap - current_overlap)` where target is 0.7+
+- Memcpy reduction: `savings_ms = memcpy_time_ms * reducible_fraction` (fraction of unnecessary copies)
+- Pipeline optimization: estimate from communication blocking time that can be hidden
+- **Confidence**: `high` = exposed comm >10% with clear overlap gap; `medium` = moderate overhead; `low` = rough estimate
 
 ---
 

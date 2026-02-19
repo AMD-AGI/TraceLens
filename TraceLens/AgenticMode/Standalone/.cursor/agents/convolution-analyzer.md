@@ -103,7 +103,22 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/convolution_findings.md`. Create it through the container on the node:
+Create `<output_dir>/category_findings/convolution_findings.md`. Create it through the container on the node.
+
+The findings file **must** end with an Impact Summary section:
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Efficiency gap: `savings_ms = op_time_ms * (1 - current_efficiency / target_efficiency)`
+- `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms` (from `transpose_overhead_percent`)
+- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- If no actionable bottlenecks found, the table may have zero rows.
 
 ---
 
