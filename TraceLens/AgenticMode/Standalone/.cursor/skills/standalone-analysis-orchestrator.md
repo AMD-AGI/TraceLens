@@ -840,7 +840,9 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ### Top Operations
 
-| Rank | Operation | Category | Time (ms) | % of Total Compute |
+Use **% of computation time** (not % of total trace time) so readers can see each operation's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`.
+
+| Rank | Operation | Category | Time (ms) | % of Compute Time |
 |------|-----------|----------|-----------|-------------------|
 | 1 | ... | ... | ... | ... |
 | 2 | ... | ... | ... | ... |
