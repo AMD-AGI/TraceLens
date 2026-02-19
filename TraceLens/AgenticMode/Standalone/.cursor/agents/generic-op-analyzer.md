@@ -162,7 +162,7 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Memory-bound ops (embedding, index, scatter): `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TB_s / peak_hbm_bw_tbs * 100` (most generic ops are memory-bound)
 - `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.

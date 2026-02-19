@@ -113,7 +113,7 @@ The findings file **must** end with an Impact Summary section:
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: BW gap to baseline: `savings_ms = op_time_ms * (1 - current_bw / baseline_bw)`
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TB_s / peak_hbm_bw_tbs * 100` (batchnorm ops are memory-bound)
 - `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms`. Alternative norm (LayerNorm/GroupNorm): estimate based on known efficiency difference
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

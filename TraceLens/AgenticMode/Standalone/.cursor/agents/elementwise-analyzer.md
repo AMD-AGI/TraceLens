@@ -117,7 +117,7 @@ The findings file **must** end with an Impact Summary section:
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Low BW utilization: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TB_s / peak_hbm_bw_tbs * 100` (elementwise ops are memory-bound)
 - `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes_eliminated)`. torch.compile auto-fusion: estimate based on number of fusible op chains
 - **Confidence**: `high` = clear fusion opportunity; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

@@ -166,7 +166,7 @@ Include:
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Flash Attention kernel tuning: `savings_ms = op_time_ms * (1 - current_efficiency / target_efficiency)`. Paged Attention tuning: estimate from kernel breakdown and workload profile
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = achieved / peak from metadata. Applies to Flash Attention and Paged Attention kernel tuning
 - `algorithmic`: Unfused attention to Flash Attention migration: `savings_ms = attention_time_ms * 0.7`. Contiguous copy elimination: `savings_ms = total_copy_time_ms`
 - **Confidence**: `high` = clear gap to peak or known optimization; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

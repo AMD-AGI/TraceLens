@@ -116,7 +116,7 @@ The findings file **must** end with an Impact Summary section:
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Efficiency gap: `savings_ms = op_time_ms * (1 - current_efficiency / target_efficiency)`
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = achieved / peak from metadata
 - `algorithmic`: Expert load rebalancing: `savings_ms = op_time_ms * estimated_imbalance_fraction`
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.

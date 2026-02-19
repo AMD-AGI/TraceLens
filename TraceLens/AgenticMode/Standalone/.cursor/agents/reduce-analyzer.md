@@ -116,7 +116,7 @@ The findings file **must** end with an Impact Summary section:
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: BW gap to peak: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TB_s / peak_hbm_bw_tbs * 100` (reduce ops are memory-bound)
 - `algorithmic`: Unfused attention (softmax+bmm) to Flash: `savings_ms = softmax_time_ms * 0.7`. Fusion with adjacent ops: `savings_ms = op_time_ms * 0.5`
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

@@ -118,7 +118,7 @@ The findings file **must** end with an Impact Summary section:
 ```
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Compute-bound: `savings_ms = op_time_ms * (1 - current_tflops / peak_tflops)`. Memory-bound: `savings_ms = op_time_ms * (1 - current_bw / peak_hbm_bw)`
+- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TFLOPS_s / max_achievable_tflops[Compute Spec] * 100` (compute-bound) or `TB_s / peak_hbm_bw_tbs * 100` (memory-bound). Peaks come from metadata
 - `algorithmic`: Replace with standard library op — estimate based on known library efficiency vs current
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

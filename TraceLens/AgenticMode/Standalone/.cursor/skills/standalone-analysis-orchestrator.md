@@ -409,8 +409,14 @@ Every subagent (compute kernel **and** system-level) **must** include an `## Imp
   - `kernel_tuning` — closing the efficiency gap to peak for existing kernels (tile sizes, wave occupancy, memory access patterns, bandwidth utilization). **Only this type feeds the performance plot.**
   - `algorithmic` — fusion, Flash Attention migration, layout changes, batching, torch.compile, operator replacement.
   - `system` — CPU idle reduction, communication/compute overlap, memcpy optimization, multi-kernel pipeline issues.
-- Estimate savings using efficiency gap: `savings_ms = op_time_ms * (1 - current_efficiency / target_efficiency)`
-- For fusion (algorithmic): `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes_eliminated)`
+- **Kernel tuning estimation** — use the efficiency gap to measured peak achievable (MAF):
+  ```
+  efficiency_pct = TFLOPS_s_mean / max_achievable_tflops[Compute Spec] * 100   (compute-bound: FLOPS/Byte > 100)
+  efficiency_pct = TB_s_mean / peak_hbm_bw_tbs * 100                          (memory-bound: FLOPS/Byte < 50)
+  savings_ms = op_time_ms * (1 - efficiency_pct / 100)
+  ```
+  Where `op_time_ms` = `Kernel Time (us)_sum / 1000` from the ops CSV, and `max_achievable_tflops` / `peak_hbm_bw_tbs` come from the category metadata JSON. No additional scaling needed — the peaks are already measured max achievable, not theoretical.
+- **Algorithmic estimation**: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes_eliminated)` (fusion); other algorithmic changes estimated case-by-case
 - **Confidence levels**: `high` = clear gap to peak on large shapes; `medium` = depends on kernel tuning quality; `low` = rough estimate, implementation-dependent
 - If no actionable bottlenecks, the table may have zero rows but the section header must still be present
 
