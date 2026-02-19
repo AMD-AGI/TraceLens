@@ -15,9 +15,7 @@ from openpyxl.utils import get_column_letter
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
-
-# Config for compare (merge keys, diff columns, sort column) per main sheet.
-MAIN_SHEETS_COMPARE_CONFIG = {
+SHEETS_COMPARE_CONFIG = {
     "ops_all": {
         "keys": [
             "name",
@@ -48,14 +46,6 @@ MAIN_SHEETS_COMPARE_CONFIG = {
         ],
         "sort_col": "total_direct_kernel_time_sum",
     },
-    "ops_summary": {
-        "keys": ["name"],
-        "diff_cols": [
-            "total_direct_kernel_time_sum",
-            "Count",
-        ],
-        "sort_col": "total_direct_kernel_time_sum",
-    },
     "unified_perf_summary": {
         "keys": [
             "name",
@@ -71,12 +61,20 @@ MAIN_SHEETS_COMPARE_CONFIG = {
         ],
         "sort_col": "Kernel Time (µs)_sum",
     },
+    "ops_summary": {
+        "keys": ["name"],
+        "diff_cols": ["total_direct_kernel_time_ms", "Count"],
+        "cols_to_delete": ["total_direct_kernel_time_sum"],
+        "sort_col": "total_direct_kernel_time_ms",
+    },
     "kernel_summary": {
         "keys": ["Kernel name"],
-        "diff_cols": [
-            "Kernel duration (µs)_sum",
-            "Kernel duration (µs)_mean",
-            "Kernel duration (µs)_count",
+        "diff_cols": ["Kernel duration (µs)_sum", "Kernel duration (µs)_mean", "Kernel duration (µs)_count"],
+        "cols_to_delete": [
+            "Kernel duration (µs)_sum)",
+            "Kernel duration (µs)_min",
+            "Kernel duration (µs)_max",
+            "Parent op category",
         ],
         "sort_col": "Kernel duration (µs)_sum",
     },
@@ -379,20 +377,37 @@ def generate_compare_perf_reports_pytorch(
         results["gpu_timeline"] = dtl
 
     report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
+    
+    # ── Ops summary / Kernel summary ──────────────────────────────────────────
+    # Perform ops_summary if specified
+    if "ops_summary" in sheets or "all" in sheets:
+        if "ops_summary" not in report_sheet_names:
+            raise ValueError(f"ops_summary sheet not found in {reports[0]}")
+        sheet_to_load = "ops_summary"
+        config = SHEETS_COMPARE_CONFIG[sheet_to_load]
+        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
+        results[sheet_to_load] = ops
+
+    # Perform kernel_summary if specified
+    if "kernel_summary" in sheets or "all" in sheets:
+        if "kernel_summary" not in report_sheet_names:
+            raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
+        sheet_to_load = "kernel_summary"
+        config = SHEETS_COMPARE_CONFIG[sheet_to_load]
+        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
+        results[sheet_to_load] = ops
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
     main_sheets = [
         "ops_all",
         "ops_unique_args",
-        "unified_perf_summary",
-        "ops_summary",
-        "kernel_summary"
+        "unified_perf_summary"
     ]  # different names for different versions of perf reports
     if "ops_all" in sheets or "all" in sheets:
         for sheet_name in main_sheets:
-            if sheet_name not in report_sheet_names or sheet_name not in MAIN_SHEETS_COMPARE_CONFIG:
+            if sheet_name not in report_sheet_names or sheet_name not in SHEETS_COMPARE_CONFIG:
                 continue
-            config = MAIN_SHEETS_COMPARE_CONFIG[sheet_name]
+            config = SHEETS_COMPARE_CONFIG[sheet_name]
             keys = config["keys"]
             diff_cols = config["diff_cols"]
             sort_col = config["sort_col"]
