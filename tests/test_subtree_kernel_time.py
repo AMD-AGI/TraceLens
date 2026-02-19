@@ -257,6 +257,7 @@ class TestComputeSubtreeKernelTimeUs:
         assert analyzer._compute_subtree_kernel_time_us(child_add) == 50.0
         assert analyzer._compute_subtree_kernel_time_us(child_mul) == 40.0
 
+
 def _generate_pytorch_perf_report(profile_path, output_path):
     """Run generate_perf_report_pytorch.py to produce an xlsx report."""
     script_path = os.path.abspath(
@@ -332,7 +333,7 @@ class TestOpsSummarySubtreeVsDirectFromReport:
             direct_add = add_["total_direct_kernel_time_sum"].sum()
             subtree_miopen = miopen["total_subtree_kernel_time_sum"].sum()
 
-            assert abs((direct_miopen + direct_add) == subtree_miopen ), (
+            assert abs((direct_miopen + direct_add) == subtree_miopen), (
                 f"direct(miopen_convolution) + direct(aten::add_) should equal "
                 f"subtree(miopen_convolution): {direct_miopen} + {direct_add} = {direct_miopen + direct_add} vs subtree {subtree_miopen}"
             )
