@@ -23,17 +23,83 @@ SUMMARY_SHEET_CONFIG = {
         "sort_col": "total_direct_kernel_time_ms",
     },
     "kernel_summary": {
-        "keys": ["name"],
-        "diff_cols": ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"],
+        "keys": ["Kernel name"],
+        "diff_cols": ["Kernel duration (µs)_sum", "Kernel duration (µs)_mean", "Kernel duration (µs)_count"],
         "cols_to_delete": [
-            "Total Kernel Time (µs)",
-            "Median Kernel Time (µs)",
-            "Std Kernel Time (µs)",
-            "Min Kernel Time (µs)",
-            "Max Kernel Time (µs)",
-            "Category",
+            "Kernel duration (µs)_sum)",
+            # "Median Kernel Time (µs)",
+            # "Std Kernel Time (µs)",
+            "Kernel duration (µs)_min",
+            "Kernel duration (µs)_max",
+            "Parent op category",
         ],
-        "sort_col": "Total Kernel Time (ms)",
+        "sort_col": "Kernel duration (µs)_sum",
+    },
+}
+
+# Config for compare (merge keys, diff columns, sort column) per main sheet.
+MAIN_SHEETS_COMPARE_CONFIG = {
+    "ops_all": {
+        "keys": [
+            "name",
+            "Input type",
+            "Input Dims",
+            "Input Strides",
+            "Concrete Inputs",
+        ],
+        "diff_cols": [
+            "total_direct_kernel_time_sum",
+            "total_direct_kernel_time_mean",
+            "operation_count",
+        ],
+        "sort_col": "total_direct_kernel_time_sum",
+    },
+    "ops_unique_args": {
+        "keys": [
+            "name",
+            "Input type",
+            "Input Dims",
+            "Input Strides",
+            "Concrete Inputs",
+        ],
+        "diff_cols": [
+            "total_direct_kernel_time_sum",
+            "total_direct_kernel_time_mean",
+            "operation_count",
+        ],
+        "sort_col": "total_direct_kernel_time_sum",
+    },
+    "ops_summary": {
+        "keys": ["name"],
+        "diff_cols": [
+            "total_direct_kernel_time_sum",
+            "Count",
+        ],
+        "sort_col": "total_direct_kernel_time_sum",
+    },
+    "unified_perf_summary": {
+        "keys": [
+            "name",
+            "Input type",
+            "Input Dims",
+            "Input Strides",
+            "Concrete Inputs",
+        ],
+        "diff_cols": [
+            "Kernel Time (µs)_sum",
+            "Kernel Time (µs)_mean",
+            "operation_count",
+        ],
+        "sort_col": "Kernel Time (µs)_sum",
+    },
+    "kernel_summary": {
+        "keys": ["Kernel name"],
+        "diff_cols": [
+            "Kernel duration (µs)_sum",
+            "Kernel duration (µs)_mean",
+            "Kernel duration (µs)_count",
+        ],
+        "sort_col": "Kernel duration (µs)_sum",
     },
 }
 
@@ -336,22 +402,20 @@ def generate_compare_perf_reports_pytorch(
     report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
 
     # ── Ops summary / Kernel summary ──────────────────────────────────────────
-    if "ops_summary" in sheets or "kernel_summary" in sheets or "all" in sheets:
-        # Determine which sheet to load based on request and availability
-        if "ops_summary" in sheets or "all" in sheets:
-            if "ops_summary" not in report_sheet_names:
-                raise ValueError(f"ops_summary sheet not found in {reports[0]}")
-            sheet_to_load = "ops_summary"
-        elif "kernel_summary" in sheets or "all" in sheets:
-            if "kernel_summary" not in report_sheet_names:
-                raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
-            sheet_to_load = "kernel_summary"
-        else:
-            raise ValueError(
-                f"Neither 'ops_summary' nor 'kernel_summary' sheet found in {reports[0]}"
-            )
+    # Perform ops_summary if specified
+    if "ops_summary" in sheets or "all" in sheets:
+        if "ops_summary" not in report_sheet_names:
+            raise ValueError(f"ops_summary sheet not found in {reports[0]}")
+        sheet_to_load = "ops_summary"
+        config = SUMMARY_SHEET_CONFIG[sheet_to_load]
+        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
+        results[sheet_to_load] = ops
 
-        # Process the sheet using configuration
+    # Perform kernel_summary if specified
+    if "kernel_summary" in sheets or "all" in sheets:
+        if "kernel_summary" not in report_sheet_names:
+            raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
+        sheet_to_load = "kernel_summary"
         config = SUMMARY_SHEET_CONFIG[sheet_to_load]
         ops = process_summary_sheet(reports, sheet_to_load, tags, config)
         results[sheet_to_load] = ops
@@ -360,59 +424,45 @@ def generate_compare_perf_reports_pytorch(
     main_sheets = [
         "ops_all",
         "ops_unique_args",
-        "unified_perf_summary"
+        "unified_perf_summary",
+        "ops_summary",
+        "kernel_summary"
     ]  # different names for different versions of perf reports
     if "ops_all" in sheets or "all" in sheets:
         for sheet_name in main_sheets:
-            if sheet_name in report_sheet_names:
-                keys = [
-                    "name",
-                    "Input type",
-                    "Input Dims",
-                    "Input Strides",
-                    "Concrete Inputs",
+            if sheet_name not in report_sheet_names or sheet_name not in MAIN_SHEETS_COMPARE_CONFIG:
+                continue
+            config = MAIN_SHEETS_COMPARE_CONFIG[sheet_name]
+            keys = config["keys"]
+            diff_cols = config["diff_cols"]
+            sort_col = config["sort_col"]
+
+            dfs = [load_sheet(path, sheet_name=sheet_name) for path in reports]
+
+            opsA = build_df_dff(
+                dfs=dfs,
+                list_report_tags=tags,
+                merge_keys=keys,
+                diff_cols=diff_cols,
+            )
+
+            this_results = split_df_diff(
+                name=sheet_name,
+                df_diff=opsA,
+                tags=tags,
+                diff_col=diff_cols[0],  # use the first diff_col for checking matches
+                sort_col=sort_col,
+                drop_other_tag_cols=True,  # keep only keys and diff/pct cols for kept tags
+            )
+            results.update(this_results)
+
+            for result_sheet_name in this_results.keys():
+                cols_to_hide = [
+                    c
+                    for c in this_results[result_sheet_name].columns
+                    if c.endswith(("kernel_names", "median", "std", "min", "max", "ex_UID"))
                 ]
-                if sheet_name == "ops_unique_args" or sheet_name == "ops_all":
-                    diff_cols = [
-                        "total_direct_kernel_time_sum",
-                        "total_direct_kernel_time_mean",
-                        "operation_count",
-                    ]
-                    sort_col = "total_direct_kernel_time_sum"
-                elif sheet_name == "unified_perf_summary":
-                    diff_cols = [
-                        "Kernel Time (µs)_sum",
-                        "Kernel Time (µs)_mean",
-                        "operation_count",
-                    ]
-                    sort_col = "Kernel Time (µs)_sum"
-                    
-                dfs = [load_sheet(path, sheet_name=sheet_name) for path in reports]
-
-                opsA = build_df_dff(
-                    dfs=dfs,
-                    list_report_tags=tags,
-                    merge_keys=keys,
-                    diff_cols=diff_cols,
-                )
-
-                this_results = split_df_diff(
-                    name=sheet_name,
-                    df_diff=opsA,
-                    tags=tags,
-                    diff_col=diff_cols[0],  # use the first diff_col for checking matches
-                    sort_col=sort_col,
-                    drop_other_tag_cols=True,  # keep only keys and diff/pct cols for kept tags
-                )
-                results.update(this_results)
-
-                for sheet_name in this_results.keys():
-                    cols_to_hide = [
-                        c
-                        for c in this_results[sheet_name].columns
-                        if c.endswith(("kernel_names", "median", "std", "min", "max", "ex_UID"))
-                    ]
-                    cols_to_hide_xl[sheet_name] = cols_to_hide
+                cols_to_hide_xl[result_sheet_name] = cols_to_hide
 
     # ── Roofline sheets (per-op) ──────────────────────────────────────────────
     if "roofline" in sheets or "all" in sheets:
