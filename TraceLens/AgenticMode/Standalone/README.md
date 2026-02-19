@@ -37,7 +37,7 @@ pip install -e .
 
 ### To run performance analysis:
 
-1. **In a Cursor chat with Claude-4.6-Opus-High, invoke:**
+1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke:**
    ```
    Run standalone analysis on <path_to_trace.json>
    ```
