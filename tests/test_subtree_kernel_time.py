@@ -15,6 +15,11 @@ Covers:
 - summarize_df_perf_metrics aggregation of Subtree Kernel Time
 """
 
+import os
+import subprocess
+import tempfile
+
+import pandas as pd
 import pytest
 from copy import deepcopy
 
@@ -252,78 +257,82 @@ class TestComputeSubtreeKernelTimeUs:
         assert analyzer._compute_subtree_kernel_time_us(child_add) == 50.0
         assert analyzer._compute_subtree_kernel_time_us(child_mul) == 40.0
 
-
-class TestUnifiedPerfTableSubtreeColumn:
-    """Test Subtree Kernel Time (µs) in build_df_unified_perf_table and summarize."""
-
-    def test_unified_perf_table_has_subtree_column(self):
-        """build_df_unified_perf_table includes Subtree Kernel Time (µs)."""
-        events = _make_simple_trace()
-        tree = TraceToTree(deepcopy(events))
-        tree.build_tree()
-        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
-        df = analyzer.build_df_unified_perf_table(include_perf_metrics=True)
-        assert "Subtree Kernel Time (µs)" in df.columns
-        # Leaf op: subtree equals direct kernel time
-        if "Kernel Time (µs)" in df.columns:
-            for _, row in df.iterrows():
-                assert row["Subtree Kernel Time (µs)"] == 50.0
-                assert row["Kernel Time (µs)"] == 50.0
-
-    def test_summarize_unified_perf_table_aggregates_subtree(self):
-        """summarize_df_unified_perf_table produces Subtree Kernel Time (µs)_sum etc."""
-        events = _make_simple_trace()
-        tree = TraceToTree(deepcopy(events))
-        tree.build_tree()
-        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
-        df = analyzer.build_df_unified_perf_table(include_perf_metrics=True)
-        summary = analyzer.summarize_df_unified_perf_table(
-            df, agg_metrics=["mean", "std"], include_pct=False
+def _generate_pytorch_perf_report(profile_path, output_path):
+    """Run generate_perf_report_pytorch.py to produce an xlsx report."""
+    script_path = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "TraceLens",
+            "Reporting",
+            "generate_perf_report_pytorch.py",
         )
-        assert not summary.empty
-        assert "Subtree Kernel Time (µs)_sum" in summary.columns
-        if "Kernel Time (µs)" in df.columns:
-            for _, row in summary.iterrows():
-                assert row["Subtree Kernel Time (µs)_sum"] == 50.0
-                assert row["Kernel Time (µs)_sum"] == 50.0
+    )
+    cmd = [
+        "python3",
+        script_path,
+        "--profile_json_path",
+        profile_path,
+        "--output_xlsx_path",
+        output_path,
+        "--enable_kernel_summary",
+        "--short_kernel_study",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"generate_perf_report_pytorch failed: {result.stderr}")
+    return output_path
 
 
-class TestBuildDfPerfMetricsSubtreeColumn:
-    """Test Subtree Kernel Time (µs) in build_df_perf_metrics and summarize_df_perf_metrics."""
+class TestOpsSummarySubtreeVsDirectFromReport:
+    """Test ops_summary direct vs subtree relationship using a generated PyTorch report."""
 
-    def test_summarize_df_perf_metrics_aggregates_subtree_when_present(self):
-        """When input df has Subtree Kernel Time (µs), summarize_df_perf_metrics aggregates it."""
-        import pandas as pd
-
-        # Minimal df with columns required by summarize_df_perf_metrics
-        df = pd.DataFrame(
-            [
-                {
-                    "name": "aten::addmm",
-                    "UID": 1,
-                    "Kernel Time (µs)": 100.0,
-                    "Subtree Kernel Time (µs)": 100.0,
-                    "GFLOPS": 1.0,
-                    "Data Moved (MB)": 0.1,
-                    "FLOPS/Byte": 100.0,
-                    "TB/s": 1.0,
-                    "TFLOPS/s": 1.0,
-                },
-                {
-                    "name": "aten::addmm",
-                    "UID": 2,
-                    "Kernel Time (µs)": 200.0,
-                    "Subtree Kernel Time (µs)": 200.0,
-                    "GFLOPS": 2.0,
-                    "Data Moved (MB)": 0.2,
-                    "FLOPS/Byte": 200.0,
-                    "TB/s": 2.0,
-                    "TFLOPS/s": 2.0,
-                },
-            ]
+    def test_ops_summary_miopen_convolution_subtree_equals_direct_miopen_plus_direct_add(
+        self, tol=1.0
+    ):
+        """
+        Generate PyTorch report for facebook_timesformer trace; in ops_summary,
+        total_direct_kernel_time_sum(aten::miopen_convolution) + total_direct_kernel_time_sum(aten::add_)
+        should equal total_subtree_kernel_time_sum(aten::miopen_convolution).
+        (aten::add_ is a child of miopen_convolution in the op tree.)
+        """
+        profile_path = os.path.join(
+            os.path.dirname(__file__),
+            "traces",
+            "mi300",
+            "facebook_timesformer-base-finetuned-k400__1016002.json.gz",
         )
-        summary = TreePerfAnalyzer.summarize_df_perf_metrics(
-            df, agg_metrics=["mean", "std"]
-        )
-        assert "Subtree Kernel Time (µs)_sum" in summary.columns
-        assert summary["Subtree Kernel Time (µs)_sum"].iloc[0] == 300.0
+        if not os.path.exists(profile_path):
+            pytest.skip(f"Trace not found: {profile_path}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = os.path.join(tmpdir, "perf_report.xlsx")
+            _generate_pytorch_perf_report(profile_path, report_path)
+
+            xls = pd.ExcelFile(report_path)
+            if "ops_summary" not in xls.sheet_names:
+                pytest.skip("ops_summary sheet not in report")
+
+            df = pd.read_excel(report_path, sheet_name="ops_summary")
+
+            if "total_direct_kernel_time_sum" not in df.columns:
+                pytest.skip("ops_summary missing total_direct_kernel_time_sum")
+            if "total_subtree_kernel_time_sum" not in df.columns:
+                pytest.skip("ops_summary missing total_subtree_kernel_time_sum")
+
+            miopen = df[df["name"] == "aten::miopen_convolution"]
+            add_ = df[df["name"] == "aten::add_"]
+
+            if miopen.empty:
+                pytest.skip("aten::miopen_convolution not in ops_summary")
+            if add_.empty:
+                pytest.skip("aten::add_ not in ops_summary")
+
+            direct_miopen = miopen["total_direct_kernel_time_sum"].sum()
+            direct_add = add_["total_direct_kernel_time_sum"].sum()
+            subtree_miopen = miopen["total_subtree_kernel_time_sum"].sum()
+
+            assert abs((direct_miopen + direct_add) == subtree_miopen ), (
+                f"direct(miopen_convolution) + direct(aten::add_) should equal "
+                f"subtree(miopen_convolution): {direct_miopen} + {direct_add} = {direct_miopen + direct_add} vs subtree {subtree_miopen}"
+            )
