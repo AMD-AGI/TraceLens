@@ -15,27 +15,6 @@ from openpyxl.utils import get_column_letter
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
-SUMMARY_SHEET_CONFIG = {
-    "ops_summary": {
-        "keys": ["name"],
-        "diff_cols": ["total_direct_kernel_time_ms", "Count"],
-        "cols_to_delete": ["total_direct_kernel_time_sum"],
-        "sort_col": "total_direct_kernel_time_ms",
-    },
-    "kernel_summary": {
-        "keys": ["Kernel name"],
-        "diff_cols": ["Kernel duration (µs)_sum", "Kernel duration (µs)_mean", "Kernel duration (µs)_count"],
-        "cols_to_delete": [
-            "Kernel duration (µs)_sum)",
-            # "Median Kernel Time (µs)",
-            # "Std Kernel Time (µs)",
-            "Kernel duration (µs)_min",
-            "Kernel duration (µs)_max",
-            "Parent op category",
-        ],
-        "sort_col": "Kernel duration (µs)_sum",
-    },
-}
 
 # Config for compare (merge keys, diff columns, sort column) per main sheet.
 MAIN_SHEETS_COMPARE_CONFIG = {
@@ -400,25 +379,6 @@ def generate_compare_perf_reports_pytorch(
         results["gpu_timeline"] = dtl
 
     report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
-
-    # ── Ops summary / Kernel summary ──────────────────────────────────────────
-    # Perform ops_summary if specified
-    if "ops_summary" in sheets or "all" in sheets:
-        if "ops_summary" not in report_sheet_names:
-            raise ValueError(f"ops_summary sheet not found in {reports[0]}")
-        sheet_to_load = "ops_summary"
-        config = SUMMARY_SHEET_CONFIG[sheet_to_load]
-        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
-        results[sheet_to_load] = ops
-
-    # Perform kernel_summary if specified
-    if "kernel_summary" in sheets or "all" in sheets:
-        if "kernel_summary" not in report_sheet_names:
-            raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
-        sheet_to_load = "kernel_summary"
-        config = SUMMARY_SHEET_CONFIG[sheet_to_load]
-        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
-        results[sheet_to_load] = ops
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
     main_sheets = [
