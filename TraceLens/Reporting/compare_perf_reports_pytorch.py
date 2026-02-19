@@ -357,54 +357,62 @@ def generate_compare_perf_reports_pytorch(
         results[sheet_to_load] = ops
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
-    alias = [
+    main_sheets = [
         "ops_all",
         "ops_unique_args",
+        "unified_perf_summary"
     ]  # different names for different versions of perf reports
     if "ops_all" in sheets or "all" in sheets:
-        for sheet_name in alias:
+        for sheet_name in main_sheets:
             if sheet_name in report_sheet_names:
-                ops_all_sheet = sheet_name
-                break
-        keys = [
-            "name",
-            "Input type",
-            "Input Dims",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
-        diff_cols = [
-            "total_direct_kernel_time_sum",
-            "total_direct_kernel_time_mean",
-            "operation_count",
-        ]
+                keys = [
+                    "name",
+                    "Input type",
+                    "Input Dims",
+                    "Input Strides",
+                    "Concrete Inputs",
+                ]
+                if sheet_name == "ops_unique_args" or sheet_name == "ops_all":
+                    diff_cols = [
+                        "total_direct_kernel_time_sum",
+                        "total_direct_kernel_time_mean",
+                        "operation_count",
+                    ]
+                    sort_col = "total_direct_kernel_time_sum"
+                elif sheet_name == "unified_perf_summary":
+                    diff_cols = [
+                        "Kernel Time (µs)_sum",
+                        "Kernel Time (µs)_mean",
+                        "operation_count",
+                    ]
+                    sort_col = "Kernel Time (µs)_sum"
+                    
+                dfs = [load_sheet(path, sheet_name=sheet_name) for path in reports]
 
-        dfs = [load_sheet(path, sheet_name=ops_all_sheet) for path in reports]
+                opsA = build_df_dff(
+                    dfs=dfs,
+                    list_report_tags=tags,
+                    merge_keys=keys,
+                    diff_cols=diff_cols,
+                )
 
-        opsA = build_df_dff(
-            dfs=dfs,
-            list_report_tags=tags,
-            merge_keys=keys,
-            diff_cols=diff_cols,
-        )
+                this_results = split_df_diff(
+                    name=sheet_name,
+                    df_diff=opsA,
+                    tags=tags,
+                    diff_col=diff_cols[0],  # use the first diff_col for checking matches
+                    sort_col=sort_col,
+                    drop_other_tag_cols=True,  # keep only keys and diff/pct cols for kept tags
+                )
+                results.update(this_results)
 
-        this_results = split_df_diff(
-            name="ops_all",
-            df_diff=opsA,
-            tags=tags,
-            diff_col=diff_cols[0],  # use the first diff_col for checking matches
-            sort_col="total_direct_kernel_time_sum",
-            drop_other_tag_cols=True,  # keep only keys and diff/pct cols for kept tags
-        )
-        results.update(this_results)
-
-        for sheet_name in this_results.keys():
-            cols_to_hide = [
-                c
-                for c in this_results[sheet_name].columns
-                if c.endswith(("kernel_names", "median", "std", "min", "max", "ex_UID"))
-            ]
-            cols_to_hide_xl[sheet_name] = cols_to_hide
+                for sheet_name in this_results.keys():
+                    cols_to_hide = [
+                        c
+                        for c in this_results[sheet_name].columns
+                        if c.endswith(("kernel_names", "median", "std", "min", "max", "ex_UID"))
+                    ]
+                    cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Roofline sheets (per-op) ──────────────────────────────────────────────
     if "roofline" in sheets or "all" in sheets:
@@ -512,9 +520,9 @@ def generate_compare_perf_reports_pytorch(
     with pd.ExcelWriter(output, engine="openpyxl") as xls:
         for sheet_name, df in results.items():
             # if df is empty, skip writing it
-            if df.empty:
-                print(f"Skipping empty sheet '{sheet_name}'")
-                continue
+            # if df.empty:
+            #     print(f"Skipping empty sheet '{sheet_name}'")
+            #     continue
             df.to_excel(
                 xls, sheet_name=sheet_name[:31], index=False
             )  # Excel 31-char limit
