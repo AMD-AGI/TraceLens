@@ -659,7 +659,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 **CRITICAL: No-Issue Handling:**
 - If **all** system-level analyses report NONE/N/A severity (no actionable issues), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
-- Instead, display a short summary: "No system-level bottlenecks detected. GPU utilization is healthy at X%, with negligible memcpy/communication overhead."
+- Instead, display a short summary: "No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead."
 - This avoids misleading stakeholders with a red P1 icon for a non-issue.
 
 **System-Level Icon Mapping (by priority number, NOT severity):**
@@ -812,7 +812,7 @@ Validate the report before sharing the priority recommendations on the chat and 
 | Metric | Value |
 |--------|-------|
 | Total Compute Time | X ms |
-| GPU Utilization | Y% |
+| Computation | Y% |
 | Idle Time | Z% |
 | Exposed Communication | W% |
 | Top Bottleneck Category | Category (V%) |
@@ -896,7 +896,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- === TEMPLATE A: No actionable system-level issues === -->
 <!-- Use this when all system-level analyses report NONE/N/A severity -->
 
-✅ No system-level bottlenecks detected. GPU utilization is healthy at X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
+✅ No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
 
 <!-- === TEMPLATE B: Actionable issues found === -->
 <!-- Use this when at least one system-level analysis reports an actionable severity (LOW/MEDIUM/HIGH/CRITICAL) -->
