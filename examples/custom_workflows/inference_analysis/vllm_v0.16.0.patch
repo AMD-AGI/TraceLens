@@ -19,10 +19,10 @@ index a7c2a8800..9966185df 100644
 +        # Setup torch profiler for graph capture traces (conditional)
 +        from vllm.distributed.parallel_state import get_world_group
 +        local_rank = get_world_group().local_rank
-+        enable_profiler =  (local_rank==0) and envs.VLLM_TORCH_PROFILER_DIR is not None
++        enable_profiler =  (local_rank==0) and self.vllm_config.profiler_config.torch_profiler_dir
 +        
 +        if enable_profiler:
-+            trace_dir = envs.VLLM_TORCH_PROFILER_DIR
++            trace_dir = self.vllm_config.profiler_config.torch_profiler_dir
 +            profiler = torch.profiler.profile(
 +                activities=[
 +                    torch.profiler.ProfilerActivity.CPU,
