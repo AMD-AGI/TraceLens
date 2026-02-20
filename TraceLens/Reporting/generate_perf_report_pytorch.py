@@ -663,7 +663,7 @@ def generate_perf_report_pytorch(
                         s = str(name).lower()
                         if "cudagraph" in s or "graphlaunch" in s:
                             return "graph"
-                        return "runtime" if s and s != "nan" else np.nan
+                        return "runtime" if s and s != "nan" else pd.NA
 
                     df_kernels.loc[mask_missing_cat, "Parent op category"] = (
                         df_kernels.loc[mask_missing_cat, "Launcher"].apply(
