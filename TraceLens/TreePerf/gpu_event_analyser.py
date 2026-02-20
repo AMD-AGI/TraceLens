@@ -325,7 +325,16 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
     def __init__(self, events):
         super().__init__(events)  # Call the parent's __init__
         self.gpu_pids = list(
-            set([event["pid"] for event in events if event["pid"] < 100])
+            set(
+                event["pid"]
+                for event in events
+                if "/device:GPU"
+                in (
+                    event.get("process", {}).get("process_name", "")
+                    if isinstance(event.get("process"), dict)
+                    else str(event.get("process", ""))
+                )
+            )
         )
 
     def get_gpu_event_lists(self, gpu_pid=None, event_filter=None):

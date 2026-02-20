@@ -354,8 +354,9 @@ class JaxTraceToTree(BaseTraceToTree):
             None
         """
         for event in self.events:
-            # GPU
-            if event.get("pid") <= 100:
+            proc = event.get("process", {})
+            proc_name = proc.get("process_name", "") if isinstance(proc, dict) else str(proc)
+            if "/device:GPU" in proc_name:
                 # set the parents['gpu_events'] to the corresponding gpu event
                 if "parent" in event.keys():
                     corresponding_gpu_event = event
@@ -422,7 +423,9 @@ class JaxTraceToTree(BaseTraceToTree):
         """
 
         for event in self.events:
-            if event.get("pid") <= 100:
+            proc = event.get("process", {})
+            proc_name = proc.get("process_name", "") if isinstance(proc, dict) else str(proc)
+            if "/device:GPU" in proc_name:
 
                 if event.get("cat") == "kernel":
                     name = event.get("name")
