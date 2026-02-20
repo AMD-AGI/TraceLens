@@ -69,7 +69,11 @@ SHEETS_COMPARE_CONFIG = {
     },
     "kernel_summary": {
         "keys": ["Kernel name"],
-        "diff_cols": ["Kernel duration (µs)_sum", "Kernel duration (µs)_mean", "Kernel duration (µs)_count"],
+        "diff_cols": [
+            "Kernel duration (µs)_sum",
+            "Kernel duration (µs)_mean",
+            "Kernel duration (µs)_count",
+        ],
         "cols_to_delete": [
             "Kernel duration (µs)_sum)",
             "Kernel duration (µs)_min",
@@ -377,7 +381,7 @@ def generate_compare_perf_reports_pytorch(
         results["gpu_timeline"] = dtl
 
     report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
-    
+
     # ── Ops summary / Kernel summary ──────────────────────────────────────────
     # Perform ops_summary if specified
     if "ops_summary" in sheets or "all" in sheets:
@@ -401,11 +405,14 @@ def generate_compare_perf_reports_pytorch(
     main_sheets = [
         "ops_all",
         "ops_unique_args",
-        "unified_perf_summary"
+        "unified_perf_summary",
     ]  # different names for different versions of perf reports
     if "ops_all" in sheets or "all" in sheets:
         for sheet_name in main_sheets:
-            if sheet_name not in report_sheet_names or sheet_name not in SHEETS_COMPARE_CONFIG:
+            if (
+                sheet_name not in report_sheet_names
+                or sheet_name not in SHEETS_COMPARE_CONFIG
+            ):
                 continue
             config = SHEETS_COMPARE_CONFIG[sheet_name]
             keys = config["keys"]
@@ -435,7 +442,9 @@ def generate_compare_perf_reports_pytorch(
                 cols_to_hide = [
                     c
                     for c in this_results[result_sheet_name].columns
-                    if c.endswith(("kernel_names", "median", "std", "min", "max", "ex_UID"))
+                    if c.endswith(
+                        ("kernel_names", "median", "std", "min", "max", "ex_UID")
+                    )
                 ]
                 cols_to_hide_xl[result_sheet_name] = cols_to_hide
 

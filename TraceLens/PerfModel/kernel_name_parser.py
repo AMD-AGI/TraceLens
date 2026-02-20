@@ -80,7 +80,6 @@ def is_cuda_gemm(kernel_name):
     # This is a temporary solution and will be expanded in the future.
     kernel_names = ["nvjet", "bmm", "void cutlass", "_gemm"]
     return any(kernel_name.startswith(name) for name in kernel_names)
-    
 
 
 def parse_cuda_gemm(kernel_name):
