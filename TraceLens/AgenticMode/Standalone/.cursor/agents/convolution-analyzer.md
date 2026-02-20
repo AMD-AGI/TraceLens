@@ -114,8 +114,10 @@ The findings file **must** end with an Impact Summary section:
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/convolution_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
 **Impact estimation guidelines:**
-- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = achieved / peak from metadata
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms` (from `transpose_overhead_percent`)
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.

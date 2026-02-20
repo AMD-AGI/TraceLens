@@ -197,8 +197,11 @@ ALL other operations and represents [Y ms] of potential improvement.
 | <rec title>   | system | X.X | high/medium/low |
 ```
 
+**Note:** A baseline `system` impact estimate (idle time reduction to target 20%) is pre-computed in `category_data/cpu_idle_metrics.json` under the `impact_estimates` key. Use it as the primary `system` row in the Impact Summary. You may add additional system rows for specific patterns (GPU graph mode, sync reduction) if warranted, but derive those manually.
+
 **Impact estimation guidelines:**
 - `system` type only (CPU/idle issues are system-level, not kernel tuning)
+- Primary estimate: use pre-computed `impact_estimates` from the metrics JSON
 - GPU graph mode: `savings_ms = idle_time_ms * short_kernel_fraction` (fraction of idle caused by launch overhead)
 - Sync reduction: `savings_ms = sync_gap_time_ms * 0.5` (conservative estimate)
 - torch.compile / JIT: `savings_ms = idle_time_ms * framework_overhead_fraction`

@@ -161,8 +161,10 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
 
+**Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
 **Impact estimation guidelines:**
-- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TB_s / peak_hbm_bw_tbs * 100` (most generic ops are memory-bound)
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.

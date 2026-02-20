@@ -115,8 +115,10 @@ The findings file **must** end with an Impact Summary section:
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/reduce_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
 **Impact estimation guidelines:**
-- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TB_s / peak_hbm_bw_tbs * 100` (reduce ops are memory-bound)
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Unfused attention (softmax+bmm) to Flash: `savings_ms = softmax_time_ms * 0.7`. Fusion with adjacent ops: `savings_ms = op_time_ms * 0.5`
 - **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

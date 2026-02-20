@@ -408,6 +408,104 @@ def calculate_average_efficiency(
     return round(total_eff / count, 2) if count > 0 else 0
 
 
+def compute_impact_estimates(operations: List[dict], category: str,
+                             min_savings_ms: float = 0.1) -> List[dict]:
+    """
+    Deterministically compute kernel_tuning impact estimates from operation metrics.
+
+    Uses the documented formula: savings_ms = op_time_ms * (1 - efficiency_pct / 100).
+    Anomalous efficiencies (>100%) are excluded.
+
+    Args:
+        operations: List of operation metric dicts (from build_operation_metrics)
+        category: Category name for labelling
+        min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
+
+    Returns:
+        List of impact estimate dicts sorted by savings descending
+    """
+    estimates = []
+    for op in operations:
+        eff = op.get('efficiency', {})
+        eff_pct = eff.get('efficiency_percent')
+        if eff_pct is None or eff.get('is_anomaly'):
+            continue
+        time_ms = op.get('time_ms', 0)
+        if time_ms <= 0:
+            continue
+        savings_ms = time_ms * (1 - eff_pct / 100)
+        if savings_ms < min_savings_ms:
+            continue
+        confidence = 'high' if time_ms > 5 and eff_pct < 60 else 'medium'
+        estimates.append({
+            'operation': op.get('name', 'Unknown'),
+            'category': category,
+            'type': 'kernel_tuning',
+            'savings_ms': round(savings_ms, 3),
+            'confidence': confidence,
+            'efficiency_pct': round(eff_pct, 2),
+            'bound_type': eff.get('bound_type'),
+            'time_ms': round(time_ms, 3),
+        })
+    return sorted(estimates, key=lambda x: x['savings_ms'], reverse=True)
+
+
+def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
+    """
+    Aggregate impact_estimates from all *_metrics.json files into a single
+    plot_data.json consumed by the performance improvement plot script.
+
+    Only kernel_tuning estimates with high/medium confidence are included
+    in the plot recommendations. All estimates (including system and
+    algorithmic) are collected in all_estimates for the report.
+
+    Args:
+        output_dir: Base output directory containing category_data/
+        max_recommendations: Max number of recommendations for the plot
+
+    Returns:
+        Path to written plot_data.json
+    """
+    category_data_dir = f'{output_dir}/category_data'
+    manifest_path = f'{category_data_dir}/category_manifest.json'
+
+    with open(manifest_path, 'r') as f:
+        manifest = json.load(f)
+
+    baseline_ms = manifest.get('gpu_utilization', {}).get('total_time_ms', 0)
+
+    all_estimates: List[dict] = []
+    for fname in sorted(os.listdir(category_data_dir)):
+        if not fname.endswith('_metrics.json'):
+            continue
+        fpath = os.path.join(category_data_dir, fname)
+        with open(fpath, 'r') as f:
+            metrics = json.load(f)
+        if metrics.get('status') in ('ERROR', 'NO_DATA'):
+            continue
+        all_estimates.extend(metrics.get('impact_estimates', []))
+
+    plot_recs = sorted(
+        [e for e in all_estimates
+         if e.get('type') == 'kernel_tuning'
+         and e.get('confidence') in ('high', 'medium')],
+        key=lambda x: x['savings_ms'],
+        reverse=True,
+    )[:max_recommendations]
+
+    plot_data = {
+        'baseline_ms': baseline_ms,
+        'recommendations': plot_recs,
+        'all_estimates': all_estimates,
+    }
+
+    out_path = f'{output_dir}/plot_data.json'
+    with open(out_path, 'w') as f:
+        json.dump(plot_data, f, indent=2)
+
+    return out_path
+
+
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     """
     Write metrics JSON to category_data folder.

@@ -16,6 +16,7 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     calculate_average_efficiency,
+    compute_impact_estimates,
     write_metrics_json,
     detect_flash_attention,
     detect_paged_attention,
@@ -211,13 +212,16 @@ def main():
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     
+    impact_estimates = compute_impact_estimates(operations, 'sdpa_fwd')
+    
     metrics = {
         'category': 'sdpa_fwd',
         'status': 'OK',
         **time_metrics,
         'average_efficiency_percent': avg_efficiency,
         'operations': operations,
-        'category_specific': category_specific
+        'category_specific': category_specific,
+        'impact_estimates': impact_estimates
     }
     
     output_path = write_metrics_json(metrics, args.output_dir, 'sdpa_fwd')

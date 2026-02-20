@@ -156,8 +156,10 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
 **Impact estimation guidelines:**
-- `kernel_tuning`: `savings_ms = op_time_ms * (1 - efficiency_pct / 100)` where `efficiency_pct` = `TFLOPS_s / max_achievable_tflops[Compute Spec] * 100` (compute-bound) or `TB_s / peak_hbm_bw_tbs * 100` (memory-bound). Peaks come from the category metadata JSON — no additional scaling needed
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Batching opportunity, quantization format change — estimate based on expected parallelism or precision improvement
 - **Confidence**: `high` = clear gap to peak on large shapes; `medium` = depends on kernel tuning quality; `low` = rough estimate
 

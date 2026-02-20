@@ -224,8 +224,11 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 | <rec title>   | system | X.X | high/medium/low |
 ```
 
+**Note:** Baseline `system` impact estimates (overlap improvement and memcpy reduction) are pre-computed in `category_data/multi_kernel_metrics.json` under the `impact_estimates` key. Use those values as the primary `system` rows in the Impact Summary. You may refine or add rows for specific patterns, but start from the pre-computed values.
+
 **Impact estimation guidelines:**
 - `system` type only (multi-kernel issues are system-level, not kernel tuning)
+- Primary estimates: use pre-computed `impact_estimates` from the metrics JSON
 - Communication/compute overlap: `savings_ms = exposed_comm_time_ms * (target_overlap - current_overlap)` where target is 0.7+
 - Memcpy reduction: `savings_ms = memcpy_time_ms * reducible_fraction` (fraction of unnecessary copies)
 - Pipeline optimization: estimate from communication blocking time that can be hidden

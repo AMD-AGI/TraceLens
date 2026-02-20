@@ -230,6 +230,22 @@ def main():
         else:
             potential_speedup = 1.0
         
+        # Compute deterministic impact estimates for idle time reduction
+        impact_estimates = []
+        if idle_percent > 20 and total_time_ms > 0:
+            target_idle = 20
+            recoverable_ms = total_time_ms * (idle_percent - target_idle) / 100
+            confidence = 'high' if idle_percent > 50 else 'medium'
+            impact_estimates.append({
+                'operation': 'GPU idle time reduction',
+                'category': 'cpu_idle',
+                'type': 'system',
+                'savings_ms': round(recoverable_ms, 3),
+                'confidence': confidence,
+                'idle_percent': round(idle_percent, 2),
+                'target_idle_percent': target_idle,
+            })
+        
         # Build metrics output
         metrics = {
             'status': 'OK',
@@ -245,7 +261,8 @@ def main():
             'kernel_analysis': kernel_patterns,
             'patterns_detected': patterns_detected,
             'potential_speedup': round(potential_speedup, 2),
-            'target_idle_percent': 20
+            'target_idle_percent': 20,
+            'impact_estimates': impact_estimates
         }
         
         # Write metrics JSON

@@ -676,41 +676,53 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.svg`.
 
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+
 ### 9.5.1 Ensure matplotlib is available
 
 ```bash
 ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null || docker exec <container> pip install matplotlib"
 ```
 
-### 9.5.2 Collect Impact Estimates
+### 9.5.2 Generate plot_data.json (Deterministic)
 
-Parse the `## Impact Summary` tables from all findings files in both `system_findings/` and `category_findings/`. Each table has rows with `Recommendation`, `Type`, `Estimated Savings (ms)`, and `Confidence`.
+Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
 
-Collect **all** rows (all types) and store them for the final report aggregation.
+```bash
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
+generate_plot_data('<output_dir>')
+\""
+```
 
-For the **plot**, filter to:
-1. `Type` = `kernel_tuning` only (exclude `algorithmic` and `system`)
-2. `Confidence` = `high` or `medium`
+This produces `<output_dir>/plot_data.json` containing:
+- `baseline_ms`: Total GPU time from manifest
+- `recommendations`: Top kernel_tuning estimates (high/medium confidence), sorted by savings, max 6
+- `all_estimates`: All estimates across all categories and types (for report aggregation)
 
-Sort by savings descending and take the top recommendations (up to 5-6 for readability).
-
-### 9.5.3 Compute Cumulative Projections
-
-Starting from the baseline E2E time (total compute time from manifest `gpu_utilization.total_time_ms`):
+### 9.5.3 Read Plot Data and Compute Cumulative Projections
 
 ```python
-baseline_ms = manifest['gpu_utilization']['total_time_ms']
+import json
+
+with open('<output_dir>/plot_data.json') as f:
+    plot_data = json.load(f)
+
+baseline_ms = plot_data['baseline_ms']
+recommendations = plot_data['recommendations']
+
 current_ms = baseline_ms
 steps = ['Baseline']
 e2e_ms = [baseline_ms]
 savings_list = [0]
 cumulative_rel = [100]
 
-for rec_name, rec_savings in sorted_recommendations:
-    current_ms -= rec_savings
-    steps.append(rec_name)
+for rec in recommendations:
+    current_ms -= rec['savings_ms']
+    label = rec['operation'].split('::')[-1][:15] + '\n(' + rec['category'] + ')'
+    steps.append(label)
     e2e_ms.append(current_ms)
-    savings_list.append(rec_savings)
+    savings_list.append(rec['savings_ms'])
     cumulative_rel.append(round(baseline_ms / current_ms * 100))
 ```
 
@@ -722,7 +734,8 @@ Generate a Python script and run it inside the container. The script produces `<
 ssh <node> "docker exec <container> python3 <output_dir>/generate_plot.py"
 ```
 
-**Plot script template** (write to `<output_dir>/generate_plot.py`, then execute):
+**Plot script template** (write to `<output_dir>/generate_plot.py`, then execute).
+Fill `steps`, `e2e_ms`, `savings`, `cumulative_rel` from Step 9.5.3:
 
 ```python
 import matplotlib
