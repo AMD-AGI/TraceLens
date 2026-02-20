@@ -11,6 +11,9 @@ import pandas as pd
 import json
 import os
 import re
+import json
+import os
+import re
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -299,120 +302,6 @@ class TraceDiff:
         wf_cache[cache_key] = ops
         return ops
 
-    def calculate_diff_boundaries(self):
-        """
-        Compare two trees and identify the boundaries of differences between them using recursive Wagner-Fischer and DFS, matching the reference tree.py algorithm.
-        Returns:
-            - db1 (list[dict]): List of difference boundaries in tree1.
-            - db2 (list[dict]): List of difference boundaries in tree2.
-            - pod1 (set): Set of points of differences in tree1.
-            - pod2 (set): Set of points of differences in tree2.
-        """
-
-        print("[TraceDiff] Calculating trace diff...")
-        tree1 = self.baseline
-        tree2 = self.variant
-
-        # Cache for Wagner-Fischer results to avoid recomputation within this phase
-        wf_cache = {}
-
-        # Cache for alignment operations to avoid recomputation between phases
-        ops_cache = {}
-
-        def get_name(node):
-            name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-            return self._normalize_name_for_comparison(name)
-
-        def get_children(tree, node):
-            return tree.get_children_events(node)
-
-        def get_gpu_children(tree, node):
-            return [
-                child for child in get_children(tree, node) if self.is_gpu_path(child)
-            ]
-
-        def add_to_pod(node, pod, tree):
-            # Add node and all its descendants to pod
-            pod.add(node.get(TraceLens.util.TraceEventUtils.TraceKeys.UID))
-            for child in get_children(tree, node):
-                add_to_pod(child, pod, tree)
-
-        def dfs(node1, node2):
-            # If either node is already a POD, skip
-            uid1 = node1.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-            uid2 = node2.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-            if uid1 in self.pod1 or uid2 in self.pod2:
-                return
-
-            name1 = get_name(node1)
-            name2 = get_name(node2)
-            if name1 != name2:
-                self.db1.append(node1)
-                self.db2.append(node2)
-                add_to_pod(node1, self.pod1, tree1)
-                add_to_pod(node2, self.pod2, tree2)
-                return
-
-            children1 = sorted(
-                get_gpu_children(tree1, node1), key=lambda child: child.get("ts", 0)
-            )
-            children2 = sorted(
-                get_gpu_children(tree2, node2), key=lambda child: child.get("ts", 0)
-            )
-            seq1 = [
-                child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-                for child in children1
-            ]
-            seq2 = [
-                child.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-                for child in children2
-            ]
-            ops = self.wagner_fischer(seq1, seq2, wf_cache)
-
-            # Cache the alignment operations for reuse in merge_trees phase
-            ops_cache[(uid1, uid2)] = ops
-
-            idx1, idx2 = 0, 0
-            for op, i, j in ops:
-                if op == "match":
-                    child1 = tree1.get_UID2event(seq1[i])
-                    child2 = tree2.get_UID2event(seq2[j])
-                    if self.is_gpu_path(child1) or self.is_gpu_path(child2):
-                        dfs(child1, child2)
-                    idx1 += 1
-                    idx2 += 1
-                elif op == "delete":
-                    child1 = tree1.get_UID2event(seq1[i])
-                    self.db1.append(child1)
-                    add_to_pod(child1, self.pod1, tree1)
-                    idx1 += 1
-                elif op == "insert":
-                    child2 = tree2.get_UID2event(seq2[j])
-                    self.db2.append(child2)
-                    add_to_pod(child2, self.pod2, tree2)
-                    idx2 += 1
-
-        # Start DFS from the top-level root node
-        # Find the root by traversing up parent pointers from any CPU root node
-        if not tree1.cpu_root_nodes or not tree2.cpu_root_nodes:
-            raise ValueError(
-                "Both trees must have at least one root node in cpu_root_nodes."
-            )
-
-        # Get the top-level root for each tree
-        root_uid1 = self._get_top_level_root(tree1, tree1.cpu_root_nodes[0])
-        root_uid2 = self._get_top_level_root(tree2, tree2.cpu_root_nodes[0])
-
-        # Perform DFS from the top-level roots
-        node1 = tree1.get_UID2event(root_uid1)
-        node2 = tree2.get_UID2event(root_uid2)
-        dfs(node1, node2)
-
-        # Store alignment cache for reuse in merge_trees phase
-        self._ops_cache = ops_cache
-
-        return self.db1, self.db2, self.pod1, self.pod2
-
     def merge_trees(self):
         """
         Merges the two trees using the PODs from get_diff_boundaries, inspired by merge_tree_from_pod, but returns a flat list of merged event dicts.
@@ -420,18 +309,24 @@ class TraceDiff:
         Returns: (merged_events, merged_root_ids)
         """
 
-        # Set the PODs and diff_boundaries
-        self.calculate_diff_boundaries()
+        print("[TraceDiff] Calculating trace diff and creating merged tree...")
 
-        print("[TraceDiff] Creating a merged tree...")
-
-        # Invalidate merged tree cache since we're rebuilding it
         self._invalidate_merged_cache()
 
-        # Cache for Wagner-Fischer results during merge phase
-        merge_wf_cache = {}
+        tree1 = self.baseline
+        tree2 = self.variant
+        if not tree1.cpu_root_nodes or not tree2.cpu_root_nodes:
+            raise ValueError(
+                "Both trees must have at least one root node in cpu_root_nodes."
+            )
 
-        # Helper to create a merged event
+        baseline_uid2node = self._get_baseline_uid2node()
+        variant_uid2node = self._get_variant_uid2node()
+        wf_cache = {}
+        merged_events = []
+        merged_id_counter = [0]
+        uid_pair_to_merged_id = {}
+
         def make_event(merged_id, uid1, uid2, merged_type, children, nn_module_stack):
             return {
                 "merged_id": merged_id,
@@ -442,104 +337,253 @@ class TraceDiff:
                 "nn_module_stack": nn_module_stack,
             }
 
-        # Use cached lookup dictionaries instead of rebuilding
-        baseline_uid2node = self._get_baseline_uid2node()
-        variant_uid2node = self._get_variant_uid2node()
-
-        # Recursive merge using PODs, but build flat event list
-        merged_events = []
-        merged_id_counter = [0]
-        uid_pair_to_merged_id = {}
-
-        def safe_children(tree, uid):
-            node = tree.get(uid, None)
+        def safe_children(uid2node, uid):
+            if uid is None:
+                return []
+            node = uid2node.get(uid)
             if node is None or not isinstance(node, dict):
                 return []
             return node.get("children", [])
 
-        def safe_gpu_children(tree, uid):
-            children = safe_children(tree, uid)
-            return [child for child in children if self.is_gpu_path(tree.get(child))]
+        def subtree_contains_cuda_runtime(uid, uid2node):
+            """Return True if this node is a cuda_runtime node."""
+            node = uid2node.get(uid)
+            if not node or not isinstance(node, dict):
+                return False
+            cat = node.get("cat") or node.get("category")
+            if cat == "cuda_runtime" or cat == "cuda_driver":
+                return True
+            else:
+                return False
 
-        def get_name_by_uid(tree, uid):
-            node = tree.get(uid)
-            name = (
-                node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
-                if node
-                else None
+        def get_name_uid(uid, tree_num):
+            name = self._get_op_name(uid, tree_num)
+            return self._normalize_name_for_comparison(name) if name else None
+
+        def get_children_with_missing(uid1, uid2):
+            """Get aligned children lists, adding missing-by-name from full child list."""
+            children1 = safe_children(baseline_uid2node, uid1)
+            children2 = safe_children(variant_uid2node, uid2)
+            all_nodes1 = [
+                baseline_uid2node[c] for c in children1 if baseline_uid2node.get(c)
+            ]
+            all_nodes2 = [
+                variant_uid2node[c] for c in children2 if variant_uid2node.get(c)
+            ]
+            gpu_children1 = [
+                n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+                for n in all_nodes1
+                if self.is_gpu_path(n)
+            ]
+            gpu_children2 = [
+                n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+                for n in all_nodes2
+                if self.is_gpu_path(n)
+            ]
+            gpu_names1 = {get_name_uid(c, 1) for c in gpu_children1}
+            gpu_names2 = {get_name_uid(c, 2) for c in gpu_children2}
+
+            all_names1 = {get_name_uid(c, 1): c for c in children1}
+            all_names2 = {get_name_uid(c, 2): c for c in children2}
+
+            names1_only = gpu_names1 - gpu_names2
+            names2_only = gpu_names2 - gpu_names1
+
+            for n in names1_only:
+                if n in all_names2:
+                    gpu_children2.append(all_names2[n])
+            for n in names2_only:
+                if n in all_names1:
+                    gpu_children1.append(all_names1[n])
+
+            def sort_by_ts(uids, uid2node):
+                nodes = [(uid2node.get(u), u) for u in uids]
+                nodes.sort(key=lambda x: x[0].get("ts", 0))
+                return [u for _, u in nodes]
+
+            return sort_by_ts(gpu_children1, baseline_uid2node), sort_by_ts(
+                gpu_children2, variant_uid2node
             )
-            return self._normalize_name_for_comparison(name)
 
-        def merge_from_pod(uid1, uid2, parent_merged_id=None):
+        def check_diff_children(ops, uid1, uid2, children1, children2):
+            """
+            Reduce spurious delete/insert pairs by flattening redundant wrapper nodes.
+
+            For every delete-node (baseline) and insert-node (variant) pair, considers three cases
+            (kernels and kernel launchers are skipped):
+
+            1. variant children include a node with the same name as the baseline node
+               -> Remove the variant node and reparent its children to the variant's parent node (uid2).
+
+            2. baseline children include a node with the same name as the variant node
+               -> Remove the baseline node and reparent its children to the baseline's parent node (uid1).
+
+            3. Both nodes have children and the two child lists (by normalized name) are equal
+               -> Remove both nodes and reparent their children to uid2 and uid1 respectively.
+
+            Mutates the baseline and variant trees in place. If any removals were applied,
+            recomputes children and Wagner-Fischer ops for the current node. Returns the
+            (possibly updated) ops list.
+            """
+            delete_indices = [i for op, i, j in ops if op == "delete"]
+            insert_indices = [j for op, i, j in ops if op == "insert"]
+            remove_insert = (
+                {}
+            )  # uid_i -> list of child uids to splice in (insert node's children)
+            remove_delete = (
+                {}
+            )  # uid_d -> list of child uids to splice in (delete node's children)
+            skip_cats = ("kernel", "cuda_runtime")
+            for i in delete_indices:
+                for j in insert_indices:
+                    uid_d, uid_i = children1[i], children2[j]
+                    node_d = baseline_uid2node.get(uid_d)
+                    node_i = variant_uid2node.get(uid_i)
+                    cat_d = (
+                        (node_d.get("cat") or node_d.get("category"))
+                        if node_d
+                        else None
+                    )
+                    cat_i = (
+                        (node_i.get("cat") or node_i.get("category"))
+                        if node_i
+                        else None
+                    )
+                    if cat_d in skip_cats or cat_i in skip_cats:
+                        continue
+                    name_d = get_name_uid(uid_d, 1)
+                    name_i = get_name_uid(uid_i, 2)
+                    imm_d = safe_children(baseline_uid2node, uid_d)
+                    imm_i = safe_children(variant_uid2node, uid_i)
+                    names_imm_d = [get_name_uid(c, 1) for c in imm_d]
+                    names_imm_i = [get_name_uid(c, 2) for c in imm_i]
+                    if name_d and any(get_name_uid(c, 2) == name_d for c in imm_i):
+                        remove_insert[uid_i] = imm_i
+                    if name_i and any(get_name_uid(c, 1) == name_i for c in imm_d):
+                        remove_delete[uid_d] = imm_d
+                    if imm_d and imm_i and names_imm_d == names_imm_i:
+                        remove_insert[uid_i] = imm_i
+                        remove_delete[uid_d] = imm_d
+            if remove_insert:
+                parent_node = variant_uid2node.get(uid2)
+                if parent_node is not None:
+                    new_children = []
+                    for c in parent_node.get("children", []):
+                        if c in remove_insert:
+                            new_children.extend(remove_insert[c])
+                        else:
+                            new_children.append(c)
+                    parent_node["children"] = new_children
+                    for uid_i, imm_i in remove_insert.items():
+                        for c in imm_i:
+                            child_node = variant_uid2node.get(c)
+                            child_node["parent"] = uid2
+            if remove_delete:
+                parent_node = baseline_uid2node.get(uid1)
+                if parent_node is not None:
+                    new_children = []
+                    for c in parent_node.get("children", []):
+                        if c in remove_delete:
+                            new_children.extend(remove_delete[c])
+                        else:
+                            new_children.append(c)
+                    parent_node["children"] = new_children
+                    for uid_d, imm_d in remove_delete.items():
+                        for c in imm_d:
+                            child_node = baseline_uid2node.get(c)
+                            child_node["parent"] = uid1
+            if remove_insert or remove_delete:
+                children1, children2 = get_children_with_missing(uid1, uid2)
+                ops = self.wagner_fischer(children1, children2, wf_cache)
+            return ops, children1, children2
+
+        def traverse_and_merge(uid1, uid2):
             key = (uid1, uid2)
             if key in uid_pair_to_merged_id:
                 return uid_pair_to_merged_id[key]
+
+            node1 = baseline_uid2node.get(uid1) if uid1 is not None else None
+            node2 = variant_uid2node.get(uid2) if uid2 is not None else None
+
+            # Boundary logic: when both exist, check POD and name mismatch
+            if uid1 and uid2:
+                if uid1 in self.pod1 or uid2 in self.pod2:
+                    pass  # Skip boundary logic, still need merge structure
+                else:
+                    name1 = get_name_uid(uid1, 1)
+                    name2 = get_name_uid(uid2, 2)
+                    if name1 != name2:
+                        self.db1.append(node1)
+                        self.db2.append(node2)
+                        self.pod1.add(uid1)
+                        self.pod2.add(uid2)
+
+            # POD logic: when only one exists, add to POD
+            if uid1 and not uid2:
+                self.pod1.add(uid1)
+            if uid2 and not uid1:
+                self.pod2.add(uid2)
+
             merged_id = merged_id_counter[0]
             merged_id_counter[0] += 1
             uid_pair_to_merged_id[key] = merged_id
-            nn_module_stack = []
-            # Build merged_uid_map for combined nodes
+
             if uid1 and uid2:
-                merged_type = "combined"
-                # Map both directions
                 self.merged_uid_map[(1, uid1)] = uid2
                 self.merged_uid_map[(2, uid2)] = uid1
-                nn_module_stack = self.baseline.get_UID2event(uid1).get(
-                    "nn_module_stack", ""
-                )
+                nn_module_stack = node1.get("nn_module_stack", "")
             elif uid1:
-                merged_type = "trace1"
                 self.merged_uid_map[(1, uid1)] = -1
-                nn_module_stack = self.baseline.get_UID2event(uid1).get(
-                    "nn_module_stack", ""
-                )
+                nn_module_stack = node1.get("nn_module_stack", "")
             else:
-                merged_type = "trace2"
                 self.merged_uid_map[(2, uid2)] = -1
-                nn_module_stack = self.variant.get_UID2event(uid2).get(
-                    "nn_module_stack", ""
-                )
-            children1 = safe_gpu_children(baseline_uid2node, uid1)
-            children2 = safe_gpu_children(variant_uid2node, uid2)
+                nn_module_stack = node2.get("nn_module_stack", "")
 
-            # Check cache from calculate_diff_boundaries phase
-            cache_key = (uid1, uid2)
-            if cache_key in self._ops_cache:
-                ops = self._ops_cache[cache_key]
+            children1, children2 = get_children_with_missing(uid1, uid2)
+            any_cuda_runtime = any(
+                subtree_contains_cuda_runtime(c, baseline_uid2node) for c in children1
+            ) or any(
+                subtree_contains_cuda_runtime(c, variant_uid2node) for c in children2
+            )
+            if len(children1) == len(children2) and not any_cuda_runtime:
+                ops = [("match", i, i) for i in range(len(children1))]
             else:
-                # Cache miss - compute using generic Wagner-Fischer
-                ops = self.wagner_fischer(children1, children2, merge_wf_cache)
+                ops = self.wagner_fischer(children1, children2, wf_cache)
+                ops, children1, children2 = check_diff_children(
+                    ops, uid1, uid2, children1, children2
+                )
+
             child_merged_ids = []
             for op, i, j in ops:
                 if op == "match":
-                    child_uid1 = children1[i]
-                    child_uid2 = children2[j]
-                    child_merged_id = merge_from_pod(child_uid1, child_uid2, merged_id)
-                    child_merged_ids.append(child_merged_id)
+                    c1, c2 = children1[i], children2[j]
+                    child_merged_ids.append(traverse_and_merge(c1, c2))
                 elif op == "delete":
-                    child_uid1 = children1[i]
-                    child_merged_id = merge_from_pod(child_uid1, None, merged_id)
-                    child_merged_ids.append(child_merged_id)
+                    c1 = children1[i]
+                    child_node = baseline_uid2node.get(c1)
+                    if child_node:
+                        self.db1.append(child_node)
+                    child_merged_ids.append(traverse_and_merge(c1, None))
                 elif op == "insert":
-                    child_uid2 = children2[j]
-                    child_merged_id = merge_from_pod(None, child_uid2, merged_id)
-                    child_merged_ids.append(child_merged_id)
+                    c2 = children2[j]
+                    child_node = variant_uid2node.get(c2)
+                    if child_node:
+                        self.db2.append(child_node)
+                    child_merged_ids.append(traverse_and_merge(None, c2))
+
+            merged_type = (
+                "combined" if (uid1 and uid2) else ("trace1" if uid1 else "trace2")
+            )
             event = make_event(
                 merged_id, uid1, uid2, merged_type, child_merged_ids, nn_module_stack
             )
             merged_events.append(event)
             return merged_id
 
-        # Find top-level root UIDs by traversing up from any CPU root node
-        root_uid1 = self._get_top_level_root(
-            self.baseline, self.baseline.cpu_root_nodes[0]
-        )
-        root_uid2 = self._get_top_level_root(
-            self.variant, self.variant.cpu_root_nodes[0]
-        )
+        root_uid1 = self._get_top_level_root(tree1, tree1.cpu_root_nodes[0])
+        root_uid2 = self._get_top_level_root(tree2, tree2.cpu_root_nodes[0])
 
-        # Merge the single top-level root
-        merged_root_id = merge_from_pod(root_uid1, root_uid2)
+        merged_root_id = traverse_and_merge(root_uid1, root_uid2)
         merged_root_ids = [merged_root_id]
 
         self.merged_tree = (merged_events, merged_root_ids)
@@ -908,15 +952,23 @@ class TraceDiff:
                     ) or (self.is_kernel(event1) and self.is_kernel(event2)):
 
                         # Store the LCA name from this combined node
-                        lca_name = self._get_op_name(
-                            node["uid1"], 1
-                        ) or self._get_op_name(node["uid2"], 2)
-                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
+                        lca_name_trace1 = re.sub(
+                            r"\(\d+\)", "", self._get_op_name(node["uid1"], 1)
+                        )
+                        lca_name_trace2 = re.sub(
+                            r"\(\d+\)", "", self._get_op_name(node["uid2"], 2)
+                        )
+                        if lca_name_trace1 == lca_name_trace2:
+                            lca_name = lca_name_trace1
+                        else:
+                            lca_name = f"{lca_name_trace1} | {lca_name_trace2}"
 
                         gpu_event_uids1 = []
                         for child in non_combined_children_trace1_gpu_paths:
                             child_node = baseline_uid2node.get(child.get("uid1"))
                             gpu_event_uids1.extend(child_node.get("gpu_events", []))
+                            if self.is_kernel(child_node):
+                                gpu_event_uids1.append(child_node["UID"])
                         if self.is_kernel(event1):
                             gpu_event_uids1.append(event1["UID"])
 
@@ -924,6 +976,8 @@ class TraceDiff:
                         for child in non_combined_children_trace2_gpu_paths:
                             child_node = variant_uid2node.get(child.get("uid2"))
                             gpu_event_uids2.extend(child_node.get("gpu_events", []))
+                            if self.is_kernel(child_node):
+                                gpu_event_uids2.append(child_node["UID"])
                         if self.is_kernel(event2):
                             gpu_event_uids2.append(event2["UID"])
 
