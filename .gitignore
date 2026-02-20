@@ -3,3 +3,5 @@
 **.ipynb_checkpoints/
 **/build/
 **.egg-info/
+*.SSTABLE
+**/ALL_HOSTS.op_stats.pb
