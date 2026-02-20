@@ -126,26 +126,42 @@ class GPUEventAnalyser:
                     raise ValueError(f"Unknown event category: {category}")
         if compute_overlapping_uids:
             points.sort(key=lambda x: (x[0], x[1]))
-            active_uids = set()  # Store UIDs instead of events
-            event_map = {
-                event["UID"]: event for event in gpu_events
-            }  # Map UIDs to events
+            active_uids = set()
+            event_map = {event["UID"]: event for event in gpu_events}
+
+            all_events_by_uid = {
+                event["UID"]: event for event in self.events if "UID" in event
+            }
+
+            def _get_cpu_op_uid(event):
+                """Walk up parent chain to find the nearest cpu_op ancestor UID."""
+                current_uid = event.get("parent")
+                while current_uid is not None:
+                    parent = all_events_by_uid.get(current_uid)
+                    if parent is None:
+                        return None
+                    if parent.get("cat") == "cpu_op":
+                        return current_uid
+                    current_uid = parent.get("parent")
+                return None
+
+            uid_to_cpu_op = {event["UID"]: _get_cpu_op_uid(event) for event in gpu_events}
 
             for _, point_type, uid in points:
                 if point_type == 0:
-                    # When an event starts, all currently active events overlap with it
                     event = event_map[uid]
+                    my_cpu_op = uid_to_cpu_op[uid]
                     if active_uids:
-                        if "overlapping_uids" not in event:
-                            event["overlapping_uids"] = set()
-                        event["overlapping_uids"].update(active_uids)
-
-                        # Also add this event's UID to all active events' overlapping_uids
                         for active_uid in active_uids:
-                            active_event = event_map[active_uid]
-                            if "overlapping_uids" not in active_event:
-                                active_event["overlapping_uids"] = set()
-                            active_event["overlapping_uids"].add(uid)
+                            active_cpu_op = uid_to_cpu_op[active_uid]
+                            if (
+                                my_cpu_op is not None
+                                and active_cpu_op is not None
+                                and my_cpu_op == active_cpu_op
+                            ):
+                                continue
+                            event["overlapping_uids"].add(active_uid)
+                            event_map[active_uid]["overlapping_uids"].add(uid)
 
                     active_uids.add(uid)
                 else:

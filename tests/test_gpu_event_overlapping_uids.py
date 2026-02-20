@@ -12,6 +12,9 @@ Test cases covered:
 - Two touching at boundary -> counted as overlapping (sweep treats start before end at same time)
 - Three events with one containing the other two -> all pairs overlap
 - overlapping_uids are sets; self not in overlapping_uids; kernel + gpu_memcpy mix
+- Same cpu_op: overlapping kernels under the same cpu_op are NOT marked overlapping
+- Different cpu_ops: overlapping kernels under different cpu_ops ARE marked overlapping
+- Mixed: some kernels share a cpu_op, others don't
 """
 
 import pytest
@@ -134,3 +137,87 @@ def test_memcpy_and_kernel_events_both_get_overlapping_uids():
     assert by_uid[2] == {1}
     assert len(result[GPUEventAnalyser.memcpy_key]) == 1
     assert len(result[GPUEventAnalyser.computation_key]) == 1
+
+
+# ── cpu_op-aware overlap tests ──────────────────────────────────────────
+
+
+def _make_tree(cpu_ops, kernels):
+    """Build a minimal event list with cpu_op -> runtime -> kernel parent chains.
+
+    cpu_ops: list of dicts with at least {"UID", "cat": "cpu_op"}
+    kernels: list of (kernel_event, runtime_uid, cpu_op_uid) tuples
+    Returns the full event list suitable for GPUEventAnalyser.
+    """
+    events = list(cpu_ops)
+    for kernel, runtime_uid, cpu_op_uid in kernels:
+        runtime = {
+            "UID": runtime_uid,
+            "cat": "cuda_runtime",
+            "name": "cudaLaunchKernel",
+            "parent": cpu_op_uid,
+        }
+        kernel["parent"] = runtime_uid
+        events.append(runtime)
+        events.append(kernel)
+    return events
+
+
+def test_same_cpu_op_overlap_not_marked():
+    """Two overlapping kernels under the SAME cpu_op should NOT be marked overlapping."""
+    cpu = {"UID": 100, "cat": "cpu_op", "name": "aten::mm"}
+    k1 = _make_event(1, 0, 10)
+    k2 = _make_event(2, 5, 10)
+    events = _make_tree([cpu], [(k1, 201, 100), (k2, 202, 100)])
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == set()
+    assert by_uid[2] == set()
+
+
+def test_different_cpu_ops_overlap_is_marked():
+    """Overlapping kernels from DIFFERENT cpu_ops should be marked overlapping."""
+    cpu_a = {"UID": 100, "cat": "cpu_op", "name": "aten::mm"}
+    cpu_b = {"UID": 101, "cat": "cpu_op", "name": "aten::add"}
+    k1 = _make_event(1, 0, 10)
+    k2 = _make_event(2, 5, 10)
+    events = _make_tree([cpu_a, cpu_b], [(k1, 201, 100), (k2, 202, 101)])
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {2}
+    assert by_uid[2] == {1}
+
+
+def test_mixed_cpu_ops_partial_overlap():
+    """Three kernels: k1,k2 share a cpu_op, k3 is under a different one.
+    k1 and k2 overlap but share a cpu_op -> not marked.
+    k1 and k3 overlap and differ in cpu_op -> marked.
+    k2 and k3 don't overlap -> not marked."""
+    cpu_a = {"UID": 100, "cat": "cpu_op", "name": "aten::mm"}
+    cpu_b = {"UID": 101, "cat": "cpu_op", "name": "aten::add"}
+    k1 = _make_event(1, 0, 20)   # [0, 20]
+    k2 = _make_event(2, 5, 10)   # [5, 15]  - same cpu_op as k1
+    k3 = _make_event(3, 10, 5)   # [10, 15] - different cpu_op, overlaps k1 only
+    events = _make_tree(
+        [cpu_a, cpu_b],
+        [(k1, 201, 100), (k2, 202, 100), (k3, 203, 101)],
+    )
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {3}
+    assert by_uid[2] == {3}
+    assert by_uid[3] == {1, 2}
+
+
+def test_no_parent_info_falls_back_to_overlap():
+    """Kernels without parent info should still be marked overlapping (conservative)."""
+    k1 = _make_event(1, 0, 10)
+    k2 = _make_event(2, 5, 10)
+    analyser = GPUEventAnalyser([k1, k2])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {2}
+    assert by_uid[2] == {1}
