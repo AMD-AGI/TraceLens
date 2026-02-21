@@ -83,15 +83,9 @@ Key metrics to analyze:
 - `sync_point_count`: Number of synchronization points detected
 - `patterns_detected`: List of identified bottleneck patterns
 
-### Step 3: Classify Idle Time Severity
+### Step 3: Read Pre-computed Severity
 
-| Idle % | Severity | Assessment |
-|--------|----------|------------|
-| >70% | CRITICAL | GPU severely underutilized, immediate action required |
-| 50-70% | HIGH | Significant CPU overhead, major optimization opportunity |
-| 30-50% | MEDIUM | Notable overhead, worth investigating |
-| 20-30% | LOW | Some overhead, lower priority |
-| <20% | ACCEPTABLE | Normal operation |
+The `severity` field in the metrics JSON is pre-computed by the analysis script. Use it directly for the findings severity level.
 
 ### Step 4: Identify Root Cause Patterns
 
@@ -129,7 +123,7 @@ For each identified pattern, provide recommendations in priority order:
 **Algorithmic Recommendations:**
 1. **Enable GPU Graph Mode**
    - Captures kernel sequence and replays with minimal CPU overhead
-   - Expected impact: 2-5x reduction in idle time for kernel launch overhead
+   - Expected impact: Reduction in idle time for kernel launch overhead
    - Implementation: Use framework's graph capture API
 
 2. **Reduce Synchronization**

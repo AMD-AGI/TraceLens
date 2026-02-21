@@ -95,7 +95,8 @@ def detect_idle_patterns(
     gpu_timeline: Dict[str, Any],
     kernel_patterns: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Detect patterns causing idle time."""
+    """Detect idle-time patterns and return factual evidence for each.
+    """
     patterns_detected = []
     
     idle_percent = gpu_timeline.get('idle_time', {}).get('percent', 0)
@@ -106,13 +107,11 @@ def detect_idle_patterns(
     # Pattern 1: Kernel Launch Overhead
     if total_kernels > 0 and short_kernels > 0:
         short_kernel_ratio = short_kernels / total_kernels
-        if short_kernel_ratio > 0.3:  # More than 30% short kernels
+        if short_kernel_ratio > 0.3:
             patterns_detected.append({
                 'name': 'Kernel Launch Overhead',
                 'severity': 'HIGH' if short_kernel_ratio > 0.5 else 'MEDIUM',
                 'evidence': f'{short_kernels} out of {total_kernels} kernels ({short_kernel_ratio*100:.1f}%) are under 10µs',
-                'impact': f'Launch overhead dominates execution for {short_kernel_ratio*100:.1f}% of kernels',
-                'solution': 'Enable GPU graph mode to batch kernel launches'
             })
     
     # Pattern 2: High Kernel Count
@@ -121,8 +120,6 @@ def detect_idle_patterns(
             'name': 'High Kernel Count',
             'severity': 'HIGH' if total_kernels > 5000 else 'MEDIUM',
             'evidence': f'{total_kernels} total kernel launches',
-            'impact': 'Each launch has fixed CPU overhead (~5-10µs)',
-            'solution': 'Use GPU graph mode or kernel fusion to reduce launch count'
         })
     
     # Pattern 3: Small Average Kernel Time
@@ -131,8 +128,6 @@ def detect_idle_patterns(
             'name': 'Small Average Kernel Time',
             'severity': 'HIGH' if avg_kernel_time < 20 else 'MEDIUM',
             'evidence': f'Average kernel time: {avg_kernel_time:.1f}µs',
-            'impact': 'CPU launch overhead is significant relative to kernel execution',
-            'solution': 'Fuse operations or use compilation to create larger kernels'
         })
     
     # Pattern 4: Very High Idle Time (general)
@@ -141,33 +136,15 @@ def detect_idle_patterns(
             'name': 'Critical GPU Underutilization',
             'severity': 'CRITICAL',
             'evidence': f'GPU idle {idle_percent:.1f}% of total time',
-            'impact': f'Only {100-idle_percent:.1f}% of GPU capacity is being used',
-            'solution': 'Enable GPU graph mode, use torch.compile, or increase batch size'
         })
     elif idle_percent > 50:
         patterns_detected.append({
             'name': 'High GPU Idle Time',
             'severity': 'HIGH',
             'evidence': f'GPU idle {idle_percent:.1f}% of total time',
-            'impact': f'Significant opportunity to improve throughput',
-            'solution': 'Enable GPU graph mode or torch.compile'
         })
     
     return patterns_detected
-
-
-def classify_severity(idle_percent: float) -> str:
-    """Classify idle time severity."""
-    if idle_percent > 70:
-        return 'CRITICAL'
-    elif idle_percent > 50:
-        return 'HIGH'
-    elif idle_percent > 30:
-        return 'MEDIUM'
-    elif idle_percent > 20:
-        return 'LOW'
-    else:
-        return 'ACCEPTABLE'
 
 
 def main():
@@ -185,7 +162,6 @@ def main():
         # Load data
         gpu_timeline = load_gpu_timeline(output_dir)
         ops_df = load_ops_summary(output_dir)
-        manifest = load_manifest(output_dir)
         
         # Extract key metrics
         idle_time = gpu_timeline.get('idle_time', {})
@@ -218,8 +194,17 @@ def main():
         for p in patterns_detected:
             print(f"  - [{p['severity']}] {p['name']}")
         
-        # Classify severity
-        severity = classify_severity(idle_percent)
+        # Classify severity (canonical thresholds live in cpu-idle-analyzer agent)
+        if idle_percent > 70:
+            severity = 'CRITICAL'
+        elif idle_percent > 50:
+            severity = 'HIGH'
+        elif idle_percent > 30:
+            severity = 'MEDIUM'
+        elif idle_percent > 20:
+            severity = 'LOW'
+        else:
+            severity = 'ACCEPTABLE'
         
         # Calculate potential speedup
         if idle_percent > 20:

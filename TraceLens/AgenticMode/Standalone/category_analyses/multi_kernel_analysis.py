@@ -15,7 +15,10 @@ import pandas as pd
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
-    """Classify memcpy severity based on count and time thresholds."""
+    """Classify memcpy severity based on count and time thresholds.
+
+    Canonical thresholds live in multi-kernel-analyzer agent.
+    """
     total_memcpy_time_ms = memcpy_summary.get("total_time_us", 0) / 1000
     total_count = memcpy_summary.get("total_count", 0)
     
@@ -39,7 +42,6 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         if count == 0:
             continue
         
-        # Severity by time percentage
         if dir_pct > 10:
             severity = "CRITICAL"
         elif dir_pct > 5:
@@ -47,9 +49,9 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         elif dir_pct > 2:
             severity = "MEDIUM"
         elif count > 50:
-            severity = "MEDIUM"
+            severity = "HIGH"
         elif count > 10:
-            severity = "LOW"
+            severity = "MEDIUM"
         else:
             severity = "NONE"
         
@@ -79,7 +81,10 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
 
 
 def classify_nccl_blocking_severity(overlap_analysis):
-    """Classify NCCL blocking compute severity."""
+    """Classify NCCL blocking compute severity.
+
+    Canonical thresholds live in multi-kernel-analyzer agent.
+    """
     exposed_comm_pct = overlap_analysis.get("comm_percent_of_total", 0)
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
     exposed_comm_us = overlap_analysis.get("exposed_comm_time_us", 0)
@@ -108,7 +113,10 @@ def classify_nccl_blocking_severity(overlap_analysis):
 
 
 def classify_overlap_severity(overlap_analysis):
-    """Classify NCCL/compute overlap quality."""
+    """Classify NCCL/compute overlap quality.
+
+    Canonical thresholds live in multi-kernel-analyzer agent.
+    """
     comm_overlap_ratio = overlap_analysis.get("comm_overlap_ratio")
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
     

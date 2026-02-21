@@ -89,12 +89,7 @@ Key metrics to analyze:
 
 ### Step 3: Analyze Memory Copy Patterns
 
-Examine `memcpy_assessment` for D2H and H2D issues:
-
-| Metric | CRITICAL | HIGH | MEDIUM | LOW |
-|--------|----------|------|--------|-----|
-| Memcpy time % of total | >10% | >5% | >2% | >0.5% |
-| D2H/H2D count | >100 | >50 | >10 | >5 |
+Examine `memcpy_assessment` for D2H and H2D issues. Severity is pre-computed in `memcpy_assessment.severity` and per-direction in each issue's `severity` field.
 
 **D2H (Device-to-Host) Issues:**
 - Frequent D2H copies suggest unnecessary data movement back to host
@@ -108,15 +103,7 @@ Examine `memcpy_assessment` for D2H and H2D issues:
 
 ### Step 4: Analyze NCCL Blocking
 
-Examine `nccl_blocking_assessment`:
-
-| Exposed Comm % | Severity | Assessment |
-|-----------------|----------|------------|
-| >20% | CRITICAL | Communication severely blocking compute |
-| 10-20% | HIGH | Significant communication overhead on critical path |
-| 5-10% | MEDIUM | Notable communication overhead, worth addressing |
-| 2-5% | LOW | Minor communication overhead |
-| <2% | ACCEPTABLE | Communication well-overlapped with compute |
+Examine `nccl_blocking_assessment`. Severity is pre-computed in `nccl_blocking_assessment.severity`.
 
 **Blocking indicators:**
 - High `exposed_comm_time_ms` means communication is on the critical path
@@ -124,14 +111,7 @@ Examine `nccl_blocking_assessment`:
 
 ### Step 5: Analyze Compute/Communication Overlap
 
-Examine `overlap_assessment`:
-
-| Overlap Ratio | Severity | Assessment |
-|---------------|----------|------------|
-| <30% | CRITICAL | Almost no overlap -- massive optimization opportunity |
-| 30-50% | HIGH | Poor overlap -- significant room for improvement |
-| 50-70% | MEDIUM | Moderate overlap -- room for improvement |
-| >70% | GOOD | Good overlap -- communication mostly hidden |
+Examine `overlap_assessment`. Severity is pre-computed in `overlap_assessment.severity`; the target overlap ratio is >70%.
 
 **Overlap improvement strategies:**
 1. Enable gradient communication overlap (async allreduce during backward)
@@ -244,33 +224,6 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is skipped, multi-kernel issues start at P1
 6. **Do NOT duplicate category analysis** - This analysis is about cross-cutting patterns, not individual op efficiency
-
----
-
-## Severity Thresholds Reference
-
-### Memory Copy
-| Condition | Severity |
-|-----------|----------|
-| memcpy_time > 10% of total | CRITICAL |
-| memcpy_time > 5% of total | HIGH |
-| memcpy_time > 2% of total | MEDIUM |
-| count > 50 (any direction) | HIGH |
-| count > 10 (any direction) | MEDIUM |
-
-### NCCL Blocking
-| Condition | Severity |
-|-----------|----------|
-| exposed_comm > 20% of total | CRITICAL |
-| exposed_comm > 10% of total | HIGH |
-| exposed_comm > 5% of total | MEDIUM |
-
-### Compute/Communication Overlap
-| Condition | Severity |
-|-----------|----------|
-| overlap_ratio < 0.3 | CRITICAL |
-| overlap_ratio < 0.5 | HIGH |
-| overlap_ratio < 0.7 | MEDIUM |
 
 ---
 
