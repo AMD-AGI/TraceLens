@@ -88,14 +88,8 @@ Check `status` field - if 'ERROR', write error findings and stop.
 Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations']`:
 
 **Bottleneck criteria:**
-- Time: > 50ms OR > 5% of category time
-- Efficiency: < 40% of peak
-
-**Prioritization:**
-- **Critical:** > 15% of compute AND < 30% efficiency
-- **High:** > 10% of compute OR < 40% efficiency
-- **Medium:** > 5% of compute OR notable kernel optimization pattern
-- **Low:** Everything else
+- Time: > 100ms OR > 5% of category time
+- Efficiency: < 60% of peak
 
 ### Step 4: Generate Markdown Tables
 
@@ -144,7 +138,6 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 - **Issue:** [Brief description]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
-- **Priority:** Critical/High/Medium/Low
 
 ## Additional Notes
 - Missing perf models: [count from metrics]
@@ -161,7 +154,7 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Batching opportunity, quantization format change — estimate based on expected parallelism or precision improvement
-- **Confidence**: `high` = clear gap to peak on large shapes; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
 

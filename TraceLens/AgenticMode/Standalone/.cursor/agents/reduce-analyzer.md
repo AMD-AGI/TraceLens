@@ -77,7 +77,7 @@ Check `category_specific.softmax_count` to identify attention patterns.
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW
+- Efficiency: < 60% of peak HBM BW
 
 **Special considerations:**
 - Softmax operations may indicate unfused attention
@@ -120,7 +120,7 @@ The findings file **must** end with an Impact Summary section:
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Unfused attention (softmax+bmm) to Flash: `savings_ms = softmax_time_ms * 0.7`. Fusion with adjacent ops: `savings_ms = op_time_ms * 0.5`
-- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
 

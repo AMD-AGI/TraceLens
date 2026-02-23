@@ -75,7 +75,7 @@ cat <output_dir>/category_data/batchnorm_metrics.json
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW
+- Efficiency: < 60% of peak HBM BW
 
 **Baseline comparison:**
 - Compare to simple elementwise ops (add_, mul, copy_)
@@ -117,7 +117,7 @@ The findings file **must** end with an Impact Summary section:
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms`. Alternative norm (LayerNorm/GroupNorm): estimate based on known efficiency difference
-- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
 

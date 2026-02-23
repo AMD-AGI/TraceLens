@@ -90,8 +90,8 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 ### Step 4: Identify Bottlenecks
 
 **Bottleneck criteria:**
-- Time: > 50ms OR > 5% of category time
-- Efficiency: < 40% of peak
+- Time: > 100ms OR > 5% of category time
+- Efficiency: < 60% of peak
 
 **Key indicator:**
 - High transpose overhead (>20%) indicates memory layout mismatch
@@ -132,7 +132,7 @@ The findings file **must** end with an Impact Summary section:
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms` (from `transpose_overhead_percent`)
-- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
 
 ---

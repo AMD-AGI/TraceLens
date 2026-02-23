@@ -436,7 +436,7 @@ def compute_impact_estimates(operations: List[dict], category: str,
         savings_ms = time_ms * (1 - eff_pct / 100)
         if savings_ms < min_savings_ms:
             continue
-        confidence = 'high' if time_ms > 5 and eff_pct < 60 else 'medium'
+        confidence = 'high' if time_ms > 5 and eff_pct < 70 else 'medium'
         estimates.append({
             'operation': op.get('name', 'Unknown'),
             'category': category,

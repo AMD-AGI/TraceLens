@@ -77,7 +77,7 @@ Check `category_specific` for compute-bound vs memory-bound counts.
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 40% of peak (considering bound type)
+- Efficiency: < 60% of peak (considering bound type)
 
 **Bound type considerations:**
 - FLOPS/Byte > 100: Compute-bound, compare to peak MAF
@@ -122,7 +122,7 @@ The findings file **must** end with an Impact Summary section:
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Replace with standard library op — estimate based on known library efficiency vs current
-- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
 

@@ -98,8 +98,8 @@ For each operation consuming significant time or with notable invocation count:
 ### Step 5: Identify Bottlenecks
 
 **Bottleneck criteria:**
-- Time: significant fraction of category time
-- Efficiency: well below expected peak for the operation type
+- Time: > 100ms OR > 5% of category time
+- Efficiency: < 60% of peak
 - Count: very high invocation count suggesting fusion/batching opportunity
 
 **Key questions to answer for each bottleneck:**
@@ -146,7 +146,6 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 - **Possible miscategorization:** [Yes/No -- if it looks like a GEMM, reduce, etc.]
 - **Algorithmic:** [Recommendation]
 - **Kernel:** [Recommendation]
-- **Priority:** High/Medium/Low
 
 ## GPU Graph Operations
 [If graph operations detected, analyze capture/replay overhead]
@@ -166,7 +165,7 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
-- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
 
 ---

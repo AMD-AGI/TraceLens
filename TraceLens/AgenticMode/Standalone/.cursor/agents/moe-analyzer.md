@@ -77,7 +77,7 @@ Check `status` - if 'NO_DATA', write findings noting no MoE operations.
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 40% of peak
+- Efficiency: < 60% of peak
 
 **Special considerations:**
 - MoE operations are typically already fused
@@ -120,7 +120,7 @@ The findings file **must** end with an Impact Summary section:
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
 - `algorithmic`: Expert load rebalancing: `savings_ms = op_time_ms * estimated_imbalance_fraction`
-- **Confidence**: `high` = clear gap to peak; `medium` = depends on kernel tuning quality; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
 
 ---

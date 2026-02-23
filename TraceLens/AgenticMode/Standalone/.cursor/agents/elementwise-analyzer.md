@@ -91,7 +91,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW (compared to baseline)
+- Efficiency: < 60% of peak HBM BW (compared to baseline)
 
 **Special considerations:**
 - Simple elementwise ops (add, mul, copy) should achieve 70-80% of peak HBM BW
