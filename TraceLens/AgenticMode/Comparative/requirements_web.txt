@@ -1,0 +1,14 @@
+# Web Dashboard Requirements
+# Install with: pip install -r requirements_web.txt
+
+# Core web framework
+flask>=2.3.0
+werkzeug>=2.3.0
+
+# Markdown rendering
+markdown>=3.4.0
+
+# Already included in main requirements but listing for completeness
+# Add these if not already in your environment:
+# requests>=2.31.0
+# pathlib>=1.0.1
