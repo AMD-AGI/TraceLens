@@ -17,8 +17,7 @@ from analysis_utils import (
     build_operation_metrics,
     calculate_average_efficiency,
     compute_impact_estimates,
-    write_metrics_json,
-    detect_transpose
+    write_metrics_json
 )
 
 
@@ -27,31 +26,6 @@ def get_convolution_config():
     return {
         'efficiency_method': 'prefer_compute',  # Convolutions can be compute-bound
         'extra_fields': [],
-        'operation_classifier': classify_convolution_operation
-    }
-
-
-def classify_convolution_operation(op_name: str, row) -> dict:
-    """Classify Convolution operation type."""
-    is_transpose = detect_transpose(op_name)
-    
-    op_lower = op_name.lower()
-    if is_transpose:
-        conv_type = 'transpose'
-    elif 'conv2d' in op_lower:
-        conv_type = 'conv2d'
-    elif 'conv1d' in op_lower:
-        conv_type = 'conv1d'
-    elif 'conv3d' in op_lower:
-        conv_type = 'conv3d'
-    elif 'depthwise' in op_lower:
-        conv_type = 'depthwise'
-    else:
-        conv_type = 'other'
-    
-    return {
-        'is_transpose': is_transpose,
-        'conv_type': conv_type
     }
 
 

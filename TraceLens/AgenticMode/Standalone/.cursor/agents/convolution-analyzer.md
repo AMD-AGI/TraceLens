@@ -74,7 +74,20 @@ cat <output_dir>/category_data/convolution_metrics.json
 
 Check `category_specific.transpose_overhead_percent` for layout issues.
 
-### Step 3: Identify Bottlenecks
+### Step 3: Classify Operations by Name
+
+Each entry in `metrics['operations']` has a `name` field (e.g. `aten::conv2d`, `aten::conv_transpose2d`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
+
+- **Standard 2D**: conv2d operations (most common in CNNs)
+- **1D**: conv1d operations (sequence/audio models)
+- **3D**: conv3d operations (video/volumetric models)
+- **Depthwise**: depthwise or channel-wise convolutions (low parallelism, expect lower efficiency)
+- **Transpose / Deconv**: transpose convolutions, deconvolutions (also signals potential layout mismatch -- cross-reference with `category_specific.transpose_overhead_percent`)
+- **Other**: anything not matching the above
+
+These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it. Operations you classify as transpose should be flagged for layout mismatch analysis in Step 4.
+
+### Step 4: Identify Bottlenecks
 
 **Bottleneck criteria:**
 - Time: > 50ms OR > 5% of category time
@@ -83,11 +96,11 @@ Check `category_specific.transpose_overhead_percent` for layout issues.
 **Key indicator:**
 - High transpose overhead (>20%) indicates memory layout mismatch
 
-### Step 4: Generate Markdown Tables
+### Step 5: Generate Markdown Tables
 
 Build operations table from `metrics['operations']`.
 
-### Step 5: Determine Optimization Recommendations
+### Step 6: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
 
@@ -101,7 +114,7 @@ For each validated bottleneck, provide recommendations in both categories:
 - Convolution kernels are typically well-optimized in vendor libraries
 - Check for memory layout inefficiencies affecting kernel performance
 
-### Step 6: Write Category Findings
+### Step 7: Write Category Findings
 
 Create `<output_dir>/category_findings/convolution_findings.md`. Create it through the container on the node.
 
