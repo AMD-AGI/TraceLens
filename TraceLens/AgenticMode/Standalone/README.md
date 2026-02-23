@@ -1,8 +1,8 @@
-# Agentic Mode: Standalone
+# TraceLens Agentic Mode: Standalone Trace Analysis
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. LLMs have been employed to define a structured workflow and interpret analysis results, with codified analysis offering repeatability when possible.  This is an experimental release to prototype a modular and extendible agentic trace analysis system. 
+TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. LLMs have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability.
 
 ---
 
@@ -58,7 +58,7 @@ pip install -e .
 
 ---
 
-## Output Files
+### Output Files
 
 ```
 analysis_output/
@@ -75,9 +75,8 @@ analysis_output/
 │   └── *_findings.md
 ├── category_findings/              # Compute kernel analysis (markdown)
 │   └── *_findings.md
-├── metadata/                       # Category metadata JSONs
-│   └── *_metadata.json
-└── replay_packages/                # Kernel replay artifacts (optional)
+└── metadata/                       # Category metadata JSONs
+    └── *_metadata.json
 ```
 
 ---
@@ -160,9 +159,48 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
 
 
+## Extending Capability
+
+The orchestrator's default workflow assumes a single eager-mode trace with standard perf report generation. For cases we're you'd like to add in custom preferences, you can override specific steps by providing instructions in the initial prompt. The normal analysis flow continues after the override.
+
+**Example: Graph execution trace with capture-phase augmentation**
+
+```
+Run standalone analysis on <path_to_graph_trace.json>
+
+This trace requires augmentation with capture-phase traces. Use this command for
+perf report generation instead:
+
+python TraceLens/Reporting/generate_perf_report_pytorch_vllm_graph.py \
+  --capture_folder <path_to_capture_folder> \
+  --graph_json_path <path_to_graph_trace.json> \
+  --output_xlsx_path <output>.xlsx \
+  --group_by_parent_module \
+  --enable_pseudo_op
+
+Once you change to this command, proceed with the normal flow.
+Do not flag idle time as an issue because that is intentional.
+Do not flag collectives as the main problem since that is a known problem.
+```
+
+This pattern generalizes: any step can be overridden or contextualized by adding instructions to the invocation prompt.
+
 ## Continual Learning
 
-After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically. This backtesting approach can help improve the system.
+After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.
+
+## Bug Reporting
+
+Please include the following details when reporting an issue. Please use the TraceLens-internal private repo to share sensitive data.
+
+- Description
+- Software Version (PyTorch, Primus, vLLM, SGLang)
+- Hardware (e.g., GPU model)
+- Issue Observed
+- Expected Behavior
+- Scripts/Commands Used
+- Error/Unexpected Behavior
+- Trace Files Used for Analysis
 
 ## 🗺️ Roadmap
 
@@ -170,9 +208,9 @@ TraceLens Standalone Agentic analysis is currently an **experimental** feature.
 
 ### 🔄 In Progress
 
-- [ ] Validation at a sub-agent level and integration tests are crucial to assess performance.
+- Validation at a sub-agent level and integration tests are crucial to assess performance.
 
 ### 🚀 Future Improvements
 
-- [ ] Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
-- [ ] Components of system-level analysis that can be codified should be moved into TraceLens.
+- Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
+- Components of system-level analysis that can be codified should be moved into TraceLens.
