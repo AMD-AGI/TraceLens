@@ -68,9 +68,9 @@ Install TraceLens from GitHub (requires AMD-AGI organization access):
 pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 ```
 
-### Step 3: Trace Preparation
+### Step 3: Trace Preparation (Optional)
 
-Read the collected trace and split it into smaller tracefiles:
+This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
 
 Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically. 
 
@@ -148,7 +148,7 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 > **Recommendations:** Ensure both tracefiles use similar execution setup (profiled steps, OSL range, concurrency) and the same execution mode (eager/graph) for meaningful comparisons.
 
-### Step 6: Agentic Trace Analysis
+### Step 6: Agentic Trace Analysis (Skip Step 4 and 5)
 
 Generate performance analysis and comparison report (if comparing two traces), along with optimization opportunity analysis automatically using an LLM agent. 
 
