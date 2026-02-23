@@ -142,7 +142,7 @@ The following maps category names to their agent definition files. These files c
 | elementwise | elementwise-analyzer.md |
 | triton | triton-analyzer.md |
 | reduce | reduce-analyzer.md |
-| batchnorm | batchnorm-analyzer.md |
+| norm | norm-analyzer.md |
 | convolution | convolution-analyzer.md |
 | other | generic-op-analyzer.md |
 
@@ -271,7 +271,7 @@ For each category in `compute_categories`, launch the corresponding subagent **s
 - `reduce` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md`
 - `triton` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md`
 - `moe_fused` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/moe-analyzer.md`
-- `batchnorm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/batchnorm-analyzer.md`
+- `norm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/norm-analyzer.md`
 - `convolution` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/convolution-analyzer.md`
 - `other` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md`
 

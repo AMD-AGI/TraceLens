@@ -6,7 +6,7 @@ model: inherit
 
 # Uncategorized Operations Analysis Subagent
 
-Analyze GPU operations that do not fit into standard categories (GEMM, SDPA, Elementwise, Reduce, BatchNorm, Convolution, MoE, Triton). This analyzer surfaces unexpected bottlenecks by reasoning about what each uncategorized operation does using its name, kernel details, and call-tree context.
+Analyze GPU operations that do not fit into standard categories (GEMM, SDPA, Elementwise, Reduce, Norm, Convolution, MoE, Triton). This analyzer surfaces unexpected bottlenecks by reasoning about what each uncategorized operation does using its name, kernel details, and call-tree context.
 
 **Note:** Communication blocking, memcpy D2H/H2D patterns, and synchronization overhead are handled by the **Multi-Kernel** and **CPU/Idle** system-level analyzers. This analyzer should NOT duplicate those findings.
 
@@ -198,7 +198,7 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 
 ### Potential Miscategorization
 - **Symptoms:** Operation name or kernel details suggest it belongs to another category
-- **Examples:** A matrix multiply variant not matched by GEMM filter, a normalization op not matched by BatchNorm filter
+- **Examples:** A matrix multiply variant not matched by GEMM filter, a normalization op not matched by Norm filter
 - **Action:** Note the miscategorization in findings so the orchestrator category filters can be improved
 - **Impact:** The operation may already have optimizations available in its true category
 

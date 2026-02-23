@@ -26,7 +26,7 @@ Update category analyzer agent files with new "Common Patterns" entries based on
 
 Ask the user to provide:
 1. **What was missed** -- the issue the analysis failed to flag
-2. **Which category** -- which analyzer(s) should have caught it (gemm, sdpa, elementwise, reduce, triton, moe, batchnorm, convolution, cpu-idle, other)
+2. **Which category** -- which analyzer(s) should have caught it (gemm, sdpa, elementwise, reduce, triton, moe, norm, convolution, cpu-idle, other)
 3. **Evidence** -- how they identified the issue (tree traversal, manual inspection, etc.)
 
 If the user has already provided this context in the conversation, do not re-ask.
@@ -84,7 +84,7 @@ After user approval, insert the new pattern entry at the end of the `## Common P
 | reduce | `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md` |
 | triton | `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md` |
 | moe_fused | `TraceLens/AgenticMode/Standalone/.cursor/agents/moe-analyzer.md` |
-| batchnorm | `TraceLens/AgenticMode/Standalone/.cursor/agents/batchnorm-analyzer.md` |
+| norm | `TraceLens/AgenticMode/Standalone/.cursor/agents/norm-analyzer.md` |
 | convolution | `TraceLens/AgenticMode/Standalone/.cursor/agents/convolution-analyzer.md` |
 | cpu_idle | `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` |
 | other | `TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md` |

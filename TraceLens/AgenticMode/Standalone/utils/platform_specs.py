@@ -93,7 +93,7 @@ CATEGORY_SKILL_MAP = {
     "elementwise": "elementwise-analysis",
     "reduce": "reduce-analysis",
     "triton": "triton-analysis",
-    "batchnorm": "batchnorm-analysis",
+    "norm": "norm-analysis",
     "convolution": "convolution-analysis",
     "other": "generic-op-analysis"
 }

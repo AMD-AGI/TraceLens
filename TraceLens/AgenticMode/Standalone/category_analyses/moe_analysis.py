@@ -25,23 +25,6 @@ def get_moe_config():
     return {
         'efficiency_method': 'prefer_compute',  # MoE ops can be compute or memory bound
         'extra_fields': [],
-        'operation_classifier': classify_moe_operation
-    }
-
-
-def classify_moe_operation(op_name: str, row) -> dict:
-    """Classify MoE operation type."""
-    op_lower = op_name.lower()
-    
-    if 'gate' in op_lower or 'router' in op_lower:
-        moe_type = 'routing'
-    elif 'expert' in op_lower:
-        moe_type = 'expert'
-    else:
-        moe_type = 'fused'
-    
-    return {
-        'moe_type': moe_type
     }
 
 

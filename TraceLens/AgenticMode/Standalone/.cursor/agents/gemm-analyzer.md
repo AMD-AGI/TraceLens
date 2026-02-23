@@ -177,11 +177,6 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 - **Algorithmic:** Batch GEMMs together using torch.bmm or grouped operations
 - **Kernel:** If batching >5x slower than expected, investigate kernel issues
 
-### Quantized GEMMs (W8A8, FP8)
-- **Special considerations:** Different efficiency profiles than BF16/FP32. TraceLens native analysis not available (Speculative)
-- **Algorithmic:** Validate quantization scheme and calibration
-- **Kernel:** Generate replay artifact - quantized kernels may need specific tuning
-
 ---
 
 ## Key Principles
