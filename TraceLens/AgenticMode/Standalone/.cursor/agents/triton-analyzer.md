@@ -1,12 +1,12 @@
 ---
 name: triton-analyzer
-description: Analyze Triton custom kernels for performance bottlenecks. Use when orchestrator needs Triton category analysis.
+description: Report informational summary for Triton custom kernels. Use when orchestrator needs Triton category analysis.
 model: inherit
 ---
 
 # Triton Analysis Subagent
 
-Analyze custom Triton kernels for performance efficiency and optimization opportunities.
+Produce an **informational-only** summary for Triton custom kernels. TraceLens does not currently support detailed Triton kernel analysis, so this subagent reports time and operation data without drawing efficiency conclusions or optimization recommendations.
 
 ---
 
@@ -71,100 +71,51 @@ After the script completes, read the JSON metrics file:
 cat <output_dir>/category_data/triton_metrics.json
 ```
 
-Check `category_specific` for compute-bound vs memory-bound counts.
+### Step 3: Write Informational Findings
 
-### Step 3: Identify Bottlenecks
+**CRITICAL:** Do NOT identify bottlenecks, make efficiency-based conclusions, or provide optimization recommendations. This section is informational only.
 
-**Bottleneck criteria:**
-- Time: > 10ms OR > 5% of category time
-- Efficiency: < 60% of peak (considering bound type)
-
-**Bound type considerations:**
-- FLOPS/Byte > 100: Compute-bound, compare to peak MAF
-- FLOPS/Byte < 50: Memory-bound, compare to peak HBM BW
-- Mixed: 50-100 FLOPS/Byte, harder to optimize
-
-### Step 4: Generate Markdown Tables
-
-Build operations table from `metrics['operations']` including bound type.
-
-### Step 5: Determine Optimization Recommendations
-
-For each validated bottleneck, provide recommendations in both categories:
-
-**Algorithmic Recommendations:**
-- Validate Triton kernel benefits vs equivalent PyTorch ops
-- Check if standard library ops would be faster
-- Consider if custom kernel is necessary
-
-**Kernel Optimization Focus:**
-- Review tile sizes for compute-bound kernels
-- Optimize memory access patterns for memory-bound kernels
-- Generate replay artifact for detailed profiling
-- Check wave occupancy and grid sizing
-- Identify bank conflicts or cache thrashing
-
-### Step 6: Write Category Findings
-
-Create `<output_dir>/category_findings/triton_findings.md`. Create it through the container on the node.
-
-The findings file **must** end with an Impact Summary section:
+Create `<output_dir>/category_findings/triton_findings.md` through the container on the node, using the following template:
 
 ```markdown
+# Triton Kernel Analysis Findings
+
+**Status:** SUCCESS
+
+**Platform:** <platform> | **Trace:** <trace_path> | **Analysis Date:** <date>
+
+> **Note:** Triton kernel analysis is not currently supported by TraceLens. This section provides an informational time breakdown only. No bottleneck conclusions or optimization recommendations are made.
+
+## 1. Overview
+
+| Metric | Value |
+|--------|-------|
+| Total Time | X.X ms |
+| % of Compute Time | X.X% |
+| Operation Count | N |
+
+## 2. Operations Breakdown
+
+| Operation | Time (ms) | % of Category | Invocations |
+|-----------|-----------|---------------|-------------|
+| <op_name> | X.X       | X.X%          | N           |
+
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/triton_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
-
-**Impact estimation guidelines:**
-- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: Replace with standard library op — estimate based on known library efficiency vs current
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
-
----
-
-## Common Patterns for Triton Analysis
-
-### Low Efficiency Custom Kernels
-- **Symptoms:** Triton kernel at <30% efficiency
-- **Issue:** Custom kernels may not be well-tuned
-- **Algorithmic:** Compare to PyTorch equivalent - custom may not be worth it
-- **Kernel:** Profile with hardware counters, optimize tile sizes
-
-### Compute-Bound Kernels
-- **Symptoms:** High FLOPS/Byte (>100), low TFLOPS/s
-- **Algorithmic:** Check if operation can be restructured
-- **Kernel:** Optimize tile sizes, wave occupancy
-
-### Memory-Bound Kernels
-- **Symptoms:** Low FLOPS/Byte (<50), low TB/s
-- **Algorithmic:** Fuse with adjacent operations
-- **Kernel:** Optimize memory access patterns
-
-### Validate Custom Kernel Benefits
-- **Key question:** Is this Triton kernel faster than PyTorch equivalent?
-- **If no:** Consider removing custom kernel
-- **If yes but inefficient:** Optimize kernel
+**Key rules for the findings file:**
+- The Impact Summary table must be present but must have **zero data rows**
+- Do NOT add any "Key Findings", "Bottleneck", or "Recommendations" sections
+- Do NOT assess efficiency or compare to peak performance
+- Only report factual time and count data from the metrics JSON
 
 ---
 
 ## Key Principles
 
-1. **Variable efficiency** - Triton kernels are user-written, quality varies
-2. **Validate benefits** - Compare to standard library alternatives
-3. **Bound type matters** - Use FLOPS/Byte to determine optimization strategy
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-
----
-
-## Efficiency Thresholds
-
-| Bound Type | >60% | 40-60% | <40% |
-|------------|------|--------|------|
-| Compute | Good | Acceptable | Needs investigation |
-| Memory | Good | Acceptable | Needs investigation |
-
-**Note:** Triton efficiency expectations are lower than vendor libraries due to user-written nature.
+1. **Informational only** -- report time and operation data, draw no conclusions
+2. **No impact estimates** -- the metrics JSON contains an empty `impact_estimates` list by design
+3. **No recommendations** -- do not suggest algorithmic or kernel-level optimizations
+4. **Empty Impact Summary** -- the table header must exist (for orchestrator parsing) but must have zero rows

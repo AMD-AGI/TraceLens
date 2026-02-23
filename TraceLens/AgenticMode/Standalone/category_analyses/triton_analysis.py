@@ -16,7 +16,6 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     calculate_average_efficiency,
-    compute_impact_estimates,
     write_metrics_json
 )
 
@@ -95,8 +94,6 @@ def main():
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     
-    impact_estimates = compute_impact_estimates(operations, 'triton')
-    
     metrics = {
         'category': 'triton',
         'status': 'OK',
@@ -104,7 +101,7 @@ def main():
         'average_efficiency_percent': avg_efficiency,
         'operations': operations,
         'category_specific': category_specific,
-        'impact_estimates': impact_estimates
+        'impact_estimates': []
     }
     
     output_path = write_metrics_json(metrics, args.output_dir, 'triton')
