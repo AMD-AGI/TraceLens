@@ -181,11 +181,11 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 **System-Level Subagent Mapping:**
 
-- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 50%`)
+- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 15%`)
 - `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
 
 **Invocation conditions:**
-- **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 50`
+- **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 15`
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 
 **Task prompt structure for each subagent:**
