@@ -1003,6 +1003,15 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Error Handling
 
+### Unsupported Trace Features
+
+If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
+
+- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`.
+- **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
+
+If found, inform the user which feature was detected and that TraceLens Agentic Mode currently supports eager-mode PyTorch traces only. **Abort** -- do not retry or continue.
+
 ### Before Invoking Subagents
 - Read `category_data/category_manifest.json` to get valid categories
 - Use `tier` field to determine which subagents belong to Step 6 (system) vs Step 7 (compute kernel)
