@@ -2,13 +2,13 @@
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode (Standalone) is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. This workflow has been developed for standalone analysis of traces. This is an experimental release to prototype a modular and extendible agentic trace analysis system. LLMs primally have been employed to define a structured workflow and interpret analysis results. The aim of this PoC is to gain insights into developing a reliable system.
+TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. LLMs have been employed to define a structured workflow and interpret analysis results, with codified analysis offering repeatability when possible.  This is an experimental release to prototype a modular and extendible agentic trace analysis system. 
 
 ---
 
 ## Prerequisites
 
-### 1. Clone and checkout the Agentic Orchestrator branch
+### 1. Clone TraceLens-internal
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens-internal.git
@@ -17,7 +17,7 @@ cd TraceLens
 
 ### 2. Install TraceLens inside your container
 
-SSH into your node and exec into the container where your traces reside:
+SSH into your node and exec into the container:
 
 ```bash
 ssh <node>
@@ -51,9 +51,10 @@ pip install -e .
    - Output directory (optional)
 
 3. **Get results:**
-   - `standalone_analysis.md` - Stakeholder report with prioritized recommendations
-   - `system_findings/` - System-level analysis (CPU/idle, multi-kernel issues)
-   - `category_findings/` - Per-category compute kernel analysis
+   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations
+   - **Additional outputs:**
+     - `system_findings/` - System-level analysis
+     - `category_findings/` - Per-category compute kernel analysis
 
 ---
 
@@ -139,10 +140,10 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 **System-Level (Step 6):**
 
-| Agent | Purpose | Invocation Condition |
-|-------|---------|---------------------|
-| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks | `idle_time_percent > 50%` |
-| `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap | Multi-kernel category exists in manifest |
+| Agent | Purpose |
+|-------|---------|
+| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
+| `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
 
 **Compute Kernel (Step 7):**
 
@@ -163,11 +164,15 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically. This backtesting approach can help improve the system.
 
-## Future Plans
-TraceLens Agentic Mode is currently an **experimental** feature. Efforts will be focused on converting this structural PoC to a reliable tool through rounds of design reviews and robust evaluation workflows.
-- Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (Codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
-- The rigidity of a structured workflow vs an open-ended approach is being studied.
-- Hard-coded analyses should be moved into TraceLens
-- Workflow handles categorized kernels, though complex system-level issues may not be fully uncovered beyond the patterns detected by the `cpu-idle-analyzer` and `multi-kernel-analyzer`. New kernels previously not analyzed may require special handling.
+## 🗺️ Roadmap
 
-- Validation at a sub-agent level and integration tests are crucial to asses performance. Evals are being developed.
+TraceLens Standalone Agentic analysis is currently an **experimental** feature.
+
+### 🔄 In Progress
+
+- [ ] Validation at a sub-agent level and integration tests are crucial to assess performance.
+
+### 🚀 Future Improvements
+
+- [ ] Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
+- [ ] Components of system-level analysis that can be codified should be moved into TraceLens.
