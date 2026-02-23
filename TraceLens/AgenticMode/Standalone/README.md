@@ -45,7 +45,7 @@ pip install -e .
 
 2. **Provide when prompted:**
    - Trace file path
-   - Platform (MI300X/MI325X/MI355X/MI400)
+   - Platform (MI300X/MI325X/MI350X/MI355X/MI400)
    - Node name
    - Container name
    - Output directory (optional)

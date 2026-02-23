@@ -60,8 +60,9 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - Options:
      1. **MI300X**
      2. **MI325X**
-     3. **MI355X**
-     4. **MI400**
+     3. **MI350X**
+     4. **MI355X**
+     5. **MI400**
 
 3. **Node Name**
    - Ask: "Which Node should we use for analysis?"

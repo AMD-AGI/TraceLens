@@ -23,7 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description='Prepare category data for TraceLens analysis')
     parser.add_argument('--trace-path', required=True, help='Path to trace file')
     parser.add_argument('--platform', required=True, choices=list(PLATFORM_SPECS.keys()),
-                        help='AMD platform (MI300X, MI325X, MI355X, MI400)')
+                        help='AMD platform (MI300X, MI325X, MI350X, MI355X, MI400)')
     parser.add_argument('--output-dir', required=True, help='Output directory')
     parser.add_argument('--disable_pseudo_ops', action='store_false',
                         dest='enable_pseudo_ops', default=True,

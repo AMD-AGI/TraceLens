@@ -7,6 +7,7 @@ See TraceLens/examples/gpu_arch_example.md for format reference.
 MI300X MAF values from measured benchmarks:
   https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
 MI325X shares gfx942 arch with MI300X (same CU count), higher HBM BW.
+MI350X uses MI325X MAF values (placeholder) -- TODO: replace with measured MAF.
 MI355X/MI400 values are theoretical peak -- TODO: replace with measured MAF.
 """
 
@@ -32,6 +33,23 @@ PLATFORM_SPECS = {
         "name": "MI325X",
         "mem_bw_gbps": 6000,
         "memory_gb": 256,
+        "max_achievable_tflops": {
+            "matrix_fp16": 794,
+            "matrix_bf16": 843,
+            "matrix_fp32": 194,
+            "matrix_fp64": 97,
+            "matrix_fp8": 1519,
+            "matrix_int8": 3094,
+            "vector_fp16": 194,
+            "vector_bf16": 194,
+            "vector_fp32": 97,
+            "vector_fp64": 48
+        },
+    },
+    "MI350X": {
+        "name": "MI350X",
+        "mem_bw_gbps": 6000,
+        "memory_gb": 288,
         "max_achievable_tflops": {
             "matrix_fp16": 794,
             "matrix_bf16": 843,
