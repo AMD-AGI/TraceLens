@@ -28,11 +28,12 @@ from ..PerfModel.torch_op_mapping import (
     dict_cat2names,
     op_to_perf_model_class_map,
 )
+from ..Trace2Tree.extensions import apply_pseudo_op_extensions
+from ..Trace2Tree.trace_capture_merge import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -130,6 +131,7 @@ class TreePerfAnalyzer:
     @staticmethod
     def from_file(
         profile_filepath,
+        capture_trace_filepath=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -148,6 +150,13 @@ class TreePerfAnalyzer:
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
         tree = TraceToTree(data, event_to_category=categorizer)
+
+        # Optionally merge capture trace into graph tree
+        if capture_trace_filepath is not None:
+            tree = merge_capture_trace_into_graph(
+                capture_tree_filepath=capture_trace_filepath,
+                graph_tree_filepath=profile_filepath,
+            )
 
         return TreePerfAnalyzer(
             tree,
@@ -2391,8 +2400,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )

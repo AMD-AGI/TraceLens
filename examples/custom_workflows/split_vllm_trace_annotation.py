@@ -302,9 +302,9 @@ def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration")-
     if not "annotation_iteration" in prefix:
         return {"batch_size": 0}
     iter_details=re.sub(r"[sqk]+","_",name).split("_")
-    if len(iter_details) < 9:
+    if len(iter_details) < 10:
         ctx_req,ctx_sum,gen_req,gen_sum=iter_details[2],iter_details[3],iter_details[6],iter_details[7]
-    elif len(iter_details) <14:
+    elif len(iter_details) <12:
         ctx_req,ctx_sum,gen_req,gen_sum= iter_details[2],iter_details[3],iter_details[7],iter_details[8]
     else:
         ctx_req,ctx_sum,gen_req,gen_sum=iter_details[3],iter_details[5],iter_details[11],iter_details[13]
