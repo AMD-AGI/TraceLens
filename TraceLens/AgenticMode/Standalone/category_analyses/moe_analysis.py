@@ -15,6 +15,7 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     calculate_average_efficiency,
+    compute_impact_estimates,
     write_metrics_json
 )
 
@@ -24,23 +25,6 @@ def get_moe_config():
     return {
         'efficiency_method': 'prefer_compute',  # MoE ops can be compute or memory bound
         'extra_fields': [],
-        'operation_classifier': classify_moe_operation
-    }
-
-
-def classify_moe_operation(op_name: str, row) -> dict:
-    """Classify MoE operation type."""
-    op_lower = op_name.lower()
-    
-    if 'gate' in op_lower or 'router' in op_lower:
-        moe_type = 'routing'
-    elif 'expert' in op_lower:
-        moe_type = 'expert'
-    else:
-        moe_type = 'fused'
-    
-    return {
-        'moe_type': moe_type
     }
 
 
@@ -96,13 +80,16 @@ def main():
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     
+    impact_estimates = compute_impact_estimates(operations, 'moe_fused')
+    
     metrics = {
         'category': 'moe_fused',
         'status': 'OK',
         **time_metrics,
         'average_efficiency_percent': avg_efficiency,
         'operations': operations,
-        'category_specific': category_specific
+        'category_specific': category_specific,
+        'impact_estimates': impact_estimates
     }
     
     output_path = write_metrics_json(metrics, args.output_dir, 'moe_fused')

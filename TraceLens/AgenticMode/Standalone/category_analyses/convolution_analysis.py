@@ -16,8 +16,8 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     calculate_average_efficiency,
-    write_metrics_json,
-    detect_transpose
+    compute_impact_estimates,
+    write_metrics_json
 )
 
 
@@ -26,31 +26,6 @@ def get_convolution_config():
     return {
         'efficiency_method': 'prefer_compute',  # Convolutions can be compute-bound
         'extra_fields': [],
-        'operation_classifier': classify_convolution_operation
-    }
-
-
-def classify_convolution_operation(op_name: str, row) -> dict:
-    """Classify Convolution operation type."""
-    is_transpose = detect_transpose(op_name)
-    
-    op_lower = op_name.lower()
-    if is_transpose:
-        conv_type = 'transpose'
-    elif 'conv2d' in op_lower:
-        conv_type = 'conv2d'
-    elif 'conv1d' in op_lower:
-        conv_type = 'conv1d'
-    elif 'conv3d' in op_lower:
-        conv_type = 'conv3d'
-    elif 'depthwise' in op_lower:
-        conv_type = 'depthwise'
-    else:
-        conv_type = 'other'
-    
-    return {
-        'is_transpose': is_transpose,
-        'conv_type': conv_type
     }
 
 
@@ -101,13 +76,16 @@ def main():
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
     
+    impact_estimates = compute_impact_estimates(operations, 'convolution')
+    
     metrics = {
         'category': 'convolution',
         'status': 'OK',
         **time_metrics,
         'average_efficiency_percent': avg_efficiency,
         'operations': operations,
-        'category_specific': category_specific
+        'category_specific': category_specific,
+        'impact_estimates': impact_estimates
     }
     
     output_path = write_metrics_json(metrics, args.output_dir, 'convolution')

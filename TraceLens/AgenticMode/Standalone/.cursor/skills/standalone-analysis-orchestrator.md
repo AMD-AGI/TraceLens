@@ -39,7 +39,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Aggregate Results: System-Level + Compute Kernel Recommendations
-10. Generate Final Report (composable System + Compute sections)
+9.5. Generate Performance Improvement Plot (matplotlib SVG)
+10. Generate Final Report (composable System + Compute sections, embed SVG)
 ```
 
 ---
@@ -141,7 +142,7 @@ The following maps category names to their agent definition files. These files c
 | elementwise | elementwise-analyzer.md |
 | triton | triton-analyzer.md |
 | reduce | reduce-analyzer.md |
-| batchnorm | batchnorm-analyzer.md |
+| norm | norm-analyzer.md |
 | convolution | convolution-analyzer.md |
 | other | generic-op-analyzer.md |
 
@@ -180,11 +181,11 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 **System-Level Subagent Mapping:**
 
-- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 50%`)
+- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 15%`)
 - `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
 
 **Invocation conditions:**
-- **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 50`
+- **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 15`
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 
 **Task prompt structure for each subagent:**
@@ -270,7 +271,7 @@ For each category in `compute_categories`, launch the corresponding subagent **s
 - `reduce` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md`
 - `triton` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md`
 - `moe_fused` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/moe-analyzer.md`
-- `batchnorm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/batchnorm-analyzer.md`
+- `norm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/norm-analyzer.md`
 - `convolution` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/convolution-analyzer.md`
 - `other` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md`
 
@@ -392,6 +393,24 @@ if has_sync:
 - Time values in milliseconds (ms) unless otherwise noted
 - Efficiency values as percentages (0-100% typically; flag >100% as anomaly)
 - Always include operation count for context
+
+#### 6. Impact Summary Required
+
+Every subagent (compute kernel **and** system-level) **must** include an `## Impact Summary` table at the end of its findings file. This table is consumed by the orchestrator to generate the performance improvement plot (kernel tuning only) and to aggregate recommendations in the report.
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic / system | X.X | high/medium/low |
+```
+
+- **Type** must be one of:
+  - `kernel_tuning` — closing the efficiency gap to peak for existing kernels. **Only this type feeds the performance plot.**
+  - `algorithmic` — fusion, Flash Attention migration, layout changes, batching, torch.compile, operator replacement.
+  - `system` — CPU idle reduction, communication/compute overlap, memcpy optimization, multi-kernel pipeline issues.
+- **Estimation formulas and confidence levels** are defined in each subagent's agent file. Subagents use pre-computed `impact_estimates` from `*_metrics.json` for `kernel_tuning` rows.
+- If no actionable bottlenecks, the table may have zero rows but the section header must still be present.
 
 ---
 
@@ -632,7 +651,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 **CRITICAL: No-Issue Handling:**
 - If **all** system-level analyses report NONE/N/A severity (no actionable issues), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
-- Instead, display a short summary: "No system-level bottlenecks detected. GPU utilization is healthy at X%, with negligible memcpy/communication overhead."
+- Instead, display a short summary: "No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead."
 - This avoids misleading stakeholders with a red P1 icon for a non-issue.
 
 **System-Level Icon Mapping (by priority number, NOT severity):**
@@ -642,6 +661,144 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 | P1 | 🔴 |
 | P2 | 🟡 |
 | P3+ | 🟢 |
+
+---
+
+## Step 9.5: Generate Performance Improvement Plot
+
+After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.svg`.
+
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+
+### 9.5.1 Ensure matplotlib is available
+
+```bash
+ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null || docker exec <container> pip install matplotlib"
+```
+
+### 9.5.2 Generate plot_data.json (Deterministic)
+
+Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
+
+```bash
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
+generate_plot_data('<output_dir>')
+\""
+```
+
+This produces `<output_dir>/plot_data.json` containing:
+- `baseline_ms`: Total GPU time from manifest
+- `recommendations`: Top kernel_tuning estimates grouped by category (high/medium confidence), sorted by total savings, max 6 categories
+- `all_estimates`: All estimates across all categories and types (for report aggregation)
+
+### 9.5.3 Read Plot Data and Compute Cumulative Projections
+
+```python
+import json
+
+with open('<output_dir>/plot_data.json') as f:
+    plot_data = json.load(f)
+
+baseline_ms = plot_data['baseline_ms']
+recommendations = plot_data['recommendations']
+
+current_ms = baseline_ms
+steps = ['Baseline']
+e2e_ms = [baseline_ms]
+savings_list = [0]
+cumulative_rel = [100]
+
+for rec in recommendations:
+    current_ms -= rec['savings_ms']
+    count = rec.get('operation_count', 1)
+    label = rec['category'] + f'\n({count} ops)'
+    steps.append(label)
+    e2e_ms.append(current_ms)
+    savings_list.append(rec['savings_ms'])
+    cumulative_rel.append(round(baseline_ms / current_ms * 100))
+```
+
+### 9.5.4 Generate and Run Plot Script
+
+Generate a Python script and run it inside the container. The script produces `<output_dir>/perf_improvement.svg`.
+
+```bash
+ssh <node> "docker exec <container> python3 <output_dir>/generate_plot.py"
+```
+
+**Plot script template** (write to `<output_dir>/generate_plot.py`, then execute).
+Fill `steps`, `e2e_ms`, `savings`, `cumulative_rel` from Step 9.5.3:
+
+```python
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# --- Fill from Step 9.5.3 ---
+steps = ['Baseline', 'Opt 1\n(name)', 'Opt 2\n(name)', 'Opt 3\n(name)']
+e2e_ms = [100.0, 60.0, 52.0, 49.0]
+savings = [0, 40.0, 8.0, 3.0]
+cumulative_rel = [100, 167, 192, 204]
+title = '<Model> on <Platform> — Kernel Tuning Potential'
+output_path = '<output_dir>/perf_improvement.svg'
+# ---------------------------------------------
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5),
+                                gridspec_kw={'width_ratios': [1.1, 1]})
+
+colors = ['#4a90d9', '#e74c3c', '#e67e22', '#f1c40f', '#2ecc71',
+          '#9b59b6', '#1abc9c'][:len(steps)]
+bars = ax1.bar(steps, e2e_ms, color=colors, edgecolor='white',
+               linewidth=1.2, width=0.65)
+for bar, val, sav in zip(bars, e2e_ms, savings):
+    ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.5,
+             f'{val:.1f} ms', ha='center', va='bottom', fontsize=10,
+             fontweight='bold')
+    if sav > 0:
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height()/2,
+                 f'-{sav:.1f} ms', ha='center', va='center',
+                 fontsize=9, color='white', fontweight='bold')
+ax1.set_ylabel('E2E Latency (ms)', fontsize=11)
+ax1.set_title('Projected E2E Latency After Each Optimization',
+              fontsize=12, fontweight='bold', pad=12)
+ax1.set_ylim(0, max(e2e_ms) * 1.2)
+ax1.spines['top'].set_visible(False)
+ax1.spines['right'].set_visible(False)
+ax1.tick_params(axis='x', labelsize=9)
+
+ax2.plot(range(len(steps)), cumulative_rel, 'o-', color='#2ecc71',
+         linewidth=2.5, markersize=9, markerfacecolor='white',
+         markeredgewidth=2.5)
+for x, y in enumerate(cumulative_rel):
+    ax2.annotate(f'{y}', (x, y), textcoords="offset points",
+                 xytext=(0, 12), ha='center', fontsize=10,
+                 fontweight='bold', color='#27ae60')
+ax2.set_xticks(range(len(steps)))
+ax2.set_xticklabels(steps, fontsize=9)
+ax2.set_ylabel('Relative Throughput (Baseline = 100)', fontsize=11)
+ax2.set_title('Cumulative Throughput Improvement',
+              fontsize=12, fontweight='bold', pad=12)
+ax2.set_ylim(80, max(cumulative_rel) * 1.15)
+ax2.axhline(y=100, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+ax2.grid(axis='y', linestyle='--', alpha=0.3)
+ax2.spines['top'].set_visible(False)
+ax2.spines['right'].set_visible(False)
+ax2.tick_params(axis='x', labelsize=9)
+
+fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
+plt.tight_layout()
+plt.savefig(output_path, bbox_inches='tight', facecolor='white')
+print(f'Plot saved to {output_path}')
+```
+
+### 9.5.5 Verify Plot Output
+
+```bash
+ssh <node> "docker exec <container> test -f <output_dir>/perf_improvement.svg && echo 'Plot generated successfully' || echo 'ERROR: Plot generation failed'"
+```
+
+If the plot fails, proceed to Step 10 without the plot and note the failure in the report.
 
 ---
 
@@ -662,10 +819,12 @@ Validate the report before sharing the priority recommendations on the chat and 
 | Metric | Value |
 |--------|-------|
 | Total Compute Time | X ms |
-| GPU Utilization | Y% |
+| Computation | Y% |
 | Idle Time | Z% |
 | Exposed Communication | W% |
 | Top Bottleneck Category | Category (V%) |
+
+![Performance Improvement](perf_improvement.svg)
 
 ## Warnings
 
@@ -681,19 +840,19 @@ These are excluded from the recommendations below.
 
 ---
 
-## Top Operations
-
-| Rank | Operation | Category | Time (ms) | % of Total Compute |
-|------|-----------|----------|-----------|-------------------|
-| 1 | ... | ... | ... | ... |
-| 2 | ... | ... | ... | ... |
-
----
-
 ## Compute Kernel Optimizations
 
 Findings from per-category kernel analysis (GEMM, SDPA, elementwise, etc.).
 Summaries of recommendations from Step 7 sub-agents, focused on individual kernel efficiency.
+
+### Top Operations
+
+Use **% of computation time** (not % of total trace time) so readers can see each operation's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`.
+
+| Rank | Operation | Category | Time (ms) | % of Compute Time |
+|------|-----------|----------|-----------|-------------------|
+| 1 | ... | ... | ... | ... |
+| 2 | ... | ... | ... | ... |
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 
@@ -733,6 +892,8 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ## System-Level Optimizations
 
+> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
@@ -744,7 +905,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- === TEMPLATE A: No actionable system-level issues === -->
 <!-- Use this when all system-level analyses report NONE/N/A severity -->
 
-✅ No system-level bottlenecks detected. GPU utilization is healthy at X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
+✅ No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
 
 <!-- === TEMPLATE B: Actionable issues found === -->
 <!-- Use this when at least one system-level analysis reports an actionable severity (LOW/MEDIUM/HIGH/CRITICAL) -->
@@ -795,6 +956,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Detailed Analysis: System-Level
 
+> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
 ### 1. CPU/Idle Time Analysis
 [Full cpu_idle_findings.md content from system_findings/]
 
@@ -817,16 +980,17 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
-4. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
-5. **Each section is independently composable** -- can be shared standalone
-6. **Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps)**
-7. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
+3. **Performance plot**: Embed `![Performance Improvement](perf_improvement.svg)` immediately after the Executive Summary metrics table. The plot shows **kernel tuning potential only**. If the plot was not generated (Step 9.5 failed), omit the image tag.
+4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
+5. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
+6. **Each section is independently composable** -- can be shared standalone
+7. **Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps)**
+8. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
    - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
    - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
-8. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
-9. **No redundancy**: Information appears in ONE place only
-10. **Recommendations**: Max ~10 lines PER recommendation
+9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
+10. **No redundancy**: Information appears in ONE place only
+11. **Recommendations**: Max ~10 lines PER recommendation
 
 ---
 
@@ -844,6 +1008,15 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 ---
 
 ## Error Handling
+
+### Unsupported Trace Features
+
+If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
+
+- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`.
+- **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
+
+If found, inform the user which feature was detected and that TraceLens Agentic Mode currently supports eager-mode PyTorch traces only. **Abort** -- do not retry or continue.
 
 ### Before Invoking Subagents
 - Read `category_data/category_manifest.json` to get valid categories
@@ -907,3 +1080,4 @@ tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'
 5. **Composable reports** - System-Level and Compute Kernel sections can stand alone as independent deliverables
 6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1). Icons follow priority number: System 🔴→🟡→🟢, Compute 🔴→🟡→🟢
 7. **Handle errors gracefully** - Failed analyses go to Warnings, not manual analysis
+8. **Performance plot** - Step 9.5 generates `perf_improvement.svg` from Impact Summary tables; if matplotlib is missing, install it in the container first

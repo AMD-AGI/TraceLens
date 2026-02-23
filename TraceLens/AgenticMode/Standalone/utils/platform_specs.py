@@ -33,17 +33,16 @@ PLATFORM_SPECS = {
         "mem_bw_gbps": 6000,
         "memory_gb": 256,
         "max_achievable_tflops": {
-            # Same gfx942 arch as MI300X (304 CUs), same compute MAF
-            "matrix_fp16": 654,
-            "matrix_bf16": 708,
-            "matrix_fp32": 163,
-            "matrix_fp64": 81,
-            "matrix_fp8": 1273,
-            "matrix_int8": 2600,
-            "vector_fp16": 163,
-            "vector_bf16": 163,
-            "vector_fp32": 81,
-            "vector_fp64": 40,
+            "matrix_fp16": 794,
+            "matrix_bf16": 843,
+            "matrix_fp32": 194,
+            "matrix_fp64": 97,
+            "matrix_fp8": 1519,
+            "matrix_int8": 3094,
+            "vector_fp16": 194,
+            "vector_bf16": 194,
+            "vector_fp32": 97,
+            "vector_fp64": 48
         },
     },
     "MI355X": {
@@ -51,18 +50,18 @@ PLATFORM_SPECS = {
         "mem_bw_gbps": 8000,
         "memory_gb": 288,
         "max_achievable_tflops": {
-            # CDNA4 / gfx950 -- TODO: replace with measured MAF
-            "matrix_fp16": 1307,
-            "matrix_bf16": 1307,
-            "matrix_fp32": 654,
-            "matrix_fp64": 327,
-            "matrix_fp8": 5032,
-            "matrix_fp4": 10063,
-            "matrix_int8": 5032,
-            "vector_fp16": 327,
-            "vector_bf16": 327,
-            "vector_fp32": 163,
-            "vector_fp64": 82,
+            "matrix_fp16": 1686,
+            "matrix_bf16": 1686,
+            "matrix_fp32": 137,
+            "matrix_fp64": 68,
+            "matrix_fp8": 3567,
+            "matrix_fp6": 4574,
+            "matrix_fp4": 5663,
+            "matrix_int8": 7134,
+            "vector_fp16": 274,
+            "vector_bf16": 274,
+            "vector_fp32": 137,
+            "vector_fp64": 68
         },
     },
     "MI400": {
@@ -87,14 +86,14 @@ PLATFORM_SPECS = {
 }
 
 CATEGORY_SKILL_MAP = {
-    "cpu_idle": "cpu-idle-analysis",  # Priority 0 - invoke when idle > 50%
+    "cpu_idle": "cpu-idle-analysis",
     "gemm": "gemm-analysis",
     "moe_fused": "moe-analysis",
     "sdpa_fwd": "sdpa-analysis",
     "elementwise": "elementwise-analysis",
     "reduce": "reduce-analysis",
     "triton": "triton-analysis",
-    "batchnorm": "batchnorm-analysis",
+    "norm": "norm-analysis",
     "convolution": "convolution-analysis",
     "other": "generic-op-analysis"
 }

@@ -6,7 +6,7 @@ model: inherit
 
 # Uncategorized Operations Analysis Subagent
 
-Analyze GPU operations that do not fit into standard categories (GEMM, SDPA, Elementwise, Reduce, BatchNorm, Convolution, MoE, Triton). This analyzer surfaces unexpected bottlenecks by reasoning about what each uncategorized operation does using its name, kernel details, and call-tree context.
+Analyze GPU operations that do not fit into standard categories (GEMM, SDPA, Elementwise, Reduce, Norm, Convolution, MoE, Triton). This analyzer surfaces unexpected bottlenecks by reasoning about what each uncategorized operation does using its name, kernel details, and call-tree context.
 
 **Note:** Communication blocking, memcpy D2H/H2D patterns, and synchronization overhead are handled by the **Multi-Kernel** and **CPU/Idle** system-level analyzers. This analyzer should NOT duplicate those findings.
 
@@ -75,6 +75,8 @@ cat <output_dir>/category_data/other_metrics.json
 
 Check `metrics['category_specific']` for sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`).
 
+**Communication kernels are automatically skipped by the analysis script.** If `category_specific.communication_ops_skipped` exists and its `count > 0`, include a "Communication Kernels (Skipped)" section in the findings directing users to TraceLens's NCCL Analyzer. Do NOT attempt to analyze these operations.
+
 ### Step 3: Read Tree Data for Context
 
 Read the tree data to understand where each operation sits in the call hierarchy:
@@ -98,8 +100,8 @@ For each operation consuming significant time or with notable invocation count:
 ### Step 5: Identify Bottlenecks
 
 **Bottleneck criteria:**
-- Time: significant fraction of category time
-- Efficiency: well below expected peak for the operation type
+- Time: > 100ms OR > 5% of category time
+- Efficiency: < 60% of peak
 - Count: very high invocation count suggesting fusion/batching opportunity
 
 **Key questions to answer for each bottleneck:**
@@ -131,7 +133,7 @@ Create `<output_dir>/category_findings/other_findings.md`. Create it through the
 
 ## Overview
 X uncategorized operations account for Y% of compute time.
-Sub-categories: Z communication, W graph, V miscellaneous.
+Sub-categories: W graph, V miscellaneous.
 
 ## Operations Breakdown
 [Generated table with name, count, time, efficiency, sub-category]
@@ -146,15 +148,35 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 - **Possible miscategorization:** [Yes/No -- if it looks like a GEMM, reduce, etc.]
 - **Algorithmic:** [Recommendation]
 - **Kernel:** [Recommendation]
-- **Priority:** High/Medium/Low
+
+## Communication Kernels (Skipped)
+[If communication_ops_skipped.count > 0, include this section:]
+X communication kernel(s) detected but not analyzed here.
+For detailed collective communication analysis, use **TraceLens's NCCL Analyzer**.
+See: `TraceLens/NcclAnalyser/` and the NCCL Analyzer documentation.
+Operations skipped: [list op names from communication_ops_skipped.op_names]
 
 ## GPU Graph Operations
 [If graph operations detected, analyze capture/replay overhead]
 
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+
 ## Notes
+- Communication kernels (NCCL/RCCL) are excluded from this analysis — use TraceLens's NCCL Analyzer
 - Communication overlap and memcpy patterns are covered in the Multi-Kernel system findings
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
+
+**Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
+- `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- If no actionable bottlenecks found, the table may have zero rows.
 
 ---
 
@@ -176,7 +198,7 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 
 ### Potential Miscategorization
 - **Symptoms:** Operation name or kernel details suggest it belongs to another category
-- **Examples:** A matrix multiply variant not matched by GEMM filter, a normalization op not matched by BatchNorm filter
+- **Examples:** A matrix multiply variant not matched by GEMM filter, a normalization op not matched by Norm filter
 - **Action:** Note the miscategorization in findings so the orchestrator category filters can be improved
 - **Impact:** The operation may already have optimizations available in its true category
 
@@ -193,8 +215,9 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 1. **Investigate, don't dismiss** -- Uncategorized ops may hide significant bottlenecks
 2. **Use tree context** -- Parent chains reveal what module/layer the op belongs to
 3. **Check for miscategorization** -- Some ops may belong to standard categories
-4. **Do NOT duplicate system-level findings** -- Communication, memcpy, and sync are covered elsewhere
-5. **Provide BOTH recommendation types** -- Algorithmic and kernel-level
+4. **Do NOT analyze communication kernels** -- They are filtered out by the analysis script; direct users to TraceLens's NCCL Analyzer
+5. **Do NOT duplicate system-level findings** -- Memcpy and sync are covered elsewhere
+6. **Provide BOTH recommendation types** -- Algorithmic and kernel-level
 
 ---
 

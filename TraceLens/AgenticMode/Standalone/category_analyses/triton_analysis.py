@@ -100,7 +100,8 @@ def main():
         **time_metrics,
         'average_efficiency_percent': avg_efficiency,
         'operations': operations,
-        'category_specific': category_specific
+        'category_specific': category_specific,
+        'impact_estimates': []
     }
     
     output_path = write_metrics_json(metrics, args.output_dir, 'triton')

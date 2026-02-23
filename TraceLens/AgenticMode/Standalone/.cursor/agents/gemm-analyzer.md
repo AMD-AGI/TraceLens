@@ -88,14 +88,8 @@ Check `status` field - if 'ERROR', write error findings and stop.
 Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations']`:
 
 **Bottleneck criteria:**
-- Time: > 50ms OR > 5% of category time
-- Efficiency: < 40% of peak
-
-**Prioritization:**
-- **Critical:** > 15% of compute AND < 30% efficiency
-- **High:** > 10% of compute OR < 40% efficiency
-- **Medium:** > 5% of compute OR notable kernel optimization pattern
-- **Low:** Everything else
+- Time: > 100ms OR > 5% of category time
+- Efficiency: < 60% of peak
 
 ### Step 4: Generate Markdown Tables
 
@@ -144,22 +138,27 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 - **Issue:** [Brief description]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
-- **Priority:** Critical/High/Medium/Low
 
 ## Additional Notes
 - Missing perf models: [count from metrics]
 - Quantized GEMMs detected: [count from metrics]
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
+
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
+- `algorithmic`: Batching opportunity, quantization format change — estimate based on expected parallelism or precision improvement
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
 
 ## Common Patterns for GEMM Analysis
-
-### Tiny Batched GEMMs
-- **Symptoms:** Huge batch count, tiny M/N/K dimensions (e.g., 1000+ GEMMs with M=8, N=16)
-- **Issue:** GPU can't efficiently parallelize, memory overhead dominates
-- **Algorithmic:** Batch GEMMs together using torch.bmm or grouped operations
-- **Kernel:** If batching >5x slower than expected, investigate kernel issues
 
 ### Compute-Bound GEMMs
 - **Symptoms:** High FLOPS/Byte (>200), low TFLOPS/s compared to peak MAF
@@ -171,10 +170,12 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 - **Algorithmic:** Fusion opportunities to reduce memory traffic
 - **Kernel:** If not reaching expected BW, indicates kernel optimization opportunity
 
-### Quantized GEMMs (W8A8, FP8)
-- **Special considerations:** Different efficiency profiles than BF16/FP32
-- **Algorithmic:** Validate quantization scheme and calibration
-- **Kernel:** Generate replay artifact - quantized kernels may need specific tuning
+
+### Tiny Batched GEMMs
+- **Symptoms:** Huge batch count, tiny M/N/K dimensions (e.g., 1000+ GEMMs with M=8, N=16)
+- **Issue:** GPU can't efficiently parallelize, memory overhead dominates
+- **Algorithmic:** Batch GEMMs together using torch.bmm or grouped operations
+- **Kernel:** If batching >5x slower than expected, investigate kernel issues
 
 ---
 

@@ -10,11 +10,15 @@ This module provides common functions for:
 - Writing metrics JSON files
 """
 
-import pandas as pd
+import ast
 import json
-import numpy as np
 import os
-from typing import Dict, List, Optional, Tuple, Any
+import re
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
@@ -408,6 +412,112 @@ def calculate_average_efficiency(
     return round(total_eff / count, 2) if count > 0 else 0
 
 
+def compute_impact_estimates(operations: List[dict], category: str,
+                             min_savings_ms: float = 0.1) -> List[dict]:
+    """
+    Deterministically compute kernel_tuning impact estimates from operation metrics.
+
+    Uses the documented formula: savings_ms = op_time_ms * (1 - efficiency_pct / 100).
+    Anomalous efficiencies (>100%) are excluded.
+
+    Args:
+        operations: List of operation metric dicts (from build_operation_metrics)
+        category: Category name for labelling
+        min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
+
+    Returns:
+        List of impact estimate dicts sorted by savings descending
+    """
+    estimates = []
+    for op in operations:
+        eff = op.get('efficiency', {})
+        eff_pct = eff.get('efficiency_percent')
+        if eff_pct is None or eff.get('is_anomaly'):
+            continue
+        time_ms = op.get('time_ms', 0)
+        if time_ms <= 0:
+            continue
+        savings_ms = time_ms * (1 - eff_pct / 100)
+        if savings_ms < min_savings_ms:
+            continue
+        confidence = 'high' if time_ms > 5 and eff_pct < 70 else 'medium'
+        estimates.append({
+            'operation': op.get('name', 'Unknown'),
+            'category': category,
+            'type': 'kernel_tuning',
+            'savings_ms': round(savings_ms, 3),
+            'confidence': confidence,
+            'efficiency_pct': round(eff_pct, 2),
+            'bound_type': eff.get('bound_type'),
+            'time_ms': round(time_ms, 3),
+        })
+    return sorted(estimates, key=lambda x: x['savings_ms'], reverse=True)
+
+
+def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
+    """
+    Aggregate impact_estimates from all *_metrics.json files into a single
+    plot_data.json consumed by the performance improvement plot script.
+
+    Only kernel_tuning estimates with high/medium confidence are included
+    in the plot recommendations. All estimates (including system and
+    algorithmic) are collected in all_estimates for the report.
+
+    Args:
+        output_dir: Base output directory containing category_data/
+        max_recommendations: Max number of recommendations for the plot
+
+    Returns:
+        Path to written plot_data.json
+    """
+    category_data_dir = f'{output_dir}/category_data'
+    manifest_path = f'{category_data_dir}/category_manifest.json'
+
+    with open(manifest_path, 'r') as f:
+        manifest = json.load(f)
+
+    baseline_ms = manifest.get('gpu_utilization', {}).get('total_time_ms', 0)
+
+    all_estimates: List[dict] = []
+    for fname in sorted(os.listdir(category_data_dir)):
+        if not fname.endswith('_metrics.json'):
+            continue
+        fpath = os.path.join(category_data_dir, fname)
+        with open(fpath, 'r') as f:
+            metrics = json.load(f)
+        if metrics.get('status') in ('ERROR', 'NO_DATA'):
+            continue
+        all_estimates.extend(metrics.get('impact_estimates', []))
+
+    category_savings = defaultdict(lambda: {'savings_ms': 0, 'count': 0, 'ops': []})
+    for e in all_estimates:
+        if e.get('type') == 'kernel_tuning' and e.get('confidence') in ('high', 'medium'):
+            cat = e['category']
+            category_savings[cat]['savings_ms'] += e['savings_ms']
+            category_savings[cat]['count'] += 1
+            category_savings[cat]['ops'].append(e.get('operation', ''))
+
+    plot_recs = sorted(
+        [{'category': cat, 'savings_ms': round(v['savings_ms'], 3),
+          'operation_count': v['count'], 'type': 'kernel_tuning'}
+         for cat, v in category_savings.items()],
+        key=lambda x: x['savings_ms'],
+        reverse=True,
+    )[:max_recommendations]
+
+    plot_data = {
+        'baseline_ms': baseline_ms,
+        'recommendations': plot_recs,
+        'all_estimates': all_estimates,
+    }
+
+    out_path = f'{output_dir}/plot_data.json'
+    with open(out_path, 'w') as f:
+        json.dump(plot_data, f, indent=2)
+
+    return out_path
+
+
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     """
     Write metrics JSON to category_data folder.
@@ -429,7 +539,6 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
 
 
 # Category-specific helper functions
-
 def detect_quantized_gemm(op_name: str) -> bool:
     """Check if GEMM operation is quantized."""
     quantized_markers = ['w8a8', 'int8', 'fp8', 'w4a16', 'w4a4', 'fp4', 'mxfp4']
@@ -515,14 +624,8 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
         return result
     
     try:
-        # Parse the string representation of the list
-        import ast
-        # Handle numpy types in string
         kernel_str = str(kernel_details_str)
         kernel_str = kernel_str.replace('np.float64(', '').replace(')', '')
-        
-        # Try to extract kernel info using regex for robustness
-        import re
         
         # Pattern to match kernel entries
         kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
@@ -561,8 +664,7 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
         result['kernels'] = kernels
         result['total_kernel_time_us'] = round(total_time, 2)
         
-    except Exception as e:
-        # If parsing fails, return empty result
+    except Exception:
         pass
     
     return result
@@ -599,7 +701,6 @@ def parse_perf_params(perf_params_str: str) -> dict:
         return result
     
     try:
-        import ast
         params = ast.literal_eval(str(perf_params_str))
         
         # Extract basic parameters
@@ -643,7 +744,7 @@ def parse_perf_params(perf_params_str: str) -> dict:
             else:
                 result['attention_pattern'] = 'unknown'
                 
-    except Exception as e:
+    except Exception:
         pass
     
     return result

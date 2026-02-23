@@ -83,15 +83,9 @@ Key metrics to analyze:
 - `sync_point_count`: Number of synchronization points detected
 - `patterns_detected`: List of identified bottleneck patterns
 
-### Step 3: Classify Idle Time Severity
+### Step 3: Read Pre-computed Severity
 
-| Idle % | Severity | Assessment |
-|--------|----------|------------|
-| >70% | CRITICAL | GPU severely underutilized, immediate action required |
-| 50-70% | HIGH | Significant CPU overhead, major optimization opportunity |
-| 30-50% | MEDIUM | Notable overhead, worth investigating |
-| 20-30% | LOW | Some overhead, lower priority |
-| <20% | ACCEPTABLE | Normal operation |
+The `severity` field in the metrics JSON is pre-computed by the analysis script. Use it directly for the findings severity level.
 
 ### Step 4: Identify Root Cause Patterns
 
@@ -129,7 +123,7 @@ For each identified pattern, provide recommendations in priority order:
 **Algorithmic Recommendations:**
 1. **Enable GPU Graph Mode**
    - Captures kernel sequence and replays with minimal CPU overhead
-   - Expected impact: 2-5x reduction in idle time for kernel launch overhead
+   - Expected impact: Reduction in idle time for kernel launch overhead
    - Implementation: Use framework's graph capture API
 
 2. **Reduce Synchronization**
@@ -148,6 +142,8 @@ Create `<output_dir>/system_findings/cpu_idle_findings.md`. Create it through th
 
 ```markdown
 # CPU/Idle Time Analysis Findings
+
+> **Note:** This analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
 
 ## CRITICAL: GPU Underutilization Detected
 
@@ -190,7 +186,22 @@ ALL other operations and represents [Y ms] of potential improvement.
 ## Technical Details
 
 [Include any relevant metrics, patterns, or data that support the analysis]
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | system | X.X | high/medium/low |
 ```
+
+**Note:** A baseline `system` impact estimate (idle time reduction to target 20%) is pre-computed in `category_data/cpu_idle_metrics.json` under the `impact_estimates` key. Use it as the primary `system` row in the Impact Summary. You may add additional system rows for specific patterns (GPU graph mode, sync reduction) if warranted, but derive those manually.
+
+**Impact estimation guidelines:**
+- `system` type only (CPU/idle issues are system-level, not kernel tuning)
+- Primary estimate: use pre-computed `impact_estimates` from the metrics JSON
+- GPU graph mode: `savings_ms = idle_time_ms * short_kernel_fraction` (fraction of idle caused by launch overhead)
+- Sync reduction: `savings_ms = sync_gap_time_ms * 0.5` (conservative estimate)
+- torch.compile / JIT: `savings_ms = idle_time_ms * framework_overhead_fraction`
+- **Confidence**: `high` = idle >50% with clear pattern; `medium` = moderate idle with mixed patterns; `low` = rough estimate
 
 ---
 

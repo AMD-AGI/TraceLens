@@ -6,12 +6,13 @@ Steps 2-5: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filteri
 TO DO: Prune out unnecessary segments
 """
 
-import pandas as pd
+import argparse
 import json
 import os
-import argparse
-from pathlib import Path
 import sys
+import traceback
+
+import pandas as pd
 
 # Add parent directory to path to import utils
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -317,7 +318,6 @@ def main():
         
         except Exception as e:
             print(f"  ⚠️  Error during multi-kernel data pre-computation: {e}")
-            import traceback
             traceback.print_exc()
             # Write empty data so downstream scripts don't fail
             multi_kernel_data = {
@@ -335,7 +335,6 @@ def main():
         print(f"  Skipping tree data and multi-kernel pre-computation")
     except Exception as e:
         print(f"  ⚠️  Error during tree data pre-computation: {e}")
-        import traceback
         traceback.print_exc()
     
     # ============================================================================
@@ -345,17 +344,18 @@ def main():
     
     unified_df = pd.read_csv(f'{csv_dir}/unified_perf_summary.csv')
     
-    # Create enhanced categories with special detection for MoE, BatchNorm, Convolution
+    # Create enhanced categories with special detection for MoE, Norm, Convolution
     def get_enhanced_category(row):
-        """Determine category with special handling for MoE, BatchNorm, Convolution"""
+        """Determine category with special handling for MoE, Norm, Convolution"""
         op_name = row.get('name', '')
         category = row.get('op category', '')
         
         # Check for special categories by operation name
         if 'moe' in op_name.lower() or 'fused_moe' in op_name.lower():
             return 'moe_fused', 'MoE Fused'
-        elif 'batch_norm' in op_name.lower() or 'batchnorm' in op_name.lower():
-            return 'batchnorm', 'BatchNorm'
+        elif any(n in op_name.lower() for n in ['batch_norm', 'batchnorm', 'layer_norm', 'layernorm',
+                                                  'group_norm', 'groupnorm', 'instance_norm']):
+            return 'norm', 'Norm'
         elif 'conv' in op_name.lower() and ('aten::' in op_name or 'backward' in op_name.lower()):
             return 'convolution', 'Convolution'
         

@@ -37,7 +37,7 @@ pip install -e .
 
 ### To run performance analysis:
 
-1. **In a Cursor chat with Claude-4.6-Opus-High, invoke:**
+1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke:**
    ```
    Run standalone analysis on <path_to_trace.json>
    ```
@@ -154,7 +154,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | `reduce-analyzer` | Analyzes reduction operations (mean, sum, softmax) |
 | `triton-analyzer` | Analyzes Triton-compiled kernels |
 | `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
-| `batchnorm-analyzer` | Analyzes batch normalization |
+| `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
 | `convolution-analyzer` | Analyzes convolution operations |
 | `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
 

@@ -95,7 +95,7 @@ Check `category_specific` for implementation type:
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 40% of peak (but consider sequence length and workload type)
+- Efficiency: < 60% of peak (but consider sequence length and workload type)
 
 **Special considerations for Paged Attention:**
 - Decode-only workloads naturally have lower efficiency (5-15%)
@@ -156,6 +156,21 @@ Include:
 - Workload profile (prefill vs decode)
 - Bottlenecks with context
 - Prioritized recommendations
+- **Impact Summary** (REQUIRED, at end of findings):
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+```
+
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/sdpa_fwd_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+
+**Impact estimation guidelines:**
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
+- `algorithmic`: Unfused attention to Flash Attention migration: `savings_ms = attention_time_ms * 0.7`. Contiguous copy elimination: `savings_ms = total_copy_time_ms`
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
 

@@ -16,6 +16,7 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     calculate_average_efficiency,
+    compute_impact_estimates,
     write_metrics_json,
     classify_other_operation
 )
@@ -39,28 +40,30 @@ def classify_other_op(op_name: str, row) -> dict:
     }
 
 
-def extract_category_specific(ops_df, metadata) -> dict:
+def extract_category_specific(ops_df, metadata, skipped_comm_ops=None) -> dict:
     """Extract other-specific aggregate metrics."""
-    comm_count = 0
     graph_count = 0
     misc_count = 0
     
     for name in ops_df['name']:
         category = classify_other_operation(str(name))
-        if category == 'communication':
-            comm_count += 1
-        elif category == 'graph':
+        if category == 'graph':
             graph_count += 1
         else:
             misc_count += 1
     
-    return {
-        'communication_count': comm_count,
+    result = {
+        'communication_count': 0,
         'graph_count': graph_count,
         'miscellaneous_count': misc_count,
         'peak_maf_tflops': metadata.get('max_achievable_tflops', {}).get('matrix_bf16') if isinstance(metadata.get('max_achievable_tflops'), dict) else metadata.get('peak_bf16_maf_tflops'),
         'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
     }
+    
+    if skipped_comm_ops and skipped_comm_ops['count'] > 0:
+        result['communication_ops_skipped'] = skipped_comm_ops
+    
+    return result
 
 
 def main():
@@ -83,6 +86,21 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     
+    comm_mask = ops_df['name'].apply(lambda n: classify_other_operation(str(n)) == 'communication')
+    comm_ops_df = ops_df[comm_mask]
+    skipped_comm_ops = {
+        'count': len(comm_ops_df),
+        'op_names': comm_ops_df['name'].tolist(),
+        'message': (
+            "Communication kernels detected. Use TraceLens's NCCL Analyzer "
+            "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
+        )
+    }
+    if skipped_comm_ops['count'] > 0:
+        print(f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
+              f"use TraceLens's NCCL Analyzer instead.")
+    ops_df = ops_df[~comm_mask]
+    
     config = get_other_config()
     peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
     maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
@@ -90,7 +108,9 @@ def main():
     time_metrics = calculate_time_metrics(ops_df, metadata)
     avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, maf, 'prefer_memory')
     operations = build_operation_metrics(ops_df, metadata, config)
-    category_specific = extract_category_specific(ops_df, metadata)
+    category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
+    
+    impact_estimates = compute_impact_estimates(operations, category)
     
     metrics = {
         'category': category,
@@ -98,7 +118,8 @@ def main():
         **time_metrics,
         'average_efficiency_percent': avg_efficiency,
         'operations': operations,
-        'category_specific': category_specific
+        'category_specific': category_specific,
+        'impact_estimates': impact_estimates
     }
     
     output_path = write_metrics_json(metrics, args.output_dir, category)

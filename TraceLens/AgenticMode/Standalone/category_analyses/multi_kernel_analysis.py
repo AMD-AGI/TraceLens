@@ -15,7 +15,10 @@ import pandas as pd
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
-    """Classify memcpy severity based on count and time thresholds."""
+    """Classify memcpy severity based on count and time thresholds.
+
+    Canonical thresholds live in multi-kernel-analyzer agent.
+    """
     total_memcpy_time_ms = memcpy_summary.get("total_time_us", 0) / 1000
     total_count = memcpy_summary.get("total_count", 0)
     
@@ -39,7 +42,6 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         if count == 0:
             continue
         
-        # Severity by time percentage
         if dir_pct > 10:
             severity = "CRITICAL"
         elif dir_pct > 5:
@@ -47,9 +49,9 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         elif dir_pct > 2:
             severity = "MEDIUM"
         elif count > 50:
-            severity = "MEDIUM"
+            severity = "HIGH"
         elif count > 10:
-            severity = "LOW"
+            severity = "MEDIUM"
         else:
             severity = "NONE"
         
@@ -79,7 +81,10 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
 
 
 def classify_nccl_blocking_severity(overlap_analysis):
-    """Classify NCCL blocking compute severity."""
+    """Classify NCCL blocking compute severity.
+
+    Canonical thresholds live in multi-kernel-analyzer agent.
+    """
     exposed_comm_pct = overlap_analysis.get("comm_percent_of_total", 0)
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
     exposed_comm_us = overlap_analysis.get("exposed_comm_time_us", 0)
@@ -108,7 +113,10 @@ def classify_nccl_blocking_severity(overlap_analysis):
 
 
 def classify_overlap_severity(overlap_analysis):
-    """Classify NCCL/compute overlap quality."""
+    """Classify NCCL/compute overlap quality.
+
+    Canonical thresholds live in multi-kernel-analyzer agent.
+    """
     comm_overlap_ratio = overlap_analysis.get("comm_overlap_ratio")
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
     
@@ -311,8 +319,29 @@ def main():
     for p in patterns_detected:
         print(f"    - [{p['severity']}] {p['pattern']}")
     
-    # Build output metrics (severity assessments and patterns only;
-    # the sub-agent interprets these and generates recommendations)
+    # Compute deterministic impact estimates from exposed comm/memcpy time
+    impact_estimates = []
+    exposed_comm_ms = overlap_analysis.get("exposed_comm_time_us", 0) / 1000
+    if exposed_comm_ms > 0.1 and nccl_blocking_assessment["severity"] != "NONE":
+        impact_estimates.append({
+            'operation': 'Communication/compute overlap improvement',
+            'category': 'multi_kernel',
+            'type': 'system',
+            'savings_ms': round(exposed_comm_ms * 0.5, 3),
+            'confidence': 'medium',
+            'exposed_comm_ms': round(exposed_comm_ms, 3),
+        })
+    total_memcpy_ms = memcpy_summary.get("total_time_us", 0) / 1000
+    if total_memcpy_ms > 0.1 and memcpy_assessment["severity"] != "NONE":
+        impact_estimates.append({
+            'operation': 'Memcpy overhead reduction',
+            'category': 'multi_kernel',
+            'type': 'system',
+            'savings_ms': round(total_memcpy_ms * 0.5, 3),
+            'confidence': 'low',
+            'total_memcpy_ms': round(total_memcpy_ms, 3),
+        })
+    
     metrics = {
         "status": "SUCCESS",
         "total_time_ms": round(total_time_ms, 3),
@@ -332,6 +361,7 @@ def main():
         "overlap_assessment": overlap_assessment,
         "patterns_detected": patterns_detected,
         "cross_validation": cross_validation,
+        "impact_estimates": impact_estimates,
     }
     
     # Write metrics output
