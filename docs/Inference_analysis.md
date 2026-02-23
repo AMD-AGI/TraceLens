@@ -17,8 +17,6 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 | **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations |
 | **Trace Splitting** | Splitting of large tracefiles into steady-state regions, per-iteration traces, and phase-specific analyses |
 
-
-#### add what patches are doing, and split optins rearaangement
   
   
   
@@ -27,14 +25,14 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 
 TraceLens features for inference analysis have been primarily tested with vLLM, with active efforts underway to extend support to other frameworks such as SGLang and Atom. Here is the summary of different execution modes and supported features.
 
-| Mode | Kernel Categorization | Shapes/Roofline analysis | Standalone Analysis | Comparative Analysis | Limitations |
-|----------------------------------------|------------------------|----------------------|-----------|-------------------------------------|-----------|
-| Eager only | Yes | Yes   | Supported, proposed patches recommended to include roofline information for attention operations | Yes | Eager mode execution may employ different compilation strategies, which can result in differences in kernels and fusions compared to graph execution mode.|
-| Graph execution only | Non-graph kernels | Non‑graph kernels | Categorization, call stack and shapes are available only for attention kernels if full_and_piecewise mode is used. | Limited | Limited | 
-| Graph execution + eager mode trace | Limited | Limited | Planned |  Planned |  Kernel categorization might not be as accurate as eager or graph+capture |
-| Graph execution + Graph capture $^1$ |  Yes | Yes | Supported, proposed patches required. | Planned | |
+| Mode |  Shapes/Roofline analysis | Standalone Analysis | Comparative Analysis | Limitations |
+|----------------------------------------|----------------------|-----------|-------------------------------------|-----------|
+| Eager only |  Yes   | Supported, proposed patches recommended to include roofline information for attention operations | Yes | Eager mode execution may employ different compilation strategies, which can result in differences in kernels and fusions compared to graph execution mode.|
+| Graph execution only | Non‑graph kernels | Limited | Limited |  Categorization, call stack and shapes are available only for attention kernels if full_and_piecewise mode is used |
+| Graph execution + eager mode trace | Limited | Planned |  Planned |  Kernel categorization might not be as accurate as eager or graph+capture |
+| Graph execution + Graph capture $^1$ |  Yes | Yes (proposed patches required) | Planned | |
 
-  $^1$ Graph mode analysis using graph capture and graph replay traces is supported for vLLM (proposed patches to vLLM required), and similar support for other inference engine is coming soon.  
+  $^1$ Graph mode analysis using graph capture and graph replay traces is supported for vLLM (proposed patches to vLLM required), and similar support for other inference engines are coming soon.  
 
 ## 📖 Quickstart Guide
 
@@ -59,7 +57,7 @@ We recommend applying patches to your inference framework to:
 #### Collection Parameters
 - **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. InferenceMax uses `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio (R) = 0.8. We recommend tracing 1.6–2.0 OSL execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details. 
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
-- **Profiler Setup:** Enable CPU-side callstack and shape capture. An example script to run GPT-OSS using InferenceMax can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh). 
+- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceMax can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh). 
 
 ### Step 2: Installation
 
@@ -74,27 +72,30 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 
 Read the collected trace and split it into smaller tracefiles:
 
-Option 1: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher). 
-```python
-python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
-```
-
-Option 2: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). 
-```python
-python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --iterations 10:20
-```
-
-Option 3: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). 
+Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically. 
 
 ```python
 python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -o ./steady_state_analysis \\
      --find-steady-state --num-steps 256
 ```
 
-Option 4: Split capture phase tracefile into individual tracefile per shape.
+Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing deocde-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps. 
+
+Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher). This is recommended if the user wants to perform analysis on isolated execution step. 
+
+
+```python
+python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
 ```
-python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -o ./dummy_runs --store-single-iteration
+
+Output: Single trace file per execution step. 
+
+Option 3: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). 
+
+```python
+python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --iterations 10:20
 ```
+
 
 ### Step 4: Generate Performance Report
 
@@ -151,15 +152,13 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 Generate performance analysis and comparison report (if comparing two traces), along with optimization opportunity analysis automatically using an LLM agent. 
 
-Currently we support two modes of analysis:
-- Comparative analysis when comparing two traces. Please follow [these instructions](../TraceLens/AgenticMode/Comparative/README.md).
-- Standalone performance analysis for a single trace, which leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
+- Standalone performance analysis: This is the recommended first step, and it leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
+- Comparative analysis: This is an optional step for comparing two traces. Please follow [these instructions](../TraceLens/AgenticMode/Comparative/README.md).
+
 
 
 ---
 
-
-#### Deval, option repriotiy, why are patches requiredcorrections in the table. 
 
 ## 🐞 TraceLens-internal: Report a Bug or Feature Request
 
@@ -177,7 +176,7 @@ Please include the following details when reporting an issue. Please use the Tra
 
 1. ▶️ Scripts/Commands Used
 
-The scripts and commands used to generate performance analysis report using TraceLens for reproducing the issue.
+The scripts and commands used to generate a performance analysis report using TraceLens for reproducing the issue.
 
 3. ❗ Error/Unexpected Behavior
 
@@ -333,7 +332,7 @@ For performance analysis, we are interested in profiling only the steady‑state
 
 InferenceMax can schedule requests at infinite rate, but we conservatively treat the first **CONC** steps as the *ramp‑up* phase.
 
-With these parameters, execution step Ranges where groups of CONC requests complete:
+With these parameters, execution step ranges where groups of CONC requests complete:
 
 
 ```

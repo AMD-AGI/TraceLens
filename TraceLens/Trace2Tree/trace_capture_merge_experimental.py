@@ -399,5 +399,6 @@ def merge_capture_trace_into_graph(
             graph_tree = make_connections(
                 graph_tree, graph_filtered_events, capture_filtered_events
             )
+            print(graph_tree.events[-1][UID] + 1)
 
     return graph_tree

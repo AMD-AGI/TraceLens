@@ -15,6 +15,10 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import collections
+import gzip
+import re
+import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
@@ -22,6 +26,116 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import merge_capture_
 
 import TraceLens
 
+def classify_graph_capture_trace(input_folder: str):
+    """
+    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Supports .json, .json.gz, and .zip (containing a .json).
+    """
+    execution_details_path = os.path.join(input_folder, "execution_details.json")
+    if os.path.isfile(execution_details_path):
+        print(f"Execution details already exist at {execution_details_path}. Skipping classification.")
+        return
+    dummy_run_pattern = re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run")
+    annotation_pattern = re.compile(r"capture_(\d+)_(.*)")
+
+    def load_trace(path: str) -> dict:
+        if path.endswith(".zip"):
+            with zipfile.ZipFile(path, "r") as zf:
+                json_files = [f for f in zf.namelist() if f.endswith(".json")]
+                if not json_files:
+                    raise ValueError(f"No .json file found inside {path}")
+                with zf.open(json_files[0]) as f:
+                    return json.load(f)
+        if path.endswith(".json.gz"):
+            with gzip.open(path, "rt") as f:
+                return json.load(f)
+        with open(path, "r") as f:
+            return json.load(f)
+
+    def find_dummy_run_roots(events):
+        roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]
+        roots.sort(key=lambda x: x.get("ts", 0))
+        return roots
+
+    def find_annotation_roots(events):
+        roots = [
+            e for e in events
+            if e.get("cat") == "user_annotation"
+            and annotation_pattern.match(e.get("name", ""))
+        ]
+        roots.sort(key=lambda x: x.get("ts", 0))
+        return roots
+
+    def parse_annotation(name: str):
+        m = annotation_pattern.match(name)
+        if not m:
+            raise ValueError(f"Annotation name does not match expected pattern: {name}")
+        return int(m.group(1)), m.group(2)
+
+    def count_stream_begin_captures(events):
+        return sum(
+            1 for e in events
+            if e.get("name", "").startswith("StreamBeginCapture")
+            and e.get("cat") == "cuda_runtime"
+        )
+
+    def infer_batch_size_from_cpu_ops(events):
+        first_dims = []
+        for e in events:
+            if e.get("cat") != "cpu_op":
+                continue
+            input_dims = e.get("args", {}).get("Input Dims")
+            if not input_dims:
+                continue
+            for dim_list in input_dims:
+                if isinstance(dim_list, list) and dim_list:
+                    first_dims.append(dim_list[0])
+        if not first_dims:
+            return None
+        return collections.Counter(first_dims).most_common(1)[0][0]
+
+    def infer_mode_from_captures(num_captures: int):
+        return "full" if num_captures <= 1 else "piecewise"
+
+    if not os.path.isdir(input_folder):
+        print(f"Error: {input_folder} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    trace_files = sorted(
+        os.path.join(input_folder, f)
+        for f in os.listdir(input_folder)
+        if f.startswith("graph_capture_rank_0")
+    )
+
+    if not trace_files:
+        print(f"No files starting with 'graph_capture_rank_0' found in {input_folder}")
+        sys.exit(0)
+
+    print(f"Found {len(trace_files)} graph-capture trace file(s) in {input_folder}\n")
+
+    results = []
+    for filepath in trace_files:
+        trace_json = load_trace(filepath)
+        events = trace_json.get("traceEvents", [])
+        dummy_roots = find_dummy_run_roots(events)
+        annotation_roots = find_annotation_roots(events)
+        basename = os.path.basename(filepath)
+
+        if annotation_roots and len(annotation_roots) == len(dummy_roots):
+            batch_size, mode = parse_annotation(annotation_roots[0]["name"])
+            print(f"batch_size: {batch_size}, mode: {mode} inferred")
+            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            continue
+
+        num_captures = count_stream_begin_captures(events)
+        mode = infer_mode_from_captures(num_captures)
+        batch_size = infer_batch_size_from_cpu_ops(events)
+        print(f"batch_size: {batch_size}, mode: {mode} inferred")
+        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+    with open(f"{input_folder}/execution_details.json", "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\nResults written to {input_folder}/execution_details.json")
+    return
 
 def get_dfs_short_kernels(
     perf_analyzer, short_kernel_threshold_us=10, histogram_bins=100, topk=None
@@ -707,12 +821,6 @@ def main():
     )
 
     parser.add_argument(
-        "--capture_json_path",
-        type=str,
-        required=False,
-        help="Path to the capture profile.json or .json.gz file",
-    )
-    parser.add_argument(
         "--graph_json_path",
         type=str,
         required=True,
@@ -724,46 +832,13 @@ def main():
         required=True,
         help="Path to the capture folder",
     )
-    parser.add_argument(
-        "--metadata_json_path",
-        type=str,
-        required=True,
-        help="Path to the metadata JSON file",
-    )
+
 
     args = parser.parse_args()
-
-    graph_tree= merge_capture_trace_into_graph(args.capture_folder,args.metadata_json_path,args.graph_json_path)
-    if False:
-        ##Use cuda graph APIs to find the root node for capture subtrees
-        capture_roots=[]
-        capture_begin=[event for event in capture_tree.events 
-                            if "StreamBeginCapture" in event.get("name","") and 
-                            event.get("cat","")=="cuda_runtime"]
-        capture_begin_ts=[event["ts"]+event["dur"] for event in capture_begin ]
-        capture_end=[event for event in capture_tree.events 
-                            if "StreamEndCapture" in event.get("name","") and 
-                            event.get("cat","")=="cuda_runtime"]
-        capture_end_ts=[event["ts"] for event in capture_end ]
-        for ts, te in zip(capture_begin_ts, capture_end_ts):
-            filtered=[e for e in capture_tree.events if e["ts"]>=ts and e["ts"]<=te]
-            capture_roots.append(max(filtered, key=lambda e: e.get("dur", 0)))
-
-        graph_roots=[event for event in graph_tree.events if "graphlaunch" in event.get("name","").lower() ]
-        print("Found {} capture roots and {} graph roots".format(len(capture_roots),len(graph_roots)))
-        for c_root,g_root in zip(capture_roots,graph_roots):
-            capture_events,capture_filtered_events=get_subtree_events(capture_tree,c_root,cat_filter=["cuda_runtime","cuda_driver"],name_filter=["Launch","Memcpy",])
-            graph_events,graph_filtered_events=get_subtree_events(graph_tree,g_root,cat_filter=["kernel","gpu_memset","gpu_memcpy"])
-            print("Verifying subtree events for capture root {} and graph root {}".format(c_root["name"],g_root["name"]))
-            verify_subtree_events(capture_filtered_events,graph_filtered_events)
-            start_uid=graph_tree.events[-1][UID]+1
-            capture_events,_=update_subtree_uids_and_timestamps(capture_tree,capture_events,capture_filtered_events,start_uid,g_root["ts"])
-            capture_events[0]["parent"]=g_root[UID]
-            g_root["children"].append(capture_events[0][UID])
-            graph_tree=append_subtree_to_event(graph_tree,capture_events,g_root)
-            graph_tree=make_connections(graph_tree,graph_filtered_events,capture_filtered_events)
-    ##For debugging
-    #graph_tree.traverse_subtree_and_print(graph_tree.events_by_uid[3969])
+    classify_graph_capture_trace(args.capture_folder)
+    metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
+    graph_tree= merge_capture_trace_into_graph(args.capture_folder, metadata_json_path, args.graph_json_path)
+    
     generate_perf_report_pytorch(
         augmented_tree=graph_tree,
         output_xlsx_path=args.output_xlsx_path,
