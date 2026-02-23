@@ -143,6 +143,8 @@ Create `<output_dir>/system_findings/cpu_idle_findings.md`. Create it through th
 ```markdown
 # CPU/Idle Time Analysis Findings
 
+> **Note:** This analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
 ## CRITICAL: GPU Underutilization Detected
 
 **Severity**: [CRITICAL/HIGH/MEDIUM based on idle %]

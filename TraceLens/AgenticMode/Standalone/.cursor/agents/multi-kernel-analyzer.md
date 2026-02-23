@@ -125,6 +125,8 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 ```markdown
 # Multi-Kernel Issue Analysis Findings
 
+> **Note:** This analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
 **Status**: [SUCCESS/ERROR]
 **Analysis Tier**: System-Level
 

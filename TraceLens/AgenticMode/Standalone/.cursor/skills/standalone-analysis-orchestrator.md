@@ -689,7 +689,7 @@ generate_plot_data('<output_dir>')
 
 This produces `<output_dir>/plot_data.json` containing:
 - `baseline_ms`: Total GPU time from manifest
-- `recommendations`: Top kernel_tuning estimates (high/medium confidence), sorted by savings, max 6
+- `recommendations`: Top kernel_tuning estimates grouped by category (high/medium confidence), sorted by total savings, max 6 categories
 - `all_estimates`: All estimates across all categories and types (for report aggregation)
 
 ### 9.5.3 Read Plot Data and Compute Cumulative Projections
@@ -711,7 +711,8 @@ cumulative_rel = [100]
 
 for rec in recommendations:
     current_ms -= rec['savings_ms']
-    label = rec['operation'].split('::')[-1][:15] + '\n(' + rec['category'] + ')'
+    count = rec.get('operation_count', 1)
+    label = rec['category'] + f'\n({count} ops)'
     steps.append(label)
     e2e_ms.append(current_ms)
     savings_list.append(rec['savings_ms'])
@@ -775,11 +776,12 @@ for x, y in enumerate(cumulative_rel):
                  fontweight='bold', color='#27ae60')
 ax2.set_xticks(range(len(steps)))
 ax2.set_xticklabels(steps, fontsize=9)
-ax2.set_ylabel('Relative Throughput (baseline = 100)', fontsize=11)
+ax2.set_ylabel('Relative Throughput (Baseline = 100)', fontsize=11)
 ax2.set_title('Cumulative Throughput Improvement',
               fontsize=12, fontweight='bold', pad=12)
-ax2.set_ylim(50, max(cumulative_rel) * 1.15)
+ax2.set_ylim(80, max(cumulative_rel) * 1.15)
 ax2.axhline(y=100, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+ax2.grid(axis='y', linestyle='--', alpha=0.3)
 ax2.spines['top'].set_visible(False)
 ax2.spines['right'].set_visible(False)
 ax2.tick_params(axis='x', labelsize=9)
@@ -890,6 +892,8 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ## System-Level Optimizations
 
+> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
@@ -951,6 +955,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 ---
 
 ## Detailed Analysis: System-Level
+
+> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
 
 ### 1. CPU/Idle Time Analysis
 [Full cpu_idle_findings.md content from system_findings/]

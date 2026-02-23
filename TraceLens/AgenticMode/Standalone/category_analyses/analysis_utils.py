@@ -10,11 +10,15 @@ This module provides common functions for:
 - Writing metrics JSON files
 """
 
-import pandas as pd
+import ast
 import json
-import numpy as np
 import os
-from typing import Dict, List, Optional, Tuple, Any
+import re
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
@@ -485,10 +489,18 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
             continue
         all_estimates.extend(metrics.get('impact_estimates', []))
 
+    category_savings = defaultdict(lambda: {'savings_ms': 0, 'count': 0, 'ops': []})
+    for e in all_estimates:
+        if e.get('type') == 'kernel_tuning' and e.get('confidence') in ('high', 'medium'):
+            cat = e['category']
+            category_savings[cat]['savings_ms'] += e['savings_ms']
+            category_savings[cat]['count'] += 1
+            category_savings[cat]['ops'].append(e.get('operation', ''))
+
     plot_recs = sorted(
-        [e for e in all_estimates
-         if e.get('type') == 'kernel_tuning'
-         and e.get('confidence') in ('high', 'medium')],
+        [{'category': cat, 'savings_ms': round(v['savings_ms'], 3),
+          'operation_count': v['count'], 'type': 'kernel_tuning'}
+         for cat, v in category_savings.items()],
         key=lambda x: x['savings_ms'],
         reverse=True,
     )[:max_recommendations]
@@ -527,7 +539,6 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
 
 
 # Category-specific helper functions
-
 def detect_quantized_gemm(op_name: str) -> bool:
     """Check if GEMM operation is quantized."""
     quantized_markers = ['w8a8', 'int8', 'fp8', 'w4a16', 'w4a4', 'fp4', 'mxfp4']
@@ -613,14 +624,8 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
         return result
     
     try:
-        # Parse the string representation of the list
-        import ast
-        # Handle numpy types in string
         kernel_str = str(kernel_details_str)
         kernel_str = kernel_str.replace('np.float64(', '').replace(')', '')
-        
-        # Try to extract kernel info using regex for robustness
-        import re
         
         # Pattern to match kernel entries
         kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
@@ -659,8 +664,7 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
         result['kernels'] = kernels
         result['total_kernel_time_us'] = round(total_time, 2)
         
-    except Exception as e:
-        # If parsing fails, return empty result
+    except Exception:
         pass
     
     return result
@@ -697,7 +701,6 @@ def parse_perf_params(perf_params_str: str) -> dict:
         return result
     
     try:
-        import ast
         params = ast.literal_eval(str(perf_params_str))
         
         # Extract basic parameters
@@ -741,7 +744,7 @@ def parse_perf_params(perf_params_str: str) -> dict:
             else:
                 result['attention_pattern'] = 'unknown'
                 
-    except Exception as e:
+    except Exception:
         pass
     
     return result
