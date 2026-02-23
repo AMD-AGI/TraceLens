@@ -24,33 +24,8 @@ from analysis_utils import (
 def get_reduce_config():
     """Return reduce-specific configuration."""
     return {
-        'efficiency_method': 'memory_bound',  # Reduce ops are memory-bound
+        'efficiency_method': 'memory_bound',
         'extra_fields': [],
-        'operation_classifier': classify_reduce_operation
-    }
-
-
-def classify_reduce_operation(op_name: str, row) -> dict:
-    """Classify reduce operation type."""
-    is_softmax = detect_softmax(op_name)
-    
-    op_lower = op_name.lower()
-    if is_softmax:
-        reduce_type = 'softmax'
-    elif 'sum' in op_lower:
-        reduce_type = 'sum'
-    elif 'mean' in op_lower or 'avg' in op_lower:
-        reduce_type = 'mean'
-    elif 'max' in op_lower:
-        reduce_type = 'max'
-    elif 'min' in op_lower:
-        reduce_type = 'min'
-    else:
-        reduce_type = 'other'
-    
-    return {
-        'is_softmax': is_softmax,
-        'reduce_type': reduce_type
     }
 
 

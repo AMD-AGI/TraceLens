@@ -7,7 +7,6 @@ Computes metrics for elementwise operations and outputs JSON for subagent proces
 import argparse
 import sys
 import os
-import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -31,20 +30,7 @@ def get_elementwise_config():
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract elementwise-specific aggregate metrics."""
-    peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
-    
-    # Find baseline bandwidth from simple ops
-    baseline_ops = ops_df[ops_df['name'].isin(['aten::add_', 'aten::mul', 'aten::copy_'])]
-    if len(baseline_ops) > 0 and 'TB/s_mean' in baseline_ops.columns:
-        baseline_bw = baseline_ops['TB/s_mean'].mean()
-        baseline_efficiency = (baseline_bw / peak_hbm_bw) * 100 if peak_hbm_bw > 0 else 0
-    else:
-        baseline_bw = peak_hbm_bw * 0.7
-        baseline_efficiency = 70.0
-    
     return {
-        'baseline_bandwidth_tbs': round(baseline_bw, 2) if not pd.isna(baseline_bw) else None,
-        'baseline_efficiency_percent': round(baseline_efficiency, 2) if not pd.isna(baseline_efficiency) else None,
         'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
     }
 

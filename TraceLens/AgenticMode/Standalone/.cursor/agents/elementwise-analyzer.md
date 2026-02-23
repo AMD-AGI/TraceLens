@@ -71,7 +71,7 @@ After the script completes, read the JSON metrics file:
 cat <output_dir>/category_data/elementwise_metrics.json
 ```
 
-Check `category_specific.baseline_efficiency_percent` for expected efficiency.
+Use `category_specific.peak_hbm_bw_tbs` as the peak HBM bandwidth reference for estimating expected efficiency of elementwise ops.
 
 ### Step 3: Classify Operations by Name
 
