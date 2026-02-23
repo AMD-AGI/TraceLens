@@ -26,16 +26,17 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 
 TraceLens features for inference analysis have been primarily tested with vLLM, with active efforts underway to extend support to other frameworks such as SGLang and Atom. Here is the summary of different execution modes and supported features.
 
-| Mode | Kernel Categorization | Shapes/Roofline analysis | TraceDiff | Comments |
-|----------------------------------------|------------------------|----------------------|-----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Eager only $^1$ | Yes | Yes | Yes | |
-| Graph execution only | Low | Non‑graph kernels | Coarse granularity | Categorization, call stack and shapes are available only for attention kernels if full_and_piecewise mode is used. |
-| Graph execution + eager mode trace $^2$ | Approximate | Non‑graph kernels | Coarse granularity | Kernel categorization might not be as accurate as eager or graph+capture since we don’t have callstack for all kernels |
-| Graph execution + Graph capture $^2$ | Yes | Yes | Yes | |
+| Mode | Kernel Categorization | Shapes/Roofline analysis | Limitations | Standalone Analysis | Comparative Analysis |
+|----------------------------------------|------------------------|----------------------|-----------|-------------------------------------|-----------|
+| Eager only $^1$ | Yes | Yes |  | Supported, proposed patches recommended to include roofline information for attention operations | Yes |
+| Graph execution only | Low | Non‑graph kernels | Categorization, call stack and shapes are available only for attention kernels if full_and_piecewise mode is used. | | | 
+| Graph execution + eager mode trace $^2$ | Non‑graph kernels | Coarse granularity | Kernel categorization might not be as accurate as eager or graph+capture since we don’t have callstack for all kernels | Planned |  Planned |
+| Graph execution + Graph capture $^3$ |  Yes | Yes | Supported, proposed patches required. | Planned |
 
   $^1$ Eager mode execution may employ different compilation strategies, which can result in differences in kernels and fusions compared to graph execution mode. 
 
-  $^2$ Graph mode analysis improvement using eager or capture phase trace is coming soon. 
+  $^2$ Graph mode analysis improvement using eager trace is coming soon. 
+  $^3$ Graph mode analysis using graph capture and graph replay traces is supported for vLLM (proposed patches to vLLM required), and similar support for other inference engine is coming soon.  
 
 ## 📖 Quickstart Guide
 
@@ -109,6 +110,16 @@ python TraceLens/Reporting/generate_perf_report_pytorch_vllm.py \
   --enable_pseudo_ops
 ```
 
+Run standalone performance analysis on graph replay and graph capture traces:
+
+```bash
+python TraceLens/Reporting/generate_perf_report_pytorch_vllm_graph.py \
+  --capture_folder path/to/capture/traces/folder \
+  --graph_json_path path/to/graph/replay/trace \
+  --output_xlsx_path perf_report.xlsx \
+  --group_by_parent_module \
+  --enable_pseudo_ops
+```
 ### Step 5: Compare Traces with TraceDiff
 
 Compare two tracefiles and analyze execution differences using Lowest Common Ancestor (LCA) analysis:
