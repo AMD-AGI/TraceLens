@@ -75,7 +75,7 @@ cat <output_dir>/category_data/batchnorm_metrics.json
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 40% of peak HBM BW
+- Efficiency: < 70% of peak HBM BW
 
 **Baseline comparison:**
 - Compare to simple elementwise ops (add_, mul, copy_)
@@ -157,7 +157,7 @@ The findings file **must** end with an Impact Summary section:
 
 | Efficiency | Assessment |
 |------------|------------|
-| >60% | Good |
-| 40-60% | Acceptable |
-| <40% | Compare to baseline, may indicate issue |
+| >70% | Good |
+| 50-70% | Below target - investigate |
+| <50% | Compare to baseline, may indicate issue |
 | <20% with baseline >70% | Kernel issue - investigate |

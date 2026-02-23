@@ -167,12 +167,6 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 ## Common Patterns for GEMM Analysis
 
-### Tiny Batched GEMMs
-- **Symptoms:** Huge batch count, tiny M/N/K dimensions (e.g., 1000+ GEMMs with M=8, N=16)
-- **Issue:** GPU can't efficiently parallelize, memory overhead dominates
-- **Algorithmic:** Batch GEMMs together using torch.bmm or grouped operations
-- **Kernel:** If batching >5x slower than expected, investigate kernel issues
-
 ### Compute-Bound GEMMs
 - **Symptoms:** High FLOPS/Byte (>200), low TFLOPS/s compared to peak MAF
 - **Algorithmic:** Check if smaller batch sizes or better batching helps
@@ -183,8 +177,15 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 - **Algorithmic:** Fusion opportunities to reduce memory traffic
 - **Kernel:** If not reaching expected BW, indicates kernel optimization opportunity
 
+
+### Tiny Batched GEMMs
+- **Symptoms:** Huge batch count, tiny M/N/K dimensions (e.g., 1000+ GEMMs with M=8, N=16)
+- **Issue:** GPU can't efficiently parallelize, memory overhead dominates
+- **Algorithmic:** Batch GEMMs together using torch.bmm or grouped operations
+- **Kernel:** If batching >5x slower than expected, investigate kernel issues
+
 ### Quantized GEMMs (W8A8, FP8)
-- **Special considerations:** Different efficiency profiles than BF16/FP32
+- **Special considerations:** Different efficiency profiles than BF16/FP32. TraceLens native analysis not available (Speculative)
 - **Algorithmic:** Validate quantization scheme and calibration
 - **Kernel:** Generate replay artifact - quantized kernels may need specific tuning
 

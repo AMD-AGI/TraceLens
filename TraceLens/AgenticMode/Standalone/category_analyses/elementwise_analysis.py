@@ -26,30 +26,6 @@ def get_elementwise_config():
     return {
         'efficiency_method': 'memory_bound',  # Elementwise ops are memory-bound
         'extra_fields': ['FLOPS/Byte'],
-        'operation_classifier': classify_elementwise_operation
-    }
-
-
-def classify_elementwise_operation(op_name: str, row) -> dict:
-    """Classify elementwise operation type."""
-    op_lower = op_name.lower()
-    
-    if 'add' in op_lower:
-        op_type = 'add'
-    elif 'mul' in op_lower:
-        op_type = 'multiply'
-    elif 'copy' in op_lower:
-        op_type = 'copy'
-    elif 'div' in op_lower:
-        op_type = 'divide'
-    elif 'sub' in op_lower:
-        op_type = 'subtract'
-    else:
-        op_type = 'other'
-    
-    return {
-        'op_type': op_type,
-        'is_baseline': op_lower in ['aten::add_', 'aten::mul', 'aten::copy_']
     }
 
 

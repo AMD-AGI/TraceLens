@@ -6,7 +6,7 @@ model: inherit
 
 # Elementwise Analysis Subagent
 
-Analyze elementwise operations (add, mul, copy, div) for memory bandwidth efficiency and optimization opportunities.
+Analyze elementwise operations for memory bandwidth efficiency and optimization opportunities.
 
 ---
 
@@ -73,22 +73,36 @@ cat <output_dir>/category_data/elementwise_metrics.json
 
 Check `category_specific.baseline_efficiency_percent` for expected efficiency.
 
-### Step 3: Identify Bottlenecks
+### Step 3: Classify Operations by Name
+
+Each entry in `metrics['operations']` has a `name` field (e.g. `aten::add_`, `aten::sigmoid`, `aten::gelu`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
+
+- **Baseline ops** (simple memory-bound; expect 70-80% HBM BW): add, mul, copy, fill
+- **Arithmetic**: sub, div, remainder, fmod, neg, abs, clamp
+- **Activation**: sigmoid, relu, gelu, silu, swish, tanh, mish, hardswish, leaky_relu
+- **Cast / Convert**: to, _to_copy, type_as, float, half, bfloat16
+- **Math**: exp, log, pow, sqrt, rsqrt, reciprocal, erf
+- **Comparison / Mask**: where, masked_fill, eq, ne, gt, lt, ge, le
+- **Other**: anything not matching the above
+
+These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it. Operations you classify as baseline should be used for the baseline bandwidth comparison in Step 4.
+
+### Step 4: Identify Bottlenecks
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 40% of peak HBM BW (compared to baseline)
+- Efficiency: < 70% of peak HBM BW (compared to baseline)
 
 **Special considerations:**
 - Simple elementwise ops (add, mul, copy) should achieve 70-80% of peak HBM BW
 - Complex elementwise ops may have lower efficiency
 - High count indicates fusion opportunities
 
-### Step 4: Generate Markdown Tables
+### Step 5: Generate Markdown Tables
 
 Build operations table from `metrics['operations']`.
 
-### Step 5: Determine Optimization Recommendations
+### Step 6: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
 
@@ -103,7 +117,7 @@ For each validated bottleneck, provide recommendations in both categories:
 - Generate replay artifact for ops with unexpectedly low HBM bandwidth
 - Check for memory access pattern issues
 
-### Step 6: Write Category Findings
+### Step 7: Write Category Findings
 
 Create `<output_dir>/category_findings/elementwise_findings.md`. Create it through the container on the node.
 
@@ -131,7 +145,7 @@ The findings file **must** end with an Impact Summary section:
 - **Symptoms:** Many small elementwise ops in sequence
 - **Look for:** RMSNorm (mul, rsqrt, mul), LayerNorm patterns
 - **Algorithmic:** Fuse using torch.compile or custom Triton kernels
-- **Impact:** Can reduce memory traffic by 2-3x
+- **Impact:** Can reduce memory traffic
 
 ### Low Baseline Efficiency
 - **Symptoms:** Simple ops (add_, mul, copy_) at <50% of peak HBM BW
@@ -158,7 +172,6 @@ The findings file **must** end with an Impact Summary section:
 
 | Efficiency | Assessment |
 |------------|------------|
-| >70% | Excellent - near optimal |
-| 50-70% | Good |
-| 30-50% | Investigate fusion opportunities |
-| <30% | Anomaly - investigate kernel issues |
+| >70% | Good - meets expected HBM BW utilization |
+| 50-70% | Below target - investigate fusion opportunities |
+| <50% | Significant gap - investigate kernel issues |

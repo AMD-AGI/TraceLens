@@ -77,11 +77,11 @@ Check `category_specific.softmax_count` to identify attention patterns.
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 40% of peak HBM BW
+- Efficiency: < 70% of peak HBM BW
 
 **Special considerations:**
 - Softmax operations may indicate unfused attention
-- Reduce ops are memory-bound (expect 50-70% efficiency)
+- Reduce ops are memory-bound (expect ~70% efficiency)
 
 ### Step 4: Generate Markdown Tables
 
@@ -134,9 +134,9 @@ The findings file **must** end with an Impact Summary section:
 
 ### Standalone Reductions
 - **Symptoms:** sum, mean, max operations in isolation
-- **Expected:** 50-70% of peak HBM BW
+- **Expected:** ~70% of peak HBM BW
 - **Algorithmic:** Fuse with adjacent operations if possible
-- **Kernel:** Optimize kernel if below 50% efficiency
+- **Kernel:** Optimize kernel if below 70% efficiency
 
 ### High Softmax Count
 - **Symptoms:** Many softmax operations
@@ -158,6 +158,6 @@ The findings file **must** end with an Impact Summary section:
 
 | Efficiency | Assessment |
 |------------|------------|
-| >60% | Good for reduce ops |
-| 40-60% | Acceptable |
-| <40% | Investigate kernel or fusion opportunity |
+| >70% | Good |
+| 50-70% | Below target - investigate |
+| <50% | Significant gap - investigate kernel or fusion opportunity |
