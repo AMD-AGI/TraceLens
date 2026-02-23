@@ -75,6 +75,8 @@ cat <output_dir>/category_data/other_metrics.json
 
 Check `metrics['category_specific']` for sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`).
 
+**Communication kernels are automatically skipped by the analysis script.** If `category_specific.communication_ops_skipped` exists and its `count > 0`, include a "Communication Kernels (Skipped)" section in the findings directing users to TraceLens's NCCL Analyzer. Do NOT attempt to analyze these operations.
+
 ### Step 3: Read Tree Data for Context
 
 Read the tree data to understand where each operation sits in the call hierarchy:
@@ -131,7 +133,7 @@ Create `<output_dir>/category_findings/other_findings.md`. Create it through the
 
 ## Overview
 X uncategorized operations account for Y% of compute time.
-Sub-categories: Z communication, W graph, V miscellaneous.
+Sub-categories: W graph, V miscellaneous.
 
 ## Operations Breakdown
 [Generated table with name, count, time, efficiency, sub-category]
@@ -147,6 +149,13 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 - **Algorithmic:** [Recommendation]
 - **Kernel:** [Recommendation]
 
+## Communication Kernels (Skipped)
+[If communication_ops_skipped.count > 0, include this section:]
+X communication kernel(s) detected but not analyzed here.
+For detailed collective communication analysis, use **TraceLens's NCCL Analyzer**.
+See: `TraceLens/NcclAnalyser/` and the NCCL Analyzer documentation.
+Operations skipped: [list op names from communication_ops_skipped.op_names]
+
 ## GPU Graph Operations
 [If graph operations detected, analyze capture/replay overhead]
 
@@ -156,6 +165,7 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 
 ## Notes
+- Communication kernels (NCCL/RCCL) are excluded from this analysis — use TraceLens's NCCL Analyzer
 - Communication overlap and memcpy patterns are covered in the Multi-Kernel system findings
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
@@ -205,8 +215,9 @@ Sub-categories: Z communication, W graph, V miscellaneous.
 1. **Investigate, don't dismiss** -- Uncategorized ops may hide significant bottlenecks
 2. **Use tree context** -- Parent chains reveal what module/layer the op belongs to
 3. **Check for miscategorization** -- Some ops may belong to standard categories
-4. **Do NOT duplicate system-level findings** -- Communication, memcpy, and sync are covered elsewhere
-5. **Provide BOTH recommendation types** -- Algorithmic and kernel-level
+4. **Do NOT analyze communication kernels** -- They are filtered out by the analysis script; direct users to TraceLens's NCCL Analyzer
+5. **Do NOT duplicate system-level findings** -- Memcpy and sync are covered elsewhere
+6. **Provide BOTH recommendation types** -- Algorithmic and kernel-level
 
 ---
 
