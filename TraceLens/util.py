@@ -98,14 +98,10 @@ class JaxProfileProcessor:
             )
 
         dir_name = os.path.dirname(protobuf_file_name) + "/"
-        hlo_filename = glob.glob(
-            dir_name + os.path.sep + module_name + "*hlo_proto.pb"
-        )
+        hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
             convert.xspace_to_tool_names([protobuf_file_name])
-        hlo_filename = glob.glob(
-            dir_name + os.path.sep + module_name + "*hlo_proto.pb"
-        )
+        hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) > 1:
             logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
         elif len(hlo_filename) == 0:
@@ -227,8 +223,7 @@ class JaxProfileProcessor:
                         hlo_ops, operands[0]
                     )
                     if not all(
-                        JaxProfileProcessor.get_operand_type(hlo_ops, o)
-                        == gemm_type
+                        JaxProfileProcessor.get_operand_type(hlo_ops, o) == gemm_type
                         for o in operands[1:]
                     ):
                         raise Exception("Input operand type mismatch", line)
