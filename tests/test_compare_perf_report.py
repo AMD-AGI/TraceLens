@@ -175,6 +175,9 @@ def test_compare_perf_report(dirpath, gz, report_filename, tol=1e-6):
             "Non-Data-Mov TFLOPS/s_mean",
             "Non-Data-Mov Kernel Time (µs)_sum",
             "Non-Data-Mov Kernel Time (µs)_mean",
+            "process_name",
+            "process_label",
+            "thread_name",
         ]
         for sheet in sheets:
             df_ref = pd.read_excel(ref_report_path, sheet_name=sheet)
