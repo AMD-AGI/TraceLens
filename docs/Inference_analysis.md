@@ -13,7 +13,7 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | **Agentic Analysis**  | Agentic workflows for standalone trace (single trace) and comparative trace analysis for performance improvement recommendations |
 | **TraceDiff**         | Extended to support inference traces with Lowest Common Ancestor (LCA) analysis for kernel correlation across platforms          |
-| **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations       |
+| **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations.      |
 | **Trace Splitting**   | Splitting of large tracefiles into steady-state regions, per-iteration traces, and phase-specific analyses                       |
 
 ## Supported Frameworks and Execution Modes
@@ -37,7 +37,7 @@ TraceLens features for inference analysis have been primarily tested with vLLM, 
 
 We recommend applying patches to your inference framework to:
 
-- Add custom annotations with request packing information
+- Add custom annotations with request packing information (See [roofline conceptual details](#roofline-analysis))
 - Capture graph mode execution phases for augmentation by TraceLens
 
 **Steps:**
@@ -544,8 +544,8 @@ Balancing complete trace capture versus analysis complexity.
 ### 🔄 In Progress
 
 - [ ] Extend graph execution analysis using TraceDiff reports from eager phase.
-- [ ] Extend graph execution analysis by linking it to capture phase trace.
-- [ ] Extending support for other inference engines.
+- [ ] Improve roofline analysis for sparse attention to use model architecture information
+- [ ] Extending support for other inference engines
 
 ### 🚀 Future Improvements
 
