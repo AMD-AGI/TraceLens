@@ -189,7 +189,7 @@ def find_execution_roots(graph_tree):
     roots = [
         event
         for event in graph_tree.events
-        if EXECUTE_CONTEXT_PATTERN.match(event.get("name", ""))
+        if EXECUTE_CONTEXT_PATTERN.match(event.get("name", "")) and event.get("cat") == "user_annotation"
     ]
     roots.sort(key=lambda x: x.get("ts", 0))
     return roots
