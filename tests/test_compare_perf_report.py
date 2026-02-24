@@ -181,11 +181,13 @@ def test_compare_perf_report(dirpath, gz, report_filename, tol=1e-6):
             df_fn = pd.read_excel(fn_report_path, sheet_name=sheet)
             if df_ref.empty:
                 continue
-            cols = [
-                col
-                for col in df_ref.columns
-                if col not in cols_ignore and col in df_fn.columns
-            ]
+            ref_cols = [col for col in df_ref.columns if col not in cols_ignore]
+            missing_cols = [col for col in ref_cols if col not in df_fn.columns]
+            assert not missing_cols, (
+                f"Sheet '{sheet}' in generated report for '{profile_path}' is missing "
+                f"reference columns: {missing_cols}"
+            )
+            cols = [col for col in ref_cols if col in df_fn.columns]
             diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
             assert (
                 not diff_cols

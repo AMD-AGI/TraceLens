@@ -16,7 +16,7 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
-        "xprof==2.20.7",  # JAX trace processing (replaces tensorboard-plugin-profile for JAX 0.8+)
+        "xprof==2.20.7",  # Preferred JAX trace library; required for JAX 0.8+; older traces work with either
         # 'openpyxl',
         # 'tensorflow',
     ],

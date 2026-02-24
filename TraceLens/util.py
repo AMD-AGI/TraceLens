@@ -33,17 +33,25 @@ class DataLoader:
         if filename_path.endswith("pb"):
             try:
                 from xprof.convert import raw_to_tool_data as convert
+
+                converter_lib = "xprof"
             except ImportError:
                 from tensorboard_plugin_profile.convert import (
                     raw_to_tool_data as convert,
                 )
 
+                converter_lib = "tensorboard-plugin-profile"
+                logger.warning(
+                    "xprof not available, falling back to tensorboard-plugin-profile "
+                    "for trace conversion. Install xprof for JAX 0.8+ support."
+                )
+
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
             if data is None:
                 raise RuntimeError(
-                    f"Trace conversion returned None for {filename_path}. "
-                    "Ensure the file exists and the output directory is writable "
-                    "(xprof may need to write cache files)."
+                    f"Trace conversion using '{converter_lib}' returned None for "
+                    f"{filename_path}. Ensure the file exists and the output directory "
+                    "is writable (cache files may need to be written)."
                 )
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
@@ -153,6 +161,11 @@ class JaxProfileProcessor:
                     if ref_data and "output" in ref_data:
                         resolved.append(ref_data["output"])
                         continue
+                    logger.warning(
+                        "Unable to resolve HLO operand reference '%s'; "
+                        "HLO metadata for this operand may be incomplete.",
+                        operand,
+                    )
                 resolved.append(operand)
             op_data["operands"] = resolved
 
