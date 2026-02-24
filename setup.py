@@ -16,8 +16,8 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
+        "xprof==2.20.7",  # JAX trace processing (replaces tensorboard-plugin-profile for JAX 0.8+)
         # 'openpyxl',
-        # 'tensorboard-plugin-profile==2.19.0',
         # 'tensorflow',
     ],
     description="A library for Automating analysis from PyTorch trace files",

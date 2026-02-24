@@ -39,6 +39,12 @@ class DataLoader:
                 )
 
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            if data is None:
+                raise RuntimeError(
+                    f"Trace conversion returned None for {filename_path}. "
+                    "Ensure the file exists and the output directory is writable "
+                    "(xprof may need to write cache files)."
+                )
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
             import gzip
