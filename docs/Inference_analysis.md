@@ -297,7 +297,190 @@ The generated report includes:
 
 ### [Roofline Analysis](#roofline-analysis)
 
-Custom roofline models tailored for inference workloads with prefill/decode-aware metrics.
+#### Inference Attention
+
+In inference serving, multiple requests are batched together. Each request has its own sequence lengths (N_Q, N_KV).
+**Notation:**
+
+| Symbol            | Description                                                         |
+| ----------------- | ------------------------------------------------------------------- |
+| B                 | Batch size (1 per request in paged attention)                       |
+| N_Q               | Number of query tokens                                              |
+| N_KV              | Number of key/value tokens (context length)                         |
+| H_Q               | Number of query heads                                               |
+| H_KV              | Number of KV heads (H_KV ≤ H_Q; equal for MHA, smaller for GQA/MQA) |
+| d_h_qk            | Head dimension for queries and keys                                 |
+| d_h_v             | Head dimension for values                                           |
+| R_C               | Number of context (prefill) requests in the batch                   |
+| R_G               | Number of generation (decode) requests in the batch                 |
+| R                 | Total number of requests (R = R_C + R_G)                            |
+| N_Q^(i), N_KV^(i) | Query and KV token counts for the i-th request                      |
+
+
+**Standard SDPA Attention (Single Request)**
+
+Attention consists of two matrix multiplications per head:
+
+1. **QK^T (score computation):** `2 * B * N_Q * N_KV * H_Q * d_h_qk`
+2. **Score × V (value aggregation):** `2 * B * N_Q * N_KV * H_Q * d_h_v`
+
+For causal attention, roughly half the score matrix is masked out:
+
+```
+FLOPS = (2 * B * N_Q * N_KV * H_Q * d_h_qk + 2 * B * N_Q * N_KV * H_Q * d_h_v) / 2
+```
+
+
+```
+Elements Moved = 
+Q:      B * N_Q  * H_Q  * d_h_qk
+K:      B * N_KV * H_KV * d_h_qk
+V:      B * N_KV * H_KV * d_h_v
+Output: B * N_Q  * H_Q  * d_h_v
+```
+
+**Inference Paged Attention**
+
+For calculating total Flops and byted moved fro inference paged attention, we **sum over the computation requirement of all requests individually** (B = 1 per request).
+
+Requests fall into two categories:
+
+- **Context (prefill) requests** — processing input tokens; attention is causal within the current chunk
+- **Generation (decode) requests** — generating new tokens; attention is non-causal (queries attend to all past KV tokens). Typically N_Q = 1, but approaches like speculative decoding may produce multiple query tokens per request.
+
+**1. Flops Calculation**
+
+**Prefill Requests (First Chunk or Full Context)**
+
+When chunked prefill is not enabled, this is the first (and only) chunk, so N_KV = N_Q and attention is causal:
+
+
+```
+                   R_C
+FLOPS_prefill  =   Σ   (2 * N_Q(i) * N_KV(i) * H_Q * d_h_qk + 2 * N_Q(i) * N_KV(i) * H_Q * d_h_v) / 2
+                  i=1
+```
+
+
+**Prefill Requests (Chunked Prefill, nth Chunk)**
+
+With chunked prefill, the nth chunk has KV tokens from all previous chunks already cached. The attention matrix for one such request looks like:
+
+```
+                                  Keys (N_KV)
+              ◄──── N_KV - N_Q ────►◄──── N_Q ───►
+             ┌──────────────────────┬──────────────┐ ▲
+             │                      │╲             │ │
+             │                      │  ╲  (masked) │ │
+             │      Non-causal      │    ╲         │ │
+    Queries  │    (full rectangle)  │      ╲       │ N_Q
+             │                      │        ╲     │ │
+             │  attend to previous  │ Causal   ╲   │ │
+             │    chunks' KV cache  │  (self)    ╲ │ │
+             └──────────────────────┴──────────────┘ ▼
+             ◄────── previous ──────►◄── current ──►
+                     chunks               chunk
+```
+
+The attention computation splits into two regions:
+
+a. **Current chunk attending to previous chunks** — this region is a full (non-causal) rectangle of shape N_Q × (N_KV − N_Q)
+b. **Current chunk attending to itself** — this region is causal (lower-triangular), so we halve
+
+For the **first chunk** (no chunking, or first chunk of chunked prefill), N_KV = N_Q, so the rectangle vanishes and the entire matrix is causal:
+
+```
+           Keys (N_KV = N_Q)
+          ◄──── N_Q ─────►
+         ┌──────────────┐ ▲
+         │╲             │ │
+         │  ╲  (masked) │ │
+         │    ╲         │ │
+         │      ╲       │ N_Q   Queries
+         │        ╲     │ │
+         │ Causal   ╲   │ │
+         │ (entire)   ╲ │ │
+         └──────────────┘ ▼
+```
+
+
+```
+                   R_C
+FLOPS_chunked  =   Σ  [ 2 * N_Q(i) * (N_KV(i) - N_Q(i)) * H_Q * d_h_qk
+                  i=1
+                       + 2 * N_Q(i) * (N_KV(i) - N_Q(i)) * H_Q * d_h_v
+                       + (2 * N_Q(i)² * H_Q * d_h_qk + 2 * N_Q(i)² * H_Q * d_h_v) / 2 ]
+```
+
+
+Both cases (first chunk and nth chunk) simplify to a **single unified formula**:
+
+
+```
+                   R_C
+FLOPS_context  =   Σ  [ (2 * N_Q(i) * N_KV(i) * H_Q * d_h_qk + 2 * N_Q(i) * N_KV(i) * H_Q * d_h_v)
+                  i=1
+                       - (2 * N_Q(i)² * H_Q * d_h_qk + 2 * N_Q(i)² * H_Q * d_h_v) / 2 ]
+```
+
+
+This works because:
+
+- When N_KV = N_Q (first chunk): `full - full/2 = full/2`, which is causal
+- When N_KV > N_Q (nth chunk): `full rectangle - self-triangle`, which is the non-causal rectangle plus the causal self-attention
+
+
+**Generation Requests**
+
+Generation requests attend to all cached KV tokens (N_KV = context length so far). Typically N_Q = 1 (autoregressive decoding), but techniques like speculative decoding may have N_Q > 1. The attention is non-causal:
+
+
+```
+                      R_G
+FLOPS_generation  =   Σ   (2 * N_Q(i) * N_KV(i) * H_Q * d_h_qk + 2 * N_Q(i) * N_KV(i) * H_Q * d_h_v)
+                     i=1
+```
+
+
+```
+FLOPS_total = FLOPS_context + FLOPS_generation
+```
+
+
+**2. Elements Moved** 
+
+The total memory traffic sums over all requests. Each request reads its Q, K, V tensors and writes the output. With GQA/MQA, the KV cache uses H_KV heads (not H_Q), reducing KV memory traffic.
+
+Ignoring cases with shared KV pages between requests:
+
+
+```
+                    R
+Elements_moved  =   Σ  ( N_Q(i)  * H_Q  * d_h_qk        // Q read
+                   i=1
+                       +  N_KV(i) * H_KV * d_h_qk        // K read (from paged KV cache)
+                       +  N_KV(i) * H_KV * d_h_v          // V read (from paged KV cache)
+                       +  N_Q(i)  * H_Q  * d_h_v  )       // Output write
+```
+
+where R = R_C + R_G is the total number of requests.
+
+Note that B = 1 per request in paged attention, so the batch dimension is absorbed into the summation.
+
+
+**Practical Roofline Analysis Without Per-Request Details**
+
+Importantly, we do **not** need the details of individual requests to perform roofline analysis. Inspecting the formulas above, the only per-request quantities that appear are `N_Q(i)`, `N_KV(i)`, and their products. The full FLOPS and memory traffic expressions can be evaluated using just these **aggregate statistics**, computed separately for context and generation requests:
+
+| Aggregate | Used in |
+|-----------|---------|
+| R_C, R_G | Request counts |
+| Σ N_Q | Elements moved (Q read, Output write) |
+| Σ N_KV | Elements moved (K read, V read) |
+| Σ (N_Q * N_KV) | FLOPS (full rectangle term) |
+| Σ (N_Q²) | FLOPS (causal self-attention correction for prefill) |
+
+We obtain these aggregates by applying `torch.record_function(annotation)` to vLLM's execution steps. A single execution step can contain a mix of both context (prefill) and generation (decode) requests, so the annotation encodes the aggregate statistics **separately** for context and generation requests within that step (e.g., R_C, R_G, Σ N_Q for context, Σ N_Q for generation, etc.). These annotations are stored as `user_annotation` events in the PyTorch profiler trace, making roofline analysis possible directly from the trace without any additional instrumentation or runtime logging.
 
 ### [Steady-State Region and Trace Splitting](#steady-state-region-and-trace-splitting)
 
