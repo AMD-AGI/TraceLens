@@ -486,7 +486,7 @@ For performance analysis, we are interested in profiling only the steady‑state
 - **NUM_PROMPTS**: typically `10 × CONC`
 - **CONC**: number of concurrent requests that can be batched together
 - **R**: Random‑range ratio used for sampling ISL and OSL
-- **OSL**: Maximum output sequence lengthOutput sequence length per request is sampled uniformly in:
+- **OSL**: Maximum output sequence length Output sequence length per request is sampled uniformly in:
   `  [ R × OSL , OSL ]`
 - **ISL**: assumed to be lower than the chunk size
 
