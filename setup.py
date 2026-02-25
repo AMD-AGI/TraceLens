@@ -17,6 +17,7 @@ setup(
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
         "xprof==2.20.7",  # Preferred JAX trace library; required for JAX 0.8+; older traces work with either
+        "protobuf>=6.31.1,<7.0.0",  # Required for grpcio-status; avoids INT_MAX crash on JAX 0.8 trace HLO ids
         # 'openpyxl',
         # 'tensorflow',
     ],
