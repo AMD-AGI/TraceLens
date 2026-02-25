@@ -18,6 +18,7 @@ Usage:
 
 import os
 import glob
+import shutil
 import tempfile
 
 import pytest
@@ -66,6 +67,14 @@ def _short_id(path):
 
 # Module-level cache so the report is generated only once per trace_path.
 _report_cache = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_report_cache():
+    """Remove tmpdirs created by jax_report after all tests in this module."""
+    yield
+    for entry in _report_cache.values():
+        shutil.rmtree(entry["tmpdir"], ignore_errors=True)
 
 
 @pytest.fixture()

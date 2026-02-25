@@ -62,12 +62,15 @@ def test_num_tree_events():
 
 
 def test_tree_event_cats():
+    """GPU event counts (kernel, memcpy) must match; host-side may vary by backend."""
     result = Counter([event["cat"] for event in perf_analyzer.tree.events])
     assert result["kernel"] == 25
     assert result["memcpy"] == 53
-    assert result["cpu_op"] + result.get("python function", 0) + result["Unknown"] == (
-        sum(result.values()) - 25 - 53
-    )
+    # Host-side (cpu_op, python function, Unknown) can differ between xprof and
+    # tensorboard-plugin-profile; only assert the total matches
+    host_cats = {"cpu_op", "python function", "Unknown"}
+    host_total = sum(result.get(c, 0) for c in host_cats)
+    assert host_total == sum(result.values()) - 25 - 53
 
 
 def test_kernel_event_cats():
