@@ -13,6 +13,8 @@ import sys
 import warnings
 from typing import Dict, Optional, Tuple
 
+from tqdm import tqdm
+
 import numpy as np
 import pandas as pd
 import collections
@@ -123,14 +125,15 @@ def classify_graph_capture_trace(input_folder: str):
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             batch_size, mode = parse_annotation(annotation_roots[0]["name"])
-            print(f"batch_size: {batch_size}, mode: {mode} inferred")
+            print(f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}")
             results.append({"file": basename, "batch_size": batch_size, "mode": mode})
             continue
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
         batch_size = infer_batch_size_from_cpu_ops(events)
-        print(f"batch_size: {batch_size}, mode: {mode} inferred")
+        print(f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}")
+    
         results.append({"file": basename, "batch_size": batch_size, "mode": mode})
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
@@ -379,6 +382,7 @@ def generate_perf_report_pytorch(
         include_unlinked_kernels=include_unlinked_kernels,
         add_python_func=add_python_func,
         enable_pseudo_ops=enable_pseudo_ops,
+        rebuild_tree=False,
     )
     
 
