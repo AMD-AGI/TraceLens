@@ -49,6 +49,11 @@ jobs:
           pip install pytest openpyxl pandas
           pytest tests/test_collective_analysis.py
       
+      - name: Run pytest on JAX perf report end-to-end tests
+        run: |
+          pip install pytest openpyxl pandas tensorboard-plugin-profile==2.19.0
+          pytest tests/test_jax_perf_report.py
+
       - name: Run copyright header checks
         run: |
           pip install pytest
