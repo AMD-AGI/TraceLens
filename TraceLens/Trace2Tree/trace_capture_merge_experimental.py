@@ -77,9 +77,9 @@ def verify_subtree_events(capture_events, graph_events):
                     )
                 )
                 return
-    print(
-        "Subtree events match successfully with {} events".format(len(capture_events))
-    )
+    #print(
+    #    "Subtree events match successfully with {} events".format(len(capture_events))
+    #)
     return
 
 
