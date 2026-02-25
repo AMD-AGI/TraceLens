@@ -336,7 +336,7 @@ Output: B * N_Q  * H_Q  * d_h_v
 
 **Inference Paged Attention**
 
-For calculating total Flops and byted moved fro inference paged attention, we **sum over the computation requirement of all requests individually** (B = 1 per request).
+For calculating total Flops and bytes moved for inference paged attention, we **sum over the computation requirement of all requests individually** (B = 1 per request).
 
 Requests fall into two categories:
 
