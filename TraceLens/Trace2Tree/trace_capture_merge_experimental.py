@@ -15,6 +15,7 @@ information (optimized execution paths), producing a complete execution
 model suitable for performance analysis.
 """
 
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
@@ -39,12 +40,12 @@ def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
         if cat_filter is not None:
             if tree.event_to_category(node) in cat_filter:
                 if name_filter is not None:
-                    if not any(
+                    if any(
                         [nf.lower() in node["name"].lower() for nf in name_filter]
                     ):
-                        continue
-                list_filtered_events.append(node)
-
+                        list_filtered_events.append(node)
+                else:
+                    list_filtered_events.append(node)
         for child in tree.get_children_events(node):
             queue.append(child)
     list_events.sort(key=lambda x: x["ts"])
@@ -76,9 +77,9 @@ def verify_subtree_events(capture_events, graph_events):
                     )
                 )
                 return
-    print(
-        "Subtree events match successfully with {} events".format(len(capture_events))
-    )
+    #print(
+    #    "Subtree events match successfully with {} events".format(len(capture_events))
+    #)
     return
 
 
@@ -338,7 +339,6 @@ def merge_capture_trace_into_graph(
 
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
     capture_map, capture_batch_sizes = load_capture_folder(capture_folder, metadata_json_path)
-
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
         batch_size = find_execution_details(execution_root)
@@ -399,6 +399,4 @@ def merge_capture_trace_into_graph(
             graph_tree = make_connections(
                 graph_tree, graph_filtered_events, capture_filtered_events
             )
-            print(graph_tree.events[-1][UID] + 1)
-
     return graph_tree

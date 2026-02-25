@@ -179,6 +179,7 @@ class TreePerfAnalyzer:
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
+        rebuild_tree=True,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -192,7 +193,8 @@ class TreePerfAnalyzer:
             event.get("cat") == "python_func" for event in self.tree.events
         )
         self.gpu_only = self.check_gpu_only()
-        self.tree.build_tree(add_python_func=add_python_func)
+        if rebuild_tree:
+            self.tree.build_tree(add_python_func=add_python_func)
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
