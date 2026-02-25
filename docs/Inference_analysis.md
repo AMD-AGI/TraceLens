@@ -469,9 +469,9 @@ We obtain these aggregates by applying `torch.record_function(annotation)` to vL
 
 Inference serving execution consists of three phases:
 
-1. **Ramp‑up**Initial few steps where one or more requests are batching.
-2. **Ramp‑down**The last few tailing steps where the final batch of requests finishes.
-3. **Steady state**Defined as the execution steps with the highest concurrency.Once steady state is reached, execution consists of:
+1. **Ramp‑up** Initial few steps where one or more requests are batching.
+2. **Ramp‑down** The last few tailing steps where the final batch of requests finishes.
+3. **Steady state** Defined as the execution steps with the highest concurrency. Once steady state is reached, execution consists of:
 
    - Decode‑only steps
    - Prefill‑decode steps, typically containing one prefill request packed with ~CONC−1 decode requests.
