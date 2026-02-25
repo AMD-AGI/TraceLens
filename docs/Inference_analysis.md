@@ -78,7 +78,7 @@ python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -
      --find-steady-state --num-steps 256
 ```
 
-Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing deocde-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps.
+Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps.
 
 Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher). This is recommended if the user wants to perform analysis on isolated execution step.
 
