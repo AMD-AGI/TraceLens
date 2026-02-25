@@ -2089,7 +2089,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         data = DataLoader.load_data(profile_filepath)
         data_pb = data["traceEvents"]
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
-        events = TraceEventUtils.non_metadata_events(data_pb)
+        metadata_events, events = TraceEventUtils.split_event_list(data_pb)
         linking_key = "correlation_id"
         tree = JaxTraceToTree(
             events, linking_key=linking_key, event_to_category=categorizer
@@ -2098,6 +2098,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             tree,
             event_to_category=categorizer,
             pb_file_name=profile_filepath,
+            metadata_events=metadata_events,
             *args,
             **kwargs,
         )
@@ -2107,6 +2108,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         tree: JaxTraceToTree,
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         pb_file_name=None,
+        metadata_events=None,
         arch=None,
         python_path=None,
         kernel_metadata_keyword_filters: list[str] = None,
@@ -2118,7 +2120,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.event_to_category = event_to_category
         self.pb_file_name = pb_file_name
         self.arch = arch
-        self.tree.build_tree(pb_file_name=pb_file_name)
+        self.tree.build_tree(metadata_events, pb_file_name=pb_file_name)
         self.gpu_event_filter = JaxAnalyses.default_gpu_event_filter
         self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map
