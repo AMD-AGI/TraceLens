@@ -78,7 +78,7 @@ python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -
      --find-steady-state --num-steps 256
 ```
 
-Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing deocde-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps.
+Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps.
 
 Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher). This is recommended if the user wants to perform analysis on isolated execution step.
 
@@ -336,7 +336,7 @@ Output: B * N_Q  * H_Q  * d_h_v
 
 **Inference Paged Attention**
 
-For calculating total Flops and byted moved fro inference paged attention, we **sum over the computation requirement of all requests individually** (B = 1 per request).
+For calculating total Flops and bytes moved for inference paged attention, we **sum over the computation requirement of all requests individually** (B = 1 per request).
 
 Requests fall into two categories:
 
@@ -469,9 +469,9 @@ We obtain these aggregates by applying `torch.record_function(annotation)` to vL
 
 Inference serving execution consists of three phases:
 
-1. **Ramp‑up**Initial few steps where one or more requests are batching.
-2. **Ramp‑down**The last few tailing steps where the final batch of requests finishes.
-3. **Steady state**Defined as the execution steps with the highest concurrency.Once steady state is reached, execution consists of:
+1. **Ramp‑up** Initial few steps where one or more requests are batching.
+2. **Ramp‑down** The last few tailing steps where the final batch of requests finishes.
+3. **Steady state** Defined as the execution steps with the highest concurrency. Once steady state is reached, execution consists of:
 
    - Decode‑only steps
    - Prefill‑decode steps, typically containing one prefill request packed with ~CONC−1 decode requests.
@@ -486,7 +486,7 @@ For performance analysis, we are interested in profiling only the steady‑state
 - **NUM_PROMPTS**: typically `10 × CONC`
 - **CONC**: number of concurrent requests that can be batched together
 - **R**: Random‑range ratio used for sampling ISL and OSL
-- **OSL**: Maximum output sequence lengthOutput sequence length per request is sampled uniformly in:
+- **OSL**: Maximum output sequence length Output sequence length per request is sampled uniformly in:
   `  [ R × OSL , OSL ]`
 - **ISL**: assumed to be lower than the chunk size
 
