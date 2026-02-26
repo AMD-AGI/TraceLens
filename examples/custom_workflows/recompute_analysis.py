@@ -21,23 +21,14 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
 )
 
 
-def compute_recompute_pct(df: pd.DataFrame, time_col: str) -> dict:
-    """Compute recompute vs non-recompute time breakdown from a DataFrame
-    that has an is_recompute column and a time column."""
-    if "is_recompute" not in df.columns or time_col not in df.columns:
-        return None
-
-    total = df[time_col].sum()
-    recompute = df.loc[df["is_recompute"] == True, time_col].sum()
-    non_recompute = total - recompute
+def _recompute_split(df: pd.DataFrame, value_col: str) -> tuple:
+    """Return (total, recompute, pct) for a value column split by is_recompute."""
+    if "is_recompute" not in df.columns or value_col not in df.columns:
+        return None, None, None
+    total = df[value_col].sum()
+    recompute = df.loc[df["is_recompute"] == True, value_col].sum()
     pct = (recompute / total * 100) if total > 0 else 0.0
-
-    return {
-        "total_time": total,
-        "recompute_time": recompute,
-        "non_recompute_time": non_recompute,
-        "recompute_pct": pct,
-    }
+    return total, recompute, pct
 
 
 def print_recompute_summary(sheets: dict[str, pd.DataFrame]):
@@ -46,29 +37,29 @@ def print_recompute_summary(sheets: dict[str, pd.DataFrame]):
     print("ACTIVATION RECOMPUTE ANALYSIS")
     print("=" * 70)
 
-    # ops_summary: total kernel time by op name, split by is_recompute
+    # GPU time breakdown from ops_summary
     if "ops_summary" in sheets:
-        result = compute_recompute_pct(
-            sheets["ops_summary"], "total_direct_kernel_time_ms"
+        df = sheets["ops_summary"]
+        total_ms, recompute_ms, time_pct = _recompute_split(
+            df, "total_direct_kernel_time_ms"
         )
-        if result:
-            print(f"\n--- ops_summary (by operation name) ---")
-            print(f"  Total GPU time:        {result['total_time']:.2f} ms")
-            print(f"  Recompute GPU time:    {result['recompute_time']:.2f} ms")
-            print(f"  Non-recompute time:    {result['non_recompute_time']:.2f} ms")
-            print(f"  Recompute %:           {result['recompute_pct']:.2f}%")
+        if total_ms is not None:
+            print(f"\n  Total GPU time:        {total_ms:>10.2f} ms")
+            print(f"  Recompute GPU time:    {recompute_ms:>10.2f} ms")
+            print(f"  Non-recompute time:    {total_ms - recompute_ms:>10.2f} ms")
+            print(f"  Recompute time %:      {time_pct:>10.2f}%")
 
-    # ops_unique_args: total kernel time by unique (op, args), split by is_recompute
-    if "ops_unique_args" in sheets:
-        result = compute_recompute_pct(
-            sheets["ops_unique_args"], "total_direct_kernel_time_sum"
-        )
-        if result:
-            print(f"\n--- ops_unique_args (by unique op + args) ---")
-            print(f"  Total GPU time:        {result['total_time']:.1f} us")
-            print(f"  Recompute GPU time:    {result['recompute_time']:.1f} us")
-            print(f"  Non-recompute time:    {result['non_recompute_time']:.1f} us")
-            print(f"  Recompute %:           {result['recompute_pct']:.2f}%")
+    # FLOPS breakdown from unified_perf_summary
+    if "unified_perf_summary" in sheets:
+        df = sheets["unified_perf_summary"]
+        if "is_recompute" in df.columns and "GFLOPS" in df.columns:
+            df = df.copy()
+            df["total_GFLOPS"] = df["GFLOPS"] * df["operation_count"]
+            total_gf, recompute_gf, flops_pct = _recompute_split(df, "total_GFLOPS")
+            if total_gf is not None:
+                print(f"\n  Total GFLOPS:          {total_gf:>10.2f}")
+                print(f"  Recompute GFLOPS:      {recompute_gf:>10.2f}")
+                print(f"  Recompute FLOPS %:     {flops_pct:>10.2f}%")
 
     # Per-op breakdown from ops_summary
     if "ops_summary" in sheets:
@@ -78,10 +69,10 @@ def print_recompute_summary(sheets: dict[str, pd.DataFrame]):
                 "total_direct_kernel_time_ms", ascending=False
             )
             if not df_recompute.empty:
-                print(f"\n--- Top recomputed operations ---")
+                print(f"\n  Top recomputed operations:")
                 for _, row in df_recompute.head(10).iterrows():
                     print(
-                        f"  {row['name']:<45s} "
+                        f"    {row['name']:<45s} "
                         f"{row['total_direct_kernel_time_ms']:>8.2f} ms  "
                         f"({row.get('Percentage (%)', 0):>5.2f}%)"
                     )
