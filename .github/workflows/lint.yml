@@ -33,7 +33,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install black==26.1.0
+        pip install black==26.1.0  # Pin for CI reproducibility; use same version locally
 
     - name: Run Black
       # only run black on changed files based on this example:
