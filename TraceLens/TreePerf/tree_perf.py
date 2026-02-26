@@ -170,10 +170,14 @@ class TreePerfAnalyzer:
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
+        detect_recompute=False,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
+        self.detect_recompute = detect_recompute
+        if detect_recompute:
+            add_python_func = True
         self.add_python_func = add_python_func
         self.arch = arch
         self.python_path = python_path
@@ -196,6 +200,9 @@ class TreePerfAnalyzer:
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
 
+        if detect_recompute:
+            self._detect_recompute_events()
+
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
@@ -205,6 +212,33 @@ class TreePerfAnalyzer:
             if event.get("cat") in {"python_func", "cpu_op"}:
                 return False
         return True
+
+    def _detect_recompute_events(self):
+        """Mark all events under torch.utils.checkpoint recompute_fn as is_recompute=True.
+
+        Walks top-down from each recompute_fn python_function node, marking
+        the entire subtree. This is O(n) over the marked subtrees and runs
+        once during __init__ when detect_recompute=True.
+        """
+        recompute_roots = []
+        for event in self.tree.events:
+            if self.event_to_category(event) != "python_function":
+                continue
+            name = event.get("name", "")
+            if "torch/utils/checkpoint.py" in name and "recompute_fn" in name:
+                recompute_roots.append(event)
+
+        marked = 0
+        for root in recompute_roots:
+            stack = [root]
+            while stack:
+                evt = stack.pop()
+                evt["is_recompute"] = True
+                marked += 1
+                for child_uid in evt.get("children", []):
+                    stack.append(self.tree.get_UID2event(child_uid))
+
+        print(f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, marked {marked} events")
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
@@ -752,6 +786,8 @@ class TreePerfAnalyzer:
                     metrics_event["parent_module"] = re.sub(
                         r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
                     ).strip("")
+            if self.detect_recompute:
+                metrics_event["is_recompute"] = event.get("is_recompute", False)
             thread_metadata = self.tree.metadata.get(event["pid"], {}).get(
                 event["tid"], {}
             )
@@ -770,7 +806,10 @@ class TreePerfAnalyzer:
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby(["name"]).agg(
+        groupby_cols = ["name"]
+        if "is_recompute" in df_temp.columns:
+            groupby_cols.append("is_recompute")
+        df_agg = df_temp.groupby(groupby_cols).agg(
             {"total_direct_kernel_time": ["sum", "count"], "op category": set},
         )
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
@@ -978,6 +1017,8 @@ class TreePerfAnalyzer:
             "Input Strides",
             "Concrete Inputs",
         ]
+        if "is_recompute" in df_kernel_launchers.columns:
+            grouping_cols_original.append("is_recompute")
 
         # 0. Filter the DataFrame based on the event name if provided
         if event_name is not None:
@@ -1247,6 +1288,13 @@ class TreePerfAnalyzer:
 
             event = self.tree.get_UID2event(event_uid)
 
+            # python_function nodes are transparent — traverse their children
+            # to reach the cpu_ops underneath (needed when add_python_func=True)
+            if self.event_to_category(event) == "python_function":
+                for child_uid in event.get("children", []):
+                    traverse(child_uid)
+                return
+
             # Skip non-cpu_op events
             if self.event_to_category(event) != "cpu_op":
                 return
@@ -1381,6 +1429,8 @@ class TreePerfAnalyzer:
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
             }
+            if self.detect_recompute:
+                row["is_recompute"] = event.get("is_recompute", False)
 
             if include_args:
                 row["Input Dims"] = list_to_tuple(args.get("Input Dims"))
@@ -1509,6 +1559,8 @@ class TreePerfAnalyzer:
                 ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
             )
         col_order.extend(["duration_us", "has_perf_model"])
+        if "is_recompute" in df.columns:
+            col_order.append("is_recompute")
         if include_perf_metrics:
             col_order.extend(perf_cols)
             col_order.append("perf_params")
@@ -1557,6 +1609,8 @@ class TreePerfAnalyzer:
             "Input Strides",
             "Concrete Inputs",
         ]
+        if "is_recompute" in df_temp.columns:
+            grouping_cols.append("is_recompute")
 
         # Convert columns to string for grouping
         str_col_names = []
