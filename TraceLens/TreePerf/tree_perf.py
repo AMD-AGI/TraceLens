@@ -1391,7 +1391,7 @@ class TreePerfAnalyzer:
             event = self.tree.get_UID2event(event_uid)
 
             # Skip non-cpu_op events
-            if self.event_to_category(event) != "cpu_op":
+            if not self.add_python_func and self.event_to_category(event) != "cpu_op":
                 return
 
             # First check: Does this subtree have any GPU kernels?
