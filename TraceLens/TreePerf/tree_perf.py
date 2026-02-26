@@ -395,7 +395,12 @@ class TreePerfAnalyzer:
                 # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
                 memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
                 roofline_time_us = max(compute_time_us, memory_time_us)
+                if compute_time_us >= memory_time_us:
+                    roofline_bound = "COMPUTE_BOUND"
+                else:
+                    roofline_bound = "MEMORY_BOUND"
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
+                dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
                     (roofline_time_us / busy_kernel_time) * 100
                     if busy_kernel_time > 0
@@ -588,6 +593,8 @@ class TreePerfAnalyzer:
         # Roofline metrics - first since they should be same for the group
         if "Roofline Time (µs)" in df_perf_metrics.columns:
             dict_agg["Roofline Time (µs)"] = "first"
+        if "Roofline Bound" in df_perf_metrics.columns:
+            dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
         if "Simulated Time (µs)" in df_perf_metrics.columns:
@@ -1570,6 +1577,7 @@ class TreePerfAnalyzer:
                 "TB/s",
                 "Compute Spec",
                 "Roofline Time (µs)",
+                "Roofline Bound",
                 "Pct Roofline",
             ]
 
@@ -1754,6 +1762,8 @@ class TreePerfAnalyzer:
         # Roofline metrics
         if "Roofline Time (µs)" in df_temp.columns:
             agg_dict["Roofline Time (µs)"] = "first"  # Static for same args
+        if "Roofline Bound" in df_temp.columns:
+            agg_dict["Roofline Bound"] = "first"  # Static for same args
         if "Pct Roofline" in df_temp.columns:
             agg_dict["Pct Roofline"] = agg_metrics  # Varies per instance
 
