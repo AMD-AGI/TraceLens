@@ -476,6 +476,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                    metrics_event["num_kernels"] = len(event["kernel_details"]) 
             rows.append(metrics_event)
 
         self._show_warnings(
@@ -579,6 +580,8 @@ class TreePerfAnalyzer:
         param_cols = [
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
+        if "num_kernels" in df_perf_metrics.columns:
+            param_cols.append("num_kernels")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
         for col in param_cols:
@@ -626,7 +629,6 @@ class TreePerfAnalyzer:
         )
         # df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
-
         return df_perf_metrics_summary
 
     def get_kernel_launchers(self, include_nccl=False):
@@ -755,6 +757,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                    metrics_event["num_kernels"] = len(event["kernel_details"])
                 if include_call_stack:
                     call_stack = self.tree.traverse_parents_and_get_callstack(
                         event, filter=("nn.Module",)
@@ -906,7 +909,6 @@ class TreePerfAnalyzer:
             )
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
-
         # --- CHANGE: Collect durations BY INDEX, not by name ---
         all_durations = [[] for _ in template]
 
@@ -988,6 +990,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
 
         # 0. Filter the DataFrame based on the event name if provided
@@ -1116,6 +1119,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
 
         # 0. Filter the DataFrame based on the event name if provided
@@ -1695,6 +1699,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
 
         # Convert columns to string for grouping
