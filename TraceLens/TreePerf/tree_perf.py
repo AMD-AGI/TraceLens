@@ -381,12 +381,11 @@ class TreePerfAnalyzer:
                 # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
                 memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
                 roofline_time_us = max(compute_time_us, memory_time_us)
-                # add ridge point column
+                # Add ridge point column
                 if compute_time_us >= memory_time_us:
                     ridge_point = "COMPUTE_BOUND"
                 else:
                     ridge_point = "MEMORY_BOUND"
-
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
                 dict_metrics["Roofline Ridge Point"] = ridge_point
                 dict_metrics["Pct Roofline"] = (
