@@ -1236,23 +1236,31 @@ class TreePerfAnalyzer:
         """
         Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
 
-        A leaf cpu_op follows the pattern: cpu_op -> runtime -> kernel
+        A leaf cpu_op follows the pattern: cpu_op -> [python_function*] -> runtime -> kernel
+        where [python_function*] means zero or more python_function nodes.
         This matches the definition used in get_kernel_launchers().
         """
         if self.event_to_category(event) != "cpu_op":
             return False
 
-        # Check if any child's grandchild is a kernel (cpu_op -> runtime -> kernel pattern)
-        for child_uid in event.get("children", []):
-            child = self.tree.get_UID2event(child_uid)
-            for grandchild_uid in child.get("children", []):
-                grandchild = self.tree.get_UID2event(grandchild_uid)
-                if self.event_to_category(grandchild) in {
-                    "kernel",
-                    "gpu_memcpy",
-                    "gpu_memset",
-                }:
+        def has_kernel_descendant(evt):
+            """Check if event has a kernel descendant, skipping python_function nodes."""
+            for child_uid in evt.get("children", []):
+                child = self.tree.get_UID2event(child_uid)
+                child_cat = self.event_to_category(child)
+                if child_cat in {"kernel", "gpu_memcpy", "gpu_memset"}:
                     return True
+                elif child_cat == "python_function" or child_cat == "cuda_runtime":
+                    # Skip python_function and check its descendants
+                    if has_kernel_descendant(child):
+                        return True
+            return False
+
+        # Check each direct child of the cpu_op
+        for child_uid in event.get("children", []):
+            if has_kernel_descendant(self.tree.get_UID2event(child_uid)):
+                return True
+        
         return False
 
     def _launches_gpu_kernels(self, event):
