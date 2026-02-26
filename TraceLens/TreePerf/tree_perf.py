@@ -238,7 +238,9 @@ class TreePerfAnalyzer:
                 for child_uid in evt.get("children", []):
                     stack.append(self.tree.get_UID2event(child_uid))
 
-        print(f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, marked {marked} events")
+        print(
+            f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, marked {marked} events"
+        )
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
