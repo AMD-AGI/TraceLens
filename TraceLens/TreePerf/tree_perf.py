@@ -238,7 +238,9 @@ class TreePerfAnalyzer:
                 for child_uid in evt.get("children", []):
                     stack.append(self.tree.get_UID2event(child_uid))
 
-        print(f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, marked {marked} events")
+        print(
+            f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, marked {marked} events"
+        )
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
@@ -2325,8 +2327,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
