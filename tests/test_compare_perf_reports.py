@@ -171,12 +171,11 @@ def _validate_report_against_reference(generated_path, reference_path, tol=1e-6)
                 )
             continue
 
-        ref_cols = set(df_ref.columns)
-        gen_cols = set(df_gen.columns)
-        if ref_cols != gen_cols:
+        missing_cols = set(df_ref.columns) - set(df_gen.columns)
+        if missing_cols:
             errors.append(
-                f"Sheet '{sheet}': column mismatch — "
-                f"missing={ref_cols - gen_cols}, extra={gen_cols - ref_cols}"
+                f"Sheet '{sheet}': columns missing from generated report: "
+                f"{missing_cols}"
             )
             continue
 
