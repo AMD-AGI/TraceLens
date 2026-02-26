@@ -75,12 +75,24 @@ SHEETS_COMPARE_CONFIG = {
             "Kernel duration (µs)_count",
         ],
         "cols_to_delete": [
-            "Kernel duration (µs)_sum)",
             "Kernel duration (µs)_min",
             "Kernel duration (µs)_max",
             "Parent op category",
         ],
         "sort_col": "Kernel duration (µs)_sum",
+    },
+    "kernel_summary_legacy": {
+        "keys": ["name"],
+        "diff_cols": ["Total Kernel Time (ms)", "Mean Kernel Time (µs)", "Count"],
+        "cols_to_delete": [
+            "Total Kernel Time (µs)",
+            "Median Kernel Time (µs)",
+            "Std Kernel Time (µs)",
+            "Min Kernel Time (µs)",
+            "Max Kernel Time (µs)",
+            "Category",
+        ],
+        "sort_col": "Total Kernel Time (ms)",
     },
 }
 
@@ -207,13 +219,22 @@ def process_summary_sheet(
     Processed DataFrame with differences and comparisons
     """
     baseline_tag = tags[0]
+
+    # Load the summary sheet from each report
+    dfs = [load_sheet(path, sheet_name=sheet_name) for path in reports]
+
+    # Fall back to legacy config if the expected key column is missing
+    if (
+        sheet_name == "kernel_summary"
+        and config["keys"][0] not in dfs[0].columns
+        and "kernel_summary_legacy" in SHEETS_COMPARE_CONFIG
+    ):
+        config = SHEETS_COMPARE_CONFIG["kernel_summary_legacy"]
+
     keys = config["keys"]
     diff_cols = config["diff_cols"]
     cols_to_delete = config["cols_to_delete"]
     sort_col = config["sort_col"]
-
-    # Load the summary sheet from each report
-    dfs = [load_sheet(path, sheet_name=sheet_name) for path in reports]
 
     # Delete columns that are not needed
     for i, df in enumerate(dfs):
@@ -403,10 +424,10 @@ def generate_compare_perf_reports_pytorch(
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
     main_sheets = [
-        "ops_all",
+        "ops_all",  # legacy alias for ops_unique_args (older reports)
         "ops_unique_args",
         "unified_perf_summary",
-    ]  # different names for different versions of perf reports
+    ]
     if "ops_all" in sheets or "all" in sheets:
         for sheet_name in main_sheets:
             if (
@@ -553,10 +574,8 @@ def generate_compare_perf_reports_pytorch(
     # ── Write workbook ────────────────────────────────────────────────────────
     with pd.ExcelWriter(output, engine="openpyxl") as xls:
         for sheet_name, df in results.items():
-            # if df is empty, skip writing it
-            # if df.empty:
-            #     print(f"Skipping empty sheet '{sheet_name}'")
-            #     continue
+            if df.empty:
+                print(f"Sheet '{sheet_name}' is empty (no matching rows)")
             df.to_excel(
                 xls, sheet_name=sheet_name[:31], index=False
             )  # Excel 31-char limit

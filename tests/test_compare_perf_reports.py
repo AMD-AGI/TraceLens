@@ -18,6 +18,9 @@ import shutil
 import pandas as pd
 import pytest
 
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Reporting.compare_perf_reports_pytorch import (
     generate_compare_perf_reports_pytorch,
 )
@@ -129,3 +132,131 @@ def test_compare_perf_reports(
     finally:
         if os.path.exists(fn_root):
             shutil.rmtree(fn_root)
+
+
+# ─── E2E compare report tests (generate reports from traces, then compare) ────
+
+E2E_TRACE_NAME = "Qwen_Qwen1.5-0.5B-Chat__1016005"
+E2E_TEST_DIR = os.path.join("tests", "traces", "compare_test_e2e")
+E2E_REF_DIR = os.path.join(E2E_TEST_DIR, "reference")
+
+E2E_H100_TRACE = os.path.join("tests", "traces", "h100", f"{E2E_TRACE_NAME}.json.gz")
+E2E_MI300_TRACE = os.path.join("tests", "traces", "mi300", f"{E2E_TRACE_NAME}.json.gz")
+
+E2E_REF_H100_REPORT = os.path.join(E2E_REF_DIR, "h100_perf_report.xlsx")
+E2E_REF_MI300_REPORT = os.path.join(E2E_REF_DIR, "mi300_perf_report.xlsx")
+E2E_REF_COMPARE_REPORT = os.path.join(E2E_REF_DIR, "compare_h100_mi300_qwen.xlsx")
+
+E2E_COLS_TO_SKIP = {"Input Dims", "Input Strides", "Concrete Inputs", "Input type"}
+
+
+def _validate_report_against_reference(generated_path, reference_path, tol=1e-6):
+    """Validate a generated report against its reference, sheet by sheet."""
+    ref_sheets = pd.ExcelFile(reference_path).sheet_names
+    gen_sheets = pd.ExcelFile(generated_path).sheet_names
+
+    missing = set(ref_sheets) - set(gen_sheets)
+    assert not missing, f"Missing sheets in generated report: {missing}"
+
+    errors = []
+    for sheet in ref_sheets:
+        df_ref = pd.read_excel(reference_path, sheet_name=sheet)
+        df_gen = pd.read_excel(generated_path, sheet_name=sheet)
+
+        if df_ref.empty:
+            if not df_gen.empty:
+                errors.append(
+                    f"Sheet '{sheet}': reference is empty but generated has "
+                    f"{len(df_gen)} rows"
+                )
+            continue
+
+        ref_cols = set(df_ref.columns)
+        gen_cols = set(df_gen.columns)
+        if ref_cols != gen_cols:
+            errors.append(
+                f"Sheet '{sheet}': column mismatch — "
+                f"missing={ref_cols - gen_cols}, extra={gen_cols - ref_cols}"
+            )
+            continue
+
+        cols = [c for c in df_ref.columns if c not in E2E_COLS_TO_SKIP]
+        diff_cols = compare_cols(df_gen, df_ref, cols, tol=tol)
+        if diff_cols:
+            errors.append(
+                f"Sheet '{sheet}': value differences:"
+                f"{format_diff_details(diff_cols)}"
+            )
+
+    return errors
+
+
+@pytest.fixture(scope="module")
+def generated_reports(tmp_path_factory):
+    """Generate perf reports from both traces once for all tests in this module."""
+    output_dir = tmp_path_factory.mktemp("compare_e2e")
+
+    h100_report = str(output_dir / "h100_perf_report.xlsx")
+    mi300_report = str(output_dir / "mi300_perf_report.xlsx")
+
+    generate_perf_report_pytorch(
+        profile_json_path=E2E_H100_TRACE,
+        output_xlsx_path=h100_report,
+        kernel_summary=True,
+        short_kernel_study=True,
+    )
+    generate_perf_report_pytorch(
+        profile_json_path=E2E_MI300_TRACE,
+        output_xlsx_path=mi300_report,
+        kernel_summary=True,
+        short_kernel_study=True,
+    )
+
+    return {"h100": h100_report, "mi300": mi300_report, "output_dir": output_dir}
+
+
+def test_individual_reports_match_reference(generated_reports):
+    """Verify that generated perf reports match reference outputs."""
+    for tag, ref_path in [
+        ("h100", E2E_REF_H100_REPORT),
+        ("mi300", E2E_REF_MI300_REPORT),
+    ]:
+        gen_path = generated_reports[tag]
+        errors = _validate_report_against_reference(gen_path, ref_path)
+        assert not errors, f"{tag} report differences:\n" + "\n".join(errors)
+
+
+def test_compare_report_sheets_present(generated_reports):
+    """Verify the comparison report contains all expected sheets."""
+    output_dir = generated_reports["output_dir"]
+    compare_path = str(output_dir / "compare_reports.xlsx")
+
+    generate_compare_perf_reports_pytorch(
+        reports=[generated_reports["h100"], generated_reports["mi300"]],
+        output=compare_path,
+        names=["h100", "mi300"],
+        sheets=["all"],
+    )
+
+    ref_sheets = set(pd.ExcelFile(E2E_REF_COMPARE_REPORT).sheet_names)
+    gen_sheets = set(pd.ExcelFile(compare_path).sheet_names)
+
+    missing = ref_sheets - gen_sheets
+    assert not missing, f"Missing sheets in compare report: {missing}"
+
+
+def test_compare_report_matches_reference(generated_reports):
+    """Validate comparison report contents against reference."""
+    output_dir = generated_reports["output_dir"]
+    compare_path = str(output_dir / "compare_reports.xlsx")
+
+    if not os.path.exists(compare_path):
+        generate_compare_perf_reports_pytorch(
+            reports=[generated_reports["h100"], generated_reports["mi300"]],
+            output=compare_path,
+            names=["h100", "mi300"],
+            sheets=["all"],
+        )
+
+    errors = _validate_report_against_reference(compare_path, E2E_REF_COMPARE_REPORT)
+    assert not errors, "Compare report differences:\n" + "\n".join(errors)
