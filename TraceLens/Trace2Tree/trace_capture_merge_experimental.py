@@ -119,6 +119,7 @@ def update_subtree_uids_and_timestamps(
     #    event[UID]=uid_mapping[event[UID]]
     for event in subtree_events:
         event["ts"] += ts_offset
+        event["ts"] = new_start_ts
     return subtree_events, subtree_filtered_events
 
 
@@ -131,6 +132,9 @@ def append_subtree_to_event(tree, subtree_events, parent_event):
         if event[UID] in tree.events_by_uid:
             print("Warning: UID {} already exists in events_by_uid".format(event[UID]))
         tree.events_by_uid[event[UID]] = event
+        tree.name2event_uids[
+                event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
+            ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
     return tree
 
 
