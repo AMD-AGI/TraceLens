@@ -7,7 +7,7 @@
 import os
 import subprocess
 import pandas as pd
-from test_compare_perf_report import compare_cols, format_diff_details
+from conftest import compare_cols, format_diff_details
 
 
 def generate_nccl_report(trace_pattern, world_size, report_path):
