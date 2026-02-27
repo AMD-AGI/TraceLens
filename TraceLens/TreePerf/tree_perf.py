@@ -275,6 +275,18 @@ class TreePerfAnalyzer:
             list_kernels.extend(this_list_kernels)
         return total_kernel_time, list_kernels
 
+    def _compute_subtree_kernel_time_us(self, event):
+        """
+        Compute inclusive (subtree) GPU kernel busy time for an event.
+        Includes all kernels in the event's subtree (this op and all descendants).
+        Overlaps between kernels are accounted for via GPUEventAnalyser busy_time.
+        """
+        _, list_kernel_uids = self.loop_and_aggregate_kernels([event])
+        if not list_kernel_uids:
+            return 0
+        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernel_uids]
+        return self.GPUEventAnalyser(list_kernels).compute_metrics()["busy_time"]
+
     @staticmethod
     def non_data_mov_filter(event):
         DATA_MOVEMENT_PATTERNS = ["at::native::direct_copy_kernel_cuda", "transpose_"]
@@ -383,7 +395,12 @@ class TreePerfAnalyzer:
                 # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
                 memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
                 roofline_time_us = max(compute_time_us, memory_time_us)
+                if compute_time_us >= memory_time_us:
+                    roofline_bound = "COMPUTE_BOUND"
+                else:
+                    roofline_bound = "MEMORY_BOUND"
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
+                dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
                     (roofline_time_us / busy_kernel_time) * 100
                     if busy_kernel_time > 0
@@ -576,6 +593,8 @@ class TreePerfAnalyzer:
         # Roofline metrics - first since they should be same for the group
         if "Roofline Time (µs)" in df_perf_metrics.columns:
             dict_agg["Roofline Time (µs)"] = "first"
+        if "Roofline Bound" in df_perf_metrics.columns:
+            dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
         if "Simulated Time (µs)" in df_perf_metrics.columns:
@@ -643,7 +662,6 @@ class TreePerfAnalyzer:
         df_perf_metrics_summary = df_perf_metrics_summary[
             priority_cols + param_cols + other_cols
         ]
-
         df_perf_metrics_summary.sort_values(
             by=["Kernel Time (µs)_sum", "UID_first"],
             ascending=[False, True],
@@ -734,6 +752,9 @@ class TreePerfAnalyzer:
             event["total_direct_kernel_time"] = self.GPUEventAnalyser(
                 kernels
             ).compute_metrics()["busy_time"]
+            event["total_subtree_kernel_time"] = self._compute_subtree_kernel_time_us(
+                event
+            )
             event["direct_kernel_count"] = len(kernels)
             event["kernel_details"] = [
                 {
@@ -765,6 +786,7 @@ class TreePerfAnalyzer:
                 "op category": event["op category"],
                 "UID": event["UID"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
+                "total_subtree_kernel_time": event["total_subtree_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
             }
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
@@ -806,14 +828,72 @@ class TreePerfAnalyzer:
         return df
 
     @staticmethod
+    def _reorder_cols_direct_subtree_pairs(
+        df, direct_prefix, subtree_prefix, suffix_order=None
+    ):
+        """
+        Reorder columns so direct and subtree kernel time appear in pairs:
+        direct_mean, subtree_mean, direct_median, subtree_median, direct_std, subtree_std, etc.
+        """
+        direct_cols = [
+            c
+            for c in df.columns
+            if c == direct_prefix or c.startswith(direct_prefix + "_")
+        ]
+        subtree_cols = [
+            c
+            for c in df.columns
+            if c == subtree_prefix or c.startswith(subtree_prefix + "_")
+        ]
+        if not direct_cols and not subtree_cols:
+            return df
+
+        def get_suffix(col, pre):
+            if col == pre:
+                return ""
+            return col[len(pre) :].lstrip("_") if col.startswith(pre + "_") else None
+
+        all_suffixes = set()
+        for c in direct_cols:
+            s = get_suffix(c, direct_prefix)
+            if s is not None:
+                all_suffixes.add(s)
+        for c in subtree_cols:
+            s = get_suffix(c, subtree_prefix)
+            if s is not None:
+                all_suffixes.add(s)
+        if suffix_order is None:
+            suffix_order = ["mean", "median", "std", "min", "max", "sum", "count", "ms"]
+        ordered_suffixes = [s for s in suffix_order if s in all_suffixes]
+        ordered_suffixes += sorted(all_suffixes - set(suffix_order))
+        paired = []
+        for s in ordered_suffixes:
+            d = direct_prefix + ("_" + s if s else "")
+            if d in df.columns:
+                paired.append(d)
+            st = subtree_prefix + ("_" + s if s else "")
+            if st in df.columns:
+                paired.append(st)
+        other = [c for c in df.columns if c not in paired]
+        orig = list(df.columns)
+        first_idx = min(orig.index(c) for c in paired) if paired else len(orig)
+        other_before = [c for c in other if orig.index(c) < first_idx]
+        other_after = [c for c in other if orig.index(c) > first_idx]
+        return df[other_before + paired + other_after]
+
+    @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
         groupby_cols = ["name"]
         if "is_recompute" in df_temp.columns:
             groupby_cols.append("is_recompute")
-        df_agg = df_temp.groupby(groupby_cols).agg(
-            {"total_direct_kernel_time": ["sum", "count"], "op category": set},
-        )
+        agg_dict = {
+            "total_direct_kernel_time": ["sum", "count"],
+            "op category": set,
+        }
+        if "total_subtree_kernel_time" in df_temp.columns:
+            agg_dict["total_subtree_kernel_time"] = ["sum"]
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(
@@ -834,8 +914,17 @@ class TreePerfAnalyzer:
             df_agg["total_direct_kernel_time_ms"] / total_duration_ms
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
+        if "total_subtree_kernel_time_sum" in df_agg.columns:
+            df_agg["total_subtree_kernel_time_ms"] = (
+                df_agg["total_subtree_kernel_time_sum"] / 1000
+            )
         df_agg.reset_index(drop=True, inplace=True)
-
+        df_agg = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
+            df_agg,
+            "total_direct_kernel_time",
+            "total_subtree_kernel_time",
+            suffix_order=["sum", "ms"],
+        )
         return df_agg
 
     @staticmethod
@@ -845,6 +934,8 @@ class TreePerfAnalyzer:
         if "parent_module" in df_temp.columns:
             groupby_cols.append("parent_module")
         agg_dict = {"total_direct_kernel_time": ["sum", "count"], "op category": set}
+        if "total_subtree_kernel_time" in df_temp.columns:
+            agg_dict["total_subtree_kernel_time"] = ["sum", "count"]
         if "call_stack" in df_temp.columns:
             agg_dict["call_stack"] = "first"
         df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
@@ -870,7 +961,12 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-
+        df_agg = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
+            df_agg,
+            "total_direct_kernel_time",
+            "total_subtree_kernel_time",
+            suffix_order=["sum", "count", "ms"],
+        )
         return df_agg
 
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
@@ -1048,6 +1144,10 @@ class TreePerfAnalyzer:
             agg_dict["total_direct_kernel_time"] = agg_metrics + (
                 ["sum"] if "sum" not in agg_metrics else []
             )
+        if "total_subtree_kernel_time" in df_filtered.columns:
+            agg_dict["total_subtree_kernel_time"] = agg_metrics + (
+                ["sum"] if "sum" not in agg_metrics else []
+            )
         columns_to_keep_first = []
         if "UID" in df_filtered.columns:
             agg_dict["UID"] = ["first", "count"]
@@ -1096,6 +1196,7 @@ class TreePerfAnalyzer:
                 "operation_count",
                 "kernel_names",
                 "total_direct_kernel_time_mean",
+                "total_subtree_kernel_time_mean",
             ]
             if col in df_unique_args.columns
         ]
@@ -1106,6 +1207,12 @@ class TreePerfAnalyzer:
             and not col.endswith("_str_repr_for_grouping")
         ]
         df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
+        df_unique_args = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
+            df_unique_args,
+            "total_direct_kernel_time",
+            "total_subtree_kernel_time",
+            suffix_order=["mean", "median", "std", "min", "max", "sum", "count"],
+        )
 
         # 5. Sort the DataFrame by the sum of total_direct_kernel_time and then by ex_uid for stability
         if "total_direct_kernel_time_sum" in df_unique_args.columns:
@@ -1470,6 +1577,7 @@ class TreePerfAnalyzer:
                 "TB/s",
                 "Compute Spec",
                 "Roofline Time (µs)",
+                "Roofline Bound",
                 "Pct Roofline",
             ]
 
@@ -1654,6 +1762,8 @@ class TreePerfAnalyzer:
         # Roofline metrics
         if "Roofline Time (µs)" in df_temp.columns:
             agg_dict["Roofline Time (µs)"] = "first"  # Static for same args
+        if "Roofline Bound" in df_temp.columns:
+            agg_dict["Roofline Bound"] = "first"  # Static for same args
         if "Pct Roofline" in df_temp.columns:
             agg_dict["Pct Roofline"] = agg_metrics  # Varies per instance
 
@@ -1795,7 +1905,8 @@ class TreePerfAnalyzer:
             + pct_cols
         )
 
-        return df_summary[col_order]
+        df_summary = df_summary[col_order]
+        return df_summary
 
     @staticmethod
     def get_df_kernel_launchers_summary_by_category(
@@ -1809,9 +1920,8 @@ class TreePerfAnalyzer:
             pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
         """
         df_temp = df_kernel_launchers.copy()
-        df_agg = df_temp.groupby("op category").agg(
-            {"total_direct_kernel_time": ["sum", "count"]}
-        )
+        agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
+        df_agg = df_temp.groupby("op category").agg(agg_dict)
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
@@ -1829,7 +1939,6 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-
         return df_agg
 
     @staticmethod
@@ -1869,7 +1978,6 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-
         return df_agg
 
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
@@ -2324,8 +2432,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
@@ -2502,6 +2612,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         for event in kernel_events:
             event["op category"] = event["gpu_kernel_op_cat"]
             event["total_direct_kernel_time"] = event["dur"]
+            event["total_subtree_kernel_time"] = event["dur"]  # JAX: launcher is kernel
             event["direct_kernel_count"] = int(1)
             # Note: 'dur' in 'kernel_details' is required from tree perf.
             event["kernel_details"] = [
@@ -2600,6 +2711,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 "UID": event["UID"],
                 "op category": event["gpu_kernel_op_cat"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
+                "total_subtree_kernel_time": event["total_subtree_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
             }
             if id_cols:
