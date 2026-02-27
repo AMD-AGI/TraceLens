@@ -1236,24 +1236,33 @@ class TreePerfAnalyzer:
         """
         Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
 
-        A leaf cpu_op follows the pattern: cpu_op -> runtime -> kernel
+        A leaf cpu_op follows patterns:
+        - cpu_op -> runtime -> kernel
+        - cpu_op -> python_function -> runtime -> kernel
         This matches the definition used in get_kernel_launchers().
         """
         if self.event_to_category(event) != "cpu_op":
             return False
 
-        # Check if any child's grandchild is a kernel (cpu_op -> runtime -> kernel pattern)
-        for child_uid in event.get("children", []):
-            child = self.tree.get_UID2event(child_uid)
-            for grandchild_uid in child.get("children", []):
-                grandchild = self.tree.get_UID2event(grandchild_uid)
-                if self.event_to_category(grandchild) in {
-                    "kernel",
-                    "gpu_memcpy",
-                    "gpu_memset",
-                }:
+        # Check if any descendant is a kernel within 3 levels
+        # Patterns: cpu_op -> runtime -> kernel OR cpu_op -> python_function -> runtime -> kernel
+        def has_kernel_descendant(evt, max_depth=10):
+            if max_depth <= 0:
+                return False
+            for child_uid in evt.get("children", []):
+                child = self.tree.get_UID2event(child_uid)
+                if not child:
+                    continue
+                child_cat = self.event_to_category(child)
+                if child_cat in {"kernel", "gpu_memcpy", "gpu_memset"}:
                     return True
-        return False
+                # Continue traversing through runtime and python_function categories
+                if child_cat in {"cuda_runtime", "python_function"}:
+                    if has_kernel_descendant(child, max_depth - 1):
+                        return True
+            return False
+
+        return has_kernel_descendant(event)
 
     def _launches_gpu_kernels(self, event):
         """
