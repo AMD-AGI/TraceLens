@@ -33,9 +33,25 @@ TraceLens features for inference analysis have been primarily tested with vLLM, 
 
 ### Step 1: Trace Collection
 
-#### Apply Framework Patches
+#### Option A: Build a Docker image using the [provided scripts](../examples/custom_workflows/inference_analysis/) (recommended)
 
-We recommend applying patches to your inference framework to:
+Build scripts are provided for supported framework versions. Each script takes the path to your local TraceLens-internal clone as the first argument, followed by any standard `docker build` flags. The script uses a released vLLM Docker image as the base, applies the relevant patch, and installs TraceLens.
+
+| Script | Base Image | vLLM Version |
+|--------|-----------|--------------|
+| `build_docker_vllm_v16.sh` | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0 |
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_vllm_v16.sh \
+    /path/to/TraceLens-internal \
+    -t tracelens-vllm
+```
+
+Then create a container from the image.
+
+
+#### Option B: Apply framework patches manually (currently supported for vLLM)
+If you prefer to patch an existing environment instead of building a new image, apply patches to your inference framework to:
 
 - Add custom annotations with request packing information (See [roofline conceptual details](#roofline-analysis))
 - Capture graph mode execution phases for augmentation by TraceLens
@@ -51,7 +67,7 @@ We recommend applying patches to your inference framework to:
 
    - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
    - Select by framework and version
-   - Apply: `cd /path/to/vllm && git apply /path/to/patchfile`
+   - Apply: `cd /path/to/vllm/../ && git apply /path/to/patchfile`
 
 #### Collection Parameters
 
