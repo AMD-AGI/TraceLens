@@ -175,4 +175,3 @@ def prune_spillover_kernels(events):
             event["children"] = [
                 uid for uid in event["children"] if uid not in removed_uids
             ]
-

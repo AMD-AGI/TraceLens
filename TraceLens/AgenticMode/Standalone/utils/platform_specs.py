@@ -49,7 +49,7 @@ PLATFORM_SPECS = {
             "vector_fp16": 194,
             "vector_bf16": 194,
             "vector_fp32": 97,
-            "vector_fp64": 48
+            "vector_fp64": 48,
         },
     },
     "MI350X": {
@@ -66,7 +66,7 @@ PLATFORM_SPECS = {
             "vector_fp16": 194,
             "vector_bf16": 194,
             "vector_fp32": 97,
-            "vector_fp64": 48
+            "vector_fp64": 48,
         },
     },
     "MI355X": {
@@ -85,7 +85,7 @@ PLATFORM_SPECS = {
             "vector_fp16": 274,
             "vector_bf16": 274,
             "vector_fp32": 137,
-            "vector_fp64": 68
+            "vector_fp64": 68,
         },
     },
     "MI400": {
@@ -119,5 +119,5 @@ CATEGORY_SKILL_MAP = {
     "triton": "triton-analysis",
     "norm": "norm-analysis",
     "convolution": "convolution-analysis",
-    "other": "generic-op-analysis"
+    "other": "generic-op-analysis",
 }

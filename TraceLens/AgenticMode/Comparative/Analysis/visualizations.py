@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+
 def generate_interactive_optimization_html(csv_path, plot_path):
     """
     Generate interactive HTML visualization of optimization opportunities.
@@ -12,28 +13,43 @@ def generate_interactive_optimization_html(csv_path, plot_path):
     try:
         import pandas as pd
         import json
-        
+
         df = pd.read_csv(csv_path)
-        
+
         # Prepare data for JavaScript
         categories_data = []
-        max_gain = df['Potential Gain (ms)'].max() if not df.empty else 1
-        
+        max_gain = df["Potential Gain (ms)"].max() if not df.empty else 1
+
         for _, row in df.iterrows():
-            has_kernels = (pd.notna(row.get('Key Candidate Operations')) and 
-                          row.get('Key Candidate Operations') != "Automated operation breakdown not yet supported")
-            
-            categories_data.append({
-                'category': row['Category'],
-                'current_time': float(row['Current Time (ms)']),
-                'projected_time': float(row['Projected Optimized Time (ms)']),
-                'potential_gain': float(row['Potential Gain (ms)']),
-                'impact': float(row['Impact (%)']),
-                'key_operations': row.get('Key Candidate Operations', 'N/A') if has_kernels else None,
-                'ai_recommendations': row.get('Comments', 'No recommendations available'),
-                'bar_height': float((row['Potential Gain (ms)'] / max_gain * 100) if max_gain > 0 else 0)
-            })
-        
+            has_kernels = (
+                pd.notna(row.get("Key Candidate Operations"))
+                and row.get("Key Candidate Operations")
+                != "Automated operation breakdown not yet supported"
+            )
+
+            categories_data.append(
+                {
+                    "category": row["Category"],
+                    "current_time": float(row["Current Time (ms)"]),
+                    "projected_time": float(row["Projected Optimized Time (ms)"]),
+                    "potential_gain": float(row["Potential Gain (ms)"]),
+                    "impact": float(row["Impact (%)"]),
+                    "key_operations": (
+                        row.get("Key Candidate Operations", "N/A")
+                        if has_kernels
+                        else None
+                    ),
+                    "ai_recommendations": row.get(
+                        "Comments", "No recommendations available"
+                    ),
+                    "bar_height": float(
+                        (row["Potential Gain (ms)"] / max_gain * 100)
+                        if max_gain > 0
+                        else 0
+                    ),
+                }
+            )
+
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -391,17 +407,18 @@ def generate_interactive_optimization_html(csv_path, plot_path):
     </script>
 </body>
 </html>"""
-        
+
         html_path = csv_path.parent / "optimization_opportunities_interactive.html"
-        with open(html_path, 'w', encoding='utf-8') as f:
+        with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
-        
+
         print(f"    ✓ Interactive HTML: {html_path}")
         return html_path
-        
+
     except Exception as e:
         print(f"    ⚠️  Failed to generate interactive HTML: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -414,48 +431,84 @@ def generate_kernel_optimization_html(csv_path):
     try:
         import pandas as pd
         import json
-        
+
         df = pd.read_csv(csv_path)
-        
+
         # Calculate totals for summary
-        total_baseline_time = df['baseline_time'].sum() / 1000.0 if 'baseline_time' in df.columns else 0
-        total_opportunity = df['opportunity'].sum() / 1000.0 if 'opportunity' in df.columns else 0
+        total_baseline_time = (
+            df["baseline_time"].sum() / 1000.0 if "baseline_time" in df.columns else 0
+        )
+        total_opportunity = (
+            df["opportunity"].sum() / 1000.0 if "opportunity" in df.columns else 0
+        )
         total_optimized_time = total_baseline_time - total_opportunity
-        total_optimization_pct = (total_opportunity / total_baseline_time * 100) if total_baseline_time > 0 else 0
-        
+        total_optimization_pct = (
+            (total_opportunity / total_baseline_time * 100)
+            if total_baseline_time > 0
+            else 0
+        )
+
         # Prepare data for JavaScript
         categories_data = []
-        max_opportunity = df['opportunity'].max() / 1000.0 if not df.empty and 'opportunity' in df.columns else 1
-        
+        max_opportunity = (
+            df["opportunity"].max() / 1000.0
+            if not df.empty and "opportunity" in df.columns
+            else 1
+        )
+
         for _, row in df.iterrows():
             # Parse kernel names (separated by ***)
-            baseline_kernels = [k.strip() for k in str(row.get('baseline_kernel_names', '')).split('***') if k.strip()]
-            target_kernels = [k.strip() for k in str(row.get('target_kernel_names', '')).split('***') if k.strip()]
-            
+            baseline_kernels = [
+                k.strip()
+                for k in str(row.get("baseline_kernel_names", "")).split("***")
+                if k.strip()
+            ]
+            target_kernels = [
+                k.strip()
+                for k in str(row.get("target_kernel_names", "")).split("***")
+                if k.strip()
+            ]
+
             # Parse CPU op names (separated by ***)
-            baseline_cpu_ops = [k.strip() for k in str(row.get('baseline_cpu_op_names', '')).split('***') if k.strip()]
-            target_cpu_ops = [k.strip() for k in str(row.get('target_cpu_op_names', '')).split('***') if k.strip()]
-            
-            opportunity = float(row.get('opportunity', 0))  / 1000.0
-            opportunity_pct_of_total = (opportunity / total_opportunity * 100) if total_opportunity > 0 else 0
-            
-            categories_data.append({
-                'nn_modules': row.get('nn_modules', 'N/A'),
-                'num_calls': int(row.get('num_aggregated_LCAs', 0)),
-                'baseline_time': float(row.get('baseline_time', 0)) / 1000.0,
-                'target_time': float(row.get('target_time', 0)) / 1000.0,
-                'opportunity': opportunity,
-                'opportunity_pct_of_total': opportunity_pct_of_total,
-                'bar_width': float((opportunity / max_opportunity * 100) if max_opportunity > 0 else 0),
-                'baseline_kernels': baseline_kernels,
-                'target_kernels': target_kernels,
-                'baseline_cpu_ops': baseline_cpu_ops,
-                'target_cpu_ops': target_cpu_ops
-            })
-        
+            baseline_cpu_ops = [
+                k.strip()
+                for k in str(row.get("baseline_cpu_op_names", "")).split("***")
+                if k.strip()
+            ]
+            target_cpu_ops = [
+                k.strip()
+                for k in str(row.get("target_cpu_op_names", "")).split("***")
+                if k.strip()
+            ]
+
+            opportunity = float(row.get("opportunity", 0)) / 1000.0
+            opportunity_pct_of_total = (
+                (opportunity / total_opportunity * 100) if total_opportunity > 0 else 0
+            )
+
+            categories_data.append(
+                {
+                    "nn_modules": row.get("nn_modules", "N/A"),
+                    "num_calls": int(row.get("num_aggregated_LCAs", 0)),
+                    "baseline_time": float(row.get("baseline_time", 0)) / 1000.0,
+                    "target_time": float(row.get("target_time", 0)) / 1000.0,
+                    "opportunity": opportunity,
+                    "opportunity_pct_of_total": opportunity_pct_of_total,
+                    "bar_width": float(
+                        (opportunity / max_opportunity * 100)
+                        if max_opportunity > 0
+                        else 0
+                    ),
+                    "baseline_kernels": baseline_kernels,
+                    "target_kernels": target_kernels,
+                    "baseline_cpu_ops": baseline_cpu_ops,
+                    "target_cpu_ops": target_cpu_ops,
+                }
+            )
+
         # Sort by opportunity descending
-        categories_data.sort(key=lambda x: x['opportunity'], reverse=True)
-        
+        categories_data.sort(key=lambda x: x["opportunity"], reverse=True)
+
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1091,16 +1144,17 @@ def generate_kernel_optimization_html(csv_path):
     </script>
 </body>
 </html>"""
-        
+
         html_path = csv_path.parent / "kernel_optimization_interactive.html"
-        with open(html_path, 'w', encoding='utf-8') as f:
+        with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
-        
+
         print(f"    ✓ Kernel optimization HTML: {html_path}")
         return html_path
-        
+
     except Exception as e:
         print(f"    ⚠️  Failed to generate kernel optimization HTML: {e}")
         import traceback
+
         traceback.print_exc()
         return None

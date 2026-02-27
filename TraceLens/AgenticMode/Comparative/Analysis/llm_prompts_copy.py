@@ -16,7 +16,7 @@ from typing import Dict, Optional, List, Any
 
 class LLMPromptManager:
     """Manages LLM prompt generation for different analysis modes"""
-    
+
     def __init__(self, use_critical_path: bool = True):
         """
         Args:
@@ -24,32 +24,38 @@ class LLMPromptManager:
         """
         self.use_critical_path = use_critical_path
         self.analysis_mode = "Critical Path" if use_critical_path else "Timeline"
-    
-    def build_analysis_prompt(self,
-                             baseline_gpu: str,
-                             target_gpu: str,
-                             baseline_total_time: float,
-                             target_total_time: float,
-                             summary_data: Dict,
-                             gemm_data: Dict,
-                             conv_data: Dict,
-                             unique_data: Dict,
-                             overall_data: Dict,
-                             detailed_comparison: Optional[Dict],
-                             critical_path_section: str,
-                             cp_comparison_data: List[Dict],
-                             baseline_cp_ops: List[str]) -> str:
+
+    def build_analysis_prompt(
+        self,
+        baseline_gpu: str,
+        target_gpu: str,
+        baseline_total_time: float,
+        target_total_time: float,
+        summary_data: Dict,
+        gemm_data: Dict,
+        conv_data: Dict,
+        unique_data: Dict,
+        overall_data: Dict,
+        detailed_comparison: Optional[Dict],
+        critical_path_section: str,
+        cp_comparison_data: List[Dict],
+        baseline_cp_ops: List[str],
+    ) -> str:
         """
         Build the main analysis prompt for the LLM.
-        
+
         Returns:
             Complete prompt string
         """
         # Calculate performance metrics
         baseline_is_trailing = baseline_total_time > target_total_time
         performance_gap_ms = abs(baseline_total_time - target_total_time)
-        performance_gap_pct = (performance_gap_ms / min(baseline_total_time, target_total_time) * 100) if min(baseline_total_time, target_total_time) > 0 else 0
-        
+        performance_gap_pct = (
+            (performance_gap_ms / min(baseline_total_time, target_total_time) * 100)
+            if min(baseline_total_time, target_total_time) > 0
+            else 0
+        )
+
         # Adapt prompt based on analysis mode
         if self.use_critical_path:
             focus_instruction = "Your analysis MUST focus primarily on critical path operations of Baseline as they directly impact overall execution time."
@@ -59,7 +65,7 @@ class LLMPromptManager:
             focus_instruction = "Your analysis should focus on timeline-based execution data, analyzing ALL operation categories by their total execution time and contribution to overall performance."
             data_focus = "TIMELINE"
             data_explanation = "The data below represents ALL operation categories aggregated from the complete timeline. Analyze based on total execution time, frequency, and percentage contribution to overall runtime."
-        
+
         # Build gap instruction based on performance relationship
         gap_instruction = self._build_gap_instruction(
             baseline_is_trailing,
@@ -69,7 +75,7 @@ class LLMPromptManager:
             target_total_time,
             critical_path_section,
             cp_comparison_data,
-            baseline_cp_ops
+            baseline_cp_ops,
         )
         prompt = f"""
         You are a GPU performance expert analyzing execution traces between Baseline and Target.
@@ -134,20 +140,22 @@ class LLMPromptManager:
         - FORMATTING: Present findings in well-structured markdown with tables, sections, and visual hierarchy
         - CLARITY: Make the report easy to scan and understand at a glance
         """
-        
+
         return prompt
-    
-    def _build_gap_instruction(self, 
-                               baseline_is_trailing: bool,
-                               performance_gap_ms: float,
-                               performance_gap_pct: float,
-                               baseline_total_time: float,
-                               target_total_time: float,
-                               critical_path_section: str,
-                               cp_comparison_data: List[Dict],
-                               baseline_cp_ops: List[str]) -> str:
+
+    def _build_gap_instruction(
+        self,
+        baseline_is_trailing: bool,
+        performance_gap_ms: float,
+        performance_gap_pct: float,
+        baseline_total_time: float,
+        target_total_time: float,
+        critical_path_section: str,
+        cp_comparison_data: List[Dict],
+        baseline_cp_ops: List[str],
+    ) -> str:
         """Build gap analysis instruction based on performance relationship"""
-        
+
         if baseline_is_trailing:
             return f"""
             PERFORMANCE GAP ANALYSIS ({self.analysis_mode} Mode):
@@ -209,11 +217,11 @@ class LLMPromptManager:
             - Group related insights visually using markdown sections
             - Include performance advantage percentages and time savings
             """
-    
+
     def _get_analysis_structure(self) -> str:
         """Get analysis structure based on mode"""
         if self.use_critical_path:
-            return '''You MUST prioritize analysis of operations on the critical path. The critical path represents the longest sequence of dependent operations and directly determines overall execution time.
+            return """You MUST prioritize analysis of operations on the critical path. The critical path represents the longest sequence of dependent operations and directly determines overall execution time.
             
             Analyze and provide suggestions focusing on:
             1. Operations that appear on the CRITICAL PATH of Baseline and not the Target
@@ -225,9 +233,9 @@ class LLMPromptManager:
             1. CRITICAL PATH COMPARISON (table: Operation | Baseline (CP) | Target (CP) | Gap | Impact on Total Time)
             2. CRITICAL PATH BOTTLENECKS (top 5 baseline critical-path operations underperforming)
             3. CRITICAL PATH ANALYSIS BY CATEGORY (table: Category | Time on Baseline | Time on Target | % of Critical Path)
-            4. NON-CRITICAL OPERATIONS (brief mention of non-critical operations with noted performance differences for context)'''
+            4. NON-CRITICAL OPERATIONS (brief mention of non-critical operations with noted performance differences for context)"""
         else:
-            return '''You are analyzing ALL operation categories from the complete timeline. Focus on categories with:
+            return """You are analyzing ALL operation categories from the complete timeline. Focus on categories with:
             - Highest total execution time (impact_pct)
             - Largest time gaps between Baseline and Target
             - High percentage contribution to overall performance
@@ -257,15 +265,15 @@ class LLMPromptManager:
                - Use EXACT category names from section 1 (e.g., 'BN_bwd', 'CONV_bwd', 'BN_fwd', etc.)
                - CALCULATE CUMULATIVE IMPACT: After table, show "**CUMULATIVE IMPACT:** X.XX% total potential improvement if all gaps are closed"
             3. PERFORMANCE STRENGTHS (categories where Baseline performs better)
-            4. CATEGORY-LEVEL INSIGHTS (detailed analysis of each major category)'''
-    
+            4. CATEGORY-LEVEL INSIGHTS (detailed analysis of each major category)"""
+
     def get_system_message(self) -> str:
         """Get system message for LLM based on analysis mode"""
         if self.use_critical_path:
             analysis_context = """You are analyzing GPU performance with a CRITICAL PATH focus. Critical path operations directly determine overall execution time through dependency chains. Prioritize operations on the critical path (~7-10% of all operations) as they have the highest impact on performance."""
         else:
             analysis_context = """You are analyzing GPU performance with a TIMELINE focus. Analyze all operations based on their total execution time and frequency. Consider both individual operation times and their cumulative contribution to overall performance."""
-        
+
         return f"""You are a GPU performance expert specializing in ML workload optimization.
 
 {analysis_context}

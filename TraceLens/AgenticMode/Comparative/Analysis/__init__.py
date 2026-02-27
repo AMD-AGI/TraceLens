@@ -24,11 +24,11 @@ from .report_generator import ReportGenerator
 from . import data_extractors
 
 __all__ = [
-    'TraceLensRunner',
-    'LLMPromptManager',
-    'JarvisPlotter',
-    'ReportGenerator',
-    'data_extractors'
+    "TraceLensRunner",
+    "LLMPromptManager",
+    "JarvisPlotter",
+    "ReportGenerator",
+    "data_extractors",
 ]
 
-__version__ = '2.0.0'
+__version__ = "2.0.0"
