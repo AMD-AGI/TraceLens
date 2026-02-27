@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """SDPA Analysis - Scaled Dot Product Attention
 
 Computes metrics for SDPA operations and outputs JSON for subagent processing.

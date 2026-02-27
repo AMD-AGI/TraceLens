@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: Post-Analysis Continual Learning
 description: Update category analyzer patterns when a missed issue is reported. Use only when the user explicitly reports a missed analysis finding and confirms it should be added as a new pattern. Do NOT invoke automatically.

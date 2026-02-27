@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Jarvis Web Dashboard - Browser-based interface for GPU trace analysis
 Run with: python3 jarvis_web_dashboard.py

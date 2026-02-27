@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 JARVIS UNIFIED ANALYZER - Main Orchestrator
 Complete workflow: Raw traces → Analysis → Report generation

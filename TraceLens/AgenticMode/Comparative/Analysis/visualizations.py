@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 def generate_interactive_optimization_html(csv_path, plot_path):
     """
     Generate interactive HTML visualization of optimization opportunities.

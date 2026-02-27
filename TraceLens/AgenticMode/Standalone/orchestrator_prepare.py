@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 TraceLens AgenticMode - Orchestrator Preparation Script
 Steps 2-5: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering

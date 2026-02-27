@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: generic-op-analyzer
 description: Analyze uncategorized GPU operations and GPU graph overhead. Use when orchestrator needs other category analysis.

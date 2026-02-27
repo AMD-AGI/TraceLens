@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """MoE (Mixture of Experts) Analysis
 
 Computes metrics for MoE fused operations and outputs JSON for subagent processing.

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Normalization Operations Analysis
 
 Computes metrics for normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.)

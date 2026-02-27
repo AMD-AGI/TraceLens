@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import slodels.auto     # patches in-place
 import openai           # ← now works on AMD VPN
 # print(openai.AzureOpenAI().models.list())

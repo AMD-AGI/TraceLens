@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: reduce-analyzer
 description: Analyze reduce operations for performance bottlenecks and optimization opportunities. Use when orchestrator needs reduce category analysis.

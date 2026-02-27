@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Platform specifications and category mappings for TraceLens AgenticMode analysis.
 
 Platform specs use the TraceLens arch dict format with max_achievable_tflops

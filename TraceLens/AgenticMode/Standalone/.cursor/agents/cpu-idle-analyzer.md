@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: cpu-idle-analyzer
 description: Analyze CPU overhead and GPU idle time causes when idle_time > 50%. Use when orchestrator detects critical GPU underutilization.
