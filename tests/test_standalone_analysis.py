@@ -42,7 +42,6 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     detect_paged_attention,
 )
 
-
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 
 
@@ -55,15 +54,17 @@ def output_dir_with_category_data(tmp_path):
 
     # gemm_ops.csv: minimal columns required by build_operation_metrics / load_category_data
     gemm_csv = out / "category_data" / "gemm_ops.csv"
-    df = pd.DataFrame({
-        "name": ["aten::mm", "aten::mm"],
-        "count": [1, 1],
-        "Kernel Time (µs)_sum": [100_000, 50_000],
-        "TFLOPS/s_mean": [400.0, 350.0],
-        "TB/s_mean": [0.5, 0.4],
-        "FLOPS/Byte": [2000.0, 1800.0],
-        "Compute Spec": ["matrix_bf16", "matrix_bf16"],
-    })
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm", "aten::mm"],
+            "count": [1, 1],
+            "Kernel Time (µs)_sum": [100_000, 50_000],
+            "TFLOPS/s_mean": [400.0, 350.0],
+            "TB/s_mean": [0.5, 0.4],
+            "FLOPS/Byte": [2000.0, 1800.0],
+            "Compute Spec": ["matrix_bf16", "matrix_bf16"],
+        }
+    )
     df.to_csv(gemm_csv, index=False)
 
     # gemm_metadata.json
@@ -98,8 +99,20 @@ def output_dir_with_manifest_and_metrics(tmp_path):
         "category": "gemm",
         "total_time_ms": 3000.0,
         "impact_estimates": [
-            {"operation": "aten::mm", "category": "gemm", "type": "kernel_tuning", "savings_ms": 100.0, "confidence": "high"},
-            {"operation": "aten::mm", "category": "gemm", "type": "kernel_tuning", "savings_ms": 50.0, "confidence": "medium"},
+            {
+                "operation": "aten::mm",
+                "category": "gemm",
+                "type": "kernel_tuning",
+                "savings_ms": 100.0,
+                "confidence": "high",
+            },
+            {
+                "operation": "aten::mm",
+                "category": "gemm",
+                "type": "kernel_tuning",
+                "savings_ms": 50.0,
+                "confidence": "medium",
+            },
         ],
     }
     (cat_data / "gemm_metrics.json").write_text(json.dumps(gemm_metrics, indent=2))
@@ -110,7 +123,13 @@ def output_dir_with_manifest_and_metrics(tmp_path):
         "category": "sdpa_fwd",
         "total_time_ms": 500.0,
         "impact_estimates": [
-            {"operation": "flash_attn_forward", "category": "sdpa_fwd", "type": "kernel_tuning", "savings_ms": 80.0, "confidence": "medium"},
+            {
+                "operation": "flash_attn_forward",
+                "category": "sdpa_fwd",
+                "type": "kernel_tuning",
+                "savings_ms": 80.0,
+                "confidence": "medium",
+            },
         ],
     }
     (cat_data / "sdpa_fwd_metrics.json").write_text(json.dumps(sdpa_metrics, indent=2))
@@ -163,8 +182,24 @@ def test_calculate_efficiency_with_validation():
 
 def test_compute_impact_estimates_basic():
     operations = [
-        {"name": "op_a", "time_ms": 10.0, "efficiency": {"efficiency_percent": 50.0, "is_anomaly": False, "bound_type": "compute"}},
-        {"name": "op_b", "time_ms": 5.0, "efficiency": {"efficiency_percent": 80.0, "is_anomaly": False, "bound_type": "memory"}},
+        {
+            "name": "op_a",
+            "time_ms": 10.0,
+            "efficiency": {
+                "efficiency_percent": 50.0,
+                "is_anomaly": False,
+                "bound_type": "compute",
+            },
+        },
+        {
+            "name": "op_b",
+            "time_ms": 5.0,
+            "efficiency": {
+                "efficiency_percent": 80.0,
+                "is_anomaly": False,
+                "bound_type": "memory",
+            },
+        },
     ]
     estimates = compute_impact_estimates(operations, "gemm")
     assert len(estimates) == 2
@@ -178,7 +213,11 @@ def test_compute_impact_estimates_basic():
 
 def test_compute_impact_estimates_excludes_anomaly():
     operations = [
-        {"name": "op_a", "time_ms": 10.0, "efficiency": {"efficiency_percent": 120.0, "is_anomaly": True}},
+        {
+            "name": "op_a",
+            "time_ms": 10.0,
+            "efficiency": {"efficiency_percent": 120.0, "is_anomaly": True},
+        },
     ]
     estimates = compute_impact_estimates(operations, "gemm")
     assert len(estimates) == 0
@@ -186,7 +225,15 @@ def test_compute_impact_estimates_excludes_anomaly():
 
 def test_compute_impact_estimates_min_savings():
     operations = [
-        {"name": "op_a", "time_ms": 1.0, "efficiency": {"efficiency_percent": 50.0, "is_anomaly": False, "bound_type": "compute"}},
+        {
+            "name": "op_a",
+            "time_ms": 1.0,
+            "efficiency": {
+                "efficiency_percent": 50.0,
+                "is_anomaly": False,
+                "bound_type": "compute",
+            },
+        },
     ]
     estimates = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1)
     assert len(estimates) == 1
@@ -199,7 +246,9 @@ def test_compute_impact_estimates_min_savings():
 
 
 def test_generate_plot_data(output_dir_with_manifest_and_metrics):
-    out_path = generate_plot_data(output_dir_with_manifest_and_metrics, max_recommendations=3)
+    out_path = generate_plot_data(
+        output_dir_with_manifest_and_metrics, max_recommendations=3
+    )
     assert os.path.isfile(out_path)
     assert out_path.endswith("plot_data.json")
 
@@ -286,7 +335,11 @@ def test_calculate_time_metrics(output_dir_with_category_data):
 
 def test_build_operation_metrics(output_dir_with_category_data):
     df, meta = load_category_data(output_dir_with_category_data, "gemm")
-    config = {"efficiency_method": "auto", "extra_fields": [], "operation_classifier": None}
+    config = {
+        "efficiency_method": "auto",
+        "extra_fields": [],
+        "operation_classifier": None,
+    }
     ops = build_operation_metrics(df, meta, config)
     assert len(ops) == 2
     for o in ops:
@@ -299,13 +352,16 @@ def test_build_operation_metrics(output_dir_with_category_data):
 # ----- Unit tests: classify_other_operation -----
 
 
-@pytest.mark.parametrize("op_name,expected", [
-    ("ncclKernel_AllReduce", "communication"),
-    ("rcclBroadcast", "communication"),
-    ("hipGraphLaunch", "graph"),
-    ("cudaGraphLaunch", "graph"),
-    ("aten::copy_", "miscellaneous"),
-])
+@pytest.mark.parametrize(
+    "op_name,expected",
+    [
+        ("ncclKernel_AllReduce", "communication"),
+        ("rcclBroadcast", "communication"),
+        ("hipGraphLaunch", "graph"),
+        ("cudaGraphLaunch", "graph"),
+        ("aten::copy_", "miscellaneous"),
+    ],
+)
 def test_classify_other_operation(op_name, expected):
     assert classify_other_operation(op_name) == expected
 
@@ -347,34 +403,48 @@ def minimal_perf_report_csvs(tmp_path):
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir(parents=True)
 
-    gpu_timeline = pd.DataFrame({
-        "type": [
-            "total_time", "computation_time", "exposed_comm_time", "exposed_memcpy_time",
-            "idle_time", "busy_time", "total_comm_time", "total_memcpy_time",
-        ],
-        "time ms": [1000.0, 998.0, 0.5, 0.1, 2.0, 998.5, 50.0, 1.0],
-        "percent": [100.0, 99.8, 0.05, 0.01, 0.2, 99.85, 5.0, 0.1],
-    })
+    gpu_timeline = pd.DataFrame(
+        {
+            "type": [
+                "total_time",
+                "computation_time",
+                "exposed_comm_time",
+                "exposed_memcpy_time",
+                "idle_time",
+                "busy_time",
+                "total_comm_time",
+                "total_memcpy_time",
+            ],
+            "time ms": [1000.0, 998.0, 0.5, 0.1, 2.0, 998.5, 50.0, 1.0],
+            "percent": [100.0, 99.8, 0.05, 0.01, 0.2, 99.85, 5.0, 0.1],
+        }
+    )
     gpu_timeline.to_csv(csv_dir / "gpu_timeline.csv", index=False)
 
-    ops_summary = pd.DataFrame({
-        "name": ["aten::mm", "flash_attn::_flash_attn_forward"],
-        "total_direct_kernel_time_sum": [800_000, 100_000],
-        "Count": [10, 2],
-        "Categories": ["{'GEMM'}", "{'SDPA_fwd'}"],
-        "total_direct_kernel_time_ms": [800.0, 100.0],
-        "Percentage (%)": [80.0, 10.0],
-        "Cumulative Percentage (%)": [80.0, 90.0],
-    })
+    ops_summary = pd.DataFrame(
+        {
+            "name": ["aten::mm", "flash_attn::_flash_attn_forward"],
+            "total_direct_kernel_time_sum": [800_000, 100_000],
+            "Count": [10, 2],
+            "Categories": ["{'GEMM'}", "{'SDPA_fwd'}"],
+            "total_direct_kernel_time_ms": [800.0, 100.0],
+            "Percentage (%)": [80.0, 10.0],
+            "Cumulative Percentage (%)": [80.0, 90.0],
+        }
+    )
     if "Kernel Time (µs)_sum" not in ops_summary.columns:
-        ops_summary["Kernel Time (µs)_sum"] = ops_summary["total_direct_kernel_time_sum"] / 1000
+        ops_summary["Kernel Time (µs)_sum"] = (
+            ops_summary["total_direct_kernel_time_sum"] / 1000
+        )
     ops_summary.to_csv(csv_dir / "ops_summary.csv", index=False)
 
-    unified = pd.DataFrame({
-        "op category": ["GEMM", "SDPA_fwd"],
-        "Kernel Time (µs)_sum": [800_000, 100_000],
-        "Count": [10, 2],
-    })
+    unified = pd.DataFrame(
+        {
+            "op category": ["GEMM", "SDPA_fwd"],
+            "Kernel Time (µs)_sum": [800_000, 100_000],
+            "Count": [10, 2],
+        }
+    )
     unified.to_csv(csv_dir / "unified_perf_summary.csv", index=False)
 
     return str(tmp_path)
@@ -386,6 +456,7 @@ def test_orchestrator_prepare_steps_2_3_require_csvs(minimal_perf_report_csvs):
     unless we have a trace. So we test that the CSV layout we provide is valid for reading.
     """
     import pandas as pd
+
     csv_dir = os.path.join(minimal_perf_report_csvs, "perf_report_csvs")
     gpu = pd.read_csv(os.path.join(csv_dir, "gpu_timeline.csv"))
     assert "type" in gpu.columns and "time ms" in gpu.columns
@@ -406,6 +477,7 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
         pytest.skip("gemm_analysis.py not found")
 
     import subprocess
+
     env = os.environ.copy()
     env["PYTHONPATH"] = REPO_ROOT
     result = subprocess.run(
@@ -418,7 +490,9 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     )
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
 
-    metrics_path = os.path.join(output_dir_with_category_data, "category_data", "gemm_metrics.json")
+    metrics_path = os.path.join(
+        output_dir_with_category_data, "category_data", "gemm_metrics.json"
+    )
     assert os.path.isfile(metrics_path)
     with open(metrics_path) as f:
         m = json.load(f)
