@@ -280,32 +280,46 @@ def _build_two_cpu_op_trace(
     siblings; their GPU kernels may overlap on different streams."""
     corr_a, corr_b = 100, 200
     return [
+        _mk_event("cpu_op", "parent_op", ts=800, dur=500, pid=100, tid=100, args={}),
+        _mk_event("cpu_op", "aten::mm", ts=810, dur=20, pid=100, tid=100, args={}),
         _mk_event(
-            "cpu_op", "parent_op", ts=800, dur=500, pid=100, tid=100, args={}
+            "cuda_runtime",
+            "hipLaunchKernel",
+            ts=815,
+            dur=5,
+            pid=100,
+            tid=100,
+            args={"correlation": corr_a},
         ),
         _mk_event(
-            "cpu_op", "aten::mm", ts=810, dur=20, pid=100, tid=100, args={}
-        ),
-        _mk_event(
-            "cuda_runtime", "hipLaunchKernel", ts=815, dur=5,
-            pid=100, tid=100, args={"correlation": corr_a},
-        ),
-        _mk_event(
-            "kernel", "gemm_kernel", ts=kernel_a_ts, dur=kernel_a_dur,
-            pid=0, tid=stream_a, args={"correlation": corr_a, "stream": stream_a},
+            "kernel",
+            "gemm_kernel",
+            ts=kernel_a_ts,
+            dur=kernel_a_dur,
+            pid=0,
+            tid=stream_a,
+            args={"correlation": corr_a, "stream": stream_a},
         ),
         _mk_ac2g(corr_a, pid=0, tid=stream_a, ts=kernel_a_ts, phase="s"),
         _mk_ac2g(corr_a, pid=0, tid=stream_a, ts=kernel_a_ts, phase="f"),
+        _mk_event("cpu_op", "aten::add", ts=840, dur=20, pid=100, tid=100, args={}),
         _mk_event(
-            "cpu_op", "aten::add", ts=840, dur=20, pid=100, tid=100, args={}
+            "cuda_runtime",
+            "hipLaunchKernel",
+            ts=845,
+            dur=5,
+            pid=100,
+            tid=100,
+            args={"correlation": corr_b},
         ),
         _mk_event(
-            "cuda_runtime", "hipLaunchKernel", ts=845, dur=5,
-            pid=100, tid=100, args={"correlation": corr_b},
-        ),
-        _mk_event(
-            "kernel", "add_kernel", ts=kernel_b_ts, dur=kernel_b_dur,
-            pid=0, tid=stream_b, args={"correlation": corr_b, "stream": stream_b},
+            "kernel",
+            "add_kernel",
+            ts=kernel_b_ts,
+            dur=kernel_b_dur,
+            pid=0,
+            tid=stream_b,
+            args={"correlation": corr_b, "stream": stream_b},
         ),
         _mk_ac2g(corr_b, pid=0, tid=stream_b, ts=kernel_b_ts, phase="s"),
         _mk_ac2g(corr_b, pid=0, tid=stream_b, ts=kernel_b_ts, phase="f"),
@@ -342,8 +356,10 @@ class TestOverlapPctInKernelLaunchers:
         Top-level overlap_pct same (single kernel per launcher).
         """
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1050, kernel_b_dur=150,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1050,
+            kernel_b_dur=150,
         )
         launchers = _build_analyzer_and_launchers(events)
 
@@ -359,7 +375,9 @@ class TestOverlapPctInKernelLaunchers:
         assert add["overlapping_kernels_details"] is not None
         assert len(add["overlapping_kernels_details"]) == 1
         assert add["overlapping_kernels_details"][0]["name"] == "gemm_kernel"
-        assert add["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(0.33)
+        assert add["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(
+            0.33
+        )
         assert add["overlap_pct"] == pytest.approx(0.33)
 
     def test_full_containment(self):
@@ -372,16 +390,22 @@ class TestOverlapPctInKernelLaunchers:
         B's overlap_pct = 50/50  = 1.0
         """
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=200,
-            kernel_b_ts=1050, kernel_b_dur=50,
+            kernel_a_ts=1000,
+            kernel_a_dur=200,
+            kernel_b_ts=1050,
+            kernel_b_dur=50,
         )
         launchers = _build_analyzer_and_launchers(events)
 
         mm = _get_launcher_by_name(launchers, "aten::mm")
         add = _get_launcher_by_name(launchers, "aten::add")
 
-        assert mm["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(0.25)
-        assert add["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(1.0)
+        assert mm["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(
+            0.25
+        )
+        assert add["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(
+            1.0
+        )
 
     def test_no_overlap(self):
         """Non-overlapping kernels -> overlapping_kernels_details is None.
@@ -390,8 +414,10 @@ class TestOverlapPctInKernelLaunchers:
         kernel B: [1200, 1300]
         """
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1200, kernel_b_dur=100,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1200,
+            kernel_b_dur=100,
         )
         launchers = _build_analyzer_and_launchers(events)
 
@@ -411,8 +437,10 @@ class TestOverlapPctInKernelLaunchers:
         overlap = 100µs -> pct = 1.0 for both
         """
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1000, kernel_b_dur=100,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1000,
+            kernel_b_dur=100,
         )
         launchers = _build_analyzer_and_launchers(events)
 
@@ -420,7 +448,9 @@ class TestOverlapPctInKernelLaunchers:
         add = _get_launcher_by_name(launchers, "aten::add")
 
         assert mm["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(1.0)
-        assert add["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(1.0)
+        assert add["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(
+            1.0
+        )
 
     def test_touching_at_boundary(self):
         """Kernels touch at boundary -> NOT overlapping.
@@ -430,8 +460,10 @@ class TestOverlapPctInKernelLaunchers:
         No temporal overlap -> no overlapping_kernels_details.
         """
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1100, kernel_b_dur=100,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1100,
+            kernel_b_dur=100,
         )
         launchers = _build_analyzer_and_launchers(events)
 
@@ -452,37 +484,69 @@ class TestOverlapPctInKernelLaunchers:
         """
         corr_a, corr_b, corr_c = 100, 200, 300
         events = [
-            _mk_event("cpu_op", "parent_op", ts=700, dur=500, pid=100, tid=100, args={}),
+            _mk_event(
+                "cpu_op", "parent_op", ts=700, dur=500, pid=100, tid=100, args={}
+            ),
             _mk_event("cpu_op", "op_A", ts=710, dur=20, pid=100, tid=100, args={}),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=715, dur=5,
-                pid=100, tid=100, args={"correlation": corr_a},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=715,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_a},
             ),
             _mk_event(
-                "kernel", "kernel_A", ts=1000, dur=200,
-                pid=0, tid=7, args={"correlation": corr_a, "stream": 7},
+                "kernel",
+                "kernel_A",
+                ts=1000,
+                dur=200,
+                pid=0,
+                tid=7,
+                args={"correlation": corr_a, "stream": 7},
             ),
             _mk_ac2g(corr_a, pid=0, tid=7, ts=1000, phase="s"),
             _mk_ac2g(corr_a, pid=0, tid=7, ts=1000, phase="f"),
             _mk_event("cpu_op", "op_B", ts=740, dur=20, pid=100, tid=100, args={}),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=745, dur=5,
-                pid=100, tid=100, args={"correlation": corr_b},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=745,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_b},
             ),
             _mk_event(
-                "kernel", "kernel_B", ts=1050, dur=50,
-                pid=0, tid=8, args={"correlation": corr_b, "stream": 8},
+                "kernel",
+                "kernel_B",
+                ts=1050,
+                dur=50,
+                pid=0,
+                tid=8,
+                args={"correlation": corr_b, "stream": 8},
             ),
             _mk_ac2g(corr_b, pid=0, tid=8, ts=1050, phase="s"),
             _mk_ac2g(corr_b, pid=0, tid=8, ts=1050, phase="f"),
             _mk_event("cpu_op", "op_C", ts=770, dur=20, pid=100, tid=100, args={}),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=775, dur=5,
-                pid=100, tid=100, args={"correlation": corr_c},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=775,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_c},
             ),
             _mk_event(
-                "kernel", "kernel_C", ts=1150, dur=100,
-                pid=0, tid=9, args={"correlation": corr_c, "stream": 9},
+                "kernel",
+                "kernel_C",
+                ts=1150,
+                dur=100,
+                pid=0,
+                tid=9,
+                args={"correlation": corr_c, "stream": 9},
             ),
             _mk_ac2g(corr_c, pid=0, tid=9, ts=1150, phase="s"),
             _mk_ac2g(corr_c, pid=0, tid=9, ts=1150, phase="f"),
@@ -518,33 +582,63 @@ class TestOverlapPctInKernelLaunchers:
             _mk_event("cpu_op", "parent_op", ts=800, dur=500, pid=100, tid=100),
             _mk_event("cpu_op", "op_A", ts=810, dur=30, pid=100, tid=100),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=812, dur=5,
-                pid=100, tid=100, args={"correlation": corr_a1},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=812,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_a1},
             ),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=820, dur=5,
-                pid=100, tid=100, args={"correlation": corr_a2},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=820,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_a2},
             ),
             _mk_event(
-                "kernel", "kernel_A1", ts=1000, dur=100,
-                pid=0, tid=7, args={"correlation": corr_a1, "stream": 7},
+                "kernel",
+                "kernel_A1",
+                ts=1000,
+                dur=100,
+                pid=0,
+                tid=7,
+                args={"correlation": corr_a1, "stream": 7},
             ),
             _mk_ac2g(corr_a1, pid=0, tid=7, ts=1000, phase="s"),
             _mk_ac2g(corr_a1, pid=0, tid=7, ts=1000, phase="f"),
             _mk_event(
-                "kernel", "kernel_A2", ts=1200, dur=100,
-                pid=0, tid=7, args={"correlation": corr_a2, "stream": 7},
+                "kernel",
+                "kernel_A2",
+                ts=1200,
+                dur=100,
+                pid=0,
+                tid=7,
+                args={"correlation": corr_a2, "stream": 7},
             ),
             _mk_ac2g(corr_a2, pid=0, tid=7, ts=1200, phase="s"),
             _mk_ac2g(corr_a2, pid=0, tid=7, ts=1200, phase="f"),
             _mk_event("cpu_op", "op_B", ts=850, dur=20, pid=100, tid=100),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=855, dur=5,
-                pid=100, tid=100, args={"correlation": corr_b},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=855,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_b},
             ),
             _mk_event(
-                "kernel", "kernel_B", ts=1050, dur=100,
-                pid=0, tid=8, args={"correlation": corr_b, "stream": 8},
+                "kernel",
+                "kernel_B",
+                ts=1050,
+                dur=100,
+                pid=0,
+                tid=8,
+                args={"correlation": corr_b, "stream": 8},
             ),
             _mk_ac2g(corr_b, pid=0, tid=8, ts=1050, phase="s"),
             _mk_ac2g(corr_b, pid=0, tid=8, ts=1050, phase="f"),
@@ -558,7 +652,9 @@ class TestOverlapPctInKernelLaunchers:
         assert op_a["overlapping_kernels_details"] is not None
         assert len(op_a["overlapping_kernels_details"]) == 1
         assert op_a["overlapping_kernels_details"][0]["name"] == "kernel_B"
-        assert op_a["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(0.25)
+        assert op_a["overlapping_kernels_details"][0]["overlap_pct"] == pytest.approx(
+            0.25
+        )
         assert op_a["overlap_pct"] == pytest.approx(0.25)
 
         assert op_b["overlapping_kernels_details"] is not None
@@ -587,33 +683,63 @@ class TestOverlapPctInKernelLaunchers:
             _mk_event("cpu_op", "parent_op", ts=800, dur=500, pid=100, tid=100),
             _mk_event("cpu_op", "op_A", ts=810, dur=30, pid=100, tid=100),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=812, dur=5,
-                pid=100, tid=100, args={"correlation": corr_a1},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=812,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_a1},
             ),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=820, dur=5,
-                pid=100, tid=100, args={"correlation": corr_a2},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=820,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_a2},
             ),
             _mk_event(
-                "kernel", "kernel_A1", ts=1000, dur=100,
-                pid=0, tid=7, args={"correlation": corr_a1, "stream": 7},
+                "kernel",
+                "kernel_A1",
+                ts=1000,
+                dur=100,
+                pid=0,
+                tid=7,
+                args={"correlation": corr_a1, "stream": 7},
             ),
             _mk_ac2g(corr_a1, pid=0, tid=7, ts=1000, phase="s"),
             _mk_ac2g(corr_a1, pid=0, tid=7, ts=1000, phase="f"),
             _mk_event(
-                "kernel", "kernel_A2", ts=1200, dur=100,
-                pid=0, tid=7, args={"correlation": corr_a2, "stream": 7},
+                "kernel",
+                "kernel_A2",
+                ts=1200,
+                dur=100,
+                pid=0,
+                tid=7,
+                args={"correlation": corr_a2, "stream": 7},
             ),
             _mk_ac2g(corr_a2, pid=0, tid=7, ts=1200, phase="s"),
             _mk_ac2g(corr_a2, pid=0, tid=7, ts=1200, phase="f"),
             _mk_event("cpu_op", "op_B", ts=850, dur=20, pid=100, tid=100),
             _mk_event(
-                "cuda_runtime", "hipLaunchKernel", ts=855, dur=5,
-                pid=100, tid=100, args={"correlation": corr_b},
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=855,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr_b},
             ),
             _mk_event(
-                "kernel", "kernel_B", ts=1050, dur=200,
-                pid=0, tid=8, args={"correlation": corr_b, "stream": 8},
+                "kernel",
+                "kernel_B",
+                ts=1050,
+                dur=200,
+                pid=0,
+                tid=8,
+                args={"correlation": corr_b, "stream": 8},
             ),
             _mk_ac2g(corr_b, pid=0, tid=8, ts=1050, phase="s"),
             _mk_ac2g(corr_b, pid=0, tid=8, ts=1050, phase="f"),
@@ -640,8 +766,10 @@ class TestOverlapPctDataFrameColumn:
     def test_overlap_pct_in_df_kernel_launchers(self):
         """overlap_pct should be a column; rounded to hundredths."""
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1050, kernel_b_dur=150,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1050,
+            kernel_b_dur=150,
         )
         tree = TraceToTree(deepcopy(events))
         analyzer = TreePerfAnalyzer(tree, add_python_func=False)
@@ -657,8 +785,10 @@ class TestOverlapPctDataFrameColumn:
     def test_overlap_pct_blank_when_no_overlap(self):
         """overlap_pct should be NaN in the DataFrame when no overlapping kernels."""
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1200, kernel_b_dur=100,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1200,
+            kernel_b_dur=100,
         )
         tree = TraceToTree(deepcopy(events))
         analyzer = TreePerfAnalyzer(tree, add_python_func=False)
@@ -672,8 +802,10 @@ class TestOverlapPctDataFrameColumn:
     def test_overlap_pct_in_unique_args_kl_overlap(self):
         """overlap_pct should survive aggregation in get_df_kernel_launchers_unique_args."""
         events = _build_two_cpu_op_trace(
-            kernel_a_ts=1000, kernel_a_dur=100,
-            kernel_b_ts=1050, kernel_b_dur=150,
+            kernel_a_ts=1000,
+            kernel_a_dur=100,
+            kernel_b_ts=1050,
+            kernel_b_dur=150,
         )
         tree = TraceToTree(deepcopy(events))
         analyzer = TreePerfAnalyzer(tree, add_python_func=False)
@@ -684,4 +816,6 @@ class TestOverlapPctDataFrameColumn:
         )
 
         overlap_cols = [c for c in df_agg.columns if "overlap_pct" in c]
-        assert len(overlap_cols) > 0, f"No overlap_pct column found. Columns: {list(df_agg.columns)}"
+        assert (
+            len(overlap_cols) > 0
+        ), f"No overlap_pct column found. Columns: {list(df_agg.columns)}"
