@@ -726,7 +726,7 @@ generate_plot_data('<output_dir>')
 
 **If using venv (local):**
 ```bash
-PYTHONPATH=<TRACE_REPO> <venv_path>/bin/python3 -c "
+<venv_path>/bin/python3 -c "
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
 generate_plot_data('<output_dir>')
 "
