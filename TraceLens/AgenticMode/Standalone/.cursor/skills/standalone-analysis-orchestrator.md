@@ -32,7 +32,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Node, Container)
+0. Query User Inputs (Platform, Trace Path, Node/Container or Venv)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
@@ -64,22 +64,29 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      4. **MI355X**
      5. **MI400**
 
-3. **Node Name**
-   - Ask: "Which Node should we use for analysis?"
+3. **Execution environment** (choose one)
 
-4. **Container Name**
-   - Ask: "Which Docker container has TraceLens installed?"
+   **Option A — Docker container (remote or local node)**  
+   - Ask: "Which Node should we use for analysis?" (hostname for SSH; use `localhost` if the container runs on the same machine.)
+   - Ask: "Which Docker container has TraceLens installed?" (container name or ID.)
 
-5. **Output Directory** (Optional)
+   **Option B — venv**  
+   - Ask: "Which Python venv should we use for analysis? (e.g. `venv_tracelens` or full path like `/home/user/venv_tracelens`)"  
+   - When using a venv, all commands run where the venv is. Node and container are not used. Ensure the venv has TraceLens installed (e.g. `pip install -e .` from the TraceLens repo) and that the trace path and output directory are accessible from the current machine.
+
+4. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+**Execution mode:** Record whether the user chose **container** (node + container) or **venv**. Use this in all steps below to run commands either via `ssh <node> "docker exec <container> ..."` or via `<venv_path>/bin/python` / `<venv_path>/bin/TraceLens_...` with `PYTHONPATH` set to the TraceLens repo root when needed.
 
 ---
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI in the container:
+Execute TraceLens CLI using the chosen execution environment:
 
+**If using Docker container:**
 ```bash
 ssh <node> "docker exec <container> \
   TraceLens_generate_perf_report_pytorch \
@@ -87,6 +94,16 @@ ssh <node> "docker exec <container> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --enable_pseudo_ops"
+```
+
+**If using venv (local):**  
+Set `TRACE_REPO` to the path of the TraceLens repo (e.g. the directory containing `TraceLens/` and `setup.py`). Then:
+```bash
+PYTHONPATH=<TRACE_REPO> <venv_path>/bin/TraceLens_generate_perf_report_pytorch \
+  --profile_json_path <trace_path> \
+  --output_xlsx_path <output_dir>/perf_report.xlsx \
+  --output_csvs_dir <output_dir>/perf_report_csvs \
+  --enable_pseudo_ops
 ```
 
 This generates:
@@ -97,14 +114,24 @@ This generates:
 
 ## Steps 2-5: Prepare Category Data
 
-Execute the TraceLens Agentic Mode orchestrator preparation script in the container:
+Execute the TraceLens Agentic Mode orchestrator preparation script using the chosen execution environment:
 
+**If using Docker container:**
 ```bash
 ssh <node> "docker exec <container> python3 \
   TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir>"
+```
+
+**If using venv (local):**
+```bash
+PYTHONPATH=<TRACE_REPO> <venv_path>/bin/python3 \
+  <TRACE_REPO>/TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
+  --trace-path <trace_path> \
+  --platform <platform> \
+  --output-dir <output_dir>
 ```
 
 This script performs:
@@ -203,8 +230,9 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Node: <node> (omit if using venv)
+- Container: <container> (omit if using venv)
+- Venv: <venv_path> (omit if using container)
 - Input files: <list from agent file's "Input files" section>
 - Output file: <from agent file's "Output file" section>
 
@@ -212,7 +240,7 @@ Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script inside the container on the node
+1. Running its Python script inside the container on the node, or locally with the venv
 2. Reading the metrics JSON output
 3. Identifying issues and generating findings
 
@@ -293,8 +321,9 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Node: <node> (omit if using venv)
+- Container: <container> (omit if using venv)
+- Venv: <venv_path> (omit if using container)
 - Input files: category_data/<category>_ops.csv, metadata/<category>_metadata.json,
   category_data/<category>_tree_data.json (if available)
 - Output file: category_findings/<category>_findings.md
@@ -673,19 +702,34 @@ After aggregating all recommendations (Step 9), generate a matplotlib performanc
 
 ### 9.5.1 Ensure matplotlib is available
 
+**If using Docker container:**
 ```bash
 ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null || docker exec <container> pip install matplotlib"
+```
+
+**If using venv (local):**
+```bash
+<venv_path>/bin/python3 -c 'import matplotlib' 2>/dev/null || <venv_path>/bin/pip install matplotlib
 ```
 
 ### 9.5.2 Generate plot_data.json (Deterministic)
 
 Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
 
+**If using Docker container:**
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
 generate_plot_data('<output_dir>')
 \""
+```
+
+**If using venv (local):**
+```bash
+PYTHONPATH=<TRACE_REPO> <venv_path>/bin/python3 -c "
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
+generate_plot_data('<output_dir>')
+"
 ```
 
 This produces `<output_dir>/plot_data.json` containing:
@@ -722,10 +766,16 @@ for rec in recommendations:
 
 ### 9.5.4 Generate and Run Plot Script
 
-Generate a Python script and run it inside the container. The script produces `<output_dir>/perf_improvement.svg`.
+Generate a Python script and run it using the chosen execution environment. The script produces `<output_dir>/perf_improvement.svg`.
 
+**If using Docker container:**
 ```bash
 ssh <node> "docker exec <container> python3 <output_dir>/generate_plot.py"
+```
+
+**If using venv (local):**
+```bash
+<venv_path>/bin/python3 <output_dir>/generate_plot.py
 ```
 
 **Plot script template** (write to `<output_dir>/generate_plot.py`, then execute).
@@ -795,8 +845,14 @@ print(f'Plot saved to {output_path}')
 
 ### 9.5.5 Verify Plot Output
 
+**If using Docker container:**
 ```bash
 ssh <node> "docker exec <container> test -f <output_dir>/perf_improvement.svg && echo 'Plot generated successfully' || echo 'ERROR: Plot generation failed'"
+```
+
+**If using venv (local):**
+```bash
+test -f <output_dir>/perf_improvement.svg && echo 'Plot generated successfully' || echo 'ERROR: Plot generation failed'
 ```
 
 If the plot fails, proceed to Step 10 without the plot and note the failure in the report.
@@ -1081,4 +1137,4 @@ tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'
 5. **Composable reports** - System-Level and Compute Kernel sections can stand alone as independent deliverables
 6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1). Icons follow priority number: System 🔴→🟡→🟢, Compute 🔴→🟡→🟢
 7. **Handle errors gracefully** - Failed analyses go to Warnings, not manual analysis
-8. **Performance plot** - Step 9.5 generates `perf_improvement.svg` from Impact Summary tables; if matplotlib is missing, install it in the container first
+8. **Performance plot** - Step 9.5 generates `perf_improvement.svg` from Impact Summary tables; if matplotlib is missing, install it in the container or venv first
