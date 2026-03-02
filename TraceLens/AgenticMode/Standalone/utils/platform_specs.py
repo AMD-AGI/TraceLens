@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Platform specifications and category mappings for TraceLens AgenticMode analysis.
 
 Platform specs use the TraceLens arch dict format with max_achievable_tflops
@@ -43,7 +49,7 @@ PLATFORM_SPECS = {
             "vector_fp16": 194,
             "vector_bf16": 194,
             "vector_fp32": 97,
-            "vector_fp64": 48
+            "vector_fp64": 48,
         },
     },
     "MI350X": {
@@ -60,7 +66,7 @@ PLATFORM_SPECS = {
             "vector_fp16": 194,
             "vector_bf16": 194,
             "vector_fp32": 97,
-            "vector_fp64": 48
+            "vector_fp64": 48,
         },
     },
     "MI355X": {
@@ -79,7 +85,7 @@ PLATFORM_SPECS = {
             "vector_fp16": 274,
             "vector_bf16": 274,
             "vector_fp32": 137,
-            "vector_fp64": 68
+            "vector_fp64": 68,
         },
     },
     "MI400": {
@@ -113,5 +119,5 @@ CATEGORY_SKILL_MAP = {
     "triton": "triton-analysis",
     "norm": "norm-analysis",
     "convolution": "convolution-analysis",
-    "other": "generic-op-analysis"
+    "other": "generic-op-analysis",
 }

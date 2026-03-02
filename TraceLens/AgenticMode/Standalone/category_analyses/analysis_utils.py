@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Shared utilities for category-specific analysis scripts.
 
@@ -24,65 +30,69 @@ import pandas as pd
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
     Load CSV operations data and metadata JSON for a category.
-    
+
     Args:
         output_dir: Base output directory path
         category: Category name (e.g., 'gemm', 'sdpa_fwd', 'elementwise')
-        
+
     Returns:
         Tuple of (operations DataFrame, metadata dict)
-        
+
     Raises:
         FileNotFoundError: If required files don't exist
     """
-    csv_path = f'{output_dir}/category_data/{category}_ops.csv'
-    metadata_path = f'{output_dir}/metadata/{category}_metadata.json'
-    
+    csv_path = f"{output_dir}/category_data/{category}_ops.csv"
+    metadata_path = f"{output_dir}/metadata/{category}_metadata.json"
+
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Category CSV not found: {csv_path}")
-    
+
     ops_df = pd.read_csv(csv_path)
-    
-    with open(metadata_path, 'r') as f:
+
+    with open(metadata_path, "r") as f:
         metadata = json.load(f)
-    
+
     return ops_df, metadata
 
 
 def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
     """
     Calculate total time and percentage of compute for a category.
-    
+
     Args:
         ops_df: Operations DataFrame with 'Kernel Time (µs)_sum' column
         metadata: Metadata dict with gpu_utilization info
-        
+
     Returns:
         Dict with total_time_ms, percent_of_compute, operation_count
     """
-    if 'Kernel Time (µs)_sum' in ops_df.columns:
-        total_time_us = ops_df['Kernel Time (µs)_sum'].sum()
+    if "Kernel Time (µs)_sum" in ops_df.columns:
+        total_time_us = ops_df["Kernel Time (µs)_sum"].sum()
         total_time_ms = total_time_us / 1000
-        total_compute_ms = metadata.get('gpu_utilization', {}).get('total_time_ms', 1)
-        percent_of_compute = (total_time_ms / total_compute_ms) * 100 if total_compute_ms > 0 else 0
+        total_compute_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 1)
+        percent_of_compute = (
+            (total_time_ms / total_compute_ms) * 100 if total_compute_ms > 0 else 0
+        )
     else:
         total_time_ms = 0
         percent_of_compute = 0
-    
+
     return {
-        'total_time_ms': round(total_time_ms, 3),
-        'percent_of_compute': round(percent_of_compute, 2),
-        'operation_count': len(ops_df)
+        "total_time_ms": round(total_time_ms, 3),
+        "percent_of_compute": round(percent_of_compute, 2),
+        "operation_count": len(ops_df),
     }
 
 
-def validate_efficiency(achieved: float, peak: float, metric_name: str) -> Dict[str, Any]:
+def validate_efficiency(
+    achieved: float, peak: float, metric_name: str
+) -> Dict[str, Any]:
     """
     Validate efficiency calculation and flag anomalies.
 
     Efficiency values > 100% indicate measurement issues or incorrect peak specs.
     These should be flagged as anomalies, not used to claim "excellent performance".
-    
+
     Args:
         achieved: Achieved performance value (TFLOPS or TB/s)
         peak: Peak performance value (TFLOPS or TB/s)
@@ -98,111 +108,98 @@ def validate_efficiency(achieved: float, peak: float, metric_name: str) -> Dict[
         return {
             "value": None,
             "warning": f"{metric_name}: Invalid peak value ({peak})",
-            "is_anomaly": True
+            "is_anomaly": True,
         }
-    
+
     if achieved is None or np.isnan(achieved):
-        return {
-            "value": None,
-            "warning": None,
-            "is_anomaly": False
-        }
-    
+        return {"value": None, "warning": None, "is_anomaly": False}
+
     efficiency = (achieved / peak) * 100
-    
+
     if efficiency > 110:
         return {
             "value": round(efficiency, 2),
             "warning": f"[ANOMALY] {metric_name} exceeds peak by {efficiency-100:.1f}% - verify measurement or peak spec",
-            "is_anomaly": True
+            "is_anomaly": True,
         }
     elif efficiency > 100:
         return {
             "value": round(efficiency, 2),
             "warning": f"[WARNING] {metric_name} slightly exceeds peak ({efficiency:.1f}%) - may be within measurement error",
-            "is_anomaly": False
+            "is_anomaly": False,
         }
-    
-    return {
-        "value": round(efficiency, 2),
-        "warning": None,
-        "is_anomaly": False
-    }
+
+    return {"value": round(efficiency, 2), "warning": None, "is_anomaly": False}
 
 
 def calculate_efficiency_with_validation(
     achieved_tflops: Optional[float],
     achieved_tbps: Optional[float],
     peak_maf: float,
-    peak_hbm_bw: float
+    peak_hbm_bw: float,
 ) -> Dict[str, Any]:
     """
     Calculate both compute and memory efficiency with validation.
-    
+
     Args:
         achieved_tflops: Achieved TFLOPS
         achieved_tbps: Achieved TB/s
         peak_maf: Peak MAF in TFLOPS
         peak_hbm_bw: Peak HBM bandwidth in TB/s
-        
+
     Returns:
         Dict with efficiency values and any warnings
     """
     compute_result = validate_efficiency(
-        achieved_tflops,
-        peak_maf,
-        "Compute efficiency"
+        achieved_tflops, peak_maf, "Compute efficiency"
     )
-    
-    memory_result = validate_efficiency(
-        achieved_tbps,
-        peak_hbm_bw,
-        "Memory bandwidth"
-    )
-    
+
+    memory_result = validate_efficiency(achieved_tbps, peak_hbm_bw, "Memory bandwidth")
+
     warnings = []
-    if compute_result['warning']:
-        warnings.append(compute_result['warning'])
-    if memory_result['warning']:
-        warnings.append(memory_result['warning'])
-    
+    if compute_result["warning"]:
+        warnings.append(compute_result["warning"])
+    if memory_result["warning"]:
+        warnings.append(memory_result["warning"])
+
     return {
-        "compute_efficiency_pct": compute_result['value'],
-        "compute_is_anomaly": compute_result['is_anomaly'],
-        "memory_efficiency_pct": memory_result['value'],
-        "memory_is_anomaly": memory_result['is_anomaly'],
-        "warnings": warnings if warnings else None
+        "compute_efficiency_pct": compute_result["value"],
+        "compute_is_anomaly": compute_result["is_anomaly"],
+        "memory_efficiency_pct": memory_result["value"],
+        "memory_is_anomaly": memory_result["is_anomaly"],
+        "warnings": warnings if warnings else None,
     }
 
 
 def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> float:
     """Resolve the correct peak MAF for an operation using Compute Spec.
-    
+
     Tier 2 of the 3-tier efficiency fallback: uses Compute Spec column
     to look up the precision-aware peak from max_achievable_tflops.
     Falls back to matrix_bf16 if Compute Spec is missing or unknown.
     """
-    compute_spec = row.get('Compute Spec', '')
-    if compute_spec and isinstance(compute_spec, str) and compute_spec in max_achievable_tflops:
+    compute_spec = row.get("Compute Spec", "")
+    if (
+        compute_spec
+        and isinstance(compute_spec, str)
+        and compute_spec in max_achievable_tflops
+    ):
         return max_achievable_tflops[compute_spec]
     return fallback_maf
 
 
 def calculate_efficiency(
-    row: pd.Series,
-    peak_hbm_bw: float,
-    peak_maf_or_maf_dict,
-    method: str = 'auto'
+    row: pd.Series, peak_hbm_bw: float, peak_maf_or_maf_dict, method: str = "auto"
 ) -> Dict[str, Optional[float]]:
     """
     Calculate efficiency metrics for an operation with 3-tier fallback:
-    
+
     1. If 'Pct Roofline' exists in CSV row (from TreePerf arch), use it directly.
        This is precision-aware and roofline-correct.
     2. Else if 'Compute Spec' + max_achievable_tflops are available, look up the
        correct peak and compute efficiency manually.
     3. Else fall back to matrix_bf16 peak (legacy behavior).
-    
+
     Args:
         row: DataFrame row with operation metrics
         peak_hbm_bw: Peak HBM bandwidth in TB/s
@@ -210,110 +207,132 @@ def calculate_efficiency(
             (max_achievable_tflops) for precision-aware lookup
         method: Efficiency calculation method:
             - 'memory_bound': Use TB/s only
-            - 'compute_bound': Use TFLOPS/s only  
+            - 'compute_bound': Use TFLOPS/s only
             - 'auto': Use FLOPS/Byte to determine (default)
             - 'prefer_compute': Try TFLOPS first, fall back to TB/s
             - 'prefer_memory': Try TB/s first, fall back to TFLOPS
-            
+
     Returns:
         Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type, warning
     """
     result = {
-        'tflops_achieved': None,
-        'tb_s_achieved': None,
-        'efficiency_percent': None,
-        'bound_type': None,
-        'flops_per_byte': None,
-        'compute_spec': None,
-        'warning': None,
-        'is_anomaly': False
+        "tflops_achieved": None,
+        "tb_s_achieved": None,
+        "efficiency_percent": None,
+        "bound_type": None,
+        "flops_per_byte": None,
+        "compute_spec": None,
+        "warning": None,
+        "is_anomaly": False,
     }
-    
-    flops_byte = row.get('FLOPS/Byte', 0) if not pd.isna(row.get('FLOPS/Byte')) else 0
-    result['flops_per_byte'] = round(flops_byte, 2) if flops_byte else None
-    
-    tflops_s = row.get('TFLOPS/s_mean') if not pd.isna(row.get('TFLOPS/s_mean')) else None
-    tb_s = row.get('TB/s_mean') if not pd.isna(row.get('TB/s_mean')) else None
-    
-    compute_spec = row.get('Compute Spec', '')
+
+    flops_byte = row.get("FLOPS/Byte", 0) if not pd.isna(row.get("FLOPS/Byte")) else 0
+    result["flops_per_byte"] = round(flops_byte, 2) if flops_byte else None
+
+    tflops_s = (
+        row.get("TFLOPS/s_mean") if not pd.isna(row.get("TFLOPS/s_mean")) else None
+    )
+    tb_s = row.get("TB/s_mean") if not pd.isna(row.get("TB/s_mean")) else None
+
+    compute_spec = row.get("Compute Spec", "")
     if compute_spec and isinstance(compute_spec, str):
-        result['compute_spec'] = compute_spec
-    
+        result["compute_spec"] = compute_spec
+
     if tflops_s is not None:
-        result['tflops_achieved'] = round(tflops_s, 2)
+        result["tflops_achieved"] = round(tflops_s, 2)
     if tb_s is not None:
-        result['tb_s_achieved'] = round(tb_s, 2)
-    
+        result["tb_s_achieved"] = round(tb_s, 2)
+
     # --- Tier 1: Use Pct Roofline from TreePerf if available ---
-    pct_roofline = row.get('Pct Roofline')
+    pct_roofline = row.get("Pct Roofline")
     if pct_roofline is not None and not pd.isna(pct_roofline):
-        result['efficiency_percent'] = round(float(pct_roofline), 2)
+        result["efficiency_percent"] = round(float(pct_roofline), 2)
         # Determine bound type from FLOPS/Byte
         if flops_byte > 100:
-            result['bound_type'] = 'compute'
+            result["bound_type"] = "compute"
         elif flops_byte < 50:
-            result['bound_type'] = 'memory'
+            result["bound_type"] = "memory"
         else:
-            result['bound_type'] = 'compute' if tflops_s is not None else 'memory'
+            result["bound_type"] = "compute" if tflops_s is not None else "memory"
         # Check for anomaly
-        if result['efficiency_percent'] > 110:
-            result['warning'] = f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
-            result['is_anomaly'] = True
+        if result["efficiency_percent"] > 110:
+            result["warning"] = (
+                f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
+            )
+            result["is_anomaly"] = True
         return result
-    
+
     # --- Tier 2/3: Manual calculation with precision-aware peak ---
     # Resolve peak_maf: if dict, look up by Compute Spec; if float, use directly
     if isinstance(peak_maf_or_maf_dict, dict):
-        fallback_maf = peak_maf_or_maf_dict.get('matrix_bf16', 1)
+        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
         peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
     else:
         peak_maf = peak_maf_or_maf_dict
-    
+
     # Determine bound type and calculate efficiency with validation
     def set_efficiency_with_validation(achieved, peak, bound_type, metric_name):
         validation = validate_efficiency(achieved, peak, metric_name)
-        result['efficiency_percent'] = validation['value']
-        result['bound_type'] = bound_type
-        result['warning'] = validation['warning']
-        result['is_anomaly'] = validation['is_anomaly']
-    
-    if method == 'memory_bound':
+        result["efficiency_percent"] = validation["value"]
+        result["bound_type"] = bound_type
+        result["warning"] = validation["warning"]
+        result["is_anomaly"] = validation["is_anomaly"]
+
+    if method == "memory_bound":
         if tb_s is not None:
-            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
-    elif method == 'compute_bound':
+            set_efficiency_with_validation(
+                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
+            )
+    elif method == "compute_bound":
         if tflops_s is not None:
-            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
-    elif method == 'auto':
+            set_efficiency_with_validation(
+                tflops_s, peak_maf, "compute", "Compute efficiency"
+            )
+    elif method == "auto":
         if flops_byte > 100 and tflops_s is not None:
-            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
+            set_efficiency_with_validation(
+                tflops_s, peak_maf, "compute", "Compute efficiency"
+            )
         elif flops_byte < 50 and tb_s is not None:
-            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
+            set_efficiency_with_validation(
+                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
+            )
         elif tflops_s is not None:
-            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
+            set_efficiency_with_validation(
+                tflops_s, peak_maf, "compute", "Compute efficiency"
+            )
         elif tb_s is not None:
-            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
-    elif method == 'prefer_compute':
+            set_efficiency_with_validation(
+                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
+            )
+    elif method == "prefer_compute":
         if tflops_s is not None:
-            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
+            set_efficiency_with_validation(
+                tflops_s, peak_maf, "compute", "Compute efficiency"
+            )
         elif tb_s is not None:
-            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
-    elif method == 'prefer_memory':
+            set_efficiency_with_validation(
+                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
+            )
+    elif method == "prefer_memory":
         if tb_s is not None:
-            set_efficiency_with_validation(tb_s, peak_hbm_bw, 'memory', 'Memory bandwidth')
+            set_efficiency_with_validation(
+                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
+            )
         elif tflops_s is not None:
-            set_efficiency_with_validation(tflops_s, peak_maf, 'compute', 'Compute efficiency')
-    
+            set_efficiency_with_validation(
+                tflops_s, peak_maf, "compute", "Compute efficiency"
+            )
+
     return result
 
 
 def build_operation_metrics(
-    ops_df: pd.DataFrame,
-    metadata: dict,
-    category_config: dict
+    ops_df: pd.DataFrame, metadata: dict, category_config: dict
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
-    
+
     Args:
         ops_df: Operations DataFrame
         metadata: Metadata dict with peak performance values
@@ -321,99 +340,99 @@ def build_operation_metrics(
             - efficiency_method: How to calculate efficiency
             - extra_fields: Additional fields to extract (optional)
             - operation_classifier: Function to classify operations (optional)
-            
+
     Returns:
         List of operation metric dicts
     """
-    peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
+    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     # Use max_achievable_tflops dict for precision-aware efficiency;
     # fall back to legacy peak_bf16_maf_tflops for backward compatibility
-    maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
-    efficiency_method = category_config.get('efficiency_method', 'auto')
-    
+    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
+    efficiency_method = category_config.get("efficiency_method", "auto")
+
     # Calculate total time for percentage calculations
     total_time_ms = 0
-    if 'Kernel Time (µs)_sum' in ops_df.columns:
-        total_time_ms = ops_df['Kernel Time (µs)_sum'].sum() / 1000
-    
+    if "Kernel Time (µs)_sum" in ops_df.columns:
+        total_time_ms = ops_df["Kernel Time (µs)_sum"].sum() / 1000
+
     operations = []
-    
+
     # Sort by time descending
-    if 'Kernel Time (µs)_sum' in ops_df.columns:
-        sorted_df = ops_df.nlargest(len(ops_df), 'Kernel Time (µs)_sum')
+    if "Kernel Time (µs)_sum" in ops_df.columns:
+        sorted_df = ops_df.nlargest(len(ops_df), "Kernel Time (µs)_sum")
     else:
         sorted_df = ops_df
-    
+
     for _, row in sorted_df.iterrows():
-        op_name = row.get('name', 'Unknown')
-        count = int(row.get('count', 1))
-        time_ms = row.get('Kernel Time (µs)_sum', 0) / 1000
-        percent_of_category = (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
-        
+        op_name = row.get("name", "Unknown")
+        count = int(row.get("count", 1))
+        time_ms = row.get("Kernel Time (µs)_sum", 0) / 1000
+        percent_of_category = (
+            (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
+        )
+
         # Calculate efficiency (precision-aware via Pct Roofline or Compute Spec)
         efficiency = calculate_efficiency(row, peak_hbm_bw, maf, efficiency_method)
-        
+
         op_metric = {
-            'name': op_name,
-            'count': count,
-            'time_ms': round(time_ms, 3),
-            'percent_of_category': round(percent_of_category, 2),
-            'efficiency': efficiency
+            "name": op_name,
+            "count": count,
+            "time_ms": round(time_ms, 3),
+            "percent_of_category": round(percent_of_category, 2),
+            "efficiency": efficiency,
         }
-        
+
         # Add efficiency warning if present (for anomaly detection)
-        if efficiency.get('warning'):
-            op_metric['efficiency_warning'] = efficiency['warning']
-        
+        if efficiency.get("warning"):
+            op_metric["efficiency_warning"] = efficiency["warning"]
+
         # Add extra fields if specified
-        extra_fields = category_config.get('extra_fields', [])
+        extra_fields = category_config.get("extra_fields", [])
         for field in extra_fields:
             if field in row and not pd.isna(row[field]):
                 op_metric[field] = row[field]
-        
+
         # Apply operation classifier if provided
-        classifier = category_config.get('operation_classifier')
+        classifier = category_config.get("operation_classifier")
         if classifier:
-            op_metric['classification'] = classifier(op_name, row)
-        
+            op_metric["classification"] = classifier(op_name, row)
+
         operations.append(op_metric)
-    
+
     return operations
 
 
 def calculate_average_efficiency(
-    ops_df: pd.DataFrame,
-    peak_hbm_bw: float,
-    peak_maf_or_maf_dict,
-    method: str = 'auto'
+    ops_df: pd.DataFrame, peak_hbm_bw: float, peak_maf_or_maf_dict, method: str = "auto"
 ) -> float:
     """
     Calculate average efficiency across all operations.
-    
+
     Args:
         ops_df: Operations DataFrame
         peak_hbm_bw: Peak HBM bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float (legacy single peak) or a dict
             (max_achievable_tflops) for precision-aware lookup
         method: Efficiency calculation method
-        
+
     Returns:
         Average efficiency percentage
     """
     total_eff = 0
     count = 0
-    
+
     for _, row in ops_df.iterrows():
         eff = calculate_efficiency(row, peak_hbm_bw, peak_maf_or_maf_dict, method)
-        if eff['efficiency_percent'] is not None:
-            total_eff += eff['efficiency_percent']
+        if eff["efficiency_percent"] is not None:
+            total_eff += eff["efficiency_percent"]
             count += 1
-    
+
     return round(total_eff / count, 2) if count > 0 else 0
 
 
-def compute_impact_estimates(operations: List[dict], category: str,
-                             min_savings_ms: float = 0.1) -> List[dict]:
+def compute_impact_estimates(
+    operations: List[dict], category: str, min_savings_ms: float = 0.1
+) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
@@ -430,28 +449,30 @@ def compute_impact_estimates(operations: List[dict], category: str,
     """
     estimates = []
     for op in operations:
-        eff = op.get('efficiency', {})
-        eff_pct = eff.get('efficiency_percent')
-        if eff_pct is None or eff.get('is_anomaly'):
+        eff = op.get("efficiency", {})
+        eff_pct = eff.get("efficiency_percent")
+        if eff_pct is None or eff.get("is_anomaly"):
             continue
-        time_ms = op.get('time_ms', 0)
+        time_ms = op.get("time_ms", 0)
         if time_ms <= 0:
             continue
         savings_ms = time_ms * (1 - eff_pct / 100)
         if savings_ms < min_savings_ms:
             continue
-        confidence = 'high' if time_ms > 5 and eff_pct < 70 else 'medium'
-        estimates.append({
-            'operation': op.get('name', 'Unknown'),
-            'category': category,
-            'type': 'kernel_tuning',
-            'savings_ms': round(savings_ms, 3),
-            'confidence': confidence,
-            'efficiency_pct': round(eff_pct, 2),
-            'bound_type': eff.get('bound_type'),
-            'time_ms': round(time_ms, 3),
-        })
-    return sorted(estimates, key=lambda x: x['savings_ms'], reverse=True)
+        confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
+        estimates.append(
+            {
+                "operation": op.get("name", "Unknown"),
+                "category": category,
+                "type": "kernel_tuning",
+                "savings_ms": round(savings_ms, 3),
+                "confidence": confidence,
+                "efficiency_pct": round(eff_pct, 2),
+                "bound_type": eff.get("bound_type"),
+                "time_ms": round(time_ms, 3),
+            }
+        )
+    return sorted(estimates, key=lambda x: x["savings_ms"], reverse=True)
 
 
 def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
@@ -470,49 +491,58 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
     Returns:
         Path to written plot_data.json
     """
-    category_data_dir = f'{output_dir}/category_data'
-    manifest_path = f'{category_data_dir}/category_manifest.json'
+    category_data_dir = f"{output_dir}/category_data"
+    manifest_path = f"{category_data_dir}/category_manifest.json"
 
-    with open(manifest_path, 'r') as f:
+    with open(manifest_path, "r") as f:
         manifest = json.load(f)
 
-    baseline_ms = manifest.get('gpu_utilization', {}).get('total_time_ms', 0)
+    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
 
     all_estimates: List[dict] = []
     for fname in sorted(os.listdir(category_data_dir)):
-        if not fname.endswith('_metrics.json'):
+        if not fname.endswith("_metrics.json"):
             continue
         fpath = os.path.join(category_data_dir, fname)
-        with open(fpath, 'r') as f:
+        with open(fpath, "r") as f:
             metrics = json.load(f)
-        if metrics.get('status') in ('ERROR', 'NO_DATA'):
+        if metrics.get("status") in ("ERROR", "NO_DATA"):
             continue
-        all_estimates.extend(metrics.get('impact_estimates', []))
+        all_estimates.extend(metrics.get("impact_estimates", []))
 
-    category_savings = defaultdict(lambda: {'savings_ms': 0, 'count': 0, 'ops': []})
+    category_savings = defaultdict(lambda: {"savings_ms": 0, "count": 0, "ops": []})
     for e in all_estimates:
-        if e.get('type') == 'kernel_tuning' and e.get('confidence') in ('high', 'medium'):
-            cat = e['category']
-            category_savings[cat]['savings_ms'] += e['savings_ms']
-            category_savings[cat]['count'] += 1
-            category_savings[cat]['ops'].append(e.get('operation', ''))
+        if e.get("type") == "kernel_tuning" and e.get("confidence") in (
+            "high",
+            "medium",
+        ):
+            cat = e["category"]
+            category_savings[cat]["savings_ms"] += e["savings_ms"]
+            category_savings[cat]["count"] += 1
+            category_savings[cat]["ops"].append(e.get("operation", ""))
 
     plot_recs = sorted(
-        [{'category': cat, 'savings_ms': round(v['savings_ms'], 3),
-          'operation_count': v['count'], 'type': 'kernel_tuning'}
-         for cat, v in category_savings.items()],
-        key=lambda x: x['savings_ms'],
+        [
+            {
+                "category": cat,
+                "savings_ms": round(v["savings_ms"], 3),
+                "operation_count": v["count"],
+                "type": "kernel_tuning",
+            }
+            for cat, v in category_savings.items()
+        ],
+        key=lambda x: x["savings_ms"],
         reverse=True,
     )[:max_recommendations]
 
     plot_data = {
-        'baseline_ms': baseline_ms,
-        'recommendations': plot_recs,
-        'all_estimates': all_estimates,
+        "baseline_ms": baseline_ms,
+        "recommendations": plot_recs,
+        "all_estimates": all_estimates,
     }
 
-    out_path = f'{output_dir}/plot_data.json'
-    with open(out_path, 'w') as f:
+    out_path = f"{output_dir}/plot_data.json"
+    with open(out_path, "w") as f:
         json.dump(plot_data, f, indent=2)
 
     return out_path
@@ -521,230 +551,238 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     """
     Write metrics JSON to category_data folder.
-    
+
     Args:
         metrics: Metrics dict to write
         output_dir: Base output directory
         category: Category name
-        
+
     Returns:
         Path to written file
     """
-    output_path = f'{output_dir}/category_data/{category}_metrics.json'
-    
-    with open(output_path, 'w') as f:
+    output_path = f"{output_dir}/category_data/{category}_metrics.json"
+
+    with open(output_path, "w") as f:
         json.dump(metrics, f, indent=2)
-    
+
     return output_path
 
 
 # Category-specific helper functions
 def detect_quantized_gemm(op_name: str) -> bool:
     """Check if GEMM operation is quantized."""
-    quantized_markers = ['w8a8', 'int8', 'fp8', 'w4a16', 'w4a4', 'fp4', 'mxfp4']
+    quantized_markers = ["w8a8", "int8", "fp8", "w4a16", "w4a4", "fp4", "mxfp4"]
     return any(marker in op_name.lower() for marker in quantized_markers)
 
 
 def detect_flash_attention(op_name: str) -> bool:
     """Check if SDPA operation uses Flash Attention."""
-    flash_markers = ['flash', 'fmha', 'flash_attention', 'flashattn']
+    flash_markers = ["flash", "fmha", "flash_attention", "flashattn"]
     return any(marker in op_name.lower() for marker in flash_markers)
 
 
 def detect_softmax(op_name: str) -> bool:
     """Check if operation is a softmax."""
-    return 'softmax' in op_name.lower()
+    return "softmax" in op_name.lower()
 
 
 def detect_transpose(op_name: str) -> bool:
     """Check if operation is a transpose (layout overhead indicator)."""
-    return 'transpose' in op_name.lower()
+    return "transpose" in op_name.lower()
 
 
 def classify_other_operation(op_name: str) -> str:
     """Classify 'other' category operations."""
     op_lower = op_name.lower()
-    
+
     # Communication operations (vendor-agnostic naming)
-    if any(x in op_lower for x in ['all_reduce', 'collective', 'ncclkernel', 'rccl', 'broadcast', 'allgather']):
-        return 'communication'
-    
+    if any(
+        x in op_lower
+        for x in [
+            "all_reduce",
+            "collective",
+            "ncclkernel",
+            "rccl",
+            "broadcast",
+            "allgather",
+        ]
+    ):
+        return "communication"
+
     # Graph operations
-    if any(x in op_lower for x in ['graph', 'hipgraph', 'cudagraph']):
-        return 'graph'
-    
-    return 'miscellaneous'
+    if any(x in op_lower for x in ["graph", "hipgraph", "cudagraph"]):
+        return "graph"
+
+    return "miscellaneous"
 
 
 def detect_paged_attention(op_name: str, kernel_details: str = None) -> bool:
     """
     Check if SDPA operation uses Paged Attention (vLLM style).
-    
+
     Args:
         op_name: Operation name
         kernel_details: Optional kernel_details_summary string from CSV
-        
+
     Returns:
         True if paged attention is detected
     """
     # Check operation name for vLLM paged attention markers
-    paged_markers = ['unified_attention', 'paged_attention', 'vllm']
+    paged_markers = ["unified_attention", "paged_attention", "vllm"]
     if any(marker in op_name.lower() for marker in paged_markers):
         return True
-    
+
     # Check kernel details for paged attention kernels
     if kernel_details:
-        if 'kernel_paged_attention' in str(kernel_details).lower():
+        if "kernel_paged_attention" in str(kernel_details).lower():
             return True
-        if 'paged_attention_2d' in str(kernel_details).lower():
+        if "paged_attention_2d" in str(kernel_details).lower():
             return True
-    
+
     return False
 
 
 def parse_kernel_breakdown(kernel_details_str: str) -> dict:
     """
     Parse kernel_details_summary to extract sub-kernel timing breakdown.
-    
+
     Args:
         kernel_details_str: String representation of kernel details list
-        
+
     Returns:
         Dict with kernel breakdown: {kernel_name: {mean_us, percent, total_us}}
     """
     result = {
-        'kernels': [],
-        'total_kernel_time_us': 0,
-        'has_paged_attention': False,
-        'has_fwd_kernel': False,
-        'has_reshape_cache': False
+        "kernels": [],
+        "total_kernel_time_us": 0,
+        "has_paged_attention": False,
+        "has_fwd_kernel": False,
+        "has_reshape_cache": False,
     }
-    
+
     if not kernel_details_str or pd.isna(kernel_details_str):
         return result
-    
+
     try:
         kernel_str = str(kernel_details_str)
-        kernel_str = kernel_str.replace('np.float64(', '').replace(')', '')
-        
+        kernel_str = kernel_str.replace("np.float64(", "").replace(")", "")
+
         # Pattern to match kernel entries
         kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
         matches = re.findall(kernel_pattern, kernel_str, re.DOTALL)
-        
+
         total_time = 0
         kernels = []
-        
+
         for name, mean_us in matches:
             mean_us_float = float(mean_us)
             total_time += mean_us_float
-            
+
             # Classify kernel type
-            kernel_type = 'other'
-            if 'reshape_and_cache' in name.lower():
-                kernel_type = 'reshape_cache'
-                result['has_reshape_cache'] = True
-            elif 'paged_attention' in name.lower():
-                kernel_type = 'paged_attention'
-                result['has_paged_attention'] = True
-            elif '_fwd_kernel' in name.lower() or 'fwd_kernel' in name.lower():
-                kernel_type = 'fwd_kernel'
-                result['has_fwd_kernel'] = True
-            
-            kernels.append({
-                'name': name,
-                'mean_us': mean_us_float,
-                'kernel_type': kernel_type
-            })
-        
+            kernel_type = "other"
+            if "reshape_and_cache" in name.lower():
+                kernel_type = "reshape_cache"
+                result["has_reshape_cache"] = True
+            elif "paged_attention" in name.lower():
+                kernel_type = "paged_attention"
+                result["has_paged_attention"] = True
+            elif "_fwd_kernel" in name.lower() or "fwd_kernel" in name.lower():
+                kernel_type = "fwd_kernel"
+                result["has_fwd_kernel"] = True
+
+            kernels.append(
+                {"name": name, "mean_us": mean_us_float, "kernel_type": kernel_type}
+            )
+
         # Calculate percentages
         if total_time > 0:
             for k in kernels:
-                k['percent'] = round((k['mean_us'] / total_time) * 100, 2)
-        
-        result['kernels'] = kernels
-        result['total_kernel_time_us'] = round(total_time, 2)
-        
+                k["percent"] = round((k["mean_us"] / total_time) * 100, 2)
+
+        result["kernels"] = kernels
+        result["total_kernel_time_us"] = round(total_time, 2)
+
     except Exception:
         pass
-    
+
     return result
 
 
 def parse_perf_params(perf_params_str: str) -> dict:
     """
     Parse perf_params to extract attention configuration and workload profile.
-    
+
     Args:
         perf_params_str: String representation of perf_params dict
-        
+
     Returns:
         Dict with parsed parameters
     """
     result = {
-        'batch_size': None,
-        'n_q': None,
-        'h_q': None,
-        'n_kv': None,
-        'h_kv': None,
-        'd_h_qk': None,
-        'd_h_v': None,
-        'dropout': None,
-        'causal': None,
-        'flash_impl': None,
-        'sum_ctx_tokens': None,
-        'sum_gen_tokens': None,
-        'ctx_ratio': None,
-        'workload_type': 'unknown'
+        "batch_size": None,
+        "n_q": None,
+        "h_q": None,
+        "n_kv": None,
+        "h_kv": None,
+        "d_h_qk": None,
+        "d_h_v": None,
+        "dropout": None,
+        "causal": None,
+        "flash_impl": None,
+        "sum_ctx_tokens": None,
+        "sum_gen_tokens": None,
+        "ctx_ratio": None,
+        "workload_type": "unknown",
     }
-    
+
     if not perf_params_str or pd.isna(perf_params_str):
         return result
-    
+
     try:
         params = ast.literal_eval(str(perf_params_str))
-        
+
         # Extract basic parameters
-        result['batch_size'] = params.get('B')
-        result['n_q'] = params.get('N_Q')
-        result['h_q'] = params.get('H_Q')
-        result['n_kv'] = params.get('N_KV')
-        result['h_kv'] = params.get('H_KV')
-        result['d_h_qk'] = params.get('d_h_qk')
-        result['d_h_v'] = params.get('d_h_v')
-        result['dropout'] = params.get('dropout')
-        result['causal'] = params.get('causal')
-        result['flash_impl'] = params.get('flash_impl')
-        
+        result["batch_size"] = params.get("B")
+        result["n_q"] = params.get("N_Q")
+        result["h_q"] = params.get("H_Q")
+        result["n_kv"] = params.get("N_KV")
+        result["h_kv"] = params.get("H_KV")
+        result["d_h_qk"] = params.get("d_h_qk")
+        result["d_h_v"] = params.get("d_h_v")
+        result["dropout"] = params.get("dropout")
+        result["causal"] = params.get("causal")
+        result["flash_impl"] = params.get("flash_impl")
+
         # Extract context/generation tokens for workload profiling
-        ctx_tokens = params.get('sum_ctx_tokens', 0)
-        gen_tokens = params.get('sum_gen_tokens', 0)
-        result['sum_ctx_tokens'] = ctx_tokens
-        result['sum_gen_tokens'] = gen_tokens
-        
+        ctx_tokens = params.get("sum_ctx_tokens", 0)
+        gen_tokens = params.get("sum_gen_tokens", 0)
+        result["sum_ctx_tokens"] = ctx_tokens
+        result["sum_gen_tokens"] = gen_tokens
+
         # Calculate context ratio and determine workload type
         total_tokens = ctx_tokens + gen_tokens
         if total_tokens > 0:
             ctx_ratio = ctx_tokens / total_tokens
-            result['ctx_ratio'] = round(ctx_ratio, 3)
-            
+            result["ctx_ratio"] = round(ctx_ratio, 3)
+
             if ctx_ratio > 0.8:
-                result['workload_type'] = 'prefill_heavy'
+                result["workload_type"] = "prefill_heavy"
             elif ctx_ratio < 0.2:
-                result['workload_type'] = 'decode_heavy'
+                result["workload_type"] = "decode_heavy"
             else:
-                result['workload_type'] = 'mixed'
-        
+                result["workload_type"] = "mixed"
+
         # Detect GQA (Grouped Query Attention)
-        if result['h_q'] and result['h_kv']:
-            if result['h_kv'] < result['h_q']:
-                result['attention_pattern'] = 'GQA'
-                result['gqa_ratio'] = result['h_q'] // result['h_kv']
-            elif result['h_kv'] == result['h_q']:
-                result['attention_pattern'] = 'MHA'
+        if result["h_q"] and result["h_kv"]:
+            if result["h_kv"] < result["h_q"]:
+                result["attention_pattern"] = "GQA"
+                result["gqa_ratio"] = result["h_q"] // result["h_kv"]
+            elif result["h_kv"] == result["h_q"]:
+                result["attention_pattern"] = "MHA"
             else:
-                result['attention_pattern'] = 'unknown'
-                
+                result["attention_pattern"] = "unknown"
+
     except Exception:
         pass
-    
+
     return result

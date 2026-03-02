@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: gemm-analyzer
 description: Analyze GEMM (matrix multiplication) operations for performance bottlenecks. Use when orchestrator needs GEMM category analysis.
