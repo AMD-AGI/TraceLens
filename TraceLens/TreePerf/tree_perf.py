@@ -1425,6 +1425,53 @@ class TreePerfAnalyzer:
             ]
             if col in df_unique_args.columns
         ]
+        # 5. Sort so rows with the same grouping appear consecutively, with the
+        #    highest-total-time group first. When groups have the same total time,
+        #    order by min(ex_UID) in group (asc) so order matches legacy refs.
+        #    Within each group: total_direct_kernel_time_sum desc then ex_UID asc.
+        if "total_direct_kernel_time_sum" in df_unique_args.columns:
+            group_cols = [
+                c
+                for c in str_col_names
+                if c in df_unique_args.columns
+                and c != "overlapping_kernel_names_str_repr_for_grouping"
+            ]
+            if group_cols:
+                # Group total time (same for every row in the group) to order groups by time
+                df_unique_args["_group_total_time"] = df_unique_args.groupby(
+                    group_cols, dropna=False
+                )["total_direct_kernel_time_sum"].transform("sum")
+                # When same _group_total_time, order groups by min ex_UID (matches legacy sort)
+                if "ex_UID" in df_unique_args.columns:
+                    df_unique_args["_group_min_ex_uid"] = df_unique_args.groupby(
+                        group_cols, dropna=False
+                    )["ex_UID"].transform("min")
+                    sort_by = (
+                        ["_group_total_time", "_group_min_ex_uid"]
+                        + group_cols
+                        + ["total_direct_kernel_time_sum", "ex_UID"]
+                    )
+                    sort_ascending = (
+                        [False, True] + [True] * len(group_cols) + [False, True]
+                    )
+                    df_unique_args = df_unique_args.sort_values(
+                        by=sort_by, ascending=sort_ascending
+                    ).reset_index(drop=True)
+                    df_unique_args.drop(
+                        columns=["_group_total_time", "_group_min_ex_uid"], inplace=True
+                    )
+                else:
+                    sort_by = (
+                        ["_group_total_time"]
+                        + group_cols
+                        + ["total_direct_kernel_time_sum"]
+                    )
+                    sort_ascending = [False] + [True] * len(group_cols) + [False]
+                    df_unique_args = df_unique_args.sort_values(
+                        by=sort_by, ascending=sort_ascending
+                    ).reset_index(drop=True)
+                    df_unique_args.drop(columns=["_group_total_time"], inplace=True)
+
         other_cols = [
             col
             for col in df_unique_args.columns
@@ -1438,54 +1485,6 @@ class TreePerfAnalyzer:
             "total_subtree_kernel_time",
             suffix_order=["mean", "median", "std", "min", "max", "sum", "count"],
         )
-
-        # 5. Sort so rows with the same grouping appear consecutively, with the
-        #    highest-total-time group first. When groups have the same total time,
-        #    order by min(ex_UID) in group (asc) so order matches legacy refs.
-        #    Within each group: total_direct_kernel_time_sum desc then ex_UID asc.
-        if "total_direct_kernel_time_sum" in df_unique_args.columns:
-            group_cols = [
-                c
-                for c in str_col_names
-                if c in df_unique_args.columns
-                and c != "overlapping_kernel_names_str_repr_for_grouping"
-            ]
-            # Group total time (same for every row in the group) to order groups by time
-            df_unique_args["_group_total_time"] = df_unique_args.groupby(
-                group_cols, dropna=False
-            )["total_direct_kernel_time_sum"].transform("sum")
-            # When same _group_total_time, order groups by min ex_UID (matches legacy sort)
-            if "ex_UID" in df_unique_args.columns:
-                df_unique_args["_group_min_ex_uid"] = df_unique_args.groupby(
-                    group_cols, dropna=False
-                )["ex_UID"].transform("min")
-                sort_by = (
-                    ["_group_total_time", "_group_min_ex_uid"]
-                    + group_cols
-                    + ["total_direct_kernel_time_sum", "ex_UID"]
-                )
-                sort_ascending = (
-                    [False, True] + [True] * len(group_cols) + [False, True]
-                )
-                df_unique_args = df_unique_args.sort_values(
-                    by=sort_by, ascending=sort_ascending
-                ).reset_index(drop=True)
-                df_unique_args.drop(
-                    columns=["_group_total_time", "_group_min_ex_uid"], inplace=True
-                )
-            else:
-                sort_by = (
-                    ["_group_total_time"]
-                    + group_cols
-                    + ["total_direct_kernel_time_sum"]
-                )
-                sort_ascending = [False] + [True] * len(group_cols) + [False]
-                df_unique_args = df_unique_args.sort_values(
-                    by=sort_by, ascending=sort_ascending
-                ).reset_index(drop=True)
-                df_unique_args.drop(columns=["_group_total_time"], inplace=True)
-
-        df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
 
         # 6. Calculate percentage of total time and cumulative percentage if requested
         if include_pct and "total_direct_kernel_time_sum" in df_unique_args.columns:
