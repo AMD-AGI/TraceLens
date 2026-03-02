@@ -11,8 +11,13 @@ Provides functions for:
 - Embedding the plot as a base64 data URI in the markdown report
 """
 
+import base64
 import json
 import os
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 
 def generate_perf_plot(output_dir: str, title: str) -> bool:
@@ -43,14 +48,6 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
 
     if not recommendations or baseline_ms <= 0:
         print('No kernel tuning recommendations or invalid baseline - skipping plot')
-        return False
-
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print('matplotlib is not installed - skipping plot generation')
         return False
 
     current_ms = baseline_ms
@@ -113,8 +110,6 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
 
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
     plt.tight_layout()
-
-    import base64
 
     output_path = os.path.join(output_dir, 'perf_improvement.png')
     plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
