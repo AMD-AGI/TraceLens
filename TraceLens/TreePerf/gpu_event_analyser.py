@@ -145,7 +145,9 @@ class GPUEventAnalyser:
                     current_uid = parent.get("parent")
                 return None
 
-            uid_to_cpu_op = {event["UID"]: _get_cpu_op_uid(event) for event in gpu_events}
+            uid_to_cpu_op = {
+                event["UID"]: _get_cpu_op_uid(event) for event in gpu_events
+            }
 
             for _, point_type, uid in points:
                 if point_type == 0:

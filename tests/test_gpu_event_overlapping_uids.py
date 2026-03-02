@@ -197,9 +197,9 @@ def test_mixed_cpu_ops_partial_overlap():
     k2 and k3 don't overlap -> not marked."""
     cpu_a = {"UID": 100, "cat": "cpu_op", "name": "aten::mm"}
     cpu_b = {"UID": 101, "cat": "cpu_op", "name": "aten::add"}
-    k1 = _make_event(1, 0, 20)   # [0, 20]
-    k2 = _make_event(2, 5, 10)   # [5, 15]  - same cpu_op as k1
-    k3 = _make_event(3, 10, 5)   # [10, 15] - different cpu_op, overlaps k1 only
+    k1 = _make_event(1, 0, 20)  # [0, 20]
+    k2 = _make_event(2, 5, 10)  # [5, 15]  - same cpu_op as k1
+    k3 = _make_event(3, 10, 5)  # [10, 15] - different cpu_op, overlaps k1 only
     events = _make_tree(
         [cpu_a, cpu_b],
         [(k1, 201, 100), (k2, 202, 100), (k3, 203, 101)],
