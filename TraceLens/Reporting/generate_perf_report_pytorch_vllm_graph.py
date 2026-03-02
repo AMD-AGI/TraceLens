@@ -452,7 +452,9 @@ def generate_perf_report_pytorch(
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
             ]
-
+            if len(op_events) == 0:
+                continue
+              # Skip categories with no events
             if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
                 # For GEMM: create a single table that covers both fwd and bwd.
                 df_ops = perf_analyzer.build_df_perf_metrics(
@@ -497,23 +499,25 @@ def generate_perf_report_pytorch(
                     ]
                 
                 op_events=[event for event in op_events if event["name"]!="vllm::unified_attention_with_output"]
-                df_ops_bwd = perf_analyzer.build_df_perf_metrics(
-                    op_events, bwd=True, include_kernel_details=True, include_args=True
-                )
-                df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd, agg_metrics
-                )
-                df_ops_bwd = add_truncated_kernel_details(
-                    df_ops_bwd,
-                    source_col="kernel_details__summarize_kernel_stats",
-                    new_col_name="trunc_kernel_details",
-                )
-                if filtered_df_bwd_ops is not None:
-                    df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
+                if len(op_events) >0:
+                    df_ops_bwd = perf_analyzer.build_df_perf_metrics(
+                        op_events, bwd=True, include_kernel_details=True, include_args=True
+                    )
+                    df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
+                        df_ops_bwd, agg_metrics
+                    )
+                    df_ops_bwd = add_truncated_kernel_details(
+                        df_ops_bwd,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                    if filtered_df_bwd_ops is not None:
+                        df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
+                    if not df_ops_bwd.empty:
+                        perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
                 if not df_ops_fwd.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-                if not df_ops_bwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+                
 
     # Short kernel study (works for both GPU-only and regular traces)
     if short_kernel_study:
