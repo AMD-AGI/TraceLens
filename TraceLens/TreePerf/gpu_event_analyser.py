@@ -109,9 +109,9 @@ class GPUEventAnalyser:
                 if "overlapping_uids" not in event:
                     compute_overlapping_uids = True
                     points.append(
-                        (event["ts"], 0, event["UID"])
-                    )  # 0 for start, 1 for end
-                    points.append((event["t_end"], 1, event["UID"]))
+                        (event["ts"], 1, event["UID"])
+                    )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
+                    points.append((event["t_end"], 0, event["UID"]))
                     event["overlapping_uids"] = set()
                 gpu_events.append(event)
 
@@ -151,6 +151,8 @@ class GPUEventAnalyser:
 
             for _, point_type, uid in points:
                 if point_type == 0:
+                    active_uids.remove(uid)
+                else:
                     event = event_map[uid]
                     my_cpu_op = uid_to_cpu_op[uid]
                     if active_uids:
@@ -166,8 +168,6 @@ class GPUEventAnalyser:
                             event_map[active_uid]["overlapping_uids"].add(uid)
 
                     active_uids.add(uid)
-                else:
-                    active_uids.remove(uid)
 
         return {
             GPUEventAnalyser.all_gpu_key: gpu_events,

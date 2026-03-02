@@ -426,6 +426,7 @@ class TreePerfAnalyzer:
                 "external_id": event["args"].get("External id"),
                 "overlapping_kernel_names": event.get("overlapping_kernel_names"),
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
+                "overlap_pct": event.get("overlap_pct"),
             }
             if include_args:
                 args_cols = [
@@ -572,6 +573,8 @@ class TreePerfAnalyzer:
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
             columns_to_keep_first.append("overlapping_kernel_names")
+            if "overlap_pct" in df_perf_metrics.columns:
+                dict_agg["overlap_pct"] = agg_metrics
         args_cols = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
         for arg in args_cols:
             if arg in df_perf_metrics.columns:
@@ -703,6 +706,15 @@ class TreePerfAnalyzer:
         #         ["None", "[]"], pd.NA
         #     )
 
+        for col in df_perf_metrics_summary.columns:
+            if "overlap_pct" in col:
+                df_perf_metrics_summary[col] = df_perf_metrics_summary[col].round(2)
+                if col.endswith("_std") and "overlap_pct_mean" in df_perf_metrics_summary.columns:
+                    has_overlap = pd.notna(df_perf_metrics_summary["overlap_pct_mean"])
+                    df_perf_metrics_summary.loc[has_overlap, col] = (
+                        df_perf_metrics_summary.loc[has_overlap, col].fillna(0.0)
+                    )
+
         return df_perf_metrics_summary
 
     def get_kernel_launchers(self, include_nccl=False):
@@ -795,29 +807,101 @@ class TreePerfAnalyzer:
                 for kernel in kernels
             ]
             event["op category"] = self.op_categorizer(event)
-            event["overlapping_kernel_names"] = [
-                self.tree.get_UID2event(uid).get("name", None)
-                for kernel in kernels
-                for uid in kernel["overlapping_uids"]
-            ]
-            event["overlapping_kernels_details"] = [
-                {
-                    "name": self.tree.get_UID2event(uid).get("name", None),
-                    "dur": self.tree.get_UID2event(uid).get("dur", None),
-                    "stream": self.tree.get_UID2event(uid)
-                    .get("args", {})
-                    .get("stream", None),
-                }
-                for kernel in kernels
-                for uid in kernel["overlapping_uids"]
-            ]
-            if event["overlapping_kernels_details"] == []:
-                event["overlapping_kernels_details"] = None
-            if event["overlapping_kernel_names"] == []:
-                event["overlapping_kernel_names"] = None
+            self._compute_overlap_info(event, kernels)
             kernel_launchers.append(event)
 
         return kernel_launchers
+
+    def _compute_overlap_info(self, event, kernels):
+        """Compute overlap_pct, overlapping_kernel_names, and
+        overlapping_kernels_details for an event from its kernel list.
+        Modifies the event dict in-place."""
+        event["overlapping_kernel_names"] = list(dict.fromkeys(
+            self.tree.get_UID2event(uid).get("name", None)
+            for kernel in kernels
+            for uid in kernel.get("overlapping_uids", set())
+        ))
+        total_kernel_runtime = (
+            sum(
+                e - s
+                for s, e in GPUEventAnalyser.merge_intervals(
+                    [(k["ts"], k["t_end"]) for k in kernels]
+                )
+            )
+            if kernels
+            else 0
+        )
+
+        overlapping_details = []
+        for kernel in kernels:
+            for uid in kernel.get("overlapping_uids", set()):
+                ov_event = self.tree.get_UID2event(uid)
+                overlap_start = max(kernel["ts"], ov_event.get("ts", 0))
+                overlap_end = min(kernel["t_end"], ov_event.get("t_end", 0))
+                overlap_time = max(0, overlap_end - overlap_start)
+                overlap_pct = (
+                    overlap_time / total_kernel_runtime
+                    if total_kernel_runtime > 0
+                    else 0.0
+                )
+                overlapping_details.append(
+                    {
+                        "name": ov_event.get("name", None),
+                        "dur": ov_event.get("dur", None),
+                        "stream": ov_event.get("args", {}).get("stream", None),
+                        "overlap_pct": round(overlap_pct, 2),
+                    }
+                )
+        if overlapping_details:
+            grouped = {}
+            for d in overlapping_details:
+                grouped.setdefault(d["name"], []).append(d)
+            overlapping_details = []
+            for name, entries in grouped.items():
+                n = len(entries)
+                avg_dur = (
+                    round(sum(e["dur"] for e in entries) / n, 2)
+                    if all(e["dur"] is not None for e in entries)
+                    else None
+                )
+                avg_pct = round(
+                    sum(e["overlap_pct"] for e in entries) / n, 2
+                )
+                overlapping_details.append(
+                    {
+                        "name": name,
+                        "dur": avg_dur,
+                        "stream": entries[0]["stream"],
+                        "overlap_pct": avg_pct,
+                    }
+                )
+        event["overlapping_kernels_details"] = overlapping_details
+
+        if overlapping_details:
+            total_overlap_time = 0
+            for kernel in kernels:
+                ov_intervals = []
+                for uid in kernel.get("overlapping_uids", set()):
+                    ov_evt = self.tree.get_UID2event(uid)
+                    os = max(kernel["ts"], ov_evt.get("ts", 0))
+                    oe = min(kernel["t_end"], ov_evt.get("t_end", 0))
+                    if oe > os:
+                        ov_intervals.append((os, oe))
+                merged = GPUEventAnalyser.merge_intervals(ov_intervals)
+                total_overlap_time += sum(e - s for s, e in merged)
+            event["overlap_pct"] = round(
+                total_overlap_time / total_kernel_runtime
+                if total_kernel_runtime > 0
+                else 0.0,
+                2,
+            )
+        else:
+            event["overlap_pct"] = None
+
+        if event["overlapping_kernels_details"] == []:
+            event["overlapping_kernels_details"] = None
+        if event["overlapping_kernel_names"] == []:
+            event["overlapping_kernel_names"] = None
 
     def get_df_kernel_launchers(
         self, id_cols=False, include_kernel_details=False, include_call_stack=False
@@ -839,6 +923,7 @@ class TreePerfAnalyzer:
                 "direct_kernel_count": event["direct_kernel_count"],
                 "overlapping_kernel_names": event["overlapping_kernel_names"],
                 "overlapping_kernels_details": event["overlapping_kernels_details"],
+                "overlap_pct": event.get("overlap_pct"),
             }
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
                 if arg in event["args"]:
@@ -991,7 +1076,7 @@ class TreePerfAnalyzer:
             "median": ("median_duration_us", np.median),
             "max": ("max_duration_us", np.max),
             "min": ("min_duration_us", np.min),
-            "std": ("std_dev_duration_us", np.std),
+            "std": ("std_dev_duration_us", lambda x: np.nan_to_num(np.std(x))),
         }
 
         # --- CHANGE: More robust way to get the template ---
@@ -1139,6 +1224,8 @@ class TreePerfAnalyzer:
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
             columns_to_keep_first.append("overlapping_kernels_details")
+            if "overlap_pct" in df_filtered.columns:
+                agg_dict["overlap_pct"] = agg_metrics
         if "parent_module" in df_filtered.columns:
             agg_dict["parent_module"] = "first"
             columns_to_keep_first.append("parent_module")
@@ -1252,6 +1339,15 @@ class TreePerfAnalyzer:
             df_unique_args["Cumulative Percentage (%)"] = df_unique_args[
                 "Percentage (%)"
             ].cumsum()
+
+        for col in df_unique_args.columns:
+            if "overlap_pct" in col:
+                df_unique_args[col] = df_unique_args[col].round(2)
+                if col.endswith("_std") and "overlap_pct_mean" in df_unique_args.columns:
+                    has_overlap = pd.notna(df_unique_args["overlap_pct_mean"])
+                    df_unique_args.loc[has_overlap, col] = (
+                        df_unique_args.loc[has_overlap, col].fillna(0.0)
+                    )
 
         return df_unique_args
 
@@ -1536,6 +1632,18 @@ class TreePerfAnalyzer:
             has_own_perf_model = self._has_perf_model(event)
             is_sole_bwd = self._is_sole_bwd_with_fwd_perf_model(event)
 
+            # Compute overlap info if not already set by get_kernel_launchers
+            if event.get("overlap_pct") is None and event.get("gpu_events"):
+                kernels = [
+                    self.tree.get_UID2event(uid)
+                    for uid in event.get("gpu_events", [])
+                    if self.event_to_category(self.tree.get_UID2event(uid))
+                    in {"kernel", "gpu_memcpy", "gpu_memset"}
+                ]
+                kernels = [k for k in kernels if k is not None]
+                if kernels:
+                    self._compute_overlap_info(event, kernels)
+
             row = {
                 "name": event.get("name"),
                 "op category": self.op_categorizer(event),
@@ -1556,6 +1664,7 @@ class TreePerfAnalyzer:
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
                 "overlapping_kernel_names": event.get("overlapping_kernel_names"),
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
+                "overlap_pct": event.get("overlap_pct"),
             }
             if include_args:
                 row["Input Dims"] = list_to_tuple(args.get("Input Dims"))
@@ -1680,6 +1789,7 @@ class TreePerfAnalyzer:
             "External id",
             "overlapping_kernel_names",
             "overlapping_kernels_details",
+            "overlap_pct",
         ]
         if include_args:
             col_order.extend(
@@ -1802,6 +1912,8 @@ class TreePerfAnalyzer:
             agg_dict["overlapping_kernels_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
+            if "overlap_pct" in df_temp.columns:
+                agg_dict["overlap_pct"] = agg_metrics
 
         # Perf params - static per unique args (e.g., M, N, K for GEMM)
         if "perf_params" in df_temp.columns:
@@ -1962,6 +2074,15 @@ class TreePerfAnalyzer:
             + other_cols
             + pct_cols
         )
+
+        for col in df_summary.columns:
+            if "overlap_pct" in col:
+                df_summary[col] = df_summary[col].round(2)
+                if col.endswith("_std") and "overlap_pct_mean" in df_summary.columns:
+                    has_overlap = pd.notna(df_summary["overlap_pct_mean"])
+                    df_summary.loc[has_overlap, col] = (
+                        df_summary.loc[has_overlap, col].fillna(0.0)
+                    )
 
         return df_summary[col_order]
 
