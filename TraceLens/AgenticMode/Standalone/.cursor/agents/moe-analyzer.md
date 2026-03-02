@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: moe-analyzer
 description: Analyze MoE (Mixture of Experts) fused operations for performance bottlenecks. Use when orchestrator needs MoE category analysis.

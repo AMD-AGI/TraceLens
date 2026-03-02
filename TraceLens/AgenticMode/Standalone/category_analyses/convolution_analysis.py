@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Convolution Operations Analysis
 
 Computes metrics for Convolution operations and outputs JSON for subagent processing.
@@ -17,78 +23,88 @@ from analysis_utils import (
     build_operation_metrics,
     calculate_average_efficiency,
     compute_impact_estimates,
-    write_metrics_json
+    write_metrics_json,
 )
 
 
 def get_convolution_config():
     """Return Convolution-specific configuration."""
     return {
-        'efficiency_method': 'prefer_compute',  # Convolutions can be compute-bound
-        'extra_fields': [],
+        "efficiency_method": "prefer_compute",  # Convolutions can be compute-bound
+        "extra_fields": [],
     }
 
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract Convolution-specific aggregate metrics."""
     # Check for transpose operations (layout issue indicator)
-    transpose_ops = ops_df[ops_df['name'].str.contains('transpose', case=False, na=False)]
-    transpose_time_ms = transpose_ops['Kernel Time (µs)_sum'].sum() / 1000 if len(transpose_ops) > 0 else 0
-    
+    transpose_ops = ops_df[
+        ops_df["name"].str.contains("transpose", case=False, na=False)
+    ]
+    transpose_time_ms = (
+        transpose_ops["Kernel Time (µs)_sum"].sum() / 1000
+        if len(transpose_ops) > 0
+        else 0
+    )
+
     total_time_ms = 0
-    if 'Kernel Time (µs)_sum' in ops_df.columns:
-        total_time_ms = ops_df['Kernel Time (µs)_sum'].sum() / 1000
-    
-    transpose_overhead_pct = (transpose_time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
-    
+    if "Kernel Time (µs)_sum" in ops_df.columns:
+        total_time_ms = ops_df["Kernel Time (µs)_sum"].sum() / 1000
+
+    transpose_overhead_pct = (
+        (transpose_time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
+    )
+
     return {
-        'transpose_count': len(transpose_ops),
-        'transpose_time_ms': round(transpose_time_ms, 3),
-        'transpose_overhead_percent': round(transpose_overhead_pct, 2),
-        'peak_maf_tflops': metadata.get('max_achievable_tflops', {}).get('matrix_bf16') if isinstance(metadata.get('max_achievable_tflops'), dict) else metadata.get('peak_bf16_maf_tflops'),
-        'peak_hbm_bw_tbs': metadata.get('peak_hbm_bw_tbs')
+        "transpose_count": len(transpose_ops),
+        "transpose_time_ms": round(transpose_time_ms, 3),
+        "transpose_overhead_percent": round(transpose_overhead_pct, 2),
+        "peak_maf_tflops": (
+            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
+            if isinstance(metadata.get("max_achievable_tflops"), dict)
+            else metadata.get("peak_bf16_maf_tflops")
+        ),
+        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze Convolution operations')
-    parser.add_argument('--output-dir', required=True, help='Output directory')
+    parser = argparse.ArgumentParser(description="Analyze Convolution operations")
+    parser.add_argument("--output-dir", required=True, help="Output directory")
     args = parser.parse_args()
-    
+
     try:
-        ops_df, metadata = load_category_data(args.output_dir, 'convolution')
+        ops_df, metadata = load_category_data(args.output_dir, "convolution")
     except FileNotFoundError as e:
-        error_metrics = {
-            'category': 'convolution',
-            'status': 'ERROR',
-            'error': str(e)
-        }
-        write_metrics_json(error_metrics, args.output_dir, 'convolution')
+        error_metrics = {"category": "convolution", "status": "ERROR", "error": str(e)}
+        write_metrics_json(error_metrics, args.output_dir, "convolution")
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     config = get_convolution_config()
-    peak_hbm_bw = metadata.get('peak_hbm_bw_tbs', 1)
-    maf = metadata.get('max_achievable_tflops', metadata.get('peak_bf16_maf_tflops', 1))
-    
+    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
+    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
+
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, maf, 'prefer_compute')
+    avg_efficiency = calculate_average_efficiency(
+        ops_df, peak_hbm_bw, maf, "prefer_compute"
+    )
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
-    
-    impact_estimates = compute_impact_estimates(operations, 'convolution')
-    
+
+    impact_estimates = compute_impact_estimates(operations, "convolution")
+
     metrics = {
-        'category': 'convolution',
-        'status': 'OK',
+        "category": "convolution",
+        "status": "OK",
         **time_metrics,
-        'average_efficiency_percent': avg_efficiency,
-        'operations': operations,
-        'category_specific': category_specific,
-        'impact_estimates': impact_estimates
+        "average_efficiency_percent": avg_efficiency,
+        "operations": operations,
+        "category_specific": category_specific,
+        "impact_estimates": impact_estimates,
     }
-    
-    output_path = write_metrics_json(metrics, args.output_dir, 'convolution')
+
+    output_path = write_metrics_json(metrics, args.output_dir, "convolution")
     print(f"Metrics written to: {output_path}")
 
 

@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # ComparativeMode: Getting Started Guide
 
 > **ComparativeMode** is an AI-powered GPU performance analysis tool that provides comprehensive gap analysis for different GPU architectures (e.g., AMD MI300, MI325, MI350 ... ) with actionable optimization recommendations.
