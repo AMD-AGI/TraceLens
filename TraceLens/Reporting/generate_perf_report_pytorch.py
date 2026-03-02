@@ -255,6 +255,8 @@ def generate_perf_report_pytorch(
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    # activation recompute detection
+    detect_recompute: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -268,6 +270,7 @@ def generate_perf_report_pytorch(
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
+        detect_recompute=detect_recompute,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -897,6 +900,14 @@ def main():
         default=False,
         help="Include overlap info in the report. Disabled by default.",
     )
+    parser.add_argument(
+        "--detect_recompute",
+        action="store_true",
+        default=False,
+        help="Detect activation recomputation (checkpointing) and add an is_recompute column "
+        "to ops_summary, ops_unique_args, and unified_perf_summary sheets. "
+        "Requires python_function events in the trace (forces add_python_func=True internally).",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -918,6 +929,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        detect_recompute=args.detect_recompute,
     )
 
 

@@ -104,6 +104,9 @@ class TestBasicKernelLauncher:
         assert launchers[0]["name"] == "aten::matmul"
         assert launchers[0]["direct_kernel_count"] == 1
         assert launchers[0]["total_direct_kernel_time"] == 50.0
+        # Leaf launcher: subtree kernel time equals direct
+        assert "total_subtree_kernel_time" in launchers[0]
+        assert launchers[0]["total_subtree_kernel_time"] == 50.0
         assert launchers[0]["kernel_details"][0]["name"] == "gemm_kernel"
 
     def test_multiple_kernels_under_one_cpu_op(self):
