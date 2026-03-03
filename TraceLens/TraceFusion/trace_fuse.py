@@ -32,6 +32,9 @@ def _process_single_rank(
 
     processed_events = []
     for event in data["traceEvents"]:
+        # remove process_name metadata events
+        if event["ph"] == "M" and event["name"] == "process_name":
+            continue
         # If filter_fn is None, use default filter
         if filter_fn is None:
             if not _default_filter_fn(event, include_pyfunc):
@@ -56,6 +59,8 @@ def _process_single_rank(
                 if type(value) == int:
                     event[field] += rank * offset_mult
 
+        # Remap pid to rank since slicetrack name always has pid appended at the end in perfetto UI
+        event["pid"] = rank
         processed_events.append(event)
 
     return rank, processed_events
@@ -135,6 +140,26 @@ class TraceFuse:
     def default_filter_fn(event):
         return event.get("cat", None) != "Trace"
 
+    def _generate_rank_metadata(self, merged_data):
+        """Generate process_name metadata events so trace viewers show 'RANK N' instead of raw pids."""
+        pid_to_rank = {}
+        for event in merged_data:
+            pid = event.get("pid")
+            rank = event.get("args", {}).get("rank")
+            if pid is not None and rank is not None and pid not in pid_to_rank:
+                pid_to_rank[pid] = rank
+
+        metadata = []
+        for pid, rank in sorted(pid_to_rank.items(), key=lambda x: str(x[0])):
+            metadata.append({
+                "name": "process_name",
+                "ph": "M",
+                "pid": pid,
+                "tid": 0,
+                "args": {"name": "RANK"},
+            })
+        return metadata
+
     def merge(self, filter_fn=None, include_pyfunc=False):
         """Merge trace files."""
         if self.use_multiprocessing:
@@ -178,6 +203,8 @@ class TraceFuse:
                 )
                 merged_data.extend(processed_events)
 
+        rank_metadata = self._generate_rank_metadata(merged_data)
+        merged_data.extend(rank_metadata)
         return merged_data
 
     def merge_and_save(
