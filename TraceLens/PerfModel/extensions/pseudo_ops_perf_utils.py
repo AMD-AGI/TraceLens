@@ -22,6 +22,8 @@ def get_pseudo_op_mappings():
     pseudo_op_mappings = {
         # MoE pseudo ops - Fused
         "pseudo_op::moe_aiter_fused_1stage": moe_perf_model_extensions.moe_aiter_fused_1stage,
+        # MoE - AITER FP8 block-scale fused (direct CPU op, no pseudo-op needed)
+        "aiter::fmoe_fp8_blockscale_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
         # MoE pseudo ops - Unfused Triton (2-stage: up and down)
         "pseudo_op::moe_triton_unfused_up": moe_perf_model_extensions.moe_triton_unfused_up,
         "pseudo_op::moe_triton_unfused_down": moe_perf_model_extensions.moe_triton_unfused_down,

@@ -10,6 +10,25 @@ Performance models for pseudo-op extensions.
 
 from TraceLens.PerfModel.utils import torch_dtype_map
 
+DTYPE_TO_BYTES = {
+    'Float8_e4m3fn': 1,
+    'Float8_e4m3fnuz': 1,
+    'Float8_e5m2': 1,
+    'Float8_e5m2fnuz': 1,
+    'FP8': 1,
+    'FP4': 0.5,
+    'BFloat16': 2,
+    'Float16': 2,
+    'Half': 2,
+    'Float32': 4,
+    'Float': 4,
+    'c10::BFloat16': 2,
+    'c10::Float8_e4m3fn': 1,
+    'c10::Float8_e4m3fnuz': 1,
+    'c10::Half': 2,
+    'c10::Float': 4,
+}
+
 
 # ==============================================================================
 # MoE Performance Models
@@ -180,26 +199,8 @@ class moe_aiter_fused_1stage(FusedMoE):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        # Map dtype strings to byte sizes
-        dtype_to_bytes = {
-            'Float8_e4m3fn': 1,
-            'Float8_e4m3fnuz': 1,
-            'Float8_e5m2': 1,
-            'Float8_e5m2fnuz': 1,
-            'BFloat16': 2,
-            'Float16': 2,
-            'Half': 2,
-            'Float32': 4,
-            'Float': 4,
-            'c10::BFloat16': 2,
-            'c10::Float8_e4m3fn': 1,
-            'c10::Float8_e4m3fnuz': 1,
-            'c10::Half': 2,
-            'c10::Float': 4,
-        }
-        
-        input_bpe = dtype_to_bytes.get(self.param_details['input_dtype'], 2)  # Default to 2
-        weight_bpe = dtype_to_bytes.get(self.param_details['weight_dtype'], 1)  # Default to 1 (FP8)
+        input_bpe = DTYPE_TO_BYTES.get(self.param_details['input_dtype'], 2)  # Default to 2
+        weight_bpe = DTYPE_TO_BYTES.get(self.param_details['weight_dtype'], 1)  # Default to 1 (FP8)
         output_bpe = input_bpe  # Output typically same as input
         
         return self.bytes_func(
@@ -228,6 +229,117 @@ class moe_aiter_fused_1stage(FusedMoE):
     
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
+        return "matrix"
+
+
+class moe_aiter_fused_blockscale(FusedMoE):
+    """
+    Performance model for AITER FP8 block-scale fused MoE (aiter::fmoe_fp8_blockscale_g1u1).
+
+    Used by SGLang and other frameworks that call AITER's fused MoE directly (without a vLLM wrapper).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        """
+        Extract MoE dimensions and data types from event args.
+
+        Expected Input Dims format (from aiter::fmoe_fp8_blockscale_g1u1):
+        [[M, K], [M, K], [E, N*(gated+1), K], [E, K, N], ...]
+          [0] out    (BF16 output buffer)
+          [1] input  (FP8 quantized input)
+          [2] gate   (FP8 W1 weights)
+          [3] down   (FP8 W2 weights)
+
+        Expected Input type format:
+        [dtype_out, dtype_input, dtype_w1, dtype_w2, ...]
+
+        Expected Concrete Inputs format:
+        [..., topk, ..., fc_scale_blkn, fc_scale_blkk, ...]
+          [8]  topk (scalar)
+          [13] fc_scale_blkn (scalar)
+          [14] fc_scale_blkk (scalar)
+        """
+        args = event.get('args', {})
+
+        kernel_input_shape = args['Input Dims']
+        out_shape = kernel_input_shape[0]   # [M, K] output buffer
+        w1_shape = kernel_input_shape[2]    # [E, N*(gated+1), K] gate/W1
+        w2_shape = kernel_input_shape[3]    # [E, K, N] down/W2
+
+        num_tokens = out_shape[0]
+        hidden_dim = w2_shape[1]
+        inter_dim = w2_shape[2]
+        num_experts = w1_shape[0]
+        gated = (w1_shape[1] == 2 * inter_dim)
+
+        concrete = args.get('Concrete Inputs', [])
+        if len(concrete) <= 8 or not concrete[8]:
+            raise ValueError(
+                f"Cannot extract topk: Concrete Inputs[8] missing or empty "
+                f"(got {len(concrete)} entries)"
+            )
+        topk = int(concrete[8])
+
+        input_types = args.get('Input type', [])
+        output_dtype = input_types[0]
+        input_dtype = input_types[1]
+        weight_dtype = input_types[2]
+
+        return {
+            'num_tokens': num_tokens,
+            'hidden_dim': hidden_dim,
+            'inter_dim': inter_dim,
+            'num_experts': num_experts,
+            'topk': topk,
+            'gated': gated,
+            'input_dtype': input_dtype,
+            'weight_dtype': weight_dtype,
+            'output_dtype': output_dtype,
+        }
+
+    def flops(self):
+        return self.flops_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            self.param_details['gated']
+        )
+
+    def bytes(self):
+        input_bpe = DTYPE_TO_BYTES.get(self.param_details['input_dtype'], 1)
+        weight_bpe = DTYPE_TO_BYTES.get(self.param_details['weight_dtype'], 1)
+        output_bpe = DTYPE_TO_BYTES.get(self.param_details['output_dtype'], 2)
+
+        return self.bytes_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            self.param_details['gated'],
+            input_bpe,
+            weight_bpe,
+            output_bpe
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
         return "matrix"
 
 
@@ -480,36 +592,16 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
     
     def bytes(self):
         """Calculate bytes moved for up projection."""
-        # Map dtype strings to byte sizes
-        dtype_to_bytes = {
-            'Float8_e4m3fn': 1,
-            'Float8_e4m3fnuz': 1,
-            'Float8_e5m2': 1,
-            'Float8_e5m2fnuz': 1,
-            'FP8': 1,
-            'FP4': 0.5,
-            'BFloat16': 2,
-            'Float16': 2,
-            'Half': 2,
-            'Float32': 4,
-            'Float': 4,
-            'c10::BFloat16': 2,
-            'c10::Float8_e4m3fn': 1,
-            'c10::Float8_e4m3fnuz': 1,
-            'c10::Half': 2,
-            'c10::Float': 4,
-        }
-        
         input_dtype = self.param_details['input_dtype']
         weight_dtype = self.param_details['weight_dtype']
         
-        if input_dtype not in dtype_to_bytes:
+        if input_dtype not in DTYPE_TO_BYTES:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in dtype_to_bytes:
+        if weight_dtype not in DTYPE_TO_BYTES:
             raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
         
-        input_bpe = dtype_to_bytes[input_dtype]
-        weight_bpe = dtype_to_bytes[weight_dtype]
+        input_bpe = DTYPE_TO_BYTES[input_dtype]
+        weight_bpe = DTYPE_TO_BYTES[weight_dtype]
         output_bpe = input_bpe  # Output same dtype as input
         
         return self.bytes_func(
@@ -631,36 +723,16 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     
     def bytes(self):
         """Calculate bytes moved for down projection."""
-        # Map dtype strings to byte sizes
-        dtype_to_bytes = {
-            'Float8_e4m3fn': 1,
-            'Float8_e4m3fnuz': 1,
-            'Float8_e5m2': 1,
-            'Float8_e5m2fnuz': 1,
-            'FP8': 1,
-            'FP4': 0.5,
-            'BFloat16': 2,
-            'Float16': 2,
-            'Half': 2,
-            'Float32': 4,
-            'Float': 4,
-            'c10::BFloat16': 2,
-            'c10::Float8_e4m3fn': 1,
-            'c10::Float8_e4m3fnuz': 1,
-            'c10::Half': 2,
-            'c10::Float': 4,
-        }
-        
         input_dtype = self.param_details['input_dtype']
         weight_dtype = self.param_details['weight_dtype']
         
-        if input_dtype not in dtype_to_bytes:
+        if input_dtype not in DTYPE_TO_BYTES:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in dtype_to_bytes:
+        if weight_dtype not in DTYPE_TO_BYTES:
             raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
         
-        input_bpe = dtype_to_bytes[input_dtype]
-        weight_bpe = dtype_to_bytes[weight_dtype]
+        input_bpe = DTYPE_TO_BYTES[input_dtype]
+        weight_bpe = DTYPE_TO_BYTES[weight_dtype]
         output_bpe = input_bpe  # Output same dtype as input
         
         return self.bytes_func(
