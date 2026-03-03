@@ -785,6 +785,7 @@ class TreePerfAnalyzer:
                 "name": event["name"],
                 "op category": event["op category"],
                 "UID": event["UID"],
+                "ts": event.get("ts"),
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
                 "total_subtree_kernel_time": event["total_subtree_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
@@ -1152,6 +1153,8 @@ class TreePerfAnalyzer:
         if "UID" in df_filtered.columns:
             agg_dict["UID"] = ["first", "count"]
             columns_to_keep_first.append("UID")
+        if "ts" in df_filtered.columns:
+            agg_dict["ts"] = "min"
         if "kernel_details" in df_filtered.columns:
             agg_dict["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
@@ -1180,10 +1183,17 @@ class TreePerfAnalyzer:
         # uid needs to be mapped to ex_UID
         if "UID_first" in df_unique_args.columns:
             rename_map["UID_first"] = "ex_UID"
+        if "ts_min" in df_unique_args.columns:
+            rename_map["ts_min"] = "first_occurrence_time"
+            normalize_first_occurrence_ts = True
+        else:
+            normalize_first_occurrence_ts = False
         for col in df_unique_args.columns:
             if col.startswith("kernel_details_"):
                 rename_map[col] = "kernel_details_summary"
         df_unique_args.rename(columns=rename_map, inplace=True)
+        if normalize_first_occurrence_ts:
+            df_unique_args["first_occurrence_time"] -= df_unique_args["first_occurrence_time"].min()
 
         # 4. Reorder columns: start with grouping + key metrics, then rest
         primary_cols = [
@@ -1194,6 +1204,7 @@ class TreePerfAnalyzer:
             for col in [
                 "UID",
                 "operation_count",
+                "first_occurrence_time",
                 "kernel_names",
                 "total_direct_kernel_time_mean",
                 "total_subtree_kernel_time_mean",
