@@ -1193,7 +1193,9 @@ class TreePerfAnalyzer:
                 rename_map[col] = "kernel_details_summary"
         df_unique_args.rename(columns=rename_map, inplace=True)
         if normalize_first_occurrence_ts:
-            df_unique_args["first_occurrence_time"] -= df_unique_args["first_occurrence_time"].min()
+            df_unique_args["first_occurrence_time"] -= df_unique_args[
+                "first_occurrence_time"
+            ].min()
 
         # 4. Reorder columns: start with grouping + key metrics, then rest
         primary_cols = [
@@ -2440,10 +2442,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
