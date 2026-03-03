@@ -1,0 +1,2 @@
+id,sub_category,trace_path,reference_dir,platform
+GEMM_0,GEMM,evals/GEMM_0/trace.json,evals/GEMM_0/analysis_output_ref,MI300X
