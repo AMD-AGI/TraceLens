@@ -2,8 +2,9 @@
 set -e
 
 usage() {
-    echo "Usage: $0 <tracelens_path>"
+    echo "Usage: $0 <tracelens_path> [gpu_type]"
     echo "  tracelens_path: Absolute path to the TraceLens-internal repository"
+    echo "  gpu_type:       'mi300' or 'mi355' (default: mi355)"
     exit 1
 }
 
@@ -17,10 +18,26 @@ if [ ! -d "${TRACELENS_PATH}" ]; then
     exit 1
 fi
 
-CONTAINER_NAME="sglang-deepseek-mi355x"
+GPU_TYPE="${2:-mi355}"
+case "${GPU_TYPE}" in
+    mi300)
+        DOCKER_IMAGE="lmsysorg/sglang:v0.5.9-rocm700-mi30x"
+        CONTAINER_NAME="sglang-deepseek-mi300x"
+        ;;
+    mi355)
+        DOCKER_IMAGE="lmsysorg/sglang:v0.5.9-rocm700-mi35x"
+        CONTAINER_NAME="sglang-deepseek-mi355x"
+        ;;
+    *)
+        echo "Error: Invalid gpu_type '${GPU_TYPE}'. Must be 'mi300' or 'mi355'."
+        usage
+        ;;
+esac
+
 TRACELENS_MOUNT="/workspace/TraceLens-internal"
 
 echo "Using TraceLens path: ${TRACELENS_PATH}"
+echo "Using GPU type: ${GPU_TYPE} (image: ${DOCKER_IMAGE})"
 echo "Starting Docker container..."
 docker run -d \
     --user root \
@@ -36,7 +53,7 @@ docker run -d \
     --device=/dev/dri \
     -e SGLANG_USE_AITER=1 \
     -v "${TRACELENS_PATH}:${TRACELENS_MOUNT}" \
-    lmsysorg/sglang:v0.5.9-rocm700-mi35x \
+    ${DOCKER_IMAGE} \
     tail -f /dev/null
 
 echo "Waiting for container to start..."
