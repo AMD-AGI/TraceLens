@@ -86,6 +86,7 @@ def verify_subtree_events(capture_events, graph_events):
 def update_subtree_uids_and_timestamps(
     capture_tree, subtree_events, subtree_filtered_events, start_uid, new_start_ts, c_root
 ):
+    cpu_root_nodes=[]
     uid_mapping = {}
     for idx, event in enumerate(subtree_events):
         old_uid = event[UID]
@@ -119,10 +120,14 @@ def update_subtree_uids_and_timestamps(
     #    event[UID]=uid_mapping[event[UID]]
     for event in subtree_events:
         event["ts"] += ts_offset
-    return subtree_events, subtree_filtered_events
+        event["ts"] = new_start_ts
+    for i in capture_tree.cpu_root_nodes:
+        if i in uid_mapping:
+            cpu_root_nodes.append(uid_mapping[i])
+    return subtree_events, subtree_filtered_events,cpu_root_nodes
 
 
-def append_subtree_to_event(tree, subtree_events, parent_event):
+def append_subtree_to_event(tree, subtree_events, parent_event, cpu_root_nodes):
     # Append the subtree events to the tree's events list
     tree.events.extend(subtree_events)
     # Update the parent event's children to include the root of the subtree
@@ -131,6 +136,10 @@ def append_subtree_to_event(tree, subtree_events, parent_event):
         if event[UID] in tree.events_by_uid:
             print("Warning: UID {} already exists in events_by_uid".format(event[UID]))
         tree.events_by_uid[event[UID]] = event
+        tree.name2event_uids[
+                event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
+            ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+    tree.cpu_root_nodes.extend(cpu_root_nodes)
     return tree
 
 
@@ -385,7 +394,7 @@ def merge_capture_trace_into_graph(
             #)
             verify_subtree_events(capture_filtered_events, graph_filtered_events)
             start_uid = graph_tree.events[-1][UID] + 1
-            capture_events, _ = update_subtree_uids_and_timestamps(
+            capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
                 capture_tree,
                 capture_events,
                 capture_filtered_events,
@@ -395,7 +404,7 @@ def merge_capture_trace_into_graph(
             )
             capture_events[0]["parent"] = g_root[UID]
             g_root["children"].append(capture_events[0][UID])
-            graph_tree = append_subtree_to_event(graph_tree, capture_events, g_root)
+            graph_tree = append_subtree_to_event(graph_tree, capture_events, g_root,cpu_root_nodes)
             graph_tree = make_connections(
                 graph_tree, graph_filtered_events, capture_filtered_events
             )

@@ -476,6 +476,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                    metrics_event["num_kernels"] = len(event["kernel_details"]) 
             rows.append(metrics_event)
 
         self._show_warnings(
@@ -579,6 +580,8 @@ class TreePerfAnalyzer:
         param_cols = [
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
+        if "num_kernels" in df_perf_metrics.columns:
+            param_cols.append("num_kernels")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
         for col in param_cols:
@@ -626,7 +629,6 @@ class TreePerfAnalyzer:
         )
         # df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
-
         return df_perf_metrics_summary
 
     def get_kernel_launchers(self, include_nccl=False):
@@ -755,6 +757,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                    metrics_event["num_kernels"] = len(event["kernel_details"])
                 if include_call_stack:
                     call_stack = self.tree.traverse_parents_and_get_callstack(
                         event, filter=("nn.Module",)
@@ -906,7 +909,6 @@ class TreePerfAnalyzer:
             )
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
-
         # --- CHANGE: Collect durations BY INDEX, not by name ---
         all_durations = [[] for _ in template]
 
@@ -988,6 +990,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
 
         # 0. Filter the DataFrame based on the event name if provided
@@ -1116,6 +1119,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
 
         # 0. Filter the DataFrame based on the event name if provided
@@ -1232,24 +1236,33 @@ class TreePerfAnalyzer:
         """
         Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
 
-        A leaf cpu_op follows the pattern: cpu_op -> runtime -> kernel
+        A leaf cpu_op follows patterns:
+        - cpu_op -> runtime -> kernel
+        - cpu_op -> python_function -> runtime -> kernel
         This matches the definition used in get_kernel_launchers().
         """
         if self.event_to_category(event) != "cpu_op":
             return False
 
-        # Check if any child's grandchild is a kernel (cpu_op -> runtime -> kernel pattern)
-        for child_uid in event.get("children", []):
-            child = self.tree.get_UID2event(child_uid)
-            for grandchild_uid in child.get("children", []):
-                grandchild = self.tree.get_UID2event(grandchild_uid)
-                if self.event_to_category(grandchild) in {
-                    "kernel",
-                    "gpu_memcpy",
-                    "gpu_memset",
-                }:
+        # Check if any descendant is a kernel within 3 levels
+        # Patterns: cpu_op -> runtime -> kernel OR cpu_op -> python_function -> runtime -> kernel
+        def has_kernel_descendant(evt, max_depth=10):
+            if max_depth <= 0:
+                return False
+            for child_uid in evt.get("children", []):
+                child = self.tree.get_UID2event(child_uid)
+                if not child:
+                    continue
+                child_cat = self.event_to_category(child)
+                if child_cat in {"kernel", "gpu_memcpy", "gpu_memset"}:
                     return True
-        return False
+                # Continue traversing through runtime and python_function categories
+                if child_cat in {"cuda_runtime", "python_function"}:
+                    if has_kernel_descendant(child, max_depth - 1):
+                        return True
+            return False
+
+        return has_kernel_descendant(event)
 
     def _launches_gpu_kernels(self, event):
         """
@@ -1387,7 +1400,7 @@ class TreePerfAnalyzer:
             event = self.tree.get_UID2event(event_uid)
 
             # Skip non-cpu_op events
-            if self.event_to_category(event) != "cpu_op":
+            if not self.add_python_func and self.event_to_category(event) != "cpu_op":
                 return
 
             # First check: Does this subtree have any GPU kernels?
@@ -1695,6 +1708,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
 
         # Convert columns to string for grouping

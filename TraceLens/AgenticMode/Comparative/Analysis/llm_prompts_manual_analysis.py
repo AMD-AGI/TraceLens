@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 LLM Prompt Templates Module
 Manages all LLM prompt generation for Jarvis analysis
@@ -11,7 +17,7 @@ from pathlib import Path
 
 class LLMPromptManager:
     """Manages LLM prompt generation for different analysis modes"""
-    
+
     def __init__(self, use_critical_path: bool = True):
         """
         Args:
@@ -19,17 +25,19 @@ class LLMPromptManager:
         """
         self.use_critical_path = use_critical_path
         self.analysis_mode = "Critical Path" if use_critical_path else "Timeline"
-    
-    def build_analysis_prompt(self,
-                             baseline_gpu: str,
-                             target_gpu: str,
-                             baseline_total_time: float,
-                             target_total_time: float,
-                             critical_path_section: str,
-                             markdown_data_section: str) -> str:
+
+    def build_analysis_prompt(
+        self,
+        baseline_gpu: str,
+        target_gpu: str,
+        baseline_total_time: float,
+        target_total_time: float,
+        critical_path_section: str,
+        markdown_data_section: str,
+    ) -> str:
         """
         Build the main analysis prompt for the LLM.
-        
+
         Args:
             baseline_gpu: Name of baseline GPU
             target_gpu: Name of target GPU
@@ -37,15 +45,19 @@ class LLMPromptManager:
             target_total_time: Total execution time for target
             critical_path_section: Critical path analysis text
             markdown_data_section: Markdown formatted data (REQUIRED)
-            
+
         Returns:
             Complete prompt string
         """
         # Calculate performance metrics
         baseline_is_trailing = baseline_total_time > target_total_time
         performance_gap_ms = abs(baseline_total_time - target_total_time)
-        performance_gap_pct = (performance_gap_ms / min(baseline_total_time, target_total_time) * 100) if min(baseline_total_time, target_total_time) > 0 else 0
-        
+        performance_gap_pct = (
+            (performance_gap_ms / min(baseline_total_time, target_total_time) * 100)
+            if min(baseline_total_time, target_total_time) > 0
+            else 0
+        )
+
         # Adapt prompt based on analysis mode
         if self.use_critical_path:
             focus_instruction = "Your analysis MUST focus primarily on critical path operations of Baseline as they directly impact overall execution time."
@@ -55,16 +67,16 @@ class LLMPromptManager:
             focus_instruction = "Your analysis should focus on timeline-based execution data, analyzing ALL operation categories by their total execution time and contribution to overall performance."
             data_focus = "TIMELINE"
             data_explanation = "The data below represents ALL operation categories aggregated from the complete timeline. Analyze based on total execution time, frequency, and percentage contribution to overall runtime."
-        
+
         # Build gap instruction based on performance relationship
         gap_instruction = self._build_gap_instruction(
             baseline_is_trailing,
             performance_gap_ms,
             performance_gap_pct,
             baseline_total_time,
-            target_total_time
+            target_total_time,
         )
-        
+
         prompt = f"""
         You are a GPU performance expert analyzing execution traces between Baseline and Target.
         {focus_instruction}
@@ -122,15 +134,17 @@ class LLMPromptManager:
         - DO NOT include a main title heading (# or H1) at the start - begin directly with the first section header
         """
         return prompt
-    
-    def _build_gap_instruction(self, 
-                               baseline_is_trailing: bool,
-                               performance_gap_ms: float,
-                               performance_gap_pct: float,
-                               baseline_total_time: float,
-                               target_total_time: float) -> str:
+
+    def _build_gap_instruction(
+        self,
+        baseline_is_trailing: bool,
+        performance_gap_ms: float,
+        performance_gap_pct: float,
+        baseline_total_time: float,
+        target_total_time: float,
+    ) -> str:
         """Build gap analysis instruction based on performance relationship"""
-        
+
         if baseline_is_trailing:
             return f"""
             PERFORMANCE GAP ANALYSIS ({self.analysis_mode} Mode):
@@ -304,11 +318,11 @@ class LLMPromptManager:
             - Group related insights visually using markdown sections
             - Include percentages and absolute time values
             """
-    
+
     def _get_analysis_structure(self) -> str:
         """Get analysis structure based on mode"""
         if self.use_critical_path:
-            return '''You MUST prioritize analysis of operations on the critical path. The critical path represents the longest sequence of dependent operations and directly determines overall execution time.
+            return """You MUST prioritize analysis of operations on the critical path. The critical path represents the longest sequence of dependent operations and directly determines overall execution time.
             
             Analyze and provide suggestions focusing on:
             1. Operations that appear on the CRITICAL PATH of Baseline and not the Target
@@ -320,9 +334,9 @@ class LLMPromptManager:
             1. CRITICAL PATH COMPARISON (table: Operation | Baseline (CP) | Target (CP) | Gap | Impact on Total Time)
             2. CRITICAL PATH BOTTLENECKS (top 5 baseline critical-path operations underperforming)
             3. CRITICAL PATH ANALYSIS BY CATEGORY (table: Category | Time on Baseline | Time on Target | % of Critical Path)
-            4. NON-CRITICAL OPERATIONS (brief mention of non-critical operations with noted performance differences for context)'''
+            4. NON-CRITICAL OPERATIONS (brief mention of non-critical operations with noted performance differences for context)"""
         else:
-            return '''You are analyzing ALL operation categories from the complete timeline. Focus on categories with:
+            return """You are analyzing ALL operation categories from the complete timeline. Focus on categories with:
             - Highest total execution time (impact_pct)
             - Largest time gaps between Baseline and Target
             - High percentage contribution to overall performance
@@ -373,15 +387,15 @@ class LLMPromptManager:
                - **IF PREFILL/DECODE DATA EXISTS**: Include brief subsection on phase-specific performance (prefill vs decode)
                  * Compare total time per phase between baseline and target
                  * Identify if performance gaps are concentrated in one phase
-                 * Keep concise (2-3 bullet points)'''
-    
+                 * Keep concise (2-3 bullet points)"""
+
     def get_system_message(self) -> str:
         """Get system message for LLM based on analysis mode"""
         if self.use_critical_path:
             analysis_context = """You are analyzing GPU performance with a CRITICAL PATH focus. Critical path operations directly determine overall execution time through dependency chains. Prioritize operations on the critical path (~7-10% of all operations) as they have the highest impact on performance."""
         else:
             analysis_context = """You are analyzing GPU performance with a TIMELINE focus. Analyze all operations based on their total execution time and frequency. Consider both individual operation times and their cumulative contribution to overall performance."""
-        
+
         return f"""You are a GPU performance expert specializing in ML workload optimization.
 
 {analysis_context}
@@ -397,62 +411,65 @@ CRITICAL INSTRUCTIONS FOR CONSISTENT OUTPUT:
 8. Maintain consistent decimal precision (e.g., always 2 decimal places for percentages)
 9. For recommendations, follow the exact format: [Priority] | [Action] | [Current Impact] | [Potential Gain]
 10. Never deviate from the requested structure - always provide all required sections even if data is limited"""
-    
+
     def load_markdown_report(self, markdown_path: Path) -> str:
         """
         Load a markdown report file for inclusion in prompts.
-        
+
         Args:
             markdown_path: Path to the markdown file
-            
+
         Returns:
             Content of the markdown file as a string
         """
         markdown_path = Path(markdown_path)
         if not markdown_path.exists():
             raise FileNotFoundError(f"Markdown report not found: {markdown_path}")
-        
-        with open(markdown_path, 'r', encoding='utf-8') as f:
+
+        with open(markdown_path, "r", encoding="utf-8") as f:
             content = f.read()
-        
+
         return content
-    
-    def append_markdown_to_prompt(self, base_prompt: str, 
-                                   baseline_md_path: Optional[Path] = None,
-                                   target_md_path: Optional[Path] = None) -> str:
+
+    def append_markdown_to_prompt(
+        self,
+        base_prompt: str,
+        baseline_md_path: Optional[Path] = None,
+        target_md_path: Optional[Path] = None,
+    ) -> str:
         """
         Append markdown reports to the analysis prompt.
-        
+
         Args:
             base_prompt: The base analysis prompt
             baseline_md_path: Path to baseline GPU markdown report
             target_md_path: Path to target GPU markdown report
-            
+
         Returns:
             Enhanced prompt with markdown reports appended
         """
         prompt_parts = [base_prompt]
-        
+
         # Add baseline markdown
         if baseline_md_path:
             try:
                 baseline_md = self.load_markdown_report(baseline_md_path)
-                prompt_parts.append("\n\n" + "="*80)
+                prompt_parts.append("\n\n" + "=" * 80)
                 prompt_parts.append("\n## BASELINE GPU DETAILED TRACELENS REPORT\n")
-                prompt_parts.append("="*80 + "\n")
+                prompt_parts.append("=" * 80 + "\n")
                 prompt_parts.append(baseline_md)
             except Exception as e:
                 print(f"⚠️  Warning: Could not load baseline markdown: {e}")
-        
+
         # Add target markdown
         if target_md_path:
             try:
                 target_md = self.load_markdown_report(target_md_path)
-                prompt_parts.append("\n\n" + "="*80)
+                prompt_parts.append("\n\n" + "=" * 80)
                 prompt_parts.append("\n## TARGET GPU DETAILED TRACELENS REPORT\n")
-                prompt_parts.append("="*80 + "\n")
+                prompt_parts.append("=" * 80 + "\n")
                 prompt_parts.append(target_md)
             except Exception as e:
                 print(f"⚠️  Warning: Could not load target markdown: {e}")
-        
+
         return "\n".join(prompt_parts)

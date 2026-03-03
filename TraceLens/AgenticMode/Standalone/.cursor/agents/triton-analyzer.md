@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: triton-analyzer
 description: Report informational summary for Triton custom kernels. Use when orchestrator needs Triton category analysis.

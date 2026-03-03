@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Jarvis Analysis - Modular Architecture
 
 This directory contains the refactored, modular version of Jarvis GPU performance analysis framework.

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Jarvis Analysis Package
 Modular GPU performance analysis framework
@@ -18,11 +24,11 @@ from .report_generator import ReportGenerator
 from . import data_extractors
 
 __all__ = [
-    'TraceLensRunner',
-    'LLMPromptManager',
-    'JarvisPlotter',
-    'ReportGenerator',
-    'data_extractors'
+    "TraceLensRunner",
+    "LLMPromptManager",
+    "JarvisPlotter",
+    "ReportGenerator",
+    "data_extractors",
 ]
 
-__version__ = '2.0.0'
+__version__ = "2.0.0"

@@ -54,6 +54,10 @@ jobs:
           pip install pytest openpyxl pandas tensorboard-plugin-profile==2.19.0
           pytest tests/test_jax_perf_report.py
 
+      - name: Run pytest on the standalone analysis tests
+        run: |
+          pytest tests/test_standalone_analysis.py
+
       - name: Run copyright header checks
         run: |
           pip install pytest

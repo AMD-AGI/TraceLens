@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TraceLens Agentic Mode: Standalone Trace Analysis
 
 > **⚠️ Experimental**: This feature is under active development and may change.
@@ -17,11 +23,19 @@ cd TraceLens
 
 ### 2. Install TraceLens inside your container
 
-SSH into your node and exec into the container:
+SSH into your node and exec into the container or venv:
 
 ```bash
 ssh <node>
 docker exec -it <container> bash
+```
+
+OR
+
+```bash
+ssh <node>
+python -m venv venv_name
+source venv_name/bin/activate
 ```
 
 Install TraceLens:
@@ -38,23 +52,19 @@ pip install -e .
 ### To run performance analysis:
 
 1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke:**
-   ```
+  ```
    Run standalone analysis on <path_to_trace.json>
-   ```
-
-
+  ```
 2. **Provide when prompted:**
-   - Trace file path
-   - Platform (MI300X/MI325X/MI350X/MI355X/MI400)
-   - Node name
-   - Container name
-   - Output directory (optional)
-
+  - Trace file path
+  - Platform (MI300X/MI325X/MI350X/MI355X/MI400)
+  - Node name and Container name or venv location
+  - Output directory (optional)
 3. **Get results:**
-   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations
-   - **Additional outputs:**
-     - `system_findings/` - System-level analysis
-     - `category_findings/` - Per-category compute kernel analysis
+  - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations
+  - **Additional outputs:**
+    - `system_findings/` - System-level analysis
+    - `category_findings/` - Per-category compute kernel analysis
 
 ---
 
@@ -116,6 +126,8 @@ flowchart TD
     Step9 --> Step11["Step 11: Final Report"]
 ```
 
+
+
 ### Orchestrator
 
 The **Standalone Analysis Orchestrator** skill coordinates the entire analysis workflow.
@@ -139,24 +151,27 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 **System-Level (Step 6):**
 
-| Agent | Purpose |
-|-------|---------|
-| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
+
+| Agent                   | Purpose                                                               |
+| ----------------------- | --------------------------------------------------------------------- |
+| `cpu-idle-analyzer`     | Analyzes GPU idle time and CPU bottlenecks                            |
 | `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
+
 
 **Compute Kernel (Step 7):**
 
-| Agent | Purpose |
-|-------|---------|
-| `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
-| `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
-| `elementwise-analyzer` | Analyzes elementwise operations (add, mul, copy, etc.) |
-| `reduce-analyzer` | Analyzes reduction operations (mean, sum, softmax) |
-| `triton-analyzer` | Analyzes Triton-compiled kernels |
-| `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
-| `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
-| `convolution-analyzer` | Analyzes convolution operations |
-| `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
+
+| Agent                  | Purpose                                                                   |
+| ---------------------- | ------------------------------------------------------------------------- |
+| `gemm-analyzer`        | Analyzes matrix multiplication operations (mm, bmm, addmm)                |
+| `sdpa-analyzer`        | Analyzes scaled dot-product attention (Flash, Paged)                      |
+| `elementwise-analyzer` | Analyzes elementwise operations (add, mul, copy, etc.)                    |
+| `reduce-analyzer`      | Analyzes reduction operations (mean, sum, softmax)                        |
+| `triton-analyzer`      | Analyzes Triton-compiled kernels                                          |
+| `moe-analyzer`         | Analyzes Mixture-of-Experts fused operations                              |
+| `norm-analyzer`        | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
+| `convolution-analyzer` | Analyzes convolution operations                                           |
+| `generic-op-analyzer`  | Analyzes uncategorized operations (communication, graph, misc.)           |
 
 
 ## Extending Capability
@@ -214,3 +229,4 @@ TraceLens Standalone Agentic analysis is currently an **experimental** feature.
 
 - Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
 - Components of system-level analysis that can be codified should be moved into TraceLens.
+
