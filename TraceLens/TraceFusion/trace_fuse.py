@@ -33,7 +33,7 @@ def _process_single_rank(
     processed_events = []
     for event in data["traceEvents"]:
         # remove process_name metadata events
-        if event["ph"] == "M" and event["name"] == "process_name":
+        if event["ph"] == "M" and (event["name"] == "process_name" or event["name"] == "process_sort_index"):
             continue
         # If filter_fn is None, use default filter
         if filter_fn is None:
@@ -157,6 +157,13 @@ class TraceFuse:
                 "pid": pid,
                 "tid": 0,
                 "args": {"name": "RANK"},
+            })
+            metadata.append({
+                "name": "process_sort_index",
+                "ph": "M",
+                "pid": pid,
+                "tid": 0,
+                "args": {"sort_index": rank},
             })
         return metadata
 
