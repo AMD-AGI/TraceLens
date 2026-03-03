@@ -85,7 +85,7 @@ agent --force "Run the quality eval skill on <output_dir> with reference <refere
 Each test case lives in `evals/<id>/` and must contain:
 
 - `trace.json.jz` -- the profiling trace to analyze.
-- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals).
+- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `standalone_analysis.md` and `perf_report_csvs/`.
 
 ### 2. Add a row to `unit_test_traces.csv`
 
