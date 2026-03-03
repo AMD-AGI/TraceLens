@@ -33,7 +33,9 @@ def _process_single_rank(
     processed_events = []
     for event in data["traceEvents"]:
         # remove process_name metadata events
-        if event["ph"] == "M" and (event["name"] == "process_name" or event["name"] == "process_sort_index"):
+        if event["ph"] == "M" and (
+            event["name"] == "process_name" or event["name"] == "process_sort_index"
+        ):
             continue
         # If filter_fn is None, use default filter
         if filter_fn is None:
@@ -151,20 +153,24 @@ class TraceFuse:
 
         metadata = []
         for pid, rank in sorted(pid_to_rank.items(), key=lambda x: str(x[0])):
-            metadata.append({
-                "name": "process_name",
-                "ph": "M",
-                "pid": pid,
-                "tid": 0,
-                "args": {"name": "RANK"},
-            })
-            metadata.append({
-                "name": "process_sort_index",
-                "ph": "M",
-                "pid": pid,
-                "tid": 0,
-                "args": {"sort_index": rank},
-            })
+            metadata.append(
+                {
+                    "name": "process_name",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": 0,
+                    "args": {"name": "RANK"},
+                }
+            )
+            metadata.append(
+                {
+                    "name": "process_sort_index",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": 0,
+                    "args": {"sort_index": rank},
+                }
+            )
         return metadata
 
     def merge(self, filter_fn=None, include_pyfunc=False):
