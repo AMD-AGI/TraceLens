@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
 set -e
 
-CONTAINER_NAME="sglang-deepseek-mi355x"
-TRACELENS_PATH="/home/mohbasit/TraceLens-internal"
+usage() {
+    echo "Usage: $0 <tracelens_path>"
+    echo "  tracelens_path: Absolute path to the TraceLens-internal repository"
+    exit 1
+}
 
+if [ -z "$1" ]; then
+    usage
+fi
+
+TRACELENS_PATH="$(realpath "$1")"
+if [ ! -d "${TRACELENS_PATH}" ]; then
+    echo "Error: TraceLens path does not exist: ${TRACELENS_PATH}"
+    exit 1
+fi
+
+CONTAINER_NAME="sglang-deepseek-mi355x"
+TRACELENS_MOUNT="/workspace/TraceLens-internal"
+
+echo "Using TraceLens path: ${TRACELENS_PATH}"
 echo "Starting Docker container..."
 docker run -d \
     --user root \
@@ -15,11 +32,10 @@ docker run -d \
     --ipc=host \
     --network=host \
     --shm-size 64G \
-    --mount type=bind,src=/data,dst=/data \
     --device=/dev/kfd \
     --device=/dev/dri \
     -e SGLANG_USE_AITER=1 \
-    -v /home:/home \
+    -v "${TRACELENS_PATH}:${TRACELENS_MOUNT}" \
     lmsysorg/sglang:v0.5.9-rocm700-mi35x \
     tail -f /dev/null
 
@@ -33,14 +49,14 @@ docker exec ${CONTAINER_NAME} bash -c "
     echo \"sglang directory: \${SGLANG_DIR}\"
     cd \"\${SGLANG_DIR}\"
     echo \"Applying patches...\"
-    for patch in ${TRACELENS_PATH}/examples/custom_workflows/inference_analysis/sglang_roofline_patches/*.patch; do
+    for patch in ${TRACELENS_MOUNT}/examples/custom_workflows/inference_analysis/sglang_roofline_patches/*.patch; do
         if [ -f \"\$patch\" ]; then
             echo \"Applying: \$(basename \$patch)\"
             git apply \"\$patch\" || exit 1
         fi
     done
     echo \"Installing TraceLens...\"
-    pip install --no-deps ${TRACELENS_PATH}
+    pip install --no-deps ${TRACELENS_MOUNT}
 "
 
 echo "Done! Entering container..."
