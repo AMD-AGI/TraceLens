@@ -80,7 +80,7 @@ def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
     return {
         "total_time_ms": round(total_time_ms, 3),
         "percent_of_compute": round(percent_of_compute, 2),
-        "operation_count": len(ops_df),
+        "operation_count": int(ops_df["operation_count"].sum()) if "operation_count" in ops_df.columns else len(ops_df),
     }
 
 
@@ -365,7 +365,7 @@ def build_operation_metrics(
 
     for _, row in sorted_df.iterrows():
         op_name = row.get("name", "Unknown")
-        count = int(row.get("count", 1))
+        count = int(row.get("count", row.get("operation_count", 1)))
         time_ms = row.get("Kernel Time (µs)_sum", 0) / 1000
         percent_of_category = (
             (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0

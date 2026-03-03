@@ -28,7 +28,7 @@ When triggered, the prompt will specify:
 Execute the pythonic quality evals script:
 
 ```bash
-ssh <node> "docker exec -w <repo_root> tracelens_evals python3 eval_scripts/quality_evals.py \
+ssh <node> "docker exec -w <repo_root> tracelens_evals python3 eval_scripts/quality_scripted_evals.py \
     --output-dir <output_dir> \
     --reference-dir <reference_dir> \
     --results <results_path>"

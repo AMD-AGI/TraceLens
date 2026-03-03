@@ -106,6 +106,12 @@ Build the operations breakdown table from `metrics['operations']`:
 |-----------|-------|-----------|---------------|------------|------------|------|
 ```
 
+**Column mappings:**
+- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`
+- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
+- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`). Do NOT use `classification.gemm_type` here — that field distinguishes quantized vs regular, not the compute/memory bound type.
+
 ### Step 5: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:

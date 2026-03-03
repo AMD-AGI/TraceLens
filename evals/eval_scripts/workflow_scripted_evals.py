@@ -115,10 +115,9 @@ def _check_findings_placement(output_dir: str) -> tuple[str, str]:
 
 
 def _check_plot(output_dir: str) -> tuple[str, str]:
-    for ext in ("svg", "png"):
-        if os.path.isfile(os.path.join(output_dir, f"perf_improvement.{ext}")):
-            return "PASS", ""
-    return "FAIL", "perf_improvement.svg/.png not found"
+    if os.path.isfile(os.path.join(output_dir, f"perf_improvement.png")):
+        return "PASS", ""
+    return "FAIL", "perf_improvement.png not found"
 
 
 EVAL_REGISTRY = [

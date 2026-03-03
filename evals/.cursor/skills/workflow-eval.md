@@ -27,14 +27,14 @@ When triggered, the prompt will specify:
 Execute the pythonic workflow evals script:
 
 ```bash
-ssh <node> "docker exec -w <repo_root> tracelens_evals python3 eval_scripts/workflow_evals.py \
+ssh <node> "docker exec -w <repo_root> tracelens_evals python3 eval_scripts/workflow_scripted_evals.py \
     --output-dir <output_dir> \
     --results <results_path>"
 ```
 
 Read the resulting CSV. These cover evals 1-7 (directory structure, file existence, plot). This is only 7 of 12 rows -- you MUST continue to Step 2.
 
-## Step 2: Run LLM-Based Evals (8-12) -- produces 5 more rows
+## Step 2: Run LLM-Based workflow Evals (8-12) -- produces 5 more rows
 
 Read the files listed below, then evaluate EACH of the 5 LLM evals below. Append ALL 5 results to the CSV from Step 1.
 

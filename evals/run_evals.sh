@@ -47,13 +47,13 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     echo "    -> Launching sub-agent: workflow-eval"
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust "Run workflow eval on $OUTPUT_DIR for test case $id. Write results to $CASE_RESULTS/workflow_eval_results.csv"
+        agent --print --force --trust "Run workflow eval skill on $OUTPUT_DIR for test case $id. Write results to $CASE_RESULTS/workflow_eval_results.csv"
     ) 2>&1 | tee "$CASE_RESULTS/workflow_eval.log" &
 
     echo "    -> Launching sub-agent: quality-eval"
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust "Run quality eval on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_eval_results.csv"
+        agent --print --force --trust "Run quality eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_eval_results.csv"
     ) 2>&1 | tee "$CASE_RESULTS/quality_eval.log" &
 
     wait

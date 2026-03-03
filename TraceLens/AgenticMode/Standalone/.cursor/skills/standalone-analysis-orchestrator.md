@@ -45,8 +45,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Aggregate Results: System-Level + Compute Kernel Recommendations
-9.5. Generate Performance Improvement Plot (matplotlib SVG)
-10. Generate Final Report (composable System + Compute sections, embed SVG)
+9.5. Generate Performance Improvement Plot (matplotlib PNG, base64-embedded)
+10. Generate Final Report (composable System + Compute sections, embed plot as base64 data URI)
 ```
 
 ---
@@ -673,7 +673,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 9.5: Generate Performance Improvement Plot
 
-After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.svg`.
+After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.png` and produce a base64-encoded version for embedding directly in the report. This makes the final report fully portable -- it can be shared or moved without losing the plot image.
 
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
@@ -699,113 +699,24 @@ This produces `<output_dir>/plot_data.json` containing:
 - `recommendations`: Top kernel_tuning estimates grouped by category (high/medium confidence), sorted by total savings, max 6 categories
 - `all_estimates`: All estimates across all categories and types (for report aggregation)
 
-### 9.5.3 Read Plot Data and Compute Cumulative Projections
+### 9.5.3 Generate Plot and Base64 File
 
-```python
-import json
-
-with open('<output_dir>/plot_data.json') as f:
-    plot_data = json.load(f)
-
-baseline_ms = plot_data['baseline_ms']
-recommendations = plot_data['recommendations']
-
-current_ms = baseline_ms
-steps = ['Baseline']
-e2e_ms = [baseline_ms]
-savings_list = [0]
-cumulative_rel = [100]
-
-for rec in recommendations:
-    current_ms -= rec['savings_ms']
-    count = rec.get('operation_count', 1)
-    label = rec['category'] + f'\n({count} ops)'
-    steps.append(label)
-    e2e_ms.append(current_ms)
-    savings_list.append(rec['savings_ms'])
-    cumulative_rel.append(round(baseline_ms / current_ms * 100))
-```
-
-### 9.5.4 Generate and Run Plot Script
-
-Generate a Python script and run it inside the container. The script produces `<output_dir>/perf_improvement.svg`.
+Call `generate_perf_plot()` which reads `plot_data.json`, computes cumulative projections, renders the matplotlib chart, and writes both `perf_improvement.png` and `perf_improvement_base64.txt`. The title should follow the format `<Model> on <Platform>: Kernel Tuning Potential`.
 
 ```bash
-ssh <node> "docker exec <container> python3 <output_dir>/generate_plot.py"
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
+generate_perf_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
+\""
 ```
 
-**Plot script template** (write to `<output_dir>/generate_plot.py`, then execute).
-Fill `steps`, `e2e_ms`, `savings`, `cumulative_rel` from Step 9.5.3:
+The function handles these edge cases automatically:
+- Missing `plot_data.json` → skips plot, prints message
+- Empty recommendations (all categories efficient) → skips plot
+- Savings exceeding baseline → clamps to prevent division by zero
+- Missing matplotlib → prints clear error message
 
-```python
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-
-# --- Fill from Step 9.5.3 ---
-steps = ['Baseline', 'Opt 1\n(name)', 'Opt 2\n(name)', 'Opt 3\n(name)']
-e2e_ms = [100.0, 60.0, 52.0, 49.0]
-savings = [0, 40.0, 8.0, 3.0]
-cumulative_rel = [100, 167, 192, 204]
-title = '<Model> on <Platform> — Kernel Tuning Potential'
-output_path = '<output_dir>/perf_improvement.svg'
-# ---------------------------------------------
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5),
-                                gridspec_kw={'width_ratios': [1.1, 1]})
-
-colors = ['#4a90d9', '#e74c3c', '#e67e22', '#f1c40f', '#2ecc71',
-          '#9b59b6', '#1abc9c'][:len(steps)]
-bars = ax1.bar(steps, e2e_ms, color=colors, edgecolor='white',
-               linewidth=1.2, width=0.65)
-for bar, val, sav in zip(bars, e2e_ms, savings):
-    ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.5,
-             f'{val:.1f} ms', ha='center', va='bottom', fontsize=10,
-             fontweight='bold')
-    if sav > 0:
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height()/2,
-                 f'-{sav:.1f} ms', ha='center', va='center',
-                 fontsize=9, color='white', fontweight='bold')
-ax1.set_ylabel('E2E Latency (ms)', fontsize=11)
-ax1.set_title('Projected E2E Latency After Each Optimization',
-              fontsize=12, fontweight='bold', pad=12)
-ax1.set_ylim(0, max(e2e_ms) * 1.2)
-ax1.spines['top'].set_visible(False)
-ax1.spines['right'].set_visible(False)
-ax1.tick_params(axis='x', labelsize=9)
-
-ax2.plot(range(len(steps)), cumulative_rel, 'o-', color='#2ecc71',
-         linewidth=2.5, markersize=9, markerfacecolor='white',
-         markeredgewidth=2.5)
-for x, y in enumerate(cumulative_rel):
-    ax2.annotate(f'{y}', (x, y), textcoords="offset points",
-                 xytext=(0, 12), ha='center', fontsize=10,
-                 fontweight='bold', color='#27ae60')
-ax2.set_xticks(range(len(steps)))
-ax2.set_xticklabels(steps, fontsize=9)
-ax2.set_ylabel('Relative Throughput (Baseline = 100)', fontsize=11)
-ax2.set_title('Cumulative Throughput Improvement',
-              fontsize=12, fontweight='bold', pad=12)
-ax2.set_ylim(80, max(cumulative_rel) * 1.15)
-ax2.axhline(y=100, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
-ax2.grid(axis='y', linestyle='--', alpha=0.3)
-ax2.spines['top'].set_visible(False)
-ax2.spines['right'].set_visible(False)
-ax2.tick_params(axis='x', labelsize=9)
-
-fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
-plt.tight_layout()
-plt.savefig(output_path, bbox_inches='tight', facecolor='white')
-print(f'Plot saved to {output_path}')
-```
-
-### 9.5.5 Verify Plot Output
-
-```bash
-ssh <node> "docker exec <container> test -f <output_dir>/perf_improvement.svg && echo 'Plot generated successfully' || echo 'ERROR: Plot generation failed'"
-```
-
-If the plot fails, proceed to Step 10 without the plot and note the failure in the report.
+If the plot fails or is skipped, proceed to Step 10 without the plot and note the failure in the report.
 
 ---
 
@@ -831,7 +742,7 @@ Validate the report before sharing the priority recommendations on the chat and 
 | Exposed Communication | W% |
 | Top Bottleneck Category | Category (V%) |
 
-![Performance Improvement](perf_improvement.svg)
+{{PERF_PLOT}}
 
 ## Warnings
 
@@ -984,10 +895,21 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ```
 
+### 10.1 Embed Performance Plot via Post-Processing
+
+After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a post-processing step to substitute the placeholder with the base64-embedded image. This keeps the large base64 string out of the agent's context.
+
+```bash
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
+result = embed_plot_in_report('<output_dir>')
+\""
+```
+
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **Performance plot**: Embed `![Performance Improvement](perf_improvement.svg)` immediately after the Executive Summary metrics table. The plot shows **kernel tuning potential only**. If the plot was not generated (Step 9.5 failed), omit the image tag.
+3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). This makes the report fully portable -- it can be shared or moved without losing the plot. The plot shows **kernel tuning potential only**. If the plot was not generated (Step 9.5 failed), the placeholder is removed.
 4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
 5. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
 6. **Each section is independently composable** -- can be shared standalone
@@ -1087,4 +1009,4 @@ tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'
 5. **Composable reports** - System-Level and Compute Kernel sections can stand alone as independent deliverables
 6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1). Icons follow priority number: System 🔴→🟡→🟢, Compute 🔴→🟡→🟢
 7. **Handle errors gracefully** - Failed analyses go to Warnings, not manual analysis
-8. **Performance plot** - Step 9.5 generates `perf_improvement.svg` from Impact Summary tables; if matplotlib is missing, install it in the container first
+8. **Performance plot** - Step 9.5 generates `perf_improvement.png` with base64 encoding; Step 10.1 embeds it as a data URI in the report for portability. If matplotlib is missing, install it in the container first
