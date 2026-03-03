@@ -2,15 +2,15 @@
 set -euo pipefail
 
 # Environment config (edit these for your setup)
-REPO_ROOT="$(pwd)"
-NODE="tw028"
-CONTAINER="tracelens_evals"
+NODE=""
+CONTAINER=""
 
 # Eval directories
+REPO_ROOT="$(pwd)"
 STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
-CSV_FILE="$EVALS_DIR/test_traces.csv"
 RESULTS_ROOT="$EVALS_DIR/results"
+TEST_TRACES_CSV="$EVALS_DIR/unit_test_traces.csv"
 PREFIX="docker exec -w $REPO_ROOT $CONTAINER"
 
 mkdir -p "$RESULTS_ROOT"
@@ -27,13 +27,14 @@ echo "Phase 1: Running standalone analysis..."
 echo ""
 
 while IFS=, read -r id sub_category trace_path reference_dir platform; do
+
+    # Create output directories
     OUTPUT_DIR="$(dirname "$trace_path")/analysis_output"
     CASE_RESULTS="$RESULTS_ROOT/$id"
-    mkdir -p "$CASE_RESULTS"
     ssh "$NODE" "$PREFIX bash -c 'mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR'"
     ssh "$NODE" "$PREFIX bash -c 'mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS'"
 
-    # Phase 1: Analysis
+    # Phase 1: Agentic Mode Standalone Analysis
     echo "  [$id] Analyzing $trace_path on $platform..."
     (
         cd "$STANDALONE_DIR"
@@ -41,7 +42,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     ) 2>&1 | tee "$CASE_RESULTS/analysis.log"
     echo "  [$id] Analysis complete."
 
-    # Phase 2: Evals in parallel
+    # Phase 2: Workflow and Quality Evals (in parallel)
     echo "  [$id] Running workflow + quality evals in parallel..."
 
     echo "    -> Launching sub-agent: workflow-eval"
@@ -59,11 +60,11 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     wait
     echo "  [$id] Evals complete."
 
-    # Merge results for this test case
+    # Aggregate Results
     ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/merge_results.py --results-dir $CASE_RESULTS --output $CASE_RESULTS/eval_summary.csv"
     echo "  [$id] Summary written to $CASE_RESULTS/eval_summary.csv"
     echo ""
-done < <(tail -n +2 "$CSV_FILE")
+done < <(tail -n +2 "$TEST_TRACES_CSV")
 
 echo ""
 echo "========================================="

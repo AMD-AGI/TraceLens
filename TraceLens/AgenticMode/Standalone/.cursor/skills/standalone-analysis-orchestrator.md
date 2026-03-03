@@ -401,7 +401,13 @@ if has_sync:
 - Efficiency values as percentages (0-100% typically; flag >100% as anomaly)
 - Always include operation count for context
 
-#### 6. Impact Summary Required
+#### 6. Use Precision-Specific Peak When Citing TFLOPS
+
+- When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON
+- This is the precision-specific peak for the operation's actual data type (e.g., 654 for FP16, 708 for BF16 on MI300X)
+- Do NOT independently look up peaks from the metadata `max_achievable_tflops` dict — the resolved value is already computed per-operation
+
+#### 7. Impact Summary Required
 
 Every subagent (compute kernel **and** system-level) **must** include an `## Impact Summary` table at the end of its findings file. This table is consumed by the orchestrator to generate the performance improvement plot (kernel tuning only) and to aggregate recommendations in the report.
 
@@ -433,10 +439,11 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 - Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
 - If CPU duration >> GPU kernel time (>5x), flag as sync bottleneck (framework issue, not kernel)
 - Check metadata time_breakdown for has_sync_bottleneck flag
+- When citing peak TFLOPS, use each operation's `efficiency.resolved_peak_maf` from the metrics JSON (precision-specific)
 
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
-- Max Achievable TFLOPS (from metadata max_achievable_tflops dict, keyed by compute spec e.g. matrix_bf16, matrix_fp8)
+- Resolved Peak MAF: Each operation's `efficiency.resolved_peak_maf` has the precision-correct peak — use this when citing peak TFLOPS
 
 **Input files:**
 - category_data/{category}_ops.csv

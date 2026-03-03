@@ -73,7 +73,7 @@ GEMMs account for 93.75% of GPU compute time (0.135 ms GPU kernel time out of 0.
 - **Shape:** M=131072, N=32, K=32 (FP16 inputs)
 - **Invocations:** 10
 - **Efficiency:** 23.51% of peak HBM bandwidth (1.25 TB/s achieved vs 5.3 TB/s peak)
-- **Compute throughput:** 19.93 TFLOPS/s achieved vs 708 TFLOPS/s peak (2.8% — expected for memory-bound)
+- **Compute throughput:** 19.93 TFLOPS/s achieved vs 654 TFLOPS/s peak FP16 (3.0% — expected for memory-bound)
 - **Bound type:** Memory-bound (FLOPS/Byte = 16.0)
 - **Kernel:** `Cijk_Ailk_Bljk_HHS_BH_MT64x128x32_MI16x16x16x1_SN_...` (vendor GEMM library)
 

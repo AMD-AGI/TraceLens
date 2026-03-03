@@ -222,6 +222,7 @@ def calculate_efficiency(
         "bound_type": None,
         "flops_per_byte": None,
         "compute_spec": None,
+        "resolved_peak_maf": None,
         "warning": None,
         "is_anomaly": False,
     }
@@ -243,6 +244,14 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
+    # Resolve peak_maf upfront so it's available for all tiers
+    if isinstance(peak_maf_or_maf_dict, dict):
+        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
+        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
+    else:
+        peak_maf = peak_maf_or_maf_dict
+    result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
+
     # --- Tier 1: Use Pct Roofline from TreePerf if available ---
     pct_roofline = row.get("Pct Roofline")
     if pct_roofline is not None and not pd.isna(pct_roofline):
@@ -261,14 +270,6 @@ def calculate_efficiency(
             )
             result["is_anomaly"] = True
         return result
-
-    # --- Tier 2/3: Manual calculation with precision-aware peak ---
-    # Resolve peak_maf: if dict, look up by Compute Spec; if float, use directly
-    if isinstance(peak_maf_or_maf_dict, dict):
-        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
-        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
-    else:
-        peak_maf = peak_maf_or_maf_dict
 
     # Determine bound type and calculate efficiency with validation
     def set_efficiency_with_validation(achieved, peak, bound_type, metric_name):
