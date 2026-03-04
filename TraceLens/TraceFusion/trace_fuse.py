@@ -161,20 +161,24 @@ class TraceFuse:
         for pid, rank in sorted(pid_to_rank.items(), key=lambda x: str(x[0])):
             label = "GPU" if pid in gpu_pids else "CPU"
             sort_idx = rank * 2 + (1 if pid in gpu_pids else 0)
-            metadata.append({
-                "name": "process_name",
-                "ph": "M",
-                "pid": pid,
-                "tid": 0,
-                "args": {"name": f"RANK {rank} - {label}"},
-            })
-            metadata.append({
-                "name": "process_sort_index",
-                "ph": "M",
-                "pid": pid,
-                "tid": 0,
-                "args": {"sort_index": sort_idx},
-            })
+            metadata.append(
+                {
+                    "name": "process_name",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": 0,
+                    "args": {"name": f"RANK {rank} - {label}"},
+                }
+            )
+            metadata.append(
+                {
+                    "name": "process_sort_index",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": 0,
+                    "args": {"sort_index": sort_idx},
+                }
+            )
         return metadata
 
     def merge(self, filter_fn=None, include_pyfunc=False):
