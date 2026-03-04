@@ -32,9 +32,10 @@ def _process_single_rank(
 
     processed_events = []
     for event in data["traceEvents"]:
-        # remove process_name metadata events
-        if event["ph"] == "M" and (
-            event["name"] == "process_name" or event["name"] == "process_sort_index"
+        if event["ph"] == "M" and event["name"] in (
+            "process_name",
+            "process_sort_index",
+            "process_labels",
         ):
             continue
         # If filter_fn is None, use default filter
@@ -61,8 +62,6 @@ def _process_single_rank(
                 if type(value) == int:
                     event[field] += rank * offset_mult
 
-        # Remap pid to rank since slicetrack name always has pid appended at the end in perfetto UI
-        # event["pid"] = rank
         processed_events.append(event)
 
     return rank, processed_events
@@ -145,20 +144,25 @@ class TraceFuse:
     _GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
 
     def _generate_rank_metadata(self, merged_data):
-        """Generate process_name metadata events with 'RANK N CPU' / 'RANK N GPU' labels."""
+        """Generate process_name metadata events with 'RANK N - CPU' / 'RANK N - GPU' labels."""
         pid_to_rank = {}
         gpu_pids = set()
         for event in merged_data:
+            if event.get("ph") == "M":
+                continue
             pid = event.get("pid")
+            if not isinstance(pid, int):
+                continue
             rank = event.get("args", {}).get("rank")
-            if pid is not None and rank is not None:
+            if rank is not None:
                 if pid not in pid_to_rank:
                     pid_to_rank[pid] = rank
                 if event.get("cat") in self._GPU_CATEGORIES:
                     gpu_pids.add(pid)
 
         metadata = []
-        for pid, rank in sorted(pid_to_rank.items(), key=lambda x: str(x[0])):
+        sorted_pids = sorted(pid_to_rank.items(), key=lambda x: (x[1], x[0]))
+        for pid, rank in sorted_pids:
             label = "GPU" if pid in gpu_pids else "CPU"
             sort_idx = rank * 2 + (1 if pid in gpu_pids else 0)
             metadata.append(
