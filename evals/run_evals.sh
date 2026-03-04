@@ -29,8 +29,8 @@ echo ""
 while IFS=, read -r id sub_category trace_path reference_dir platform; do
 
     # Create output directories
-    OUTPUT_DIR="$(dirname "$trace_path")/analysis_output"
     CASE_RESULTS="$RESULTS_ROOT/$id"
+    OUTPUT_DIR="$CASE_RESULTS/analysis_output"
     ssh "$NODE" "$PREFIX bash -c 'mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR'"
     ssh "$NODE" "$PREFIX bash -c 'mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS'"
 
