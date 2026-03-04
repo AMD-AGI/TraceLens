@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Environment config (edit these for your setup)
-NODE=tw011
-CONTAINER=tracelens_evals
+NODE=""
+CONTAINER=""
 
 # Eval directories
 REPO_ROOT="$(pwd)"
