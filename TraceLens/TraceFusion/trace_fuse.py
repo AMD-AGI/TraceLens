@@ -62,7 +62,7 @@ def _process_single_rank(
                     event[field] += rank * offset_mult
 
         # Remap pid to rank since slicetrack name always has pid appended at the end in perfetto UI
-        event["pid"] = rank
+        # event["pid"] = rank
         processed_events.append(event)
 
     return rank, processed_events
@@ -159,7 +159,7 @@ class TraceFuse:
                     "ph": "M",
                     "pid": pid,
                     "tid": 0,
-                    "args": {"name": "RANK"},
+                    "args": {"name": f"RANK {rank}"},
                 }
             )
             metadata.append(
