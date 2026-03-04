@@ -7,12 +7,20 @@ with numeric tolerance.
 import argparse
 import csv
 import os
+import re
 import sys
 
 import pandas as pd
 
 CSV_COLUMNS = ["index", "category", "issue_summary", "result", "details"]
 NUMERIC_TOLERANCE = 0.01
+
+_NUMPY_TYPE_RE = re.compile(r"np\.\w+\(([^)]+)\)")
+
+
+def _normalize_numpy_reprs(s: str) -> str:
+    """Strip numpy type wrappers so np.int64(135) becomes 135, etc."""
+    return _NUMPY_TYPE_RE.sub(r"\1", s)
 
 
 def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]:
@@ -57,7 +65,9 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
                             f"{fname}:{col} max relative diff {rel_diff:.4f}"
                         )
             else:
-                mask = ref_df[col].fillna("") != gen_df[col].fillna("")
+                ref_norm = ref_df[col].fillna("").astype(str).map(_normalize_numpy_reprs)
+                gen_norm = gen_df[col].fillna("").astype(str).map(_normalize_numpy_reprs)
+                mask = ref_norm != gen_norm
                 if mask.any():
                     rows = list(mask[mask].index[:3])
                     mismatches.append(f"{fname}:{col} differs at rows {rows}")

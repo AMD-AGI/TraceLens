@@ -1,20 +1,17 @@
 ---
-name: Workflow Eval
-description: Run workflow evals (pythonic + LLM) on a standalone analysis output and produce a results CSV.
+name: Workflow LLM Eval
+description: Run LLM-based workflow evals on a standalone analysis output and produce a results CSV.
 triggers:
-  - workflow eval
-  - run workflow eval
+  - workflow LLM eval
+  - run workflow LLM eval
 tools:
-  - terminal
   - file_read
   - file_write
 ---
 
-# Workflow Eval
+# Workflow LLM Eval
 
-Evaluate the standalone analysis output for workflow correctness: directory structure, file existence, and report formatting.
-
-**MANDATORY: This skill has 3 steps. ALL steps must be completed. The final CSV must contain exactly 12 rows (evals 1-12). Do NOT stop after Step 1.**
+Evaluate the standalone analysis report for correct formatting, content structure, and template adherence.
 
 ## Inputs
 
@@ -22,28 +19,18 @@ When triggered, the prompt will specify:
 - **output_dir**: path to the `analysis_output/` directory to evaluate
 - **results_path**: path to write the results CSV
 
-## Step 1: Run Pythonic Evals (1-7) -- produces 7 rows
+## Files to Read
 
-Execute the pythonic workflow evals script:
-
-```bash
-ssh <node> "docker exec -w <repo_root> tracelens_evals python3 eval_scripts/workflow_scripted_evals.py \
-    --output-dir <output_dir> \
-    --results <results_path>"
-```
-
-Read the resulting CSV. These cover evals 1-7 (directory structure, file existence, plot). This is only 7 of 12 rows -- you MUST continue to Step 2.
-
-## Step 2: Run LLM-Based workflow Evals (8-12) -- produces 5 more rows
-
-Read the files listed below, then evaluate EACH of the 5 LLM evals below. Append ALL 5 results to the CSV from Step 1.
-
-### Files to Read
+Read ALL of these before evaluating:
 
 - `<output_dir>/standalone_analysis.md`
 - `<output_dir>/perf_report_csvs/gpu_timeline.csv`
 - `<output_dir>/category_data/category_manifest.json`
 - All `<output_dir>/category_findings/*_findings.md`
+
+## Evals
+
+Evaluate ALL 5 checks below. Write ALL 5 rows to the results CSV.
 
 ### workflow_eval_8: Report Template Rendering
 
@@ -121,12 +108,10 @@ Read `category_manifest.json` to get compute_kernel categories. For each, read t
 
 **PASS** if all category findings have the required structure. **FAIL** listing which categories are missing what.
 
-## Step 3: Write Merged Results -- final CSV must have 12 rows
+## Output
 
-Read the CSV from Step 1 (7 rows). Append the 5 LLM eval results (workflow_eval_8 through workflow_eval_12) as new rows. Write the merged CSV back to the same path. Use `workflow_eval_8`, `workflow_eval_9`, etc. as the `index` values.
+Write a CSV to the specified `results_path` with exactly these 5 columns and 5 data rows:
 
-**Output CSV must have exactly these 5 columns:** `index,category,issue_summary,result,details`
+`index,category,issue_summary,result,details`
 
-Do not add any other columns (no test_case_id, no priority, no eval_type). Each LLM eval row must use the exact index, category, and issue_summary specified above.
-
-**Verify the final CSV has exactly 12 data rows (workflow_eval_1 through workflow_eval_12) before finishing.**
+Use `workflow_eval_8` through `workflow_eval_12` as the `index` values. Do not add any other columns.

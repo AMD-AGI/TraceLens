@@ -42,20 +42,30 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     ) 2>&1 | tee "$CASE_RESULTS/analysis.log"
     echo "  [$id] Analysis complete."
 
-    # Phase 2: Workflow and Quality Evals (in parallel)
-    echo "  [$id] Running workflow + quality evals in parallel..."
+    # Phase 2: Evals (4 parallel tasks: 2 scripted + 2 LLM)
+    echo "  [$id] Running evals in parallel..."
 
-    echo "    -> Launching sub-agent: workflow-eval"
+    echo "    -> Scripted workflow evals"
+    ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/workflow_scripted_evals.py \
+        --output-dir $OUTPUT_DIR \
+        --results $CASE_RESULTS/workflow_scripted_results.csv" &
+
+    echo "    -> LLM workflow evals"
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust "Run workflow eval skill on $OUTPUT_DIR for test case $id. Write results to $CASE_RESULTS/workflow_eval_results.csv"
-    ) 2>&1 | tee "$CASE_RESULTS/workflow_eval.log" &
+        agent --print --force --trust "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id. Write results to $CASE_RESULTS/workflow_llm_results.csv"
+    ) 2>&1 | tee "$CASE_RESULTS/workflow_llm_eval.log" &
 
-    echo "    -> Launching sub-agent: quality-eval"
+    echo "    -> Scripted quality evals"
+    ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/quality_scripted_evals.py \
+        --output-dir $OUTPUT_DIR --reference-dir $reference_dir \
+        --results $CASE_RESULTS/quality_scripted_results.csv" &
+
+    echo "    -> LLM quality evals"
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust "Run quality eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_eval_results.csv"
-    ) 2>&1 | tee "$CASE_RESULTS/quality_eval.log" &
+        agent --print --force --trust "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_llm_results.csv"
+    ) 2>&1 | tee "$CASE_RESULTS/quality_llm_eval.log" &
 
     wait
     echo "  [$id] Evals complete."
@@ -64,7 +74,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/merge_results.py --results-dir $CASE_RESULTS --output $CASE_RESULTS/eval_summary.csv"
     echo "  [$id] Summary written to $CASE_RESULTS/eval_summary.csv"
     echo ""
-done < <(tail -n +2 "$TEST_TRACES_CSV")
+done < <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 
 echo ""
 echo "========================================="
