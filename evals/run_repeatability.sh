@@ -72,11 +72,11 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
             agent --print --force --trust "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_llm_results.csv"
         ) 2>&1 | tee "$CASE_RESULTS/quality_llm_eval.log" &
 
-        wait
+        wait || true
         echo "  [$id] Evals for run $((i + 1)) complete."
 
         # Aggregate Results
-        ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/merge_results.py --results-dir $CASE_RESULTS --output $CASE_RESULTS/eval_summary.csv"
+        ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/merge_results.py --results-dir $CASE_RESULTS --output $CASE_RESULTS/eval_summary.csv" || true
         echo "  [$id] Summary written to $CASE_RESULTS/eval_summary.csv"
         echo ""
     done

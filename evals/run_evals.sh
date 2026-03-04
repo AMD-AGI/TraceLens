@@ -1,36 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="$HOME/.local/bin:$PATH"
-
 # Environment config (edit these for your setup)
-NODE=""
-CONTAINER=""
-CONTAINER_ROOT=""
+NODE=tw011
+CONTAINER=tracelens_evals
 
-# Detect execution context:
-#   1) Inside the container  → run directly
-#   2) On the compute node   → docker exec into container
-#   3) On the head node      → ssh to node, then docker exec
-if [ -f /.dockerenv ]; then
-    MODE="container"
-    REPO_ROOT="$CONTAINER_ROOT"
-elif docker inspect "$CONTAINER" &>/dev/null; then
-    MODE="compute_node"
-    REPO_ROOT="$(pwd)"
-else
-    MODE="head_node"
-    REPO_ROOT="$(pwd)"
-fi
-
-echo "Detected mode: $MODE"
-
-STANDALONE_DIR="$REPO_ROOT/TraceLens/AgenticMode/Standalone"
+# Eval directories
+REPO_ROOT="$(pwd)"
+STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="$EVALS_DIR/results"
 TEST_TRACES_CSV="$EVALS_DIR/unit_test_traces.csv"
+PREFIX="docker exec -w $REPO_ROOT $CONTAINER"
 
 mkdir -p "$RESULTS_ROOT"
+ssh "$NODE" "$PREFIX bash -c 'mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT'"
 
 echo "========================================="
 echo "  Standalone Analysis Evaluation"
@@ -47,7 +31,8 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     # Create output directories
     CASE_RESULTS="$RESULTS_ROOT/$id"
     OUTPUT_DIR="$CASE_RESULTS/analysis_output"
-    mkdir -p "$OUTPUT_DIR" "$CASE_RESULTS"
+    ssh "$NODE" "$PREFIX bash -c 'mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR'"
+    ssh "$NODE" "$PREFIX bash -c 'mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS'"
 
     # Phase 1: Agentic Mode Standalone Analysis
     echo "  [$id] Analyzing $trace_path on $platform..."
@@ -61,9 +46,9 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     echo "  [$id] Running evals in parallel..."
 
     echo "    -> Scripted workflow evals"
-    python3 "$EVALS_DIR/eval_scripts/workflow_scripted_evals.py" \
-        --output-dir "$OUTPUT_DIR" \
-        --results "$CASE_RESULTS/workflow_scripted_results.csv" &
+    ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/workflow_scripted_evals.py \
+        --output-dir $OUTPUT_DIR \
+        --results $CASE_RESULTS/workflow_scripted_results.csv" &
 
     echo "    -> LLM workflow evals"
     (
@@ -72,9 +57,9 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
     ) 2>&1 | tee "$CASE_RESULTS/workflow_llm_eval.log" &
 
     echo "    -> Scripted quality evals"
-    python3 "$EVALS_DIR/eval_scripts/quality_scripted_evals.py" \
-        --output-dir "$OUTPUT_DIR" --reference-dir "$reference_dir" \
-        --results "$CASE_RESULTS/quality_scripted_results.csv" &
+    ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/quality_scripted_evals.py \
+        --output-dir $OUTPUT_DIR --reference-dir $reference_dir \
+        --results $CASE_RESULTS/quality_scripted_results.csv" &
 
     echo "    -> LLM quality evals"
     (
@@ -82,11 +67,11 @@ while IFS=, read -r id sub_category trace_path reference_dir platform; do
         agent --print --force --trust "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_llm_results.csv"
     ) 2>&1 | tee "$CASE_RESULTS/quality_llm_eval.log" &
 
-    wait
+    wait || true
     echo "  [$id] Evals complete."
 
     # Aggregate Results
-    python3 "$EVALS_DIR/eval_scripts/merge_results.py" --results-dir "$CASE_RESULTS" --output "$CASE_RESULTS/eval_summary.csv"
+    ssh "$NODE" "$PREFIX python3 $EVALS_DIR/eval_scripts/merge_results.py --results-dir $CASE_RESULTS --output $CASE_RESULTS/eval_summary.csv" || true
     echo "  [$id] Summary written to $CASE_RESULTS/eval_summary.csv"
     echo ""
 done < <(tail -n +2 "$TEST_TRACES_CSV"; echo)
