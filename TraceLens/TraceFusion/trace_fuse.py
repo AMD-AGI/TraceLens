@@ -142,35 +142,39 @@ class TraceFuse:
     def default_filter_fn(event):
         return event.get("cat", None) != "Trace"
 
+    _GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
+
     def _generate_rank_metadata(self, merged_data):
-        """Generate process_name metadata events so trace viewers show 'RANK N' instead of raw pids."""
+        """Generate process_name metadata events with 'RANK N CPU' / 'RANK N GPU' labels."""
         pid_to_rank = {}
+        gpu_pids = set()
         for event in merged_data:
             pid = event.get("pid")
             rank = event.get("args", {}).get("rank")
-            if pid is not None and rank is not None and pid not in pid_to_rank:
-                pid_to_rank[pid] = rank
+            if pid is not None and rank is not None:
+                if pid not in pid_to_rank:
+                    pid_to_rank[pid] = rank
+                if event.get("cat") in self._GPU_CATEGORIES:
+                    gpu_pids.add(pid)
 
         metadata = []
         for pid, rank in sorted(pid_to_rank.items(), key=lambda x: str(x[0])):
-            metadata.append(
-                {
-                    "name": "process_name",
-                    "ph": "M",
-                    "pid": pid,
-                    "tid": 0,
-                    "args": {"name": f"RANK {rank}"},
-                }
-            )
-            metadata.append(
-                {
-                    "name": "process_sort_index",
-                    "ph": "M",
-                    "pid": pid,
-                    "tid": 0,
-                    "args": {"sort_index": rank},
-                }
-            )
+            label = "GPU" if pid in gpu_pids else "CPU"
+            sort_idx = rank * 2 + (1 if pid in gpu_pids else 0)
+            metadata.append({
+                "name": "process_name",
+                "ph": "M",
+                "pid": pid,
+                "tid": 0,
+                "args": {"name": f"RANK {rank} - {label}"},
+            })
+            metadata.append({
+                "name": "process_sort_index",
+                "ph": "M",
+                "pid": pid,
+                "tid": 0,
+                "args": {"sort_index": sort_idx},
+            })
         return metadata
 
     def merge(self, filter_fn=None, include_pyfunc=False):
