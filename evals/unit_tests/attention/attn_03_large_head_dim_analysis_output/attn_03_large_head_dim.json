@@ -1,0 +1,123 @@
+{
+  "traceEvents": [
+    {
+      "ph": "M",
+      "pid": 0,
+      "tid": 0,
+      "name": "process_name",
+      "args": {
+        "name": "GPU 0"
+      }
+    },
+    {
+      "ph": "M",
+      "pid": 470,
+      "tid": 0,
+      "name": "process_name",
+      "args": {
+        "name": "python3"
+      }
+    },
+    {
+      "ph": "M",
+      "pid": 470,
+      "tid": 711,
+      "name": "thread_name",
+      "args": {
+        "name": "MainThread"
+      }
+    },
+    {
+      "ph": "M",
+      "pid": 0,
+      "tid": 7,
+      "name": "thread_name",
+      "args": {
+        "name": "stream 7"
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aten::_scaled_dot_product_flash_attention",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1000000.0,
+      "dur": 3400.0,
+      "args": {
+        "Input Dims": [
+          [4, 8, 2048, 256],
+          [4, 8, 2048, 256],
+          [4, 8, 2048, 256]
+        ],
+        "Input type": [
+          "BFloat16",
+          "BFloat16",
+          "BFloat16"
+        ],
+        "Input Strides": [
+          [4194304, 524288, 256, 1],
+          [4194304, 524288, 256, 1],
+          [4194304, 524288, 256, 1]
+        ],
+        "Concrete Inputs": [
+          "",
+          "",
+          "",
+          "0.0",
+          "False",
+          "False",
+          ""
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "cudaLaunchKernel",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1000010.0,
+      "dur": 5.0,
+      "args": {
+        "External id": 100
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "flash_fwd_kernel_bf16_hdim256",
+      "pid": 0,
+      "tid": 7,
+      "ts": 1000050.0,
+      "dur": 3200.0,
+      "args": {
+        "device": 0,
+        "context": 1,
+        "stream": 7,
+        "grid": [128, 8, 1],
+        "block": [128, 1, 1],
+        "External id": 100
+      }
+    },
+    {
+      "ph": "s",
+      "id": 100,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1000050.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 100,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1000050.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    }
+  ]
+}

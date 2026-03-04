@@ -1,0 +1,2 @@
+name,total_direct_kernel_time_sum,Count,Categories,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
+aten::_scaled_dot_product_flash_attention,18000.0,1,{'SDPA_fwd'},18.0,100.0,100.0
