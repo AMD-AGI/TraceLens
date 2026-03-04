@@ -770,7 +770,8 @@ class TreePerfAnalyzer:
         return kernel_launchers
 
     def get_df_kernel_launchers(
-        self, id_cols=False, include_kernel_details=False, include_call_stack=False
+        self, id_cols=False, include_kernel_details=False, include_call_stack=False,
+        include_first_occurrence_time=False,
     ):
 
         def list_to_tuple(obj):
@@ -785,11 +786,12 @@ class TreePerfAnalyzer:
                 "name": event["name"],
                 "op category": event["op category"],
                 "UID": event["UID"],
-                "ts": event.get("ts"),
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
                 "total_subtree_kernel_time": event["total_subtree_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
             }
+            if include_first_occurrence_time:
+                metrics_event["ts"] = event.get("ts")
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
                 if arg in event["args"]:
                     metrics_event[arg] = list_to_tuple(event["args"][arg])
