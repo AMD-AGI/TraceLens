@@ -322,10 +322,18 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 # Jax GPU event analyser
 class JaxGPUEventAnalyser(GPUEventAnalyser):
 
+    @staticmethod
+    def _is_gpu_event(event: dict) -> bool:
+        """Return True if event's process_name contains /device:GPU."""
+        proc = event.get("process")
+        if isinstance(proc, dict):
+            return "/device:GPU" in proc.get("process_name", "")
+        return "/device:GPU" in str(proc or "")
+
     def __init__(self, events):
         super().__init__(events)  # Call the parent's __init__
         self.gpu_pids = list(
-            set([event["pid"] for event in events if event["pid"] < 100])
+            {event["pid"] for event in events if self._is_gpu_event(event)}
         )
 
     def get_gpu_event_lists(self, gpu_pid=None, event_filter=None):
@@ -348,36 +356,36 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             if event_filter is not None and not event_filter(event):
                 continue
             pid = event.get("pid")
-            # jax uses pid > 100 for CPU evens
             # skip some dictionary setup events that do not have ts
-            if "ts" in event:
-                if pid < 100:
-                    cur_dict = return_dict.get(pid)
-                    if cur_dict is None:
-                        cur_dict = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
-                        return_dict[pid] = cur_dict
-                    if "t_end" not in event:
-                        event["t_end"] = event["ts"] + event["dur"]
-                    cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
-                    name = event.get("name")
-                    if any(
-                        name.lower().startswith(x) for x in ["copy", "memcpy", "memset"]
-                    ):
-                        cur_dict[GPUEventAnalyser.memcpy_key].append(event)
-                    elif name.startswith("nccl"):
-                        cur_dict[GPUEventAnalyser.communication_key].append(event)
-                    else:
-                        cur_dict[GPUEventAnalyser.computation_key].append(event)
+            if "ts" not in event:
+                continue
+            is_gpu = pid in self.gpu_pids
+            if is_gpu:
+                cur_dict = return_dict.get(pid)
+                if cur_dict is None:
+                    cur_dict = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
+                    return_dict[pid] = cur_dict
+                if "t_end" not in event:
+                    event["t_end"] = event["ts"] + event["dur"]
+                cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
+                name = event.get("name") or ""
+                if any(
+                    name.lower().startswith(x) for x in ["copy", "memcpy", "memset"]
+                ):
+                    cur_dict[GPUEventAnalyser.memcpy_key].append(event)
+                elif name.startswith("nccl"):
+                    cur_dict[GPUEventAnalyser.communication_key].append(event)
                 else:
-                    cur_dict = return_dict.get(pid)
-                    if cur_dict is None:
-                        cur_dict = {key: [] for key in GPUEventAnalyser.cpu_event_keys}
-                        return_dict[pid] = cur_dict
-                    cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
+                    cur_dict[GPUEventAnalyser.computation_key].append(event)
+            else:
+                cur_dict = return_dict.get(pid)
+                if cur_dict is None:
+                    cur_dict = {key: [] for key in GPUEventAnalyser.cpu_event_keys}
+                    return_dict[pid] = cur_dict
+                cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
         if gpu_pid is None:
             return return_dict
-        else:
-            return return_dict.get(gpu_pid, {})
+        return return_dict.get(gpu_pid, {})
 
     def compute_metrics(self, gpu_pid=1, event_filter=None):
         # Default: use GPU0 (PID 1) for Jax
@@ -391,12 +399,13 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         dict_gpu_event_lists = self.get_gpu_event_lists(event_filter=event_filter)
         gpu_frames = {}
         print("Processing events by GPU")
-        for gpu_id, cur_events in tqdm.tqdm(
-            filter(lambda x: x[0] < 100, dict_gpu_event_lists.items())
-        ):
+        for frame_idx, gpu_id in enumerate(tqdm.tqdm(sorted(self.gpu_pids))):
+            cur_events = dict_gpu_event_lists.get(gpu_id)
+            if cur_events is None:
+                continue
             GPUEventAnalyser.verify_dict_gpu_event_lists(cur_events)
             cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
-            gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(
+            gpu_frames[frame_idx] = GPUEventAnalyser.get_breakdown_df_from_dict(
                 cur_metrics
             )
         return gpu_frames
