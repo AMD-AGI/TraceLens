@@ -770,7 +770,10 @@ class TreePerfAnalyzer:
         return kernel_launchers
 
     def get_df_kernel_launchers(
-        self, id_cols=False, include_kernel_details=False, include_call_stack=False,
+        self,
+        id_cols=False,
+        include_kernel_details=False,
+        include_call_stack=False,
         include_first_occurrence_time=False,
     ):
 
