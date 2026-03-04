@@ -4,9 +4,9 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
 # Environment config (edit these for your setup)
-NODE="tw003"
-CONTAINER="modular_eval"
-CONTAINER_ROOT="/workspace"
+NODE=""
+CONTAINER=""
+CONTAINER_ROOT=""
 
 # Detect execution context:
 #   1) Inside the container  → run directly
