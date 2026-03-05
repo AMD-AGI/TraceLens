@@ -45,8 +45,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Aggregate Results: System-Level + Compute Kernel Recommendations
-9.5. Generate Performance Improvement Plot (matplotlib PNG, base64-embedded)
-10. Generate Final Report (composable System + Compute sections, embed plot as base64 data URI)
+10. Generate Final Report (composable System + Compute sections)
+10.1. Generate and Embed Performance Improvement Plot (single atomic call: plot_data + matplotlib PNG + base64 embed)
 ```
 
 ---
@@ -678,55 +678,6 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ---
 
-## Step 9.5: Generate Performance Improvement Plot
-
-After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.png` and produce a base64-encoded version for embedding directly in the report. This makes the final report fully portable -- it can be shared or moved without losing the plot image.
-
-**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
-
-### 9.5.1 Ensure matplotlib is available
-
-```bash
-ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null || docker exec <container> pip install matplotlib"
-```
-
-### 9.5.2 Generate plot_data.json (Deterministic)
-
-Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
-
-```bash
-ssh <node> "docker exec <container> python3 -c \"
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
-generate_plot_data('<output_dir>')
-\""
-```
-
-This produces `<output_dir>/plot_data.json` containing:
-- `baseline_ms`: Total GPU time from manifest
-- `recommendations`: Top kernel_tuning estimates grouped by category (high/medium confidence), sorted by total savings, max 6 categories
-- `all_estimates`: All estimates across all categories and types (for report aggregation)
-
-### 9.5.3 Generate Plot and Base64 File
-
-Call `generate_perf_plot()` which reads `plot_data.json`, computes cumulative projections, renders the matplotlib chart, and writes both `perf_improvement.png` and `perf_improvement_base64.txt`. The title should follow the format `<Model> on <Platform>: Kernel Tuning Potential`.
-
-```bash
-ssh <node> "docker exec <container> python3 -c \"
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
-generate_perf_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
-\""
-```
-
-The function handles these edge cases automatically:
-- Missing `plot_data.json` → skips plot, prints message
-- Empty recommendations (all categories efficient) → skips plot
-- Savings exceeding baseline → clamps to prevent division by zero
-- Missing matplotlib → prints clear error message
-
-If the plot fails or is skipped, proceed to Step 10 without the plot and note the failure in the report.
-
----
-
 ## Step 10: Generate Final Report
 
 Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
@@ -902,21 +853,25 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ```
 
-### 10.1 Embed Performance Plot via Post-Processing
+### 10.1 Generate and Embed Performance Improvement Plot
 
-After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a post-processing step to substitute the placeholder with the base64-embedded image. This keeps the large base64 string out of the agent's context.
+After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report. This keeps the large base64 string out of the agent's context.
+
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
-result = embed_plot_in_report('<output_dir>')
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
+generate_and_embed_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
 \""
 ```
+
+If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
 
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). This makes the report fully portable -- it can be shared or moved without losing the plot. The plot shows **kernel tuning potential only**. If the plot was not generated (Step 9.5 failed), the placeholder is removed.
+3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). The plot shows **kernel tuning potential only**.
 4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
 5. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
 6. **Each section is independently composable** -- can be shared standalone
@@ -1016,4 +971,4 @@ tree.traverse_subtree_and_print(event, cpu_op_fields=('Input Dims', 'Input type'
 5. **Composable reports** - System-Level and Compute Kernel sections can stand alone as independent deliverables
 6. **Sequential priority numbering per tier** - System and Compute tiers each number P1/P2/P3 independently with no gaps (if CPU/Idle is skipped, multi-kernel starts at P1). Icons follow priority number: System 🔴→🟡→🟢, Compute 🔴→🟡→🟢
 7. **Handle errors gracefully** - Failed analyses go to Warnings, not manual analysis
-8. **Performance plot** - Step 9.5 generates `perf_improvement.png` with base64 encoding; Step 10.1 embeds it as a data URI in the report for portability. If matplotlib is missing, install it in the container first
+8. **Performance plot** - Step 10.1 generates `plot_data.json`, renders `perf_improvement.png`, and embeds it as a base64 data URI in the report -- all in a single atomic call to `generate_and_embed_plot()`

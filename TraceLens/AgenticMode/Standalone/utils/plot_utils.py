@@ -9,6 +9,7 @@
 Provides functions for:
 - Generating the performance improvement plot from pre-computed plot data
 - Embedding the plot as a base64 data URI in the markdown report
+- Running the full plot pipeline (plot data + plot + embed) as a single call
 """
 
 import base64
@@ -171,3 +172,36 @@ def embed_plot_in_report(output_dir: str,
         f.write(report)
 
     return embedded
+
+
+def generate_and_embed_plot(output_dir: str, title: str) -> dict:
+    """Run the full plot pipeline: generate plot_data.json, render the plot, and embed it.
+
+    Chains generate_plot_data() -> generate_perf_plot() -> embed_plot_in_report()
+    so the orchestrator only needs a single call. Each stage is independent and
+    failures are reported without aborting subsequent stages where possible.
+
+    Args:
+        output_dir: Base output directory containing category_data/ and the report
+        title: Plot suptitle (e.g. '<Model> on <Platform> — Kernel Tuning Potential')
+
+    Returns:
+        Dict with boolean status for each stage: plot_data, plot, embed
+    """
+    from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
+
+    results = {"plot_data": False, "plot": False, "embed": False}
+
+    try:
+        generate_plot_data(output_dir)
+        results["plot_data"] = True
+    except Exception as e:
+        print(f"plot_data generation failed: {e}")
+        return results
+
+    results["plot"] = generate_perf_plot(output_dir, title)
+
+    if results["plot"]:
+        results["embed"] = embed_plot_in_report(output_dir)
+
+    return results
