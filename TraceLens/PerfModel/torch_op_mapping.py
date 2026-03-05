@@ -150,6 +150,7 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
         )
     dict_cat2names[cat].append(op_name)
 
+
 def categorize_torch_op(row):
     """
     Categorizes a row based on the 'name' and 'kernel_names' fields.
@@ -217,7 +218,7 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-    for k,v in dict_cat2names.items():
+    for k, v in dict_cat2names.items():
         if row["name"] in v:
             return k
     # if none of the above cases match, return 'other'
