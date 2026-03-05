@@ -2184,7 +2184,9 @@ class flash_attention_backward(SDPA):
 
     def __init__(self, event, arch=None, python_path=None):
         super().__init__(event, arch, python_path)
-        self.d_h = self.d_h_qk  # head dimension for simulation (used by get_simulation_time_bwd_func)
+        self.d_h = (
+            self.d_h_qk
+        )  # head dimension for simulation (used by get_simulation_time_bwd_func)
 
     @staticmethod
     def get_param_details(event):
@@ -3582,7 +3584,9 @@ class Normalization:
         # read grad_out and the input once, invstd if it is saved
 
         # read grad_out and input (if mask is true and is_training), write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] and is_training else 1)
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (
+            2 if output_mask[0] and is_training else 1
+        )
         if is_training:
             bytes += num_channels * bpe_in  # invstd
         # read weight if affine
