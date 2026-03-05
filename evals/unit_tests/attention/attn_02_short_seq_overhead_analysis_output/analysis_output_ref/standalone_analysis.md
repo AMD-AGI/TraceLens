@@ -35,7 +35,7 @@ Standalone performance analysis of attention trace `attn_02_short_seq_overhead` 
 
 **Action**: (1) **Batch/sequence consolidation** — aggregate multiple short sequences into fewer, longer batches to amortize launch overhead. (2) **Kernel fusion** — if this SDPA is part of a larger block (e.g., transformer layer), fuse with adjacent ops to reduce kernel launches. (3) Evaluate whether Flash Attention is the right backend for N=16; a simpler implementation may have lower overhead.
 
-**Impact**: Estimated 0.175 ms savings (87.5% of CPU duration) if launch overhead is reduced via batching/fusion — medium confidence. Kernel-level tuning has limited upside (~0.025 ms) given the compute-bound, tiny workload.
+**Impact**: ~0.025 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > SDPA_fwd](#1-sdpa_fwd-100-of-compute) for details*
 
@@ -93,8 +93,6 @@ The workload is extremely small: 32×16×32×128 ≈ 2M elements per tensor. Wit
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Batch/sequence consolidation to amortize launch overhead | algorithmic | 0.175 | medium |
-| Kernel fusion with adjacent ops | algorithmic | 0.10–0.15 | low |
 | Kernel tuning (limited upside) | kernel_tuning | 0.025 | low |
 
 ---

@@ -30,7 +30,7 @@ Standalone performance analysis of MoE trace `moe_01_many_experts_few_tokens` on
 
 **Action**: (1) Increase batch size or sequence length to improve token count (e.g., 256+ tokens for 64 experts). (2) Consider reducing expert count if small batches are inherent (e.g., 8–16 experts for 16-token workloads). (3) Use auxiliary load-balancing loss during training to encourage more uniform routing.
 
-**Impact**: Algorithmic — batching to 256+ tokens could improve expert utilization from ~0.5 to ~8 tokens/expert on average. Kernel-level tuning not applicable (fused MoE lacks perf model).
+**Impact**: Not quantifiable from trace data.
 
 → *See Detailed Analysis: Compute Kernels > MoE Fused below*
 
@@ -85,8 +85,6 @@ Single `vllm::rocm_aiter_fused_moe` operation dominates 100% of GPU compute (0.2
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Increase token count for better expert utilization | algorithmic | N/A | medium |
-| Reduce expert count for small-batch workloads | algorithmic | N/A | medium |
 
 ---
 

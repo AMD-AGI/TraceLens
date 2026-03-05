@@ -32,7 +32,7 @@ Findings from per-category kernel analysis focused on individual kernel efficien
 
 **Action**: Profile with hardware counters to verify whether the bottleneck is compute-bound (matrix units) or memory-bound (weight loading). With 8 experts and topk=2, each expert's w1 and w2 weights total 2 × 8192 × 22016 × 2 bytes ≈ 689 MB per expert, totaling ~5.5 GB for all experts — potentially causing HBM bandwidth pressure.
 
-**Impact**: If memory-bound, weight prefetching or expert parallelism strategies could yield 2-4 ms savings — low confidence without hardware counter data.
+**Impact**: Not quantifiable from trace data.
 
 → *See [Detailed Analysis: Compute Kernels > MoE Fused](#1-moe-fused-100-of-compute) for details*
 
@@ -95,9 +95,7 @@ MoE Fused operations account for 100% of GPU compute time (12.0 ms). A single `v
 **Impact Summary:**
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
-|---------------|------|----------------------|------------|
-| FP8 weight quantization | precision | 4.0 | low |
-| Expert weight prefetching | memory | 2.0 | low |
+|---------------|------|------------------------|------------|
 
 ---
 

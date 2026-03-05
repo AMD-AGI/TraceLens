@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_01_large_spatial_smal
 
 **Action**: Investigate alternative tile configurations or specialized kernels for large-spatial/small-channel workloads. Consider im2col+GEMM fusion strategies that better amortize weight loads across spatial positions.
 
-**Impact**: Estimated 4.38 ms savings (97.3% of kernel time) if efficiency approaches peak — medium confidence given the extreme shape mismatch.
+**Impact**: ~4.38 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 

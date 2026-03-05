@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_03_asymmetric_kernel`
 
 **Action**: Generate replay artifact for kernel team to evaluate specialized asymmetric-filter paths. Consider splitting 1×7 into 1×1 + 1×6 or using im2col with tailored GEMM shapes. Profile memory access patterns for the elongated filter dimension.
 
-**Impact**: Estimated 0.73 ms savings (91.2% of kernel time) if efficiency approaches peak — medium confidence given the non-standard filter shape.
+**Impact**: ~0.73 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 

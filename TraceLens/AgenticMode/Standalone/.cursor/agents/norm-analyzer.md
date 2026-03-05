@@ -130,11 +130,11 @@ The findings file **must** end with an Impact Summary section:
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/norm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/norm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: channels_last layout: `savings_ms = transpose_overhead_time_ms`. Alternative norm (LayerNorm/GroupNorm): estimate based on known efficiency difference
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---

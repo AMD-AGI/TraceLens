@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_02_small_spatial_many
 
 **Action**: Investigate batching across spatial positions or alternative GEMM decompositions. Consider fusing with adjacent layers to increase effective batch size. Profile for L2 cache thrashing from large weight tensor (2048×2048×3×3 ≈ 50M elements).
 
-**Impact**: Estimated 1.17 ms savings (97.5% of kernel time) if efficiency approaches peak — medium confidence given the extreme aspect ratio.
+**Impact**: ~1.17 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 

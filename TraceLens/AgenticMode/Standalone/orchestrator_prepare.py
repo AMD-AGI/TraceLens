@@ -114,11 +114,6 @@ def main():
     if gpu_utilization_metrics["computation_time_percent"] < 95:
         print(f"  ⚠️  WARNING: Compute utilization < 95%")
 
-    # Check for critical idle time - flag for CPU/idle analysis
-    cpu_idle_critical = gpu_utilization_metrics["idle_time_percent"] > 50
-    if cpu_idle_critical:
-        print(f"  🔴 CRITICAL: Idle time > 50% - CPU/idle analysis required")
-
     # ============================================================================
     # STEP 3: Identify Top Operations
     # ============================================================================
@@ -529,59 +524,48 @@ def main():
         )
 
     # ============================================================================
-    # CPU/Idle Category Creation (when idle > 50%)
+    # CPU/Idle Category Creation (always created)
     # ============================================================================
-    if cpu_idle_critical:
-        print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
-        print(
-            f"    🔴 Creating CPU/idle category due to {gpu_utilization_metrics['idle_time_percent']:.1f}% idle time"
-        )
+    print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
+    print(
+        f"    Idle time: {gpu_utilization_metrics['idle_time_percent']:.1f}%"
+    )
 
-        # Create CPU idle metadata
-        cpu_idle_metadata = {
-            "platform": platform,
-            "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
-            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
-            "memory_gb": platform_specs["memory_gb"],
-            "trace_path": trace_path,
-            "output_dir": output_dir,
-            "category": "CPU/Idle Analysis",
-            "category_name": "cpu_idle",
-            "gpu_utilization": gpu_utilization_metrics,
-            "idle_critical": True,
-            "severity": (
-                "CRITICAL"
-                if gpu_utilization_metrics["idle_time_percent"] > 70
-                else "HIGH"
-            ),
-        }
+    cpu_idle_metadata = {
+        "platform": platform,
+        "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+        "max_achievable_tflops": platform_specs["max_achievable_tflops"],
+        "memory_gb": platform_specs["memory_gb"],
+        "trace_path": trace_path,
+        "output_dir": output_dir,
+        "category": "CPU/Idle Analysis",
+        "category_name": "cpu_idle",
+        "gpu_utilization": gpu_utilization_metrics,
+    }
 
-        cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
-        with open(cpu_idle_metadata_file, "w") as f:
-            json.dump(cpu_idle_metadata, f, indent=2)
+    cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
+    with open(cpu_idle_metadata_file, "w") as f:
+        json.dump(cpu_idle_metadata, f, indent=2)
 
-        # Create empty ops CSV (cpu_idle doesn't use ops, it uses gpu_timeline)
-        cpu_idle_csv = f"{output_dir}/category_data/cpu_idle_ops.csv"
-        pd.DataFrame().to_csv(cpu_idle_csv, index=False)
+    cpu_idle_csv = f"{output_dir}/category_data/cpu_idle_ops.csv"
+    pd.DataFrame().to_csv(cpu_idle_csv, index=False)
 
-        print(f"    ✓ Exported metadata")
+    print(f"    ✓ Exported metadata")
 
-        # Insert at beginning of categories (highest priority)
-        exported_categories.insert(
-            0,
-            {
-                "name": "cpu_idle",
-                "display_name": "CPU/Idle Analysis",
-                "skill": "cpu-idle-analysis",
-                "tier": "system",
-                "ops_count": 0,
-                "csv_file": cpu_idle_csv,
-                "metadata_file": cpu_idle_metadata_file,
-                "tree_data_file": None,
-                "priority": 0,
-                "critical": True,
-            },
-        )
+    exported_categories.insert(
+        0,
+        {
+            "name": "cpu_idle",
+            "display_name": "CPU/Idle Analysis",
+            "skill": "cpu-idle-analysis",
+            "tier": "system",
+            "ops_count": 0,
+            "csv_file": cpu_idle_csv,
+            "metadata_file": cpu_idle_metadata_file,
+            "tree_data_file": None,
+            "priority": 0,
+        },
+    )
 
     # ============================================================================
     # Multi-Kernel System-Level Category Creation
@@ -722,7 +706,6 @@ def main():
         "trace_path": trace_path,
         "output_dir": output_dir,
         "gpu_utilization": gpu_utilization_metrics,
-        "cpu_idle_critical": cpu_idle_critical,
         "categories": exported_categories,
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
     }

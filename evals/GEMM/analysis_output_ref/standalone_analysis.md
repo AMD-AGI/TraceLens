@@ -33,7 +33,7 @@ Findings from per-category kernel analysis focused on individual kernel efficien
 
 **Action**: Generate replay artifact for kernel team to investigate tile size selection for this extreme tall-skinny shape. A narrower tile matched to the 32-column output could improve bandwidth utilization significantly.
 
-**Impact**: Estimated 0.103 ms savings (76.5% of GEMM kernel time) if bandwidth utilization reaches peak — medium confidence given the extreme aspect ratio.
+**Impact**: ~0.103 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > GEMM](#1-gemm-100-of-compute) for details*
 
@@ -99,7 +99,6 @@ GEMMs account for 93.75% of GPU compute time (0.135 ms GPU kernel time out of 0.
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
 | Tune kernel tile size for tall-skinny shape (M=131072, N=32, K=32) | kernel_tuning | 0.103 | medium |
-| Fuse with adjacent ops to reduce memory traffic | algorithmic | 0.030 | low |
 
 ---
 

@@ -30,7 +30,7 @@ Standalone performance analysis of MoE trace `moe_04_top2_dense` on MI300X. The 
 
 **Action**: (1) topk=2 improves expert utilization and model quality but costs 2× compute — trade-off is inherent. (2) If quality allows, consider topk=1 for 2× speedup (moe_03: 0.95 ms). (3) Verify load balance — 1024 pairs / 16 experts should distribute well; profile if concerned.
 
-**Impact**: Algorithmic trade-off — topk=1 saves ~0.85 ms (47%) at potential quality cost. Kernel tuning not applicable (fused MoE lacks perf model).
+**Impact**: Not quantifiable from trace data.
 
 → *See Detailed Analysis: Compute Kernels > MoE Fused below*
 
@@ -85,8 +85,6 @@ Single `vllm::rocm_aiter_fused_moe` operation dominates 100% of GPU compute (1.8
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Reduce to topk=1 if quality allows | algorithmic | ~0.85 ms (47%) | medium |
-| Load-balancing verification | algorithmic | N/A | low |
 
 ---
 

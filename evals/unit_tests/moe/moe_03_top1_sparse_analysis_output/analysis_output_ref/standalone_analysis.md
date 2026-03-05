@@ -30,7 +30,7 @@ Standalone performance analysis of MoE trace `moe_03_top1_sparse` on MI300X. The
 
 **Action**: (1) Profile expert utilization at runtime; if imbalance >2× (e.g., one expert 64 tokens, another 0), consider capacity factor or load-balancing loss. (2) If balanced, topk=1 is compute-efficient (half the FLOPs of topk=2). (3) Compare with moe_04_top2_dense (same model, topk=2) — 1.8 ms vs 0.95 ms shows topk=2 doubles compute as expected.
 
-**Impact**: Algorithmic — load-balancing can improve utilization if routing is skewed. Kernel tuning not applicable (fused MoE lacks perf model).
+**Impact**: Not quantifiable from trace data.
 
 → *See Detailed Analysis: Compute Kernels > MoE Fused below*
 
@@ -85,8 +85,6 @@ Single `vllm::rocm_aiter_fused_moe` operation dominates 100% of GPU compute (0.9
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Load-balancing if routing skewed | algorithmic | N/A | low |
-| topk=1 already compute-efficient vs topk=2 | — | 0 | high |
 
 ---
 

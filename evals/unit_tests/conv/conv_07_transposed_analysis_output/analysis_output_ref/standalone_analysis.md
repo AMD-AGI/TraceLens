@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_07_transposed` on MI3
 
 **Action**: Generate replay artifact for kernel team to prioritize transposed/deconv optimization. Compare against cuDNN transposed conv performance. Consider algorithmic alternatives: replace transposed conv with bilinear upsample + standard conv where acceptable for the model.
 
-**Impact**: Estimated 0.89 ms savings (99.3% of kernel time) if efficiency approaches forward-path levels — medium confidence given the known optimization gap for backward-data path.
+**Impact**: ~0.89 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 

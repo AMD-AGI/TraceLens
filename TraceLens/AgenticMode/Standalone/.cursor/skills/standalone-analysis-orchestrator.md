@@ -188,11 +188,11 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 **System-Level Subagent Mapping:**
 
-- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_time_percent > 15%`)
+- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (always invoke)
 - `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
 
 **Invocation conditions:**
-- **CPU/Idle**: `manifest['cpu_idle_critical'] == True` OR `gpu_util['idle_time_percent'] > 15`
+- **CPU/Idle**: Always invoke -- the cpu_idle category is always present in the manifest. The subagent reports factual idle percentage and kernel analysis data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 
 **Task prompt structure for each subagent:**
@@ -409,21 +409,21 @@ if has_sync:
 
 #### 7. Impact Summary Required
 
-Every subagent (compute kernel **and** system-level) **must** include an `## Impact Summary` table at the end of its findings file. This table is consumed by the orchestrator to generate the performance improvement plot (kernel tuning only) and to aggregate recommendations in the report.
+Every subagent (compute kernel **and** system-level) **must** include an `## Impact Summary` table at the end of its findings file. This table is consumed by the orchestrator to generate the performance improvement plot.
 
 ```markdown
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic / system | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
-- **Type** must be one of:
-  - `kernel_tuning` — closing the efficiency gap to peak for existing kernels. **Only this type feeds the performance plot.**
-  - `algorithmic` — fusion, Flash Attention migration, layout changes, batching, torch.compile, operator replacement.
-  - `system` — CPU idle reduction, communication/compute overlap, memcpy optimization, multi-kernel pipeline issues.
-- **Estimation formulas and confidence levels** are defined in each subagent's agent file. Subagents use pre-computed `impact_estimates` from `*_metrics.json` for `kernel_tuning` rows.
-- If no actionable bottlenecks, the table may have zero rows but the section header must still be present.
+- **Type**: Only `kernel_tuning` is valid — closing the efficiency gap to peak for existing kernels. This feeds the performance plot.
+- **`algorithmic` and `system` types are retired.** Do NOT estimate savings for fusion, torch.compile, batching, idle reduction, overlap improvement, or memcpy reduction.
+- Compute kernel subagents use pre-computed `impact_estimates` from `*_metrics.json` for `kernel_tuning` rows. Do NOT manually derive savings numbers.
+- System-level subagents (cpu_idle, multi_kernel) and categories without efficiency data (triton) always produce zero data rows.
+- If no pre-computed `kernel_tuning` estimates exist (e.g., all ops have anomalous efficiency >100%), the table must have zero rows.
+- The section header `## Impact Summary` must always be present even with zero rows.
 
 ---
 
@@ -655,16 +655,16 @@ System-level recommendations address pipeline/framework issues that affect ALL o
 
 **System-Level Prioritization:**
 
-Assign priorities sequentially starting from P1 based on which analyses are present. If CPU/Idle is skipped, multi-kernel issues start at P1.
+Assign priorities sequentially starting from P1 based on which analyses are present. If CPU/Idle is below threshold, multi-kernel issues start at P1.
 
 | Order | Source | Criteria | Included When |
 |-------|--------|----------|---------------|
-| First | CPU/Idle | `idle_time_percent > 30%` | Only if CPU/Idle analysis was invoked |
+| First | CPU/Idle | `idle_time_percent > 15%` | Only if idle exceeds 15% threshold |
 | Next | Multi-Kernel | Highest severity multi-kernel issue (memcpy/NCCL blocking/overlap) | Only if severity is not NONE/N/A |
 | Next | Multi-Kernel | Next severity multi-kernel issue | If additional actionable issues exist |
 
 **CRITICAL: No-Issue Handling:**
-- If **all** system-level analyses report NONE/N/A severity (no actionable issues), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
+- If **all** system-level analyses report no actionable issues (idle <= 15% and multi-kernel severities are NONE/N/A), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
 - Instead, display a short summary: "No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead."
 - This avoids misleading stakeholders with a red P1 icon for a non-issue.
 
@@ -680,7 +680,9 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
+Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path> << 'REPORT_EOF' ... REPORT_EOF"`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
+
+The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
@@ -738,7 +740,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences - what to do]
 
-**Impact**: [Expected improvement]
+**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
 → *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
 
@@ -750,7 +752,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
-**Impact**: [Expected improvement]
+**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
 → *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
 
@@ -762,7 +764,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
-**Impact**: [Expected improvement]
+**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
 ---
 
@@ -773,26 +775,25 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
-<!-- CONDITIONAL: If NO actionable system-level issues found (all severities are NONE/N/A), use the clean template below. -->
-<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if invoked. -->
+<!-- CONDITIONAL: If NO actionable system-level issues found (idle <= 15% and multi-kernel severities NONE/N/A), use Template A. -->
+<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if idle > 15%. -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. Do NOT append severity labels like (CRITICAL) or (MEDIUM). -->
+<!-- System-level recommendations have NO **Impact** field -- impact is not quantifiable for system-level issues. -->
 
 <!-- === TEMPLATE A: No actionable system-level issues === -->
-<!-- Use this when all system-level analyses report NONE/N/A severity -->
+<!-- Use this when idle <= 15% and all multi-kernel severities are NONE/N/A -->
 
 ✅ No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
 
 <!-- === TEMPLATE B: Actionable issues found === -->
-<!-- Use this when at least one system-level analysis reports an actionable severity (LOW/MEDIUM/HIGH/CRITICAL) -->
+<!-- Use this when idle > 15% or at least one multi-kernel issue has actionable severity -->
 
 ### 🔴 P1: <CPU/Idle Title OR Multi-Kernel Issue Title>
 
 **Issue**: [1-2 sentences - what's wrong]
 
 **Action**: [1-2 sentences - what to do]
-
-**Impact**: [Expected improvement]
 
 → *See [Detailed Analysis: System-Level > CPU/Idle Time](#cpu-idle-time-analysis) for details* OR → *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
 
@@ -804,8 +805,6 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Action**: [1-2 sentences - what to do]
 
-**Impact**: [Expected improvement]
-
 → *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
 
 ---
@@ -815,8 +814,6 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Issue**: [1 sentence]
 
 **Action**: [1-2 sentences]
-
-**Impact**: [Expected improvement]
 
 ---
 

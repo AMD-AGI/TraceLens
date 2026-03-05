@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_06_large_dilation` on
 
 **Action**: Generate replay artifact for kernel team to profile dilated convolution memory access. Investigate specialized dilated im2col or gather-scatter patterns. Consider algorithmic alternatives: decompose dilated conv into separable operations or use atrous convolution optimizations.
 
-**Impact**: Estimated 1.96 ms savings (89.1% of kernel time) if efficiency approaches peak — medium confidence given the known difficulty of dilated conv memory patterns.
+**Impact**: ~1.96 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 

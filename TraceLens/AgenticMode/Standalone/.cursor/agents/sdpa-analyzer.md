@@ -146,7 +146,7 @@ For Paged Attention, include additional columns:
 For each validated bottleneck, provide recommendations based on attention type:
 
 **For Standard/Unfused Attention:**
-- **Algorithmic:** Migrate to Flash Attention (3-10x speedup)
+- **Algorithmic:** Migrate to Flash Attention
 - **Kernel:** Generate replay artifact if already using Flash Attention
 
 **For Paged Attention (vLLM):**
@@ -171,11 +171,11 @@ Include:
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/sdpa_fwd_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/sdpa_fwd_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: Unfused attention to Flash Attention migration: `savings_ms = attention_time_ms * 0.7`. Contiguous copy elimination: `savings_ms = total_copy_time_ms`
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---
@@ -186,12 +186,11 @@ Include:
 
 #### Attention-Heavy Models (Transformers, ViT)
 - **Look for:** softmax, bmm, mul (scaling), copy_ (transposes)
-- **Algorithmic:** Flash Attention (3-10x speedup on attention)
-- **Kernel:** Optimize individual kernels (limited gains, maybe 10-30%)
+- **Algorithmic:** Flash Attention
+- **Kernel:** Optimize individual kernels
 
 #### Unfused Attention Patterns
 - **Symptoms:** Multiple operations: softmax, bmm, mul, copy_ appearing together
-- **High impact:** Replacing with Flash Attention typically gives 3-10x speedup
 - **Algorithmic (primary):** Migrate to Flash Attention
 
 #### Flash Attention Already Used
@@ -238,7 +237,7 @@ Include:
 1. **Identify attention type first** - Flash, Paged, or Standard
 2. **Sequence length matters** - Short sequences naturally have lower efficiency
 3. **Workload type matters for Paged Attention** - Prefill vs decode have different expectations
-4. **Unfused attention is a major opportunity** - 3-10x speedup potential
+4. **Unfused attention is a major opportunity** - migrate to Flash Attention
 5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 6. **Context ratio determines optimization focus** - Prefill kernel vs paged attention kernel
 
@@ -272,12 +271,12 @@ Include:
 
 ### Algorithmic Recommendations
 
-| Issue | Recommendation | Expected Impact |
-|-------|----------------|-----------------|
-| Low decode efficiency (<5%) | Increase decode batch size | 2-3x throughput improvement |
-| High latency long prefill | Enable chunked prefill | Reduced TTFT, better GPU util |
-| Memory pressure | Tune max_model_len, enable KV cache quantization | Larger batch sizes possible |
-| Single-request latency | Use speculative decoding | 2-3x latency reduction |
+| Issue | Recommendation |
+|-------|----------------|
+| Low decode efficiency (<5%) | Increase decode batch size |
+| High latency long prefill | Enable chunked prefill |
+| Memory pressure | Tune max_model_len, enable KV cache quantization |
+| Single-request latency | Use speculative decoding |
 
 ### Kernel Optimization Focus
 

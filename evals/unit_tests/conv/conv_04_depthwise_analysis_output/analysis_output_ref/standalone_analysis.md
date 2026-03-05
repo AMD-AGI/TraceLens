@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_04_depthwise` on MI30
 
 **Action**: Profile the depthwise kernel for memory coalescing, warp occupancy, and L2 utilization. Consider algorithmic alternatives: fuse with adjacent pointwise conv (depthwise-separable block), or evaluate if im2col+GEMM path performs better for this shape. Investigate whether FP16/BF16 would improve throughput.
 
-**Impact**: Estimated 0.35 ms savings (99.7% of kernel time) if efficiency improves — low confidence given the fundamental memory-bound nature of depthwise ops.
+**Impact**: ~0.35 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 
@@ -78,7 +78,6 @@ Single depthwise `aten::convolution`. Input [8,1024,32,32], weight [1024,1,3,3],
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
 | Optimize depthwise kernel memory access patterns | kernel_tuning | 0.349 | low |
-| Fuse with adjacent pointwise (depthwise-separable block) | algorithmic | TBD | medium |
 
 ---
 
