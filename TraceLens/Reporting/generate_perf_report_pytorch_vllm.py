@@ -266,7 +266,7 @@ def generate_perf_report_pytorch(
     
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output"])
+    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd"])
     
     
     if extension_file:
@@ -377,7 +377,7 @@ def generate_perf_report_pytorch(
                         df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
                     ]
                 
-                op_events=[event for event in op_events if event["name"]!="vllm::unified_attention_with_output"]
+                op_events=[event for event in op_events if (event["name"]!="vllm::unified_attention_with_output" and event["name"]!="aiter::mha_varlen_fwd")]
                 if len(op_events) >0:
                     df_ops_bwd = perf_analyzer.build_df_perf_metrics(
                         op_events, bwd=True, include_kernel_details=True, include_args=True
