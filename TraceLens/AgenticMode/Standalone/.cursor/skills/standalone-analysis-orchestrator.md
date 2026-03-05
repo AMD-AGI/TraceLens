@@ -680,7 +680,9 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>`. The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
+Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path>"` with a heredoc). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
+
+The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
