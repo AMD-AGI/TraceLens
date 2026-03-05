@@ -14,6 +14,7 @@ Provides functions for:
 import base64
 import json
 import os
+import re
 
 import numpy as np
 import matplotlib
@@ -176,7 +177,16 @@ def embed_plot_in_report(output_dir: str,
         img_tag = ''
         embedded = False
 
+    # Replace placeholder first; if already embedded, replace existing image tag
     report = report.replace(placeholder, img_tag)
+    if embedded and placeholder not in report:
+        # Replace previous embed so re-running updates the image
+        report = re.sub(
+            r'!\[Performance Improvement\]\(data:image/png;base64,[A-Za-z0-9+/=]+\)',
+            img_tag,
+            report,
+            count=1,
+        )
 
     with open(report_path, 'w') as f:
         f.write(report)
