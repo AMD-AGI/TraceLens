@@ -20,6 +20,7 @@ op_to_perf_model_class_map = {
     "vllm::gemm_with_dynamic_quant": perf_model.vllm_gemm_with_dynamic_quant,
     "FlashAttnFunc": perf_model.flash_attention,
     "flash_attn::_flash_attn_forward": perf_model.flash_attention,
+    "flash_attn::_flash_attn_backward": perf_model.flash_attention_backward,
     "flash_attn::_flash_attn_varlen_forward": perf_model.flash_attention_varlen_forward,
     "flash_attn::_flash_attn_varlen_backward": perf_model.flash_attention_varlen_backward,
     "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,

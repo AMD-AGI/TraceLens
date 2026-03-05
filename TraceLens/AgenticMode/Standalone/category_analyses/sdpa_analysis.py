@@ -224,13 +224,20 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze SDPA operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument(
+        "--category",
+        default="sdpa_fwd",
+        choices=["sdpa_fwd", "sdpa_bwd"],
+        help="SDPA category to analyze (default: sdpa_fwd)",
+    )
     args = parser.parse_args()
+    category = args.category
 
     try:
-        ops_df, metadata = load_category_data(args.output_dir, "sdpa_fwd")
+        ops_df, metadata = load_category_data(args.output_dir, category)
     except FileNotFoundError as e:
-        error_metrics = {"category": "sdpa_fwd", "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, "sdpa_fwd")
+        error_metrics = {"category": category, "status": "ERROR", "error": str(e)}
+        write_metrics_json(error_metrics, args.output_dir, category)
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -245,10 +252,10 @@ def main():
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
 
-    impact_estimates = compute_impact_estimates(operations, "sdpa_fwd")
+    impact_estimates = compute_impact_estimates(operations, category)
 
     metrics = {
-        "category": "sdpa_fwd",
+        "category": category,
         "status": "OK",
         **time_metrics,
         "average_efficiency_percent": avg_efficiency,
@@ -257,7 +264,7 @@ def main():
         "impact_estimates": impact_estimates,
     }
 
-    output_path = write_metrics_json(metrics, args.output_dir, "sdpa_fwd")
+    output_path = write_metrics_json(metrics, args.output_dir, category)
     print(f"Metrics written to: {output_path}")
 
 
