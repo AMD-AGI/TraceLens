@@ -162,8 +162,15 @@ class moe_aiter_fused_1stage(FusedMoE):
         topk_weights_shape = kernel_input_shape[3]
         
         num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
-        inter_dim = w2_shape[2]
+        ## Based on the w1 and w2 shapes, calculate the hidden_dim and inter_dim
+        ## This logic is based on aiter_fused_moe https://github.com/ROCm/aiter/blob/c4a3ff2a044ef0f433d235986afd7979b7b7d147/aiter/fused_moe.py#L119
+        ## # Account for INT4 weight compression: scale inter_dim by the packing ratio
+        ## to get the true logical intermediate dimension from stored shape
+        E, _, hidden_dim = w1_shape
+        E, hidden_dim, inter_dim = w2_shape
+
+        int4_war = hidden_dim // w1_shape[-1]
+        inter_dim *= int4_war
         num_experts = w1_shape[0]
         topk = topk_weights_shape[1]
         
@@ -274,8 +281,15 @@ class moe_aiter_fused_blockscale(FusedMoE):
         w2_shape = kernel_input_shape[3]    # [E, K, N] down/W2
 
         num_tokens = out_shape[0]
-        hidden_dim = w2_shape[1]
-        inter_dim = w2_shape[2]
+        ## Based on the w1 and w2 shapes, calculate the hidden_dim and inter_dim
+        ## This logic is based on aiter_fused_moe https://github.com/ROCm/aiter/blob/c4a3ff2a044ef0f433d235986afd7979b7b7d147/aiter/fused_moe.py#L119
+        ## # Account for INT4 weight compression: scale inter_dim by the packing ratio
+        ## to get the true logical intermediate dimension from stored shape
+        E, _, hidden_dim = w1_shape
+        E, hidden_dim, inter_dim = w2_shape
+
+        int4_war = hidden_dim // w1_shape[-1]
+        inter_dim *= int4_war
         num_experts = w1_shape[0]
         gated = (w1_shape[1] == 2 * inter_dim)
 

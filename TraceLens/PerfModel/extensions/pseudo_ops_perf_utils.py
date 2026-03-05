@@ -29,8 +29,11 @@ def get_pseudo_op_mappings():
         "pseudo_op::moe_triton_unfused_down": moe_perf_model_extensions.moe_triton_unfused_down,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
-        "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
+        "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
+        ## Misc ops
+        "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
+        "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
     }
 
     return pseudo_op_mappings
@@ -51,6 +54,7 @@ def get_pseudo_op_categories():
         attention_perf_model_extensions.InferenceAttention: "InferenceAttention",
         perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
         attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
+        perf_model_extensions.per_group_quant: "BinaryElementwise"
     }
     
     return pseudo_op_categories
