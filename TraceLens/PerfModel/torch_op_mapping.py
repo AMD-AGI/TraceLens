@@ -36,7 +36,6 @@ op_to_perf_model_class_map = {
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
-    "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
     # TEv2 pseudo ops
     "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
@@ -150,7 +149,6 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
         )
     dict_cat2names[cat].append(op_name)
 
-
 def categorize_torch_op(row):
     """
     Categorizes a row based on the 'name' and 'kernel_names' fields.
@@ -199,10 +197,6 @@ def categorize_torch_op(row):
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
-    elif row["name"] in dict_cat2names.get("MoE_fused", []):
-        return "MoE_fused"
-    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
-        return "MoE_unfused"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
@@ -222,6 +216,8 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-
+    for k,v in dict_cat2names.items():
+        if row["name"] in v:
+            return k
     # if none of the above cases match, return 'other'
     return "other"

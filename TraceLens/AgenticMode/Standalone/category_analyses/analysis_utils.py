@@ -80,7 +80,11 @@ def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
     return {
         "total_time_ms": round(total_time_ms, 3),
         "percent_of_compute": round(percent_of_compute, 2),
-        "operation_count": int(ops_df["operation_count"].sum()) if "operation_count" in ops_df.columns else len(ops_df),
+        "operation_count": (
+            int(ops_df["operation_count"].sum())
+            if "operation_count" in ops_df.columns
+            else len(ops_df)
+        ),
     }
 
 
@@ -276,7 +280,9 @@ def calculate_efficiency(
                 f"{result['efficiency_percent']:.2f}% of peak HBM bandwidth "
                 f"({result['tb_s_achieved']} TB/s achieved vs {peak_hbm_bw} TB/s peak)"
             )
-        elif result["bound_type"] == "compute" and result["tflops_achieved"] is not None:
+        elif (
+            result["bound_type"] == "compute" and result["tflops_achieved"] is not None
+        ):
             result["efficiency_label"] = (
                 f"{result['efficiency_percent']:.2f}% of peak MAF "
                 f"({result['tflops_achieved']} TFLOPS achieved vs {result['resolved_peak_maf']} TFLOPS peak)"
@@ -344,7 +350,9 @@ def calculate_efficiency(
                 f"{result['efficiency_percent']:.2f}% of peak HBM bandwidth "
                 f"({result['tb_s_achieved']} TB/s achieved vs {peak_hbm_bw} TB/s peak)"
             )
-        elif result["bound_type"] == "compute" and result["tflops_achieved"] is not None:
+        elif (
+            result["bound_type"] == "compute" and result["tflops_achieved"] is not None
+        ):
             result["efficiency_label"] = (
                 f"{result['efficiency_percent']:.2f}% of peak MAF "
                 f"({result['tflops_achieved']} TFLOPS achieved vs {result['resolved_peak_maf']} TFLOPS peak)"

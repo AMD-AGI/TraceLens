@@ -49,13 +49,13 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
         if set(ref_df.columns) != set(gen_df.columns):
             extra = set(gen_df.columns) - set(ref_df.columns)
             missing = set(ref_df.columns) - set(gen_df.columns)
-            mismatches.append(f"{fname}: column mismatch (extra: {extra}, missing: {missing})")
+            mismatches.append(
+                f"{fname}: column mismatch (extra: {extra}, missing: {missing})"
+            )
             continue
         gen_df = gen_df[ref_df.columns]
         if len(ref_df) != len(gen_df):
-            mismatches.append(
-                f"{fname}: row count {len(gen_df)} vs ref {len(ref_df)}"
-            )
+            mismatches.append(f"{fname}: row count {len(gen_df)} vs ref {len(ref_df)}")
             continue
 
         for col in ref_df.columns:
@@ -70,8 +70,12 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
                             f"{fname}:{col} max relative diff {rel_diff:.4f}"
                         )
             else:
-                ref_norm = ref_df[col].fillna("").astype(str).map(_normalize_numpy_reprs)
-                gen_norm = gen_df[col].fillna("").astype(str).map(_normalize_numpy_reprs)
+                ref_norm = (
+                    ref_df[col].fillna("").astype(str).map(_normalize_numpy_reprs)
+                )
+                gen_norm = (
+                    gen_df[col].fillna("").astype(str).map(_normalize_numpy_reprs)
+                )
                 mask = ref_norm != gen_norm
                 if mask.any():
                     rows = list(mask[mask].index[:3])

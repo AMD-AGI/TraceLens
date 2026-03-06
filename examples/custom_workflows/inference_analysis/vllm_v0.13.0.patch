@@ -109,7 +109,7 @@ index ca5253260..52810ea0f 100644
 +        enable_profiler =  (local_rank==0) and envs.VLLM_TORCH_PROFILER_DIR is not None
 +        
 +        if enable_profiler:
-+            trace_dir = envs.VLLM_TORCH_PROFILER_DIR
++            trace_dir = f"{envs.VLLM_TORCH_PROFILER_DIR}/capture_traces"
 +            profiler = torch.profiler.profile(
 +                activities=[
 +                    torch.profiler.ProfilerActivity.CPU,

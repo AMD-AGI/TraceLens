@@ -28,7 +28,12 @@ def _rebase_path(manifest_path: str, output_dir: str) -> str:
     When evaluating against a different directory (e.g. analysis_output_ref),
     we extract the relative suffix and resolve it against the actual dir.
     """
-    for marker in ("category_data/", "metadata/", "system_findings/", "category_findings/"):
+    for marker in (
+        "category_data/",
+        "metadata/",
+        "system_findings/",
+        "category_findings/",
+    ):
         idx = manifest_path.find(marker)
         if idx != -1:
             return os.path.join(output_dir, manifest_path[idx:])

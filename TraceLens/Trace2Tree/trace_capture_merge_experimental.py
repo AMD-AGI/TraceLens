@@ -84,7 +84,7 @@ def verify_subtree_events(capture_events, graph_events):
 
 
 def update_subtree_uids_and_timestamps(
-    capture_tree, subtree_events, subtree_filtered_events, start_uid, new_start_ts, c_root
+    capture_tree, subtree_events, subtree_filtered_events, start_uid, new_start_ts, c_root, g_root_dur
 ):
     cpu_root_nodes=[]
     uid_mapping = {}
@@ -121,6 +121,7 @@ def update_subtree_uids_and_timestamps(
     for event in subtree_events:
         event["ts"] += ts_offset
         event["ts"] = new_start_ts
+        event["dur"] = g_root_dur
     for i in capture_tree.cpu_root_nodes:
         if i in uid_mapping:
             cpu_root_nodes.append(uid_mapping[i])
@@ -401,6 +402,7 @@ def merge_capture_trace_into_graph(
                 start_uid,
                 g_root["ts"],
                 c_root,
+                g_root["dur"],
             )
             capture_events[0]["parent"] = g_root[UID]
             g_root["children"].append(capture_events[0][UID])
