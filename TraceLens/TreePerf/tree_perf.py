@@ -1478,6 +1478,49 @@ class TreePerfAnalyzer:
         for root_uid in self.tree.cpu_root_nodes:
             traverse(root_uid)
 
+        # Collect GPU kernels that have no cpu_op in their parent hierarchy.
+        # These are missed by the cpu_root_nodes traversal above.
+        collected_gpu_uids = set()
+        for evt in collected:
+            collected_gpu_uids.update(evt.get("gpu_events", []))
+
+        orphan_kernels = []
+        for evt in self.tree.events:
+            if self.event_to_category(evt) not in {"kernel", "gpu_memcpy", "gpu_memset"}:
+                continue
+            if evt["UID"] in collected_gpu_uids:
+                continue
+            if not include_nccl and "nccl" in evt.get("name", "").lower():
+                continue
+
+            has_cpu_op = False
+            parent = self.tree.get_parent_event(evt)
+            while parent is not None:
+                if self.event_to_category(parent) == "cpu_op":
+                    has_cpu_op = True
+                    break
+                parent = self.tree.get_parent_event(parent)
+
+            if not has_cpu_op:
+                orphan_kernels.append(evt)
+
+        # Group orphan kernels by their immediate parent (typically a runtime event)
+        parent_to_orphans = defaultdict(list)
+        for kernel in orphan_kernels:
+            parent = self.tree.get_parent_event(kernel)
+            parent_uid = parent["UID"] if parent else None
+            parent_to_orphans[parent_uid].append(kernel)
+
+        for parent_uid, kernels in parent_to_orphans.items():
+            if parent_uid is None:
+                continue
+            parent_evt = self.tree.get_UID2event(parent_uid)
+            for kernel in kernels:
+                synthetic = dict(parent_evt)
+                synthetic["name"] = f"{parent_evt['name']}::{kernel['name']}"
+                synthetic["gpu_events"] = [kernel["UID"]]
+                collected.append(synthetic)
+
         return collected
 
     def build_df_unified_perf_table(
