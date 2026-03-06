@@ -515,6 +515,20 @@ def main():
             json.dump(metadata, f, indent=2)
         print(f"    ✓ Exported metadata")
 
+        # Resolve tree_data_file: check enhanced name first, then fall back
+        # to original op category names from Step 4 which may differ
+        tree_data_file = f"{output_dir}/category_data/{category_name}_tree_data.json"
+        if not os.path.exists(tree_data_file):
+            orig_categories = category_df["op category"].dropna().unique()
+            for orig_cat in orig_categories:
+                orig_name = orig_cat.replace(" ", "_").replace("/", "_").lower()
+                candidate = f"{output_dir}/category_data/{orig_name}_tree_data.json"
+                if os.path.exists(candidate):
+                    tree_data_file = candidate
+                    break
+            else:
+                tree_data_file = None
+
         exported_categories.append(
             {
                 "name": category_name,
@@ -524,7 +538,7 @@ def main():
                 "ops_count": len(category_df),
                 "csv_file": csv_file,
                 "metadata_file": metadata_file,
-                "tree_data_file": f"{output_dir}/category_data/{category_name}_tree_data.json",
+                "tree_data_file": tree_data_file,
             }
         )
 

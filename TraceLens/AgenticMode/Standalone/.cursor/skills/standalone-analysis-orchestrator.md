@@ -680,7 +680,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path>"` with a heredoc). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
+Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (via `ssh <node> "docker exec <container> tee <path>"` with a heredoc). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it.
 
 The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
@@ -777,7 +777,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- CONDITIONAL: If NO actionable system-level issues found (all severities are NONE/N/A), use the clean template below. -->
 <!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if invoked. -->
-<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
+<!-- Icon mapping by PRIORITY NUMBER: P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. Do NOT append severity labels like (CRITICAL) or (MEDIUM). -->
 
 <!-- === TEMPLATE A: No actionable system-level issues === -->
@@ -855,7 +855,42 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ```
 
-### 10.1 Generate and Embed Performance Improvement Plot
+### 10.1 Validate Report Structure (Retry up to 2x)
+
+After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, prompt the LLM to rewrite the report with the missing sections.
+
+**Required `##` headers** (must appear exactly as written):
+1. `## Executive Summary`
+2. `## Compute Kernel Optimizations`
+3. `## System-Level Optimizations`
+4. `## Detailed Analysis: Compute Kernels`
+5. `## Detailed Analysis: System-Level`
+6. `## Appendix`
+
+**Validation procedure** (run on the node, inside the container using `validate_report()` from `analysis_utils`):
+
+```bash
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
+passed, missing = validate_report('<output_dir>')
+if not passed:
+    print('FAIL: Missing sections: ' + ', '.join(missing))
+    import sys; sys.exit(1)
+print('PASS: All required sections present')
+\""
+```
+
+**If validation fails (exit code 1):**
+
+1. Read the FAIL output to identify missing sections
+2. Prompt the LLM with a correction request:
+   > "Your report at `<output_dir>/standalone_analysis.md` is missing these sections: [list]. The report **must** use these exact `##` headers: Executive Summary, Compute Kernel Optimizations, System-Level Optimizations, Detailed Analysis: Compute Kernels, Detailed Analysis: System-Level, Appendix. Rewrite `standalone_analysis.md` with all required sections, keeping existing content."
+3. After the LLM rewrites, run validation again
+4. Maximum 2 retry attempts. If still failing after retries, proceed to Step 10.1 with a warning
+
+---
+
+### 10.2 Generate and Embed Performance Improvement Plot
 
 After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report. This keeps the large base64 string out of the agent's context.
 

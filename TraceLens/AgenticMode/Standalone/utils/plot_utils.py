@@ -15,6 +15,7 @@ Provides functions for:
 import base64
 import json
 import os
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
 
 import matplotlib
 matplotlib.use('Agg')
@@ -188,7 +189,6 @@ def generate_and_embed_plot(output_dir: str, title: str) -> dict:
     Returns:
         Dict with boolean status for each stage: plot_data, plot, embed
     """
-    from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
 
     results = {"plot_data": False, "plot": False, "embed": False}
 

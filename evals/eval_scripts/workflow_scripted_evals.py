@@ -115,8 +115,19 @@ def _check_findings_placement(output_dir: str) -> tuple[str, str]:
 
 
 def _check_plot(output_dir: str) -> tuple[str, str]:
-    if os.path.isfile(os.path.join(output_dir, f"perf_improvement.png")):
+    plot_path = os.path.join(output_dir, "perf_improvement.png")
+    plot_data_path = os.path.join(output_dir, "plot_data.json")
+
+    if os.path.isfile(plot_path):
         return "PASS", ""
+
+    if os.path.isfile(plot_data_path):
+        with open(plot_data_path) as f:
+            plot_data = json.load(f)
+        recs = plot_data.get("recommendations", [])
+        if not recs:
+            return "PASS", "No kernel tuning recommendations — plot correctly skipped"
+
     return "FAIL", "perf_improvement.png not found"
 
 

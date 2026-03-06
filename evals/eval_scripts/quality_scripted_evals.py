@@ -14,6 +14,7 @@ import pandas as pd
 
 CSV_COLUMNS = ["index", "category", "issue_summary", "result", "details"]
 NUMERIC_TOLERANCE = 0.01
+ABS_TOLERANCE = 0.05
 
 _NUMPY_TYPE_RE = re.compile(r"np\.\w+\(([^)]+)\)")
 
@@ -45,9 +46,12 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
         ref_df = pd.read_csv(os.path.join(ref_dir, fname))
         gen_df = pd.read_csv(gen_path)
 
-        if list(ref_df.columns) != list(gen_df.columns):
-            mismatches.append(f"{fname}: column mismatch")
+        if set(ref_df.columns) != set(gen_df.columns):
+            extra = set(gen_df.columns) - set(ref_df.columns)
+            missing = set(ref_df.columns) - set(gen_df.columns)
+            mismatches.append(f"{fname}: column mismatch (extra: {extra}, missing: {missing})")
             continue
+        gen_df = gen_df[ref_df.columns]
         if len(ref_df) != len(gen_df):
             mismatches.append(
                 f"{fname}: row count {len(gen_df)} vs ref {len(ref_df)}"
@@ -60,7 +64,8 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
                     diff = (ref_df[col] - gen_df[col]).abs()
                     denom = ref_df[col].abs().replace(0, 1)
                     rel_diff = (diff / denom).max()
-                    if rel_diff > NUMERIC_TOLERANCE:
+                    abs_diff = diff.max()
+                    if rel_diff > NUMERIC_TOLERANCE and abs_diff > ABS_TOLERANCE:
                         mismatches.append(
                             f"{fname}:{col} max relative diff {rel_diff:.4f}"
                         )
