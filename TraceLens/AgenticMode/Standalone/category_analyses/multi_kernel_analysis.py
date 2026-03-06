@@ -354,33 +354,6 @@ def main():
     for p in patterns_detected:
         print(f"    - [{p['severity']}] {p['pattern']}")
 
-    # Compute deterministic impact estimates from exposed comm/memcpy time
-    impact_estimates = []
-    exposed_comm_ms = overlap_analysis.get("exposed_comm_time_us", 0) / 1000
-    if exposed_comm_ms > 0.1 and nccl_blocking_assessment["severity"] != "NONE":
-        impact_estimates.append(
-            {
-                "operation": "Communication/compute overlap improvement",
-                "category": "multi_kernel",
-                "type": "system",
-                "savings_ms": round(exposed_comm_ms * 0.5, 3),
-                "confidence": "medium",
-                "exposed_comm_ms": round(exposed_comm_ms, 3),
-            }
-        )
-    total_memcpy_ms = memcpy_summary.get("total_time_us", 0) / 1000
-    if total_memcpy_ms > 0.1 and memcpy_assessment["severity"] != "NONE":
-        impact_estimates.append(
-            {
-                "operation": "Memcpy overhead reduction",
-                "category": "multi_kernel",
-                "type": "system",
-                "savings_ms": round(total_memcpy_ms * 0.5, 3),
-                "confidence": "low",
-                "total_memcpy_ms": round(total_memcpy_ms, 3),
-            }
-        )
-
     metrics = {
         "status": "SUCCESS",
         "total_time_ms": round(total_time_ms, 3),
@@ -400,7 +373,7 @@ def main():
         "overlap_assessment": overlap_assessment,
         "patterns_detected": patterns_detected,
         "cross_validation": cross_validation,
-        "impact_estimates": impact_estimates,
+        "impact_estimates": [],
     }
 
     # Write metrics output

@@ -34,7 +34,7 @@ Standalone performance analysis of attention trace `attn_01_long_seq_flash` on M
 
 **Action**: Verify (1) FLOP model for Flash Attention on this shape, (2) MI300X peak BF16 spec (708 TFLOPS), (3) kernel timing measurement (18.0 ms GPU kernel time vs 18.2 ms CPU duration). Do not optimize based on this metric until anomaly is resolved.
 
-**Impact**: 0 ms savings — no actionable kernel optimization until anomaly is explained. High confidence that current kernel (`flash_fwd_splitkv_kernel_bf16`) is performing well for long-sequence Flash Attention.
+**Impact**: Not quantifiable from trace data.
 
 → *See [Detailed Analysis: Compute Kernels > SDPA_fwd](#1-sdpa_fwd-100-of-compute) for details*
 
@@ -88,8 +88,6 @@ Compute efficiency exceeds peak by 38.0%. Possible causes: (1) FLOP model overco
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Verify measurement/peak spec before optimization | verification | N/A | high |
-| Kernel already optimal for long-sequence Flash Attention | — | 0 | high |
 
 ---
 

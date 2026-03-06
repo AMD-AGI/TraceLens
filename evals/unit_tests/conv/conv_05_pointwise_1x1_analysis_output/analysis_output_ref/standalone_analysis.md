@@ -28,7 +28,7 @@ Standalone performance analysis of convolution trace `conv_05_pointwise_1x1` on 
 
 **Action**: Generate replay artifact for kernel team. 1×1 conv maps cleanly to GEMM; investigate whether tile sizes 256×128×16 are optimal for batch×spatial=16×14×14=3136. Consider `torch.compile` or cuDNN/cuBLAS backend selection for pointwise-heavy models.
 
-**Impact**: Estimated 0.52 ms savings (86.6% of kernel time) if efficiency approaches peak — medium confidence given the favorable GEMM-like shape.
+**Impact**: ~0.52 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
 

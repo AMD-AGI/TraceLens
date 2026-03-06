@@ -152,12 +152,12 @@ The findings file **must** end with an Impact Summary section:
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/reduce_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/reduce_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`). **Use `low` confidence** due to lack of dedicated performance models
-- `algorithmic`: Unfused attention (softmax+bmm) to Flash: `savings_ms = softmax_time_ms * 0.7`. Fusion with adjacent ops: `savings_ms = op_time_ms * 0.5`
-- **Confidence**: `high` = clear algorithmic opportunity (e.g., unfused attention); `medium` = likely opportunity but outcome depends on implementation; `low` = approximate estimate or based on general memory-bound model (use for all `kernel_tuning` rows)
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = approximate estimate or based on general memory-bound model (use for all `kernel_tuning` rows)
 
 ---
 
@@ -166,7 +166,7 @@ The findings file **must** end with an Impact Summary section:
 ### Softmax in Attention Context
 - **Symptoms:** Standalone softmax ops, often with bmm nearby
 - **Issue:** Indicates unfused attention pattern
-- **Algorithmic (primary):** Migrate to Flash Attention for 3-10x speedup
+- **Algorithmic (primary):** Migrate to Flash Attention
 - **Kernel:** Optimize softmax kernel (limited gains)
 
 ### Standalone Reductions

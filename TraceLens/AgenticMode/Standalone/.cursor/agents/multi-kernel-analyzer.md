@@ -185,12 +185,10 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 ### System P<N>: [Highest Priority Multi-Kernel Issue]
 **Issue**: [1 sentence]
 **Action**: [1-2 sentences]
-**Expected Impact**: [quantified improvement]
 
 ### System P<N+1>: [Next Issue]
 **Issue**: [1 sentence]
 **Action**: [1-2 sentences]
-**Expected Impact**: [quantified improvement]
 
 ## Technical Details
 
@@ -209,28 +207,19 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | system | X.X | high/medium/low |
 ```
 
-**Note:** Baseline `system` impact estimates (overlap improvement and memcpy reduction) are pre-computed in `category_data/multi_kernel_metrics.json` under the `impact_estimates` key. Use those values as the primary `system` rows in the Impact Summary. You may refine or add rows for specific patterns, but start from the pre-computed values.
-
-**Impact estimation guidelines:**
-- `system` type only (multi-kernel issues are system-level, not kernel tuning)
-- Primary estimates: use pre-computed `impact_estimates` from the metrics JSON
-- Communication/compute overlap: `savings_ms = exposed_comm_time_ms * (target_overlap - current_overlap)` where target is 0.7+
-- Memcpy reduction: `savings_ms = memcpy_time_ms * reducible_fraction` (fraction of unnecessary copies)
-- Pipeline optimization: estimate from communication blocking time that can be hidden
-- **Confidence**: `high` = exposed comm >10% with clear overlap gap; `medium` = moderate overhead; `low` = rough estimate
+**Impact estimates are not produced for system-level analyses.** The Impact Summary table header must be present but must have **zero data rows**. Do NOT estimate savings for overlap improvement, memcpy reduction, or any other system-level recommendation.
 
 ---
 
 ## Key Principles
 
 1. **System-level focus** - These are pipeline/framework issues, NOT individual kernel issues
-2. **Quantify the opportunity** - Show exact time that could be recovered
+2. **No impact estimates** - System-level impact cannot be reliably estimated from trace data
 3. **Provide actionable solutions** - Specific steps, not vague suggestions
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
-5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is skipped, multi-kernel issues start at P1
+5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is below threshold, multi-kernel issues start at P1
 6. **Do NOT duplicate category analysis** - This analysis is about cross-cutting patterns, not individual op efficiency
 
 ---

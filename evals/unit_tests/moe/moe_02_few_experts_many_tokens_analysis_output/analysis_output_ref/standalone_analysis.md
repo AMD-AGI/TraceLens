@@ -30,7 +30,7 @@ Standalone performance analysis of MoE trace `moe_02_few_experts_many_tokens` on
 
 **Action**: (1) Verify token distribution across experts at runtime — if routing is skewed, consider auxiliary load-balancing loss. (2) Profile expert utilization; if balanced, kernel is likely well-utilized. (3) For further speedup, consider FP8 quantization if model supports it (MI300X peak FP8: 1273 TFLOPS vs BF16: 708 TFLOPS).
 
-**Impact**: Algorithmic tuning (load balancing, FP8) may yield gains. Kernel-level efficiency cannot be quantified without perf model.
+**Impact**: Not quantifiable from trace data.
 
 → *See Detailed Analysis: Compute Kernels > MoE Fused below*
 
@@ -85,8 +85,6 @@ Single `vllm::rocm_aiter_fused_moe` operation dominates 100% of GPU compute (6.5
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Load-balancing verification | algorithmic | N/A | low |
-| FP8 quantization (if supported) | algorithmic | N/A | medium |
 
 ---
 

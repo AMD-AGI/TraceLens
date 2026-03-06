@@ -30,7 +30,7 @@ Standalone performance analysis of MoE trace `moe_06_tiny_batch_many_experts` on
 
 **Action**: (1) **Batching**: Increase batch size dramatically (e.g., 64+ tokens) to amortize launch overhead and improve expert utilization. (2) **Expert count**: 128 experts for 4 tokens is severe overkill — consider 8–16 experts for tiny-batch workloads. (3) **topk**: topk=8 with 4 tokens means each token uses 8 experts; 32 pairs across 128 experts maximizes idle experts.
 
-**Impact**: Algorithmic — batching and reducing experts can improve utilization. Launch overhead (0.20 ms) exceeds kernel time (0.18 ms); batching would amortize this.
+**Impact**: Not quantifiable from trace data.
 
 → *See Detailed Analysis: Compute Kernels > MoE Fused below*
 
@@ -45,8 +45,6 @@ Standalone performance analysis of MoE trace `moe_06_tiny_batch_many_experts` on
 **Issue**: CPU duration (0.38 ms) exceeds GPU kernel time (0.18 ms) by 0.20 ms — launch/sync overhead is 53% of total wall-clock time. For such short kernels, launch overhead dominates.
 
 **Action**: Batch multiple MoE invocations or increase token count to amortize launch overhead. Consider GPU graph capture to reduce per-kernel launch cost if applicable.
-
-**Impact**: Batching to 64+ tokens could reduce overhead fraction from 53% to <10%.
 
 → *See Detailed Analysis: System-Level below*
 
@@ -93,8 +91,6 @@ Single `vllm::rocm_aiter_fused_moe` operation dominates 100% of GPU compute (0.1
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|------------------------|------------|
-| Batch to 64+ tokens | algorithmic | Amortize 0.20 ms overhead | high |
-| Reduce expert count for tiny batches | algorithmic | N/A | medium |
 
 ---
 

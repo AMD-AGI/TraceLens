@@ -176,11 +176,11 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
 

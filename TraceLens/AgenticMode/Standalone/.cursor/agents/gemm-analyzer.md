@@ -163,11 +163,11 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 **Peak TFLOPS reference:** When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON. This is the precision-specific peak for the operation's data type (e.g., 654 for FP16, 708 for BF16). Do not look up peaks independently from the metadata dict.
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: Batching opportunity, quantization format change — estimate based on expected parallelism or precision improvement
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 
 ---

@@ -8,11 +8,8 @@
 """
 CPU/Idle Time Analysis Script
 
-Analyzes GPU idle time patterns to identify CPU overhead causes:
-- Kernel launch overhead (many small kernels)
-- Synchronization bottlenecks
-- CPU-GPU pipeline bubbles
-- Framework overhead
+Reports GPU idle time percentage and utilization breakdown.
+Flags idle time exceeding 15% for the agent to investigate.
 
 Outputs cpu_idle_metrics.json with analysis results.
 """
@@ -21,7 +18,7 @@ import argparse
 import json
 import os
 import pandas as pd
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 
 
 def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
@@ -98,70 +95,6 @@ def analyze_kernel_patterns(ops_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     return patterns
 
 
-def detect_idle_patterns(
-    gpu_timeline: Dict[str, Any], kernel_patterns: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-    """Detect idle-time patterns and return factual evidence for each."""
-    patterns_detected = []
-
-    idle_percent = gpu_timeline.get("idle_time", {}).get("percent", 0)
-    total_kernels = kernel_patterns.get("total_kernel_count", 0)
-    short_kernels = kernel_patterns.get("short_kernel_count", 0)
-    avg_kernel_time = kernel_patterns.get("avg_kernel_time_us", 0)
-
-    # Pattern 1: Kernel Launch Overhead
-    if total_kernels > 0 and short_kernels > 0:
-        short_kernel_ratio = short_kernels / total_kernels
-        if short_kernel_ratio > 0.3:
-            patterns_detected.append(
-                {
-                    "name": "Kernel Launch Overhead",
-                    "severity": "HIGH" if short_kernel_ratio > 0.5 else "MEDIUM",
-                    "evidence": f"{short_kernels} out of {total_kernels} kernels ({short_kernel_ratio*100:.1f}%) are under 10µs",
-                }
-            )
-
-    # Pattern 2: High Kernel Count
-    if total_kernels > 1000:
-        patterns_detected.append(
-            {
-                "name": "High Kernel Count",
-                "severity": "HIGH" if total_kernels > 5000 else "MEDIUM",
-                "evidence": f"{total_kernels} total kernel launches",
-            }
-        )
-
-    # Pattern 3: Small Average Kernel Time
-    if avg_kernel_time > 0 and avg_kernel_time < 50:
-        patterns_detected.append(
-            {
-                "name": "Small Average Kernel Time",
-                "severity": "HIGH" if avg_kernel_time < 20 else "MEDIUM",
-                "evidence": f"Average kernel time: {avg_kernel_time:.1f}µs",
-            }
-        )
-
-    # Pattern 4: Very High Idle Time (general)
-    if idle_percent > 70:
-        patterns_detected.append(
-            {
-                "name": "Critical GPU Underutilization",
-                "severity": "CRITICAL",
-                "evidence": f"GPU idle {idle_percent:.1f}% of total time",
-            }
-        )
-    elif idle_percent > 50:
-        patterns_detected.append(
-            {
-                "name": "High GPU Idle Time",
-                "severity": "HIGH",
-                "evidence": f"GPU idle {idle_percent:.1f}% of total time",
-            }
-        )
-
-    return patterns_detected
-
-
 def main():
     parser = argparse.ArgumentParser(description="CPU/Idle Time Analysis")
     parser.add_argument("--output-dir", required=True, help="Analysis output directory")
@@ -202,58 +135,12 @@ def main():
         print(f"  Short Kernels (<10µs): {kernel_patterns['short_kernel_count']}")
         print(f"  Avg Kernel Time: {kernel_patterns['avg_kernel_time_us']:.1f} µs")
 
-        # Detect patterns (severity + evidence only;
-        # recommendations are the sub-agent's responsibility)
-        patterns_detected = detect_idle_patterns(gpu_timeline, kernel_patterns)
-        print(f"\nPatterns Detected: {len(patterns_detected)}")
-        for p in patterns_detected:
-            print(f"  - [{p['severity']}] {p['name']}")
+        idle_flagged = idle_percent > 15
+        print(f"\n  Idle Flagged: {idle_flagged} ({idle_percent:.1f}%)")
 
-        # Classify severity (canonical thresholds live in cpu-idle-analyzer agent)
-        if idle_percent > 70:
-            severity = "CRITICAL"
-        elif idle_percent > 50:
-            severity = "HIGH"
-        elif idle_percent > 30:
-            severity = "MEDIUM"
-        elif idle_percent > 20:
-            severity = "LOW"
-        else:
-            severity = "ACCEPTABLE"
-
-        # Calculate potential speedup
-        if idle_percent > 20:
-            target_idle = 20
-            current_throughput = 100 - idle_percent
-            target_throughput = 100 - target_idle
-            potential_speedup = (
-                target_throughput / current_throughput if current_throughput > 0 else 1
-            )
-        else:
-            potential_speedup = 1.0
-
-        # Compute deterministic impact estimates for idle time reduction
-        impact_estimates = []
-        if idle_percent > 20 and total_time_ms > 0:
-            target_idle = 20
-            recoverable_ms = total_time_ms * (idle_percent - target_idle) / 100
-            confidence = "high" if idle_percent > 50 else "medium"
-            impact_estimates.append(
-                {
-                    "operation": "GPU idle time reduction",
-                    "category": "cpu_idle",
-                    "type": "system",
-                    "savings_ms": round(recoverable_ms, 3),
-                    "confidence": confidence,
-                    "idle_percent": round(idle_percent, 2),
-                    "target_idle_percent": target_idle,
-                }
-            )
-
-        # Build metrics output
         metrics = {
             "status": "OK",
-            "severity": severity,
+            "idle_flagged": idle_flagged,
             "gpu_utilization": {
                 "total_time_ms": round(total_time_ms, 3),
                 "idle_time_ms": round(idle_ms, 3),
@@ -263,10 +150,7 @@ def main():
                 "memcpy_percent": round(memcpy_percent, 2),
             },
             "kernel_analysis": kernel_patterns,
-            "patterns_detected": patterns_detected,
-            "potential_speedup": round(potential_speedup, 2),
-            "target_idle_percent": 20,
-            "impact_estimates": impact_estimates,
+            "impact_estimates": [],
         }
 
         # Write metrics JSON
@@ -276,15 +160,13 @@ def main():
             json.dump(metrics, f, indent=2)
 
         print(f"\n✓ Metrics saved: {metrics_path}")
-        print(f"\nSeverity: {severity}")
-        print(f"Potential Speedup: {potential_speedup:.2f}x")
         print("=" * 80)
 
     except Exception as e:
         print(f"\n✗ Error: {str(e)}")
 
         # Write error metrics
-        error_metrics = {"status": "ERROR", "error": str(e), "severity": "UNKNOWN"}
+        error_metrics = {"status": "ERROR", "error": str(e)}
 
         os.makedirs(f"{output_dir}/category_data", exist_ok=True)
         with open(f"{output_dir}/category_data/cpu_idle_metrics.json", "w") as f:

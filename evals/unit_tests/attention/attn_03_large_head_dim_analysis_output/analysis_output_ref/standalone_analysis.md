@@ -34,7 +34,7 @@ Standalone performance analysis of attention trace `attn_03_large_head_dim` on M
 
 **Action**: (1) Generate replay artifact for kernel team to profile `flash_fwd_kernel_bf16_hdim256` — tile size, warp occupancy, and register usage for d=256. (2) Compare against d=128 kernel configurations; d=256 may need different tuning. (3) Evaluate whether GQA or multi-query variants could improve utilization for this head configuration.
 
-**Impact**: Estimated 3.006 ms savings (93.9% of SDPA kernel time) if efficiency reaches 100% — medium confidence. Realistic target: 30–50% efficiency → 1.0–1.5 ms savings.
+**Impact**: ~3.006 ms savings from closing efficiency gaps (pre-computed).
 
 → *See [Detailed Analysis: Compute Kernels > SDPA_fwd](#1-sdpa_fwd-100-of-compute) for details*
 
@@ -91,7 +91,6 @@ The d=256 head dimension uses a specialized kernel (`flash_fwd_kernel_bf16_hdim2
 |---------------|------|------------------------|------------|
 | aten::_scaled_dot_product_flash_attention kernel tuning (d=256) | kernel_tuning | 3.006 | medium |
 | Tile/warp configuration for flash_fwd_kernel_bf16_hdim256 | kernel_tuning | 1.0–1.5 | medium |
-| Evaluate d=128 + 16 heads if model allows | algorithmic | 0.5–1.0 | low |
 
 ---
 
