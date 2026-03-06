@@ -106,6 +106,12 @@ Build the operations breakdown table from `metrics['operations']`:
 |-----------|-------|-----------|---------------|------------|------------|------|
 ```
 
+**Column mappings:**
+- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`
+- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
+- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`). Do NOT use `classification.gemm_type` here — that field distinguishes quantized vs regular, not the compute/memory bound type.
+
 ### Step 5: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
@@ -140,7 +146,7 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute)
-- **Efficiency:** Z% of peak MAF
+- **Efficiency:** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
 - **Issue:** [Brief description]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
@@ -154,6 +160,8 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 |---------------|------|----------------------|------------|
 | <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
 ```
+
+**Peak TFLOPS reference:** When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON. This is the precision-specific peak for the operation's data type (e.g., 654 for FP16, 708 for BF16). Do not look up peaks independently from the metadata dict.
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
 
