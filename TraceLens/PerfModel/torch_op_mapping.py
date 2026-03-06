@@ -223,12 +223,5 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-<<<<<<< HEAD
-
-=======
-    for k, v in dict_cat2names.items():
-        if row["name"] in v:
-            return k
->>>>>>> 3745556 (reformat with black)
     # if none of the above cases match, return 'other'
     return "other"
