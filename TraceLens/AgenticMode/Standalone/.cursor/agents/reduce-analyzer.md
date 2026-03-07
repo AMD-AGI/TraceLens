@@ -108,7 +108,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 60% of peak HBM BW
+- Efficiency: < 70% of peak HBM BW
 
 **Special considerations:**
 - Softmax operations may indicate unfused attention
@@ -149,7 +149,7 @@ The findings file **must** end with an Impact Summary section:
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/reduce_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
@@ -171,7 +171,7 @@ The findings file **must** end with an Impact Summary section:
 
 ### Standalone Reductions
 - **Symptoms:** sum, mean, max operations in isolation
-- **General guideline:** ~70% of peak HBM BW is a rough reference point, not a precise target
+- **General guideline:** >70% of peak HBM BW is the target
 - **Algorithmic:** Fuse with adjacent operations if possible
 - **Kernel:** Flag for investigation if showing very low bandwidth utilization (<20%); use `low` confidence
 
@@ -196,5 +196,4 @@ The findings file **must** end with an Impact Summary section:
 | Efficiency | Assessment |
 |------------|------------|
 | >70% | Good |
-| 50-70% | Below target - investigate |
-| <50% | Significant gap - investigate kernel or fusion opportunity |
+| <70% | Investigate kernel or fusion opportunity |

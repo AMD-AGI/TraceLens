@@ -21,22 +21,18 @@ import pandas as pd
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
-    """Classify memcpy severity based on count and time thresholds.
-
-    Canonical thresholds live in multi-kernel-analyzer agent.
-    """
+    """Classify memcpy as flagged (true/false) based on time or count thresholds."""
     total_memcpy_time_ms = memcpy_summary.get("total_time_us", 0) / 1000
     total_count = memcpy_summary.get("total_count", 0)
 
     if total_time_ms <= 0:
-        return {"severity": "NONE", "details": "No timeline data available"}
+        return {"flagged": False, "details": "No timeline data available"}
 
     memcpy_pct = (total_memcpy_time_ms / total_time_ms) * 100
 
     issues = []
-    overall_severity = "NONE"
+    overall_flagged = False
 
-    # Check per-direction issues
     by_direction = memcpy_summary.get("by_direction", {})
 
     for direction in ["D2H", "H2D"]:
@@ -48,20 +44,10 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         if count == 0:
             continue
 
-        if dir_pct > 10:
-            severity = "CRITICAL"
-        elif dir_pct > 5:
-            severity = "HIGH"
-        elif dir_pct > 2:
-            severity = "MEDIUM"
-        elif count > 50:
-            severity = "HIGH"
-        elif count > 10:
-            severity = "MEDIUM"
-        else:
-            severity = "NONE"
+        flagged = dir_pct > 5 or count > 10
 
-        if severity != "NONE":
+        if flagged:
+            overall_flagged = True
             issues.append(
                 {
                     "direction": direction,
@@ -69,18 +55,12 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
                     "time_ms": round(dir_time_ms, 3),
                     "percent_of_total": round(dir_pct, 2),
                     "avg_bytes": dir_info.get("avg_bytes", 0),
-                    "severity": severity,
                     "description": f"{direction} memcpy: {count} transfers, {dir_time_ms:.3f}ms ({dir_pct:.2f}% of total)",
                 }
             )
 
-            # Track highest severity
-            sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
-            if sev_rank.get(severity, 0) > sev_rank.get(overall_severity, 0):
-                overall_severity = severity
-
     return {
-        "severity": overall_severity,
+        "flagged": overall_flagged,
         "total_count": total_count,
         "total_time_ms": round(total_memcpy_time_ms, 3),
         "percent_of_total": round(memcpy_pct, 2),
@@ -89,30 +69,19 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
 
 
 def classify_nccl_blocking_severity(overlap_analysis):
-    """Classify NCCL blocking compute severity.
+    """Classify NCCL blocking compute as flagged (true/false).
 
-    Canonical thresholds live in multi-kernel-analyzer agent.
+    Flagged when exposed communication exceeds 5% of total GPU time.
     """
     exposed_comm_pct = overlap_analysis.get("comm_percent_of_total", 0)
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
     exposed_comm_us = overlap_analysis.get("exposed_comm_time_us", 0)
 
     if total_comm_us == 0:
-        return {"severity": "NONE", "details": "No communication events detected"}
-
-    if exposed_comm_pct > 20:
-        severity = "CRITICAL"
-    elif exposed_comm_pct > 10:
-        severity = "HIGH"
-    elif exposed_comm_pct > 5:
-        severity = "MEDIUM"
-    elif exposed_comm_pct > 2:
-        severity = "LOW"
-    else:
-        severity = "NONE"
+        return {"flagged": False, "details": "No communication events detected"}
 
     return {
-        "severity": severity,
+        "flagged": exposed_comm_pct > 5,
         "exposed_comm_time_ms": round(exposed_comm_us / 1000, 3),
         "total_comm_time_ms": round(total_comm_us / 1000, 3),
         "exposed_percent_of_total": round(exposed_comm_pct, 2),
@@ -121,32 +90,23 @@ def classify_nccl_blocking_severity(overlap_analysis):
 
 
 def classify_overlap_severity(overlap_analysis):
-    """Classify NCCL/compute overlap quality.
+    """Classify NCCL/compute overlap quality as flagged (true/false).
 
-    Canonical thresholds live in multi-kernel-analyzer agent.
+    Flagged when overlap ratio is below 70%.
     """
     comm_overlap_ratio = overlap_analysis.get("comm_overlap_ratio")
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
 
     if comm_overlap_ratio is None or total_comm_us < 100:
         return {
-            "severity": "NONE",
+            "flagged": False,
             "details": "Insufficient communication data for overlap analysis",
         }
 
-    if comm_overlap_ratio < 0.3:
-        severity = "CRITICAL"
-    elif comm_overlap_ratio < 0.5:
-        severity = "HIGH"
-    elif comm_overlap_ratio < 0.7:
-        severity = "MEDIUM"
-    else:
-        severity = "NONE"
-
     return {
-        "severity": severity,
+        "flagged": comm_overlap_ratio < 0.7,
         "overlap_ratio": round(comm_overlap_ratio, 4),
-        "overlap_percent": round(comm_overlap_ratio * 100, 1),
+        "overlap_percent": round(comm_overlap_ratio * 100, 2),
         "target_percent": 70,
         "description": f"Compute/communication overlap: {comm_overlap_ratio:.1%} (target > 70%)",
     }
@@ -254,9 +214,9 @@ def main():
         error_metrics = {
             "status": "ERROR",
             "error": "multi_kernel_data.json not found - run orchestrator_prepare.py first",
-            "memcpy_assessment": {"severity": "UNKNOWN"},
-            "nccl_blocking_assessment": {"severity": "UNKNOWN"},
-            "overlap_assessment": {"severity": "UNKNOWN"},
+            "memcpy_assessment": {"flagged": False},
+            "nccl_blocking_assessment": {"flagged": False},
+            "overlap_assessment": {"flagged": False},
             "patterns_detected": [],
         }
         metrics_file = f"{output_dir}/category_data/multi_kernel_metrics.json"
@@ -296,9 +256,9 @@ def main():
     nccl_blocking_assessment = classify_nccl_blocking_severity(overlap_analysis)
     overlap_assessment = classify_overlap_severity(overlap_analysis)
 
-    print(f"\n  Memcpy Assessment: {memcpy_assessment['severity']}")
-    print(f"  NCCL Blocking Assessment: {nccl_blocking_assessment['severity']}")
-    print(f"  Overlap Assessment: {overlap_assessment['severity']}")
+    print(f"\n  Memcpy Assessment: flagged={memcpy_assessment['flagged']}")
+    print(f"  NCCL Blocking Assessment: flagged={nccl_blocking_assessment['flagged']}")
+    print(f"  Overlap Assessment: flagged={overlap_assessment['flagged']}")
 
     # Cross-validate overlap metrics against gpu_timeline.csv
     cross_validation = None
@@ -322,37 +282,34 @@ def main():
     # recommendations are the sub-agent's responsibility)
     patterns_detected = []
 
-    if memcpy_assessment["severity"] != "NONE":
+    if memcpy_assessment["flagged"]:
         for issue in memcpy_assessment.get("issues", []):
             patterns_detected.append(
                 {
                     "pattern": f"high_{issue['direction'].lower()}_memcpy",
-                    "severity": issue["severity"],
                     "description": issue["description"],
                 }
             )
 
-    if nccl_blocking_assessment["severity"] != "NONE":
+    if nccl_blocking_assessment["flagged"]:
         patterns_detected.append(
             {
                 "pattern": "nccl_blocking_compute",
-                "severity": nccl_blocking_assessment["severity"],
                 "description": nccl_blocking_assessment.get("description", ""),
             }
         )
 
-    if overlap_assessment["severity"] != "NONE":
+    if overlap_assessment["flagged"]:
         patterns_detected.append(
             {
                 "pattern": "poor_comm_compute_overlap",
-                "severity": overlap_assessment["severity"],
                 "description": overlap_assessment.get("description", ""),
             }
         )
 
     print(f"  Patterns detected: {len(patterns_detected)}")
     for p in patterns_detected:
-        print(f"    - [{p['severity']}] {p['pattern']}")
+        print(f"    - {p['pattern']}")
 
     metrics = {
         "status": "SUCCESS",

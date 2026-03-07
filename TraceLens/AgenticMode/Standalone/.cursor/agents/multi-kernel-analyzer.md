@@ -88,14 +88,14 @@ cat <output_dir>/category_data/multi_kernel_metrics.json
 ```
 
 Key metrics to analyze:
-- `memcpy_assessment`: Severity and per-direction breakdown of memory copy issues
-- `nccl_blocking_assessment`: Severity of communication blocking compute
-- `overlap_assessment`: Quality of compute/communication overlap
-- `patterns_detected`: List of detected patterns with severity and description (no recommendations -- you generate those)
+- `memcpy_assessment`: Boolean `flagged` and per-direction breakdown of memory copy issues
+- `nccl_blocking_assessment`: Boolean `flagged` for communication blocking compute
+- `overlap_assessment`: Boolean `flagged` for compute/communication overlap quality
+- `patterns_detected`: List of detected patterns with description (no recommendations -- you generate those)
 
 ### Step 3: Analyze Memory Copy Patterns
 
-Examine `memcpy_assessment` for D2H and H2D issues. Severity is pre-computed in `memcpy_assessment.severity` and per-direction in each issue's `severity` field.
+Examine `memcpy_assessment` for D2H and H2D issues. `memcpy_assessment.flagged` is `true` when any direction exceeds thresholds (>5% of total time or >10 transfers).
 
 **D2H (Device-to-Host) Issues:**
 - Frequent D2H copies suggest unnecessary data movement back to host
@@ -109,7 +109,7 @@ Examine `memcpy_assessment` for D2H and H2D issues. Severity is pre-computed in 
 
 ### Step 4: Analyze NCCL Blocking
 
-Examine `nccl_blocking_assessment`. Severity is pre-computed in `nccl_blocking_assessment.severity`.
+Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true` when exposed communication exceeds 5% of total GPU time.
 
 **Blocking indicators:**
 - High `exposed_comm_time_ms` means communication is on the critical path
@@ -117,7 +117,7 @@ Examine `nccl_blocking_assessment`. Severity is pre-computed in `nccl_blocking_a
 
 ### Step 5: Analyze Compute/Communication Overlap
 
-Examine `overlap_assessment`. Severity is pre-computed in `overlap_assessment.severity`; the target overlap ratio is >70%.
+Examine `overlap_assessment`. `overlap_assessment.flagged` is `true` when overlap ratio is below 70%.
 
 **Overlap improvement strategies:**
 1. Enable gradient communication overlap (async allreduce during backward)
@@ -138,26 +138,26 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 
 ## Summary
 
-| Metric | Value | Severity |
-|--------|-------|----------|
-| Total Memcpy Events | X | [severity] |
-| D2H Transfers | X (Y ms) | [severity] |
-| H2D Transfers | X (Y ms) | [severity] |
-| Exposed Communication | X% of total | [severity] |
-| Compute/Comm Overlap | X% | [severity] |
+| Metric | Value | Flagged |
+|--------|-------|---------|
+| Total Memcpy Events | X | true/false |
+| D2H Transfers | X (Y ms) | true/false |
+| H2D Transfers | X (Y ms) | true/false |
+| Exposed Communication | X% of total | true/false |
+| Compute/Comm Overlap | X% | true/false |
 
 ## Memory Copy Analysis
 
 ### D2H (Device-to-Host) Transfers
 - **Count**: X transfers
 - **Total Time**: Y ms (Z% of total GPU time)
-- **Assessment**: [severity]
+- **Flagged**: true/false
 - **Root Cause**: [analysis based on count and time patterns]
 
 ### H2D (Host-to-Device) Transfers
 - **Count**: X transfers
 - **Total Time**: Y ms (Z% of total GPU time)
-- **Assessment**: [severity]
+- **Flagged**: true/false
 - **Root Cause**: [analysis]
 
 ## Communication Blocking Analysis
@@ -165,19 +165,16 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 ### NCCL Blocking Compute
 - **Exposed Communication Time**: X ms (Y% of total)
 - **Total Communication Time**: X ms
-- **Assessment**: [severity]
-- **Impact**: GPU compute blocked for X ms due to non-overlapped communication
+- **Flagged**: true/false
 
 ### Compute/Communication Overlap
 - **Overlap Ratio**: X% (target > 70%)
-- **Assessment**: [severity]
-- **Impact**: [quantified improvement potential]
+- **Flagged**: true/false
 
 ## Detected Patterns
 
-1. **[Pattern Name]** - [Severity]
+1. **[Pattern Name]**
    - Evidence: [metrics]
-   - Impact: [time/percentage]
    - Recommendation: [specific action]
 
 ## Recommendations

@@ -94,7 +94,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 60% of peak
+- Efficiency: < 70% of peak TFLOPS
 
 **Special considerations:**
 - MoE operations are typically already fused
@@ -129,7 +129,7 @@ The findings file **must** end with an Impact Summary section:
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/moe_fused_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
@@ -175,6 +175,5 @@ The findings file **must** end with an Impact Summary section:
 
 | Efficiency | Assessment |
 |------------|------------|
-| >50% | Good for MoE |
-| 30-50% | Acceptable, check routing balance |
-| <30% | Investigate load imbalance or kernel issues |
+| >70% | Good |
+| <70% | Investigate load imbalance or kernel issues |

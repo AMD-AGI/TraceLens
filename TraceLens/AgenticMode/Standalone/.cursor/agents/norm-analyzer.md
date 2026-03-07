@@ -93,7 +93,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 60% of peak HBM BW
+- Efficiency: < 70% of peak HBM BW
 
 **Baseline comparison:**
 - Compare to simple elementwise ops (add_, mul, copy_)
@@ -127,7 +127,7 @@ The findings file **must** end with an Impact Summary section:
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/norm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
@@ -176,6 +176,4 @@ The findings file **must** end with an Impact Summary section:
 | Efficiency | Assessment |
 |------------|------------|
 | >70% | Good |
-| 50-70% | Below target - investigate |
-| <50% | Compare to baseline, may indicate issue |
-| <20% with baseline >70% | Kernel issue - investigate |
+| <70% | Compare to baseline, may indicate kernel issue |

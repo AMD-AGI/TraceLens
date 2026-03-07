@@ -101,7 +101,7 @@ Check `category_specific` for implementation type:
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 60% of peak (but consider sequence length and workload type)
+- Efficiency: < 70% of peak TFLOPS (but consider sequence length and workload type)
 
 **Special considerations for Paged Attention:**
 - Decode-only workloads naturally have lower efficiency (5-15%)
@@ -168,7 +168,7 @@ Include:
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/sdpa_fwd_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.

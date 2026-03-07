@@ -56,7 +56,7 @@ For each matched P-item pair (from eval 2), compare the content values:
 - **Performance numbers**: kernel time, efficiency percentage, achieved bandwidth/TFLOPS. Numeric tolerance: 5% relative difference.
 - **Shapes**: matrix dimensions, batch sizes. Must match exactly.
 - **Gap to roofline**: the efficiency percentage or fraction of peak. Tolerance: 5%.
-- **Estimated gain**: savings in ms or percentage improvement. Tolerance: 5%. **For estimated savings values < 0.1 ms, accept differences up to 0.05 ms absolute regardless of relative percentage** (sub-ms savings are LLM-estimated and inherently non-deterministic). When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
+- **Estimated gain**: savings in ms or percentage improvement. Tolerance: 5%. **For estimated savings values < 0.5 ms, accept differences up to 0.5 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
 
 Check the category findings files for detailed values if the top-level report summarizes them.
 

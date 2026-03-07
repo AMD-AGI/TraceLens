@@ -83,7 +83,7 @@ Use `category_specific.peak_hbm_bw_tbs` as the peak HBM bandwidth reference for 
 
 Each entry in `metrics['operations']` has a `name` field (e.g. `aten::add_`, `aten::sigmoid`, `aten::gelu`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
 
-- **Baseline ops** (simple memory-bound; expect 70-80% HBM BW): add, mul, copy, fill
+- **Baseline ops** (simple memory-bound; expect >70% HBM BW): add, mul, copy, fill
 - **Arithmetic**: sub, div, remainder, fmod, neg, abs, clamp
 - **Activation**: sigmoid, relu, gelu, silu, swish, tanh, mish, hardswish, leaky_relu
 - **Cast / Convert**: to, _to_copy, type_as, float, half, bfloat16
@@ -97,10 +97,10 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Bottleneck criteria:**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 60% of peak HBM BW (compared to baseline)
+- Efficiency: < 70% of peak HBM BW (compared to baseline)
 
 **Special considerations:**
-- Simple elementwise ops (add, mul, copy) should achieve 70-80% of peak HBM BW
+- Simple elementwise ops (add, mul, copy) should achieve >70% of peak HBM BW
 - Complex elementwise ops may have lower efficiency
 - High count indicates fusion opportunities
 
@@ -133,7 +133,7 @@ The findings file **must** end with an Impact Summary section:
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/elementwise_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
@@ -155,7 +155,7 @@ The findings file **must** end with an Impact Summary section:
 
 ### Low Baseline Efficiency
 - **Symptoms:** Simple ops (add_, mul, copy_) at <50% of peak HBM BW
-- **Expected:** 70-80% efficiency for these operations
+- **Expected:** >70% efficiency for these operations
 - **Kernel:** Investigate memory access patterns, kernel launch overhead
 
 ### High Invocation Count
@@ -178,6 +178,5 @@ The findings file **must** end with an Impact Summary section:
 
 | Efficiency | Assessment |
 |------------|------------|
-| >70% | Good - meets expected HBM BW utilization |
-| 50-70% | Below target - investigate fusion opportunities |
-| <50% | Significant gap - investigate kernel issues |
+| >70% | Good |
+| <70% | Significant gap - investigate kernel issues or fusion opportunities |

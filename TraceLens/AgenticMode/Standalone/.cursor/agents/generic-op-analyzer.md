@@ -107,7 +107,7 @@ For each operation consuming significant time or with notable invocation count:
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 60% of peak
+- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
 - Count: very high invocation count suggesting fusion/batching opportunity
 
 **Key questions to answer for each bottleneck:**
@@ -168,7 +168,7 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 
 ## Notes
 - Communication kernels (NCCL/RCCL) are excluded from this analysis — use TraceLens's NCCL Analyzer
@@ -231,8 +231,8 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 
 | Operation Type | Expected Efficiency | Notes |
 |----------------|---------------------|-------|
-| Memory-bound (embedding, index, scatter) | 50-70% of peak HBM BW | Standard memory-bound expectation |
-| Compute-bound (custom kernels) | 40-60% of peak MAF | Varies widely for custom ops |
+| Memory-bound (embedding, index, scatter) | >70% of peak HBM BW | Standard memory-bound expectation |
+| Compute-bound (custom kernels) | >70% of peak TFLOPS | Varies widely for custom ops |
 | Graph launch | N/A | Measure overhead vs benefit |
 
 **Note:** Efficiency expectations for uncategorized ops vary widely. Use the operation's FLOPS/Byte ratio to determine if it's compute-bound or memory-bound, then compare to the appropriate peak.

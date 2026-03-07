@@ -95,7 +95,7 @@ Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 60% of peak
+- Efficiency: < 70% of peak TFLOPS
 
 ### Step 4: Generate Markdown Tables
 
@@ -158,7 +158,7 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
 **Peak TFLOPS reference:** When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON. This is the precision-specific peak for the operation's data type (e.g., 654 for FP16, 708 for BF16). Do not look up peaks independently from the metadata dict.
@@ -207,10 +207,8 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 | Efficiency | Assessment | Action |
 |------------|------------|--------|
-| >80% | Excellent | Focus on algorithmic improvements |
-| 60-80% | Good | Limited optimization potential |
-| 40-60% | Acceptable | Consider kernel optimization if high time |
-| <40% | Needs investigation | Priority for kernel optimization, generate replay artifact |
+| >70% | Good | Limited optimization potential |
+| <70% | Needs investigation | Priority for kernel optimization, generate replay artifact |
 
 ---
 
