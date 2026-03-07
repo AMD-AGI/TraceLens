@@ -123,11 +123,11 @@ Two Cursor agent skills in `.cursor/skills/` define the eval logic:
 
 **workflow-eval** -- 12 evals total:
 - Evals 1-7 (scripted): directory structure, required files, plot output. Run via `eval_scripts/workflow_scripted_evals.py`.
-- Evals 8-12 (LLM-based): report template rendering, executive summary metrics, issue template formatting, hardware reference in appendix, and compute sub-agent findings structure.
+- Evals 8-12 (LLM-based): report template rendering, executive summary metrics, issue template formatting, hardware reference in appendix, sub-agent findings structure, and Impact Summary type validation (only `kernel_tuning` for compute, zero rows for system).
 
 **quality-eval** -- 3 evals total:
 - Eval 1 (scripted): CSV value alignment between generated and reference outputs. Run via `eval_scripts/quality_scripted_evals.py`.
-- Evals 2-3 (LLM-based): semantic comparison of compute issue titles and content (performance numbers, shapes, efficiency) against the reference report.
+- Evals 2-3 (LLM-based): semantic comparison of compute issue titles and content (performance numbers, shapes, efficiency, pre-computed kernel_tuning gains) against the reference report. System-level P-items are skipped (no Impact field to compare).
 
 ## Results
 

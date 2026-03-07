@@ -51,12 +51,14 @@ Compare the P-item titles in the generated `standalone_analysis.md` against the 
 **Category:** Quality
 **Issue Summary:** Compute Issue Content Alignment
 
-For each matched P-item pair (from eval 2), compare the content values:
+For each matched P-item pair (from eval 2), compare the content values. **Only compare Compute Kernel P-items** (under `## Compute Kernel Optimizations`). **Skip System-Level P-items** (under `## System-Level Optimizations`) entirely -- system P-items have no `**Impact**` field and no numeric gain to compare.
+
+For each matched compute P-item pair:
 
 - **Performance numbers**: kernel time, efficiency percentage, achieved bandwidth/TFLOPS. Numeric tolerance: 5% relative difference.
 - **Shapes**: matrix dimensions, batch sizes. Must match exactly.
 - **Gap to roofline**: the efficiency percentage or fraction of peak. Tolerance: 5%.
-- **Estimated gain**: savings in ms or percentage improvement. Tolerance: 5%. **For estimated savings values < 0.5 ms, accept differences up to 0.5 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
+- **Estimated gain**: savings in ms from pre-computed `kernel_tuning` estimates (format: `~X.X ms savings from closing efficiency gaps (pre-computed)` or `Not quantifiable from trace data`). Tolerance: 5%. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
 
 Check the category findings files for detailed values if the top-level report summarizes them.
 

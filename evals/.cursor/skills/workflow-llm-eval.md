@@ -27,10 +27,11 @@ Read ALL of these before evaluating:
 - `<output_dir>/perf_report_csvs/gpu_timeline.csv`
 - `<output_dir>/category_data/category_manifest.json`
 - All `<output_dir>/category_findings/*_findings.md`
+- All `<output_dir>/system_findings/*_findings.md`
 
 ## Evals
 
-Evaluate ALL 5 checks below. Write ALL 5 rows to the results CSV.
+Evaluate ALL 5 checks below. Write ALL 5 rows to the results CSV. If a file listed above does not exist, skip it gracefully (do not FAIL solely because an optional system findings file is absent).
 
 ### workflow_eval_8: Report Template Rendering
 
@@ -101,18 +102,24 @@ In `standalone_analysis.md`, find the `## Appendix` section. Verify it contains:
 
 **PASS** if all present. **FAIL** with what's missing.
 
-### workflow_eval_12: Compute sub-agent findings structure
+### workflow_eval_12: Sub-agent findings structure and Impact Summary types
 
 **Category:** Workflow
-**Issue Summary:** Compute sub-agent findings structure
+**Issue Summary:** Sub-agent findings structure and Impact Summary types
 
-Read `category_manifest.json` to get compute_kernel categories. For each, read the corresponding `category_findings/<cat>_findings.md`. Verify each contains:
+Read `category_manifest.json` to get categories by tier. For each **compute_kernel** category, read `category_findings/<cat>_findings.md`. For each **system** category, read `system_findings/<cat>_findings.md`.
+
+**Compute kernel findings** must each contain:
 
 - An operations table (markdown table with columns like Operation, Count, Time)
 - At least one key bottleneck section with Time, Efficiency, and recommendation text
-- An `## Impact Summary` section with a markdown table
+- An `## Impact Summary` section with a markdown table where every data row has Type = `kernel_tuning`. Rows with Type = `algorithmic` or `system` are **not allowed**. The table may have zero data rows (header only) if no actionable bottlenecks were found.
 
-**PASS** if all category findings have the required structure. **FAIL** listing which categories are missing what.
+**System findings** (e.g. `cpu_idle_findings.md`, `multi_kernel_findings.md`) must each contain:
+
+- An `## Impact Summary` section with the table header row but **zero data rows**. System-level analyses do not produce impact estimates.
+
+**PASS** if all findings have the required structure and valid Impact Summary types. **FAIL** listing which categories have missing structure or invalid Impact Summary rows (e.g. `algorithmic` or `system` type entries in compute findings, or data rows in system findings).
 
 ## Output
 
