@@ -775,6 +775,22 @@ class TreePerfAnalyzer:
 
         return df_perf_metrics_summary
 
+    def compute_overlapping_kernels(self, kernel_events):
+        """Run sweep-line overlap detection on all GPU events globally.
+
+        Populates ``overlapping_uids`` on each GPU event dict in-place so that
+        downstream methods like ``_compute_overlap_info()`` see correct
+        cross-stream overlap regardless of call order.
+
+        This is idempotent: if ``overlapping_uids`` is already present on every
+        event the sweep-line is skipped automatically.
+        """
+        if not self.include_unlinked_kernels:
+            kernel_events = [
+                event for event in kernel_events if event.get("tree")
+            ]
+        self.GPUEventAnalyser(kernel_events).get_gpu_event_lists()
+
     def get_kernel_launchers(self, include_nccl=False):
         # This method identifies kernel launchers, which are the events directly responsible for launching GPU kernels.
         #
@@ -790,12 +806,16 @@ class TreePerfAnalyzer:
         # the first cpu_op ancestor. If no cpu_op is found, the runtime event is used as the launcher.
         # This approach gives consistent results regardless of whether add_python_func=True or False.
 
+        # Step 0: Ensure overlapping_uids is populated globally before per-launcher processing
+
         # Step 1: Find all kernel events
         kernel_events = [
             evt
             for evt in self.tree.events
             if self.event_to_category(evt) in {"kernel", "gpu_memcpy", "gpu_memset"}
         ]
+
+        self.compute_overlapping_kernels(kernel_events)
 
         # Step 2: Map each kernel to its launcher (cpu_op if found, else runtime event)
         launcher_to_kernels = defaultdict(list)

@@ -30,6 +30,7 @@ overlap_pct computation (via kernel launchers and DataFrames):
 - overlap_pct survives aggregation in unique-args kl_overlap
 """
 
+import os
 import pytest
 import pandas as pd
 from copy import deepcopy
@@ -819,3 +820,56 @@ class TestOverlapPctDataFrameColumn:
         assert (
             len(overlap_cols) > 0
         ), f"No overlap_pct column found. Columns: {list(df_agg.columns)}"
+
+
+# ── Bug 2 regression: overlap data must not depend on call order ────────
+
+TRACE_PATH = os.path.join(
+    "tests", "traces", "mi300",
+    "gaunernst_bert-small-uncased__1016001.json.gz",
+)
+
+
+@pytest.mark.skipif(
+    not os.path.exists(TRACE_PATH), reason=f"Trace not found: {TRACE_PATH}"
+)
+class TestOverlapCallOrderIndependence:
+    """get_df_kernel_launchers() must return identical overlap data regardless
+    of whether get_df_gpu_timeline() was called first (Bug 2 regression)."""
+
+    def test_kernel_launchers_overlap_without_prior_gpu_timeline(self):
+        """Calling get_df_kernel_launchers() directly must produce the same
+        overlap results as calling get_df_gpu_timeline() first."""
+        # Path A: get_df_kernel_launchers() only
+        analyzer_a = TreePerfAnalyzer.from_file(TRACE_PATH)
+        df_a = analyzer_a.get_df_kernel_launchers()
+
+        # Path B: get_df_gpu_timeline() first (previously required for overlap)
+        analyzer_b = TreePerfAnalyzer.from_file(TRACE_PATH)
+        analyzer_b.get_df_gpu_timeline()
+        df_b = analyzer_b.get_df_kernel_launchers()
+
+        count_a = df_a["overlap_pct"].notna().sum()
+        count_b = df_b["overlap_pct"].notna().sum()
+
+        assert count_a == count_b, (
+            f"overlap_pct count differs: direct={count_a}, "
+            f"after get_df_gpu_timeline={count_b}"
+        )
+
+    def test_overlap_values_match(self):
+        """The actual overlap_pct values must match, not just the counts."""
+        analyzer_a = TreePerfAnalyzer.from_file(TRACE_PATH)
+        df_a = analyzer_a.get_df_kernel_launchers()
+
+        analyzer_b = TreePerfAnalyzer.from_file(TRACE_PATH)
+        analyzer_b.get_df_gpu_timeline()
+        df_b = analyzer_b.get_df_kernel_launchers()
+
+        pcts_a = df_a.set_index("UID")["overlap_pct"].dropna().sort_index()
+        pcts_b = df_b.set_index("UID")["overlap_pct"].dropna().sort_index()
+
+        assert list(pcts_a.index) == list(pcts_b.index), (
+            "UIDs with overlap differ between paths"
+        )
+        pd.testing.assert_series_equal(pcts_a, pcts_b, check_names=False)
