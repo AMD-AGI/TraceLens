@@ -985,7 +985,11 @@ class TreePerfAnalyzer:
             event["overlapping_kernel_names"] = None
 
     def get_df_kernel_launchers(
-        self, id_cols=False, include_kernel_details=False, include_call_stack=False
+        self,
+        id_cols=False,
+        include_kernel_details=False,
+        include_call_stack=False,
+        include_first_occurrence_time=False,
     ):
 
         def list_to_tuple(obj):
@@ -1007,6 +1011,8 @@ class TreePerfAnalyzer:
                 "overlapping_kernels_details": event["overlapping_kernels_details"],
                 "overlap_pct": event.get("overlap_pct"),
             }
+            if include_first_occurrence_time:
+                metrics_event["ts"] = event.get("ts")
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
                 if arg in event["args"]:
                     metrics_event[arg] = list_to_tuple(event["args"][arg])
@@ -1378,6 +1384,8 @@ class TreePerfAnalyzer:
         if "UID" in df_filtered.columns:
             agg_dict["UID"] = ["first", "count"]
             columns_to_keep_first.append("UID")
+        if "ts" in df_filtered.columns:
+            agg_dict["ts"] = "min"
         if "kernel_details" in df_filtered.columns:
             agg_dict["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
@@ -1417,6 +1425,11 @@ class TreePerfAnalyzer:
         # uid needs to be mapped to ex_UID
         if "UID_first" in df_unique_args.columns:
             rename_map["UID_first"] = "ex_UID"
+        if "ts_min" in df_unique_args.columns:
+            rename_map["ts_min"] = "first_occurrence_time"
+            normalize_first_occurrence_ts = True
+        else:
+            normalize_first_occurrence_ts = False
         for col in df_unique_args.columns:
             if col.startswith("kernel_details_"):
                 rename_map[col] = "kernel_details_summary"
@@ -1427,6 +1440,10 @@ class TreePerfAnalyzer:
             ) and not col.endswith("_str_repr_for_grouping"):
                 rename_map[col] = "overlapping_kernels_details_summary"
         df_unique_args.rename(columns=rename_map, inplace=True)
+        if normalize_first_occurrence_ts:
+            df_unique_args["first_occurrence_time"] -= df_unique_args[
+                "first_occurrence_time"
+            ].min()
 
         # 4. Reorder columns: start with grouping + key metrics, then rest
         primary_cols = [
@@ -1437,6 +1454,7 @@ class TreePerfAnalyzer:
             for col in [
                 "UID",
                 "operation_count",
+                "first_occurrence_time",
                 "kernel_names",
                 "total_direct_kernel_time_mean",
                 "total_subtree_kernel_time_mean",
