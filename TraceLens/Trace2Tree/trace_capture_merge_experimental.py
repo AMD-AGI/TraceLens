@@ -363,7 +363,7 @@ def merge_capture_trace_into_graph(
             mode="FULL"
         key = "{}_{}".format(closest_batch_size, mode)
         filepath = capture_map[key]
-        ##print("Loading capture trace: {} (key={})".format(filepath, key))
+        print("Loading capture trace: {} (key={})".format(filepath, key))
         capture_perf_analyzer = TreePerfAnalyzer.from_file(
             filepath, add_python_func=True
         )
