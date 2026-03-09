@@ -78,7 +78,7 @@ class GPUEventAnalyser:
             GPUEventAnalyser.gpu_event_keys, GPUEventAnalyser.cpu_event_keys
         )
 
-    def get_gpu_event_lists(self, compute_overlapping_uids=False):
+    def get_gpu_event_lists(self):
         """
         Return a dictionary of lists of events, categorized by event types
         Event types are all gpu events, computation, communication, and memcpy.
@@ -94,9 +94,9 @@ class GPUEventAnalyser:
         comp_events = []
         comm_events = []
         memcpy_events = []
+        compute_overlapping_uids = False
 
         points = []
-        compute_overlapping_uids = False
         for event in self.events:
 
             # TODO: ideally we want to get gpu events based on process id
@@ -163,6 +163,10 @@ class GPUEventAnalyser:
                                 and active_cpu_op is not None
                                 and my_cpu_op == active_cpu_op
                             ):
+                                continue
+                            ov_start = max(event["ts"], event_map[active_uid]["ts"])
+                            ov_end = min(event["t_end"], event_map[active_uid]["t_end"])
+                            if (ov_end - ov_start) < 1.0:  # skip sub-microsecond noise
                                 continue
                             event["overlapping_uids"].add(active_uid)
                             event_map[active_uid]["overlapping_uids"].add(uid)
@@ -294,9 +298,7 @@ class GPUEventAnalyser:
                 "total_memcpy_time": total_memcpy_time,
             }
 
-    def compute_metrics(
-        self, micro_idle_thresh_us=None, compute_overlapping_uids=False
-    ):
+    def compute_metrics(self, micro_idle_thresh_us=None):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -307,9 +309,7 @@ class GPUEventAnalyser:
         """
 
         # Categorize events.
-        dict_gpu_event_lists = self.get_gpu_event_lists(
-            compute_overlapping_uids=compute_overlapping_uids
-        )
+        dict_gpu_event_lists = self.get_gpu_event_lists()
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         return GPUEventAnalyser.compute_metrics_dict(
