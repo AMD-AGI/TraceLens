@@ -17,6 +17,9 @@ overlapping_uids computation (GPUEventAnalyser):
 - Same cpu_op: overlapping kernels under the same cpu_op are NOT marked overlapping
 - Different cpu_ops: overlapping kernels under different cpu_ops ARE marked overlapping
 - Mixed: some kernels share a cpu_op, others don't
+- Sub-microsecond overlap (<1µs) filtered as timestamp noise (Bug 1 regression)
+- Exactly 1µs overlap meets threshold and IS marked (strict < 1.0 check)
+- Above-threshold overlap (>1µs) correctly marked
 
 overlap_pct computation (via kernel launchers and DataFrames):
 - Partial overlap between kernels from different cpu_ops
@@ -242,7 +245,41 @@ def test_no_parent_info_falls_back_to_overlap():
     assert by_uid[2] == {1}
 
 
-# ── overlap_pct helpers ─────────────────────────────────────────────────
+def test_sub_microsecond_overlap_not_marked():
+    """Back-to-back kernels with <1µs overlap (timestamp noise) must NOT be
+    marked overlapping.  Reproduces Bug 1: consecutive same-stream GEMMs with
+    0.2µs boundary artifact."""
+    # kernel A: [1000, 2000], kernel B starts 0.2µs before A ends
+    a = _make_event(1, 1000, 1000)  # [1000, 2000]
+    b = _make_event(2, 1999.8, 1000)  # [1999.8, 2999.8]  overlap = 0.2µs
+    analyser = GPUEventAnalyser([a, b])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == set(), "0.2µs overlap should be filtered as noise"
+    assert by_uid[2] == set(), "0.2µs overlap should be filtered as noise"
+
+
+def test_exactly_one_microsecond_overlap_is_marked():
+    """Overlap of exactly 1.0µs meets the threshold (< 1.0 check is strict)
+    so it IS marked as genuine overlap."""
+    a = _make_event(1, 1000, 1000)  # [1000, 2000]
+    b = _make_event(2, 1999.0, 1000)  # [1999, 2999]  overlap = 1.0µs
+    analyser = GPUEventAnalyser([a, b])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {2}, "1.0µs overlap meets the threshold"
+    assert by_uid[2] == {1}, "1.0µs overlap meets the threshold"
+
+
+def test_above_threshold_overlap_is_marked():
+    """Overlap of >1µs is genuine and must be marked."""
+    a = _make_event(1, 1000, 1000)  # [1000, 2000]
+    b = _make_event(2, 1998.0, 1000)  # [1998, 2998]  overlap = 2.0µs
+    analyser = GPUEventAnalyser([a, b])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {2}, "2.0µs overlap should be marked"
+    assert by_uid[2] == {1}, "2.0µs overlap should be marked"
 
 
 def _mk_event(cat, name, ts, dur, pid, tid, args=None):
