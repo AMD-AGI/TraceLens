@@ -9,7 +9,7 @@ export ISL=2048
 export OSL=32
 export RANDOM_RANGE_RATIO=0.8
 export RESULT_FILENAME="dsr1_fp8_mi300x_results.json"
-export PROFILE_DIR="/home/mohbasit/profile"
+export PROFILE_DIR="/home/profile"
 
 check_env_vars \
     MODEL \
