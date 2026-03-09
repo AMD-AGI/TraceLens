@@ -825,7 +825,10 @@ class TestOverlapPctDataFrameColumn:
 # ── Bug 2 regression: overlap data must not depend on call order ────────
 
 TRACE_PATH = os.path.join(
-    "tests", "traces", "mi300", "llama_70b_fsdp",
+    "tests",
+    "traces",
+    "mi300",
+    "llama_70b_fsdp",
     "rank0_trace_no_pyfn.json.gz",
 )
 
@@ -869,7 +872,7 @@ class TestOverlapCallOrderIndependence:
         pcts_a = df_a.set_index("UID")["overlap_pct"].dropna().sort_index()
         pcts_b = df_b.set_index("UID")["overlap_pct"].dropna().sort_index()
 
-        assert list(pcts_a.index) == list(pcts_b.index), (
-            "UIDs with overlap differ between paths"
-        )
+        assert list(pcts_a.index) == list(
+            pcts_b.index
+        ), "UIDs with overlap differ between paths"
         pd.testing.assert_series_equal(pcts_a, pcts_b, check_names=False)

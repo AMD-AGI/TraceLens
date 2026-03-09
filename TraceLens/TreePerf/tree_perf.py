@@ -786,9 +786,7 @@ class TreePerfAnalyzer:
         event the sweep-line is skipped automatically.
         """
         if not self.include_unlinked_kernels:
-            kernel_events = [
-                event for event in kernel_events if event.get("tree")
-            ]
+            kernel_events = [event for event in kernel_events if event.get("tree")]
         self.GPUEventAnalyser(kernel_events).get_gpu_event_lists()
 
     def get_kernel_launchers(self, include_nccl=False):
