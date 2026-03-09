@@ -6,7 +6,7 @@
 
 import re
 import logging
-from typing import Optional, List, Callable
+from typing import Any, Optional, List, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,19 @@ def inject_pseudo_op_wrap_children(
 
     parent_evt["children"] = [pseudo_evt["UID"]]
     pseudo_evt["parent"] = parent_evt["UID"]
+
+    # Descendants that were cpu_root_nodes are no longer roots since they
+    # now live under the pseudo op. Remove them and promote the pseudo op.
+    root_set = set(tree.cpu_root_nodes)
+    stack = list(children_uids)
+    while stack:
+        uid = stack.pop()
+        if uid in root_set:
+            tree.cpu_root_nodes.remove(uid)
+            root_set.discard(uid)
+        evt = tree.get_UID2event(uid)
+        stack.extend(evt.get("children", []))
+    tree.cpu_root_nodes.append(pseudo_evt["UID"])
 
 
 def apply_pseudo_op_extensions(
