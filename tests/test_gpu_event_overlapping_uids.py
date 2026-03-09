@@ -825,8 +825,8 @@ class TestOverlapPctDataFrameColumn:
 # ── Bug 2 regression: overlap data must not depend on call order ────────
 
 TRACE_PATH = os.path.join(
-    "tests", "traces", "mi300",
-    "gaunernst_bert-small-uncased__1016001.json.gz",
+    "tests", "traces", "mi300", "llama_70b_fsdp",
+    "rank0_trace_no_pyfn.json.gz",
 )
 
 
