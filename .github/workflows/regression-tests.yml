@@ -23,33 +23,33 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install .
+          pip install . pytest openpyxl orjson tensorboard-plugin-profile==2.19.0
 
-      - name: Run pytest on function-based tests
-        run: |
-          pip install pytest
-          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
+      - name: Run function-based tests
+        run: pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
 
-      - name: Run pytest on rocprof based testcases
-        run: |
-          pip install pytest openpyxl pandas
-          pytest tests/test_rocprof_perf_report.py
+      - name: Run rocprof report tests
+        run: pytest tests/test_rocprof_perf_report.py
 
-      - name: Run pytest on report regression tests
-        run: |
-          pip install pytest openpyxl pandas
-          pytest tests/test_compare_perf_report.py
+      - name: Run perf report regression tests
+        run: pytest tests/test_perf_report_regression.py
 
-      - name: Run pytest on collective analysis tests
-        run: |
-          pip install pytest openpyxl pandas
-          pytest tests/test_collective_analysis.py
-      
+      - name: Run compare perf reports tests
+        run: pytest tests/test_compare_perf_reports.py
+
+      - name: Run collective analysis tests
+        run: pytest tests/test_collective_analysis.py
+
+      - name: Run JAX perf report tests
+        run: pytest tests/test_jax_perf_report.py
+
+      - name: Run detect recompute tests
+        run: pytest tests/test_detect_recompute.py
+
       - name: Run copyright header checks
-        run: |
-          pip install pytest
-          pytest tests/test_copyright_headers.py
+        run: pytest tests/test_copyright_headers.py

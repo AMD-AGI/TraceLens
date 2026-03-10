@@ -80,6 +80,7 @@ The script supports several optional arguments to customize the output report. B
 | `--short_kernel_study`            | `False`           | Include short-kernel analysis in the report.                                 |
 | `--short_kernel_threshold_us X`   | `10`              | Threshold (in microseconds) to classify a kernel as "short".             |
 | `--short_kernel_histogram_bins B` | `100`             | Number of bins to use for the short-kernel duration histogram.              |
+| `--detect_recompute`              | `False`           | Detect activation recomputation (checkpointing) and add an `is_recompute` column to `ops_summary`, `ops_unique_args`, and `unified_perf_summary`. See [Activation Recompute Detection](#-activation-recompute-detection) below. |
 | `--output_xlsx_path PATH`         | `<auto-inferred>` | Path to save the Excel report. Auto-inferred if not provided.              |
 | `--output_csvs_dir DIR`           | `None`            | If set, saves each sheet as a CSV file in the specified directory.         |
 
@@ -101,6 +102,51 @@ python generate_perf_report_pytorch.py \
   --output_csvs_dir output_csvs/ \
   --topk_ops 50 \
 ```
+
+## 🔍 Activation Recompute Detection
+
+When training with activation checkpointing (`torch.utils.checkpoint`), some forward-pass ops are recomputed during the backward pass to save memory. The `--detect_recompute` flag identifies these ops and adds an `is_recompute` column to the report, so you can see exactly how much GPU time and compute is spent on recomputation.
+
+### How it works
+
+TraceLens walks the CPU call-stack tree and finds `python_function` events from `torch/utils/checkpoint.py` corresponding to `recompute_fn`. All ops in those subtrees are marked `is_recompute=True`. This requires `python_function` events in the trace, which TraceLens enables automatically when this flag is set.
+
+### Usage
+
+```bash
+TraceLens_generate_perf_report_pytorch \
+  --profile_json_path path/to/trace.json \
+  --detect_recompute
+```
+
+### What changes in the report
+
+The following sheets gain an `is_recompute` column that splits rows into recompute vs non-recompute:
+
+| Sheet | Effect |
+|-------|--------|
+| `ops_summary` | Same op name appears in separate rows for `is_recompute=True` and `False` |
+| `ops_unique_args` | Unique (op, shape, is_recompute) combinations, each with their own time/count |
+| `unified_perf_summary` | Full perf metrics split by recompute status |
+
+This makes it straightforward to answer questions like:
+- What percentage of GPU time is recomputation?
+- Which layers are being recomputed and at what cost?
+- Is the recompute overhead acceptable given the memory savings?
+
+### Python API
+
+```python
+from TraceLens.TreePerf import TreePerfAnalyzer
+
+analyzer = TreePerfAnalyzer.from_file("trace.json", detect_recompute=True)
+df = analyzer.get_df_kernel_launchers(include_kernel_details=True)
+print(df["is_recompute"].value_counts())
+```
+
+> **Note**: When `--detect_recompute` is not set (the default), there is zero overhead — no extra columns, no tree changes, and no `python_function` parsing.
+
+---
 
 ## 🧩 Extensions: Custom Hooks for Tree and PerfModel
 

@@ -247,6 +247,10 @@ def generate_perf_report_pytorch(
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    # activation recompute detection
+    detect_recompute: bool = False,
+    # first occurrence time column in ops_unique_args
+    include_first_occurrence_time: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -260,6 +264,7 @@ def generate_perf_report_pytorch(
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
+        detect_recompute=detect_recompute,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -299,7 +304,8 @@ def generate_perf_report_pytorch(
     # Only process CPU-dependent analysis for non-GPU-only traces
     if not perf_analyzer.gpu_only:
         df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
-            include_kernel_details=True
+            include_kernel_details=True,
+            include_first_occurrence_time=include_first_occurrence_time,
         )
         df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary(
             df_kernel_launchers
@@ -485,7 +491,7 @@ def generate_perf_report_pytorch(
                         s = str(name).lower()
                         if "cudagraph" in s or "graphlaunch" in s:
                             return "graph"
-                        return "runtime" if s and s != "nan" else np.nan
+                        return "runtime" if s and s != "nan" else pd.NA
 
                     df_kernels.loc[mask_missing_cat, "Parent op category"] = (
                         df_kernels.loc[mask_missing_cat, "Launcher"].apply(
@@ -713,6 +719,21 @@ def main():
         default=None,
         help="Path to the GPU architecture JSON file",
     )
+    parser.add_argument(
+        "--detect_recompute",
+        action="store_true",
+        default=False,
+        help="Detect activation recomputation (checkpointing) and add an is_recompute column "
+        "to ops_summary, ops_unique_args, and unified_perf_summary sheets. "
+        "Requires python_function events in the trace (forces add_python_func=True internally).",
+    )
+    parser.add_argument(
+        "--include_first_occurrence_time",
+        action="store_true",
+        default=False,
+        help="Add a first_occurrence_time column to ops_unique_args showing when each "
+        "unique op+args combination first appeared (normalized so the earliest is 0).",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -733,6 +754,8 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        detect_recompute=args.detect_recompute,
+        include_first_occurrence_time=args.include_first_occurrence_time,
     )
 
 
