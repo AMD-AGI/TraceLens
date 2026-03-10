@@ -3157,6 +3157,18 @@ class GroupedGemm:
         )
 
 
+def _collect_2d_shapes(obj):
+    """Recursively extract all (rows, cols) int pairs from nested lists/tuples."""
+    shapes = []
+    if isinstance(obj, (list, tuple)):
+        if len(obj) == 2 and all(isinstance(v, int) and v > 0 for v in obj):
+            shapes.append((obj[0], obj[1]))
+        else:
+            for item in obj:
+                shapes.extend(_collect_2d_shapes(item))
+    return shapes
+
+
 class primus_turbo_grouped_gemm(GroupedGemm):
     """
     Primus Turbo fixed-K grouped GEMM: X(M,K) @ W(G,K,N) -> Y(M,N).
@@ -3173,18 +3185,6 @@ class primus_turbo_grouped_gemm(GroupedGemm):
       primus_turbo::grouped_gemm_impl
       primus_turbo_cpp_extension::grouped_gemm
     """
-
-    @staticmethod
-    def _collect_2d_shapes(obj):
-        """Recursively extract all (rows, cols) pairs from nested lists/tuples."""
-        shapes = []
-        if isinstance(obj, (list, tuple)):
-            if len(obj) == 2 and all(isinstance(v, int) and v > 0 for v in obj):
-                shapes.append((obj[0], obj[1]))
-            else:
-                for item in obj:
-                    shapes.extend(primus_turbo_grouped_gemm._collect_2d_shapes(item))
-        return shapes
 
     @staticmethod
     def _extract_impl_dims(input_dims):
@@ -3229,8 +3229,8 @@ class primus_turbo_grouped_gemm(GroupedGemm):
             and isinstance(input_dims[1], (list, tuple))
         ):
             return None
-        lhs = primus_turbo_grouped_gemm._collect_2d_shapes(input_dims[0])
-        rhs = primus_turbo_grouped_gemm._collect_2d_shapes(input_dims[1])
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
         if not (lhs and rhs and len(lhs) == len(rhs)):
             return None
         K = lhs[0][1]
@@ -3324,12 +3324,13 @@ class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
             and isinstance(input_dims[1], (list, tuple))
         ):
             return None
-        lhs = primus_turbo_grouped_gemm._collect_2d_shapes(input_dims[0])
-        rhs = primus_turbo_grouped_gemm._collect_2d_shapes(input_dims[1])
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
         if not (lhs and rhs and len(lhs) == len(rhs)):
             return None
-        pairs = [(a, b) for a, b in zip(lhs, rhs) if a[1] == b[0]]
-        return pairs if pairs else None
+        if not all(a[1] == b[0] for a, b in zip(lhs, rhs)):
+            return None
+        return list(zip(lhs, rhs))
 
     @staticmethod
     def get_param_details(event):
