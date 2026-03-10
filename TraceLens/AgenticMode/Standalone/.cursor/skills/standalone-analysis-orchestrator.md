@@ -656,10 +656,14 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Detailed Analysis: Compute Kernels
 
-For each category, include total time, % of compute, average efficiency (if from metrics), and either a per-op table from `*_metrics.json` or, for categories with a CSV but no metrics (e.g. **multi_tensor_apply**), a **Most expensive instances** table from the category CSV: top N rows by `Kernel Time (µs)_sum`, columns Operation | Kernel time (ms) | % of category | Count.
+For each category, include total time, % of compute, average efficiency (if from metrics), and either:
+
+- **Per-op table from `*_metrics.json`**: columns **Operation | Kernel time (ms) | % of category | Count | Efficiency | Potential improvement (time, E2E %)**. The last column shows both time range and E2E % range from `impact_estimates` when kernel_tuning estimates exist (e.g. "~635–2378 ms (1.12–4.19% E2E)"); use "—" when no estimates. Match impact rows to ops by `time_ms` (and operation name) from the same metrics file.
+
+- **For categories with a CSV but no metrics** (e.g. **multi_tensor_apply**): a **Most expensive instances** table from the category CSV: top N rows by `Kernel Time (µs)_sum`, columns Operation | Kernel time (ms) | % of category | Count. (No Efficiency or Potential improvement columns when metrics are absent.)
 
 ### 1. <Operation Category> (X% of compute)
-[Kernel breakdowns, ops table or most expensive instances, impact_estimates summary]
+[Kernel breakdowns, per-op table with Efficiency and Potential improvement (time, E2E %) where available, or most expensive instances from CSV]
 
 ### 2. <Operation Category> (X% of compute)
 [...]
@@ -752,7 +756,7 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 8. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
    - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
    - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
-9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. For compute categories with a CSV but no metrics (e.g. multi_tensor_apply), include a "Most expensive instances" table from the category CSV (top ops by kernel time). In System-Level, use explicit HTML anchors `<a id="cpu-idle-time-analysis"></a>` and `<a id="multi-kernel-issues"></a>` before the subsection headings so in-report links (`#cpu-idle-time-analysis`, `#multi-kernel-issues`) work in all renderers. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
+9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. For compute categories with metrics, use a per-op table from `*_metrics.json` with columns: Operation | Kernel time (ms) | % of category | Count | Efficiency | **Potential improvement (time, E2E %)** (from impact_estimates; "—" when none). For categories with a CSV but no metrics (e.g. multi_tensor_apply), include a "Most expensive instances" table from the category CSV (top ops by kernel time). In System-Level, use explicit HTML anchors `<a id="cpu-idle-time-analysis"></a>` and `<a id="multi-kernel-issues"></a>` before the subsection headings so in-report links (`#cpu-idle-time-analysis`, `#multi-kernel-issues`) work in all renderers. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
 10. **No redundancy**: Information appears in ONE place only
 11. **Recommendations**: Max ~10 lines PER recommendation. Use category-specific Action text (SDPA: tile/block, backend; GEMM: fusion, tile, library; elementwise: fuse with adjacent; do not suggest kernel fusion for SDPA).
 
