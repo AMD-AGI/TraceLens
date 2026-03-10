@@ -320,9 +320,7 @@ def classify_stage_base(e: Event) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def token_start_times(
-    stream: List[Event], block0_norm_hint: str
-) -> List[float]:
+def token_start_times(stream: List[Event], block0_norm_hint: str) -> List[float]:
     """
     Token boundaries: first event in each token is block_0/norm_attn/...
     ROCm path contains te_layernorm_forward; CUDA path contains te_norm_forward_ffi.
@@ -379,9 +377,7 @@ def compute_stage_table(
     token_starts: List[float],
     token_range: Tuple[int, int],
     layer_range: Tuple[int, int],
-) -> Tuple[
-    Dict[str, float], Dict[str, float], float, float, List[str]
-]:
+) -> Tuple[Dict[str, float], Dict[str, float], float, float, List[str]]:
     """
     Returns stage_avg_us per layer, stage_share, per_layer_us, per_token_us, notes.
 
@@ -405,15 +401,9 @@ def compute_stage_table(
         if tok >= len(token_starts):
             break
         t_start = token_starts[tok]
-        t_end = (
-            token_starts[tok + 1]
-            if (tok + 1) < len(token_starts)
-            else max_ts_end
-        )
+        t_end = token_starts[tok + 1] if (tok + 1) < len(token_starts) else max_ts_end
 
-        norm_times = collect_norm_attn_times_for_token(
-            stream, t_start, t_end
-        )
+        norm_times = collect_norm_attn_times_for_token(stream, t_start, t_end)
 
         need_blocks = list(range(l0, l1 + 1))
         if any(b not in norm_times for b in need_blocks):
@@ -429,9 +419,7 @@ def compute_stage_table(
             layer_start = norm_times[b]
             layer_end = norm_times.get(b + 1, t_end)
 
-            layer_events = slice_by_time(
-                stream, ts_index, layer_start, layer_end
-            )
+            layer_events = slice_by_time(stream, ts_index, layer_start, layer_end)
 
             mlp_in_ev = None
             mlp_out_ev = None
@@ -442,9 +430,7 @@ def compute_stage_table(
                 if mlp_out_ev is None and "/mlp/out/dot_general" in p:
                     mlp_out_ev = e
 
-            mlp_in_end = (
-                (mlp_in_ev.ts + mlp_in_ev.dur) if mlp_in_ev else None
-            )
+            mlp_in_end = (mlp_in_ev.ts + mlp_in_ev.dur) if mlp_in_ev else None
             mlp_out_start = mlp_out_ev.ts if mlp_out_ev else None
 
             layer_stage = defaultdict(float)
@@ -479,17 +465,12 @@ def compute_stage_table(
             "Check token/layer range and norm_attn markers."
         )
 
-    stage_avg = {
-        s: stage_sum.get(s, 0.0) / total_layers for s in STAGES
-    }
+    stage_avg = {s: stage_sum.get(s, 0.0) / total_layers for s in STAGES}
     per_layer = sum(stage_avg.values())
     stage_share = {
-        s: (stage_avg[s] / per_layer if per_layer > 0 else 0.0)
-        for s in STAGES
+        s: (stage_avg[s] / per_layer if per_layer > 0 else 0.0) for s in STAGES
     }
-    per_token = (
-        statistics.mean(per_token_totals) if per_token_totals else float("nan")
-    )
+    per_token = statistics.mean(per_token_totals) if per_token_totals else float("nan")
 
     return stage_avg, stage_share, per_layer, per_token, notes
 
@@ -536,25 +517,17 @@ def summarize_one(
 
     d_model, head_dim, gsu = infer_params(stream)
 
-    token_starts = token_start_times(
-        stream, block0_norm_hint=block0_norm_hint
+    token_starts = token_start_times(stream, block0_norm_hint=block0_norm_hint)
+
+    stage_avg, stage_share, per_layer, per_token, notes = compute_stage_table(
+        stream=stream,
+        token_starts=token_starts,
+        token_range=tokens,
+        layer_range=layers,
     )
 
-    stage_avg, stage_share, per_layer, per_token, notes = (
-        compute_stage_table(
-            stream=stream,
-            token_starts=token_starts,
-            token_range=tokens,
-            layer_range=layers,
-        )
-    )
-
-    top_kernels = top_stats_by_key(
-        stream, key_fn=lambda e: e.name, top_n=top_kernels_n
-    )
-    top_ops = top_stats_by_key(
-        stream, key_fn=lambda e: get_path(e), top_n=top_ops_n
-    )
+    top_kernels = top_stats_by_key(stream, key_fn=lambda e: e.name, top_n=top_kernels_n)
+    top_ops = top_stats_by_key(stream, key_fn=lambda e: get_path(e), top_n=top_ops_n)
 
     return Summary(
         label=label,
@@ -582,9 +555,7 @@ def summarize_one(
 
 def emit_report(rocm: Summary, cuda: Summary) -> str:
     lines: List[str] = []
-    lines.append(
-        "# Trace Comparison: ROCm vs CUDA (full + fixed attribution)\n\n"
-    )
+    lines.append("# Trace Comparison: ROCm vs CUDA (full + fixed attribution)\n\n")
 
     lines.append("## Workload sanity checks\n\n")
     lines.append(
@@ -619,13 +590,10 @@ def emit_report(rocm: Summary, cuda: Summary) -> str:
         f"({fmt_us(cuda.per_layer_us)} µs/layer)\n"
     )
     lines.append(
-        f"- ROCm/CUDA per-layer ratio: **{ratio:.3f}×** "
-        "( >1 means ROCm slower )\n\n"
+        f"- ROCm/CUDA per-layer ratio: **{ratio:.3f}×** " "( >1 means ROCm slower )\n\n"
     )
 
-    lines.append(
-        "## Per-layer time (µs) and share of layer critical path\n\n"
-    )
+    lines.append("## Per-layer time (µs) and share of layer critical path\n\n")
     lines.append(
         "| Stage | ROCm µs/layer | ROCm share | CUDA µs/layer | "
         "CUDA share | ROCm/CUDA |\n"
@@ -656,12 +624,9 @@ def emit_report(rocm: Summary, cuda: Summary) -> str:
             f"avg={fmt_us(st.avg_us)} µs, p90={fmt_us(st.p90_us)} µs\n"
         )
 
+    lines.append("\n## Top XLA op-paths by total time (main stream)\n")
     lines.append(
-        "\n## Top XLA op-paths by total time (main stream)\n"
-    )
-    lines.append(
-        "These come from `event.args.name` "
-        "(e.g., `.../attn/q/dot_general`).\n\n"
+        "These come from `event.args.name` " "(e.g., `.../attn/q/dot_general`).\n\n"
     )
     lines.append("### ROCm (top 15)\n")
     for path, st in rocm.top_ops[:15]:
@@ -676,9 +641,7 @@ def emit_report(rocm: Summary, cuda: Summary) -> str:
             f"avg={fmt_us(st.avg_us)} µs\n"
         )
 
-    lines.append(
-        "\n## Interpretation notes (how to read differences)\n"
-    )
+    lines.append("\n## Interpretation notes (how to read differences)\n")
     lines.append(
         "- If ROCm shows non-zero `post_gsu` and CUDA shows ~0, "
         "ROCm is paying split-K/GSU reduction overhead "
