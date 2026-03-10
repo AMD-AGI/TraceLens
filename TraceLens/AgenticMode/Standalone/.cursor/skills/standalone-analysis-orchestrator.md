@@ -457,9 +457,19 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path> << 'REPORT_EOF' ... REPORT_EOF"`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
+Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path> << 'REPORT_EOF' ... REPORT_EOF"`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it.
 
 The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
+
+The report **must** use these exact `##` headers — do NOT rename them:
+1. `## Executive Summary`
+2. `## Compute Kernel Optimizations`
+3. `## System-Level Optimizations`
+4. `## Detailed Analysis: Compute Kernels`
+5. `## Detailed Analysis: System-Level`
+6. `## Appendix`
+
+Each compute kernel P-item must use **Issue** / **Action** / **Impact** fields.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
@@ -629,16 +639,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 10.1 Validate Report Structure (Retry up to 2x)
 
-After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, prompt the LLM to rewrite the report with the missing sections.
-
-**Required `##` headers** (must appear exactly as written):
-1. `## Executive Summary`
-2. `## Compute Kernel Optimizations`
-3. `## System-Level Optimizations`
-4. `## Detailed Analysis: Compute Kernels`
-5. `## Detailed Analysis: System-Level`
-6. `## Appendix`
-
+After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
 **Validation procedure** (run on the node, inside the container using `validate_report()` from `analysis_utils`):
 
 ```bash
@@ -664,7 +665,7 @@ print('PASS: All required sections present')
 
 ### 10.2 Generate and Embed Performance Improvement Plot
 
-After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report. This keeps the large base64 string out of the agent's context.
+After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png.
 
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
