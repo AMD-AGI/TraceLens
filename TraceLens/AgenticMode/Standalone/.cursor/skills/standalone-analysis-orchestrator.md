@@ -455,11 +455,66 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ---
 
+## Step 9.5: Generate Performance Improvement Plot
+
+After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.png` and produce a base64-encoded version for embedding directly in the report. This makes the final report fully portable -- it can be shared or moved without losing the plot image.
+
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+
+### 9.5.1 Ensure matplotlib is available
+
+```bash
+ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null || docker exec <container> pip install matplotlib"
+```
+
+### 9.5.2 Generate plot_data.json (Deterministic)
+
+Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
+
+```bash
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
+generate_plot_data('<output_dir>')
+\""
+```
+
+This produces `<output_dir>/plot_data.json` containing:
+- `baseline_ms`: Total GPU time from manifest
+- `recommendations`: Top kernel_tuning estimates grouped by category (high/medium confidence), sorted by total savings, max 6 categories
+- `all_estimates`: All estimates across all categories and types (for report aggregation)
+
+### 9.5.3 Generate Plot and Base64 File
+
+Call `generate_perf_plot()` which reads `plot_data.json`, computes cumulative projections, renders the matplotlib chart, and writes both `perf_improvement.png` and `perf_improvement_base64.txt`. The title should follow the format `<Model> on <Platform> — Kernel Tuning Potential`.
+
+**Plot layout (both panes show ±5% uncertainty):**
+- **Left pane — Projected E2E Latency After Each Optimization (±5% uncertainty):** Bar chart of projected latency after each optimization step. Each bar has ±5% error bars (capsize=4). Y-axis: E2E Latency (ms).
+- **Right pane — Cumulative Throughput Improvement (±5% uncertainty):** Central line with markers (relative throughput, baseline=100). A filled band (volume) shows ±5% uncertainty: lower bound 95% of each point, upper bound 105%. **No uncertainty at baseline** (first point): band has zero width there. Boundary lines connect the outside of the uncertainty area. Y-axis: Relative Throughput (Baseline = 100).
+
+```bash
+ssh <node> "docker exec <container> python3 -c \"
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
+generate_perf_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
+\""
+```
+
+The function handles these edge cases automatically:
+- Missing `plot_data.json` → skips plot, prints message
+- Empty recommendations (all categories efficient) → skips plot
+- Savings exceeding baseline → clamps to prevent division by zero
+- Missing matplotlib → prints clear error message
+
+If the plot fails or is skipped, proceed to Step 10 without the plot and note the failure in the report.
+
+---
+
 ## Step 10: Generate Final Report
 
 Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path> << 'REPORT_EOF' ... REPORT_EOF"`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
 
 The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
+
+**Deterministic report generation (optional):** The script `TraceLens/AgenticMode/Standalone/generate_standalone_report.py` produces the full report body from `category_data/`, `plot_data.json`, and `*_metrics.json`. Run with `--output-dir <output_dir>` and `--model "<Model>"`; then run `embed_plot_in_report()` to substitute the plot. This ensures consistency with the plot (e.g. ±5% uncertainty) and with category-specific recommendation text.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
@@ -502,20 +557,20 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ### Top Operations
 
-Use **% of computation time** (not % of total trace time) so readers can see each operation's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`.
+Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. The table may be category-level (Rank | Category | Time (ms) | % of Compute Time | Ops).
 
-| Rank | Operation | Category | Time (ms) | % of Compute Time |
-|------|-----------|----------|-----------|-------------------|
+| Rank | Category | Time (ms) | % of Compute Time | Ops |
+|------|----------|-----------|-------------------|-----|
 | 1 | ... | ... | ... | ... |
-| 2 | ... | ... | ... | ... |
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
+<!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
 
 ### 🔴 P1: <Brief Title>
 
 **Issue**: [1 sentence - what's wrong]
 
-**Action**: [1-2 sentences - what to do]
+**Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
 **Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
@@ -574,6 +629,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 → *See [Detailed Analysis: System-Level > CPU/Idle Time](#cpu-idle-time-analysis) for details* OR → *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
 
+<!-- Use explicit HTML anchors in Detailed Analysis: System-Level so links work in all renderers: <a id="cpu-idle-time-analysis"></a> before "### 1. CPU/Idle Time Analysis", <a id="multi-kernel-issues"></a> before "### 2. Multi-Kernel Issues". Link targets: #cpu-idle-time-analysis, #multi-kernel-issues. -->
+
 ---
 
 ### 🟡 P2: <Multi-Kernel Issue Title>
@@ -596,8 +653,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Detailed Analysis: Compute Kernels
 
+For each category, include total time, % of compute, average efficiency (if from metrics), and either a per-op table from `*_metrics.json` or, for categories with a CSV but no metrics (e.g. **multi_tensor_apply**), a **Most expensive instances** table from the category CSV: top N rows by `Kernel Time (µs)_sum`, columns Operation | Kernel time (ms) | % of category | Count.
+
 ### 1. <Operation Category> (X% of compute)
-[All kernel breakdowns, calculations, tables, explanations from category_findings/]
+[Kernel breakdowns, ops table or most expensive instances, impact_estimates summary]
 
 ### 2. <Operation Category> (X% of compute)
 [...]
@@ -608,11 +667,13 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
 
+<a id="cpu-idle-time-analysis"></a>
 ### 1. CPU/Idle Time Analysis
-[Full cpu_idle_findings.md content from system_findings/]
+[Full cpu_idle_findings.md content from system_findings/ or metrics table: total GPU time, computation %, exposed comm/memcpy, idle %]
 
+<a id="multi-kernel-issues"></a>
 ### 2. Multi-Kernel Issues
-[Full multi_kernel_findings.md content from system_findings/]
+[Full multi_kernel_findings.md content from system_findings/ or reference to category_data/multi_kernel_data.json]
 
 ---
 
@@ -680,7 +741,7 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 **Key formatting rules:**
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
-3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). The plot shows **kernel tuning potential only**.
+3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). This makes the report fully portable -- it can be shared or moved without losing the plot. The plot shows **kernel tuning potential only** with **±5% uncertainty** on both panes (left: E2E latency error bars; right: throughput uncertainty band/volume, no uncertainty at baseline). If the plot was not generated (Step 9.5 failed), the placeholder is removed.
 4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
 5. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
 6. **Each section is independently composable** -- can be shared standalone
@@ -688,9 +749,9 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 8. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
    - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
    - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
-9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
+9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. For compute categories with a CSV but no metrics (e.g. multi_tensor_apply), include a "Most expensive instances" table from the category CSV (top ops by kernel time). In System-Level, use explicit HTML anchors `<a id="cpu-idle-time-analysis"></a>` and `<a id="multi-kernel-issues"></a>` before the subsection headings so in-report links (`#cpu-idle-time-analysis`, `#multi-kernel-issues`) work in all renderers. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
 10. **No redundancy**: Information appears in ONE place only
-11. **Recommendations**: Max ~10 lines PER recommendation
+11. **Recommendations**: Max ~10 lines PER recommendation. Use category-specific Action text (SDPA: tile/block, backend; GEMM: fusion, tile, library; elementwise: fuse with adjacent; do not suggest kernel fusion for SDPA).
 
 ---
 

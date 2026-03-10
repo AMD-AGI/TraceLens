@@ -18,7 +18,9 @@ import os
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     generate_plot_data,
 )
+import re
 
+import numpy as np
 import matplotlib
 
 matplotlib.use("Agg")
@@ -75,62 +77,40 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
         1, 2, figsize=(14, 5.5), gridspec_kw={"width_ratios": [1.1, 1]}
     )
 
-    colors = [
-        "#4a90d9",
-        "#e74c3c",
-        "#e67e22",
-        "#f1c40f",
-        "#2ecc71",
-        "#9b59b6",
-        "#1abc9c",
-    ][: len(steps)]
-    bars = ax1.bar(
-        steps, e2e_ms, color=colors, edgecolor="white", linewidth=1.2, width=0.65
-    )
-    label_offset = max(e2e_ms) * 0.05
-    for bar, val, sav in zip(bars, e2e_ms, savings_list):
-        ax1.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + label_offset,
-            f"{val:.1f} ms",
-            ha="center",
-            va="bottom",
-            fontsize=10,
-            fontweight="bold",
-        )
+    colors = ['#4a90d9', '#e74c3c', '#e67e22', '#f1c40f', '#2ecc71',
+              '#9b59b6', '#1abc9c'][:len(steps)]
+    yerr_left = 0.05 * np.array(e2e_ms)
+    bars = ax1.bar(steps, e2e_ms, color=colors, edgecolor='white',
+                   linewidth=1.2, width=0.65, yerr=yerr_left, capsize=4,
+                   error_kw=dict(ecolor='#333333', linewidth=1.2))
+    for i, (bar, val, sav) in enumerate(zip(bars, e2e_ms, savings_list)):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + yerr_left[i] + 1.5,
+                 f'{val:.1f} ms', ha='center', va='bottom', fontsize=10,
+                 fontweight='bold')
         if sav > 0:
-            ax1.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() / 2,
-                f"-{sav:.1f} ms",
-                ha="center",
-                va="center",
-                fontsize=9,
-                color="white",
-                fontweight="bold",
-            )
-    ax1.set_ylabel("E2E Latency (ms)", fontsize=11)
-    ax1.set_title(
-        "Projected E2E Latency After Each Optimization",
-        fontsize=12,
-        fontweight="bold",
-        pad=12,
-    )
-    ax1.set_ylim(0, max(e2e_ms) * 1.2)
-    ax1.spines["top"].set_visible(False)
-    ax1.spines["right"].set_visible(False)
-    ax1.tick_params(axis="x", labelsize=9)
+            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height()/2,
+                     f'-{sav:.1f} ms', ha='center', va='center',
+                     fontsize=9, color='white', fontweight='bold')
+    ax1.set_ylabel('E2E Latency (ms)', fontsize=11)
+    ax1.set_title('Projected E2E Latency After Each Optimization (±5% uncertainty)',
+                  fontsize=12, fontweight='bold', pad=12)
+    ax1.set_ylim(0, (max(e2e_ms) + max(yerr_left)) * 1.2)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.tick_params(axis='x', labelsize=9)
 
-    ax2.plot(
-        range(len(steps)),
-        cumulative_rel,
-        "o-",
-        color="#2ecc71",
-        linewidth=2.5,
-        markersize=9,
-        markerfacecolor="white",
-        markeredgewidth=2.5,
-    )
+    # Right pane: cumulative throughput with uncertainty band (volume) and line along outside
+    x_vals = np.arange(len(steps))
+    cum_arr = np.array(cumulative_rel, dtype=float)
+    cum_low = cum_arr * 0.95
+    cum_high = cum_arr * 1.05
+    # No uncertainty at baseline (first point)
+    cum_low[0] = cum_high[0] = cum_arr[0]
+    ax2.fill_between(x_vals, cum_low, cum_high, color='#2ecc71', alpha=0.35, zorder=0)
+    ax2.plot(x_vals, cum_high, '-', color='#27ae60', linewidth=1.5, zorder=2)
+    ax2.plot(x_vals, cum_low, '-', color='#27ae60', linewidth=1.5, zorder=2)
+    ax2.plot(x_vals, cumulative_rel, 'o-', color='#2ecc71', linewidth=2.5,
+             markersize=9, markerfacecolor='white', markeredgewidth=2.5, zorder=3)
     for x, y in enumerate(cumulative_rel):
         ax2.annotate(
             f"{y}",
@@ -144,16 +124,15 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
         )
     ax2.set_xticks(range(len(steps)))
     ax2.set_xticklabels(steps, fontsize=9)
-    ax2.set_ylabel("Relative Throughput (Baseline = 100)", fontsize=11)
-    ax2.set_title(
-        "Cumulative Throughput Improvement", fontsize=12, fontweight="bold", pad=12
-    )
-    ax2.set_ylim(80, max(cumulative_rel) * 1.15)
-    ax2.axhline(y=100, color="gray", linestyle="--", alpha=0.5, linewidth=0.8)
-    ax2.grid(axis="y", linestyle="--", alpha=0.3)
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["right"].set_visible(False)
-    ax2.tick_params(axis="x", labelsize=9)
+    ax2.set_ylabel('Relative Throughput (Baseline = 100)', fontsize=11)
+    ax2.set_title('Cumulative Throughput Improvement (±5% uncertainty)',
+                  fontsize=12, fontweight='bold', pad=12)
+    ax2.set_ylim(80, max(cum_high) * 1.15)
+    ax2.axhline(y=100, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+    ax2.grid(axis='y', linestyle='--', alpha=0.3)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.tick_params(axis='x', labelsize=9)
 
     fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
     plt.tight_layout()
@@ -213,7 +192,16 @@ def embed_plot_in_report(
         img_tag = ""
         embedded = False
 
+    # Replace placeholder first; if already embedded, replace existing image tag
     report = report.replace(placeholder, img_tag)
+    if embedded and placeholder not in report:
+        # Replace previous embed so re-running updates the image
+        report = re.sub(
+            r'!\[Performance Improvement\]\(data:image/png;base64,[A-Za-z0-9+/=]+\)',
+            img_tag,
+            report,
+            count=1,
+        )
 
     with open(report_path, "w") as f:
         f.write(report)
