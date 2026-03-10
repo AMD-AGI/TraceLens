@@ -2782,6 +2782,132 @@ class aiter__fmha_v3_backward(SDPA):
         return self.bytes_bwd(bytes_per_element)
 
 
+class aiter_mha_fwd(SDPA):
+    # aiter::mha_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Tensor args: q[0], k[1], v[2] — shape (B, N, H, d_h), bhnd layout
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if concrete_inputs[3] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[3])
+            except (ValueError, TypeError):
+                pass
+        is_causal = (
+            concrete_inputs[5].lower() == "true"
+            if concrete_inputs[5] not in ("", "None")
+            else False
+        )
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+
+class aiter_fmha_v3_fwd(SDPA):
+    # aiter::fmha_v3_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Tensor args: q[0], k[1], v[2] — shape (B, N, H, d_h), bhnd layout
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if concrete_inputs[3] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[3])
+            except (ValueError, TypeError):
+                pass
+        is_causal = (
+            concrete_inputs[5].lower() == "true"
+            if concrete_inputs[5] not in ("", "None")
+            else False
+        )
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+
+class aiter_mha_bwd(SDPA):
+    # aiter::mha_bwd(dout, q, k, v, out, softmax_lse, dropout_p, softmax_scale, is_causal, ...)
+    # Tensor args: q[1], k[2], v[3] — shape (B, N, H, d_h), bhnd layout
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if concrete_inputs[6] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[6])
+            except (ValueError, TypeError):
+                pass
+        is_causal = (
+            concrete_inputs[8].lower() == "true"
+            if concrete_inputs[8] not in ("", "None")
+            else False
+        )
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
 class vllm_unified_attention_with_output(SDPA):
 
     @staticmethod
@@ -3632,7 +3758,9 @@ class Normalization:
         # read grad_out and the input once, invstd if it is saved
 
         # read grad_out and input (if mask is true and is_training), write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] and is_training else 1)
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (
+            2 if output_mask[0] and is_training else 1
+        )
         if is_training:
             bytes += num_channels * bpe_in  # invstd
         # read weight if affine
