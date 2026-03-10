@@ -143,6 +143,7 @@ The following maps category names to their agent definition files. These files c
 | multi_kernel | multi-kernel-analyzer.md |
 | gemm | gemm-analyzer.md |
 | sdpa_fwd | sdpa-analyzer.md |
+| sdpa_bwd | sdpa-analyzer.md |
 | moe_fused | moe-analyzer.md |
 | elementwise | elementwise-analyzer.md |
 | triton | triton-analyzer.md |
@@ -263,7 +264,8 @@ For each category in `compute_categories`, launch the corresponding subagent **s
 **Compute Kernel Subagent Mapping:**
 
 - `gemm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/gemm-analyzer.md`
-- `sdpa_fwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md`
+- `sdpa_fwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` (pass `--category sdpa_fwd`)
+- `sdpa_bwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` (pass `--category sdpa_bwd`)
 - `elementwise` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/elementwise-analyzer.md`
 - `reduce` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md`
 - `triton` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md`
