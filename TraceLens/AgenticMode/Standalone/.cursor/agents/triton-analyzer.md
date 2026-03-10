@@ -107,8 +107,8 @@ Create `<output_dir>/category_findings/triton_findings.md` through the container
 | <op_name> | X.X       | X.X%          | N           |
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Confidence |
-|---------------|------|----------------------|------------|
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 **Key rules for the findings file:**

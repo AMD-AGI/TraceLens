@@ -345,6 +345,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
 - Resolved Peak MAF: Each operation's `efficiency.resolved_peak_maf` has the precision-correct peak — use this when citing peak TFLOPS
+- Impact estimates assume tuning can reach 75–100% of roofline (midpoint 87.5% used for plots)
 
 **Input files:**
 - category_data/{category}_ops.csv
@@ -461,7 +462,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.png` and produce a base64-encoded version for embedding directly in the report. This makes the final report fully portable -- it can be shared or moved without losing the plot image.
 
-**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only. Impact estimates assume tuning can reach 75–100% of roofline; the plot uses the 87.5% midpoint for projected improvements.
 
 ### 9.5.1 Ensure matplotlib is available
 
@@ -574,7 +575,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
-**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
 → *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
 
@@ -586,7 +587,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
-**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
 → *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
 
@@ -598,7 +599,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
-**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 
 ---
 
@@ -744,7 +745,7 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
 2. **Executive Summary**: Max ~20 lines
 3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). This makes the report fully portable -- it can be shared or moved without losing the plot. The plot shows **kernel tuning potential only** with **±5% uncertainty** on both panes (left: E2E latency error bars; right: throughput uncertainty band/volume, no uncertainty at baseline). If the plot was not generated (Step 9.5 failed), the placeholder is removed.
-4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
+4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings. Impact estimates show a range (75–100% of roofline target), e.g. "~X.X–Y.Y ms savings (X.X–Y.Y% of E2E)"
 5. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
 6. **Each section is independently composable** -- can be shared standalone
 7. **Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps)**
