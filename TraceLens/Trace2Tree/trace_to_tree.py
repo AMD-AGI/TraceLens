@@ -638,15 +638,23 @@ class TraceToTree:
         self.ac2g_event_map = {"start": {}, "end": {}}
         self.pid_tid_event_map = {}
         self.seq_num2event_uids_map = {}  # from seq id to list uids
+        self.runtime_event_uids = []  # UIDs of cuda_runtime/cuda_driver events for fast add_gpu_ops_to_tree
+        # Index: linking_key value -> list of GPU events (for _get_graph_gpu_events, avoids O(N) scan per graph launch)
+        self.linking_id_to_gpu_events = defaultdict(list)
         # self.dict_pythonID2UID = {}  # Commented out: never read, only written
 
         UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
         PID = TraceLens.util.TraceEventUtils.TraceKeys.PID
         TID = TraceLens.util.TraceEventUtils.TraceKeys.TID
         Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
+        runtime_cats = {"cuda_runtime", "cuda_driver"}
+        gpu_cats = {"kernel", "gpu_memset", "gpu_memcpy"}
 
         for event in self.events:
             cat = event.get("cat")
+
+            if cat in runtime_cats:
+                self.runtime_event_uids.append(event[UID])
 
             # Process ac2g events
             if cat == "ac2g":
@@ -660,6 +668,12 @@ class TraceToTree:
             args = event.get(Args)
             if args is None:
                 continue
+
+            # Index GPU events by linking_key for fast _get_graph_gpu_events (graph launch lookup)
+            if cat in gpu_cats:
+                link_id = args.get(self.linking_key)
+                if link_id is not None:
+                    self.linking_id_to_gpu_events[link_id].append(event)
 
             # Process PID-TID-linking key events
             pid = event.get(PID)
@@ -775,38 +789,32 @@ class TraceToTree:
                 dict_pidtid2num_cpu_ops[stack_key] += 1
 
     def add_gpu_ops_to_tree(self):
-        for runtime_event in self.events:
-            if self.event_to_category(runtime_event) not in {
-                "cuda_runtime",
-                "cuda_driver",
-            }:
-                continue
-            if runtime_event["name"] in {"cudaGraphLaunch", "hipGraphLaunch"}:
+        UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
+        events_by_uid = self.events_by_uid
+        name2event_uids = self.name2event_uids
+        graph_launch_names = {"cudaGraphLaunch", "hipGraphLaunch"}
+        for runtime_uid in self.runtime_event_uids:
+            runtime_event = events_by_uid[runtime_uid]
+            if runtime_event["name"] in graph_launch_names:
                 corresponding_gpu_events = self._get_graph_gpu_events(runtime_event)
             else:
                 gpu_evt = self._find_corresponding_output_event(runtime_event)
                 corresponding_gpu_events = [gpu_evt] if gpu_evt else []
             for gpu_evt in corresponding_gpu_events:
-                runtime_event.setdefault("children", []).append(
-                    gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
-                gpu_evt["parent"] = runtime_event[
-                    TraceLens.util.TraceEventUtils.TraceKeys.UID
-                ]
+                gpu_evt_uid = gpu_evt[UID]
+                runtime_event.setdefault("children", []).append(gpu_evt_uid)
+                gpu_evt["parent"] = runtime_uid
                 gpu_evt["tree"] = True
-                self.name2event_uids[
-                    gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.Name]
-                ].append(gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID])
-                runtime_event.setdefault("gpu_events", []).append(
-                    gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
+                name2event_uids[gpu_evt[Name]].append(gpu_evt_uid)
+                runtime_event.setdefault("gpu_events", []).append(gpu_evt_uid)
 
-                parent = self.get_parent_event(runtime_event)
-                while parent:
-                    parent.setdefault("gpu_events", []).append(
-                        gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                    )
-                    parent = self.get_parent_event(parent)
+                # Walk parent chain to propagate gpu_events
+                parent_uid = runtime_event.get("parent")
+                while parent_uid is not None:
+                    parent = events_by_uid[parent_uid]
+                    parent.setdefault("gpu_events", []).append(gpu_evt_uid)
+                    parent_uid = parent.get("parent")
 
     # TODO base class includes this, remove
     def label_non_gpu_paths(self):
@@ -1245,16 +1253,7 @@ class TraceToTree:
         ).get(self.linking_key)
         if corr is None:
             return []
-        gpu_cats = {"kernel", "gpu_memset", "gpu_memcpy"}
-        return [
-            evt
-            for evt in self.events
-            if self.event_to_category(evt) in gpu_cats
-            and evt.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(
-                "correlation"
-            )
-            == corr
-        ]
+        return self.linking_id_to_gpu_events.get(corr, [])
 
     def _find_corresponding_output_event(self, input_event):
         # 1. Get the linking id from the input event
