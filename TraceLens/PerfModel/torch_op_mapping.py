@@ -164,7 +164,8 @@ def categorize_torch_op(row):
         row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
     Returns:
         str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+             'SDPA_fwd', 'SDPA_bwd', 'EP_Communication', 'triton', 'elementwise', 'reduce',
+             'multi_tensor_apply', 'record_param_comms', or 'other'.
     """
 
     debug = False

@@ -14,7 +14,6 @@ Trace shape reference (DeepSeek V2 Lite, EP=8):
   DeepEPCombineBackward  Input Dims[0] = (16384, 2048)  – gradient of local tokens
 """
 
-import pytest
 from TraceLens.PerfModel.perf_model import (
     EPComm,
     deepep_dispatch,
@@ -204,6 +203,13 @@ def test_deepep_dispatch_fp32_dtype():
     model = deepep_dispatch(event)
     expected = 16384 * 2048 * 4  # float32 = 4 bytes
     assert model.bytes() == expected
+
+
+def test_deepep_unknown_dtype_returns_none():
+    """bytes() must return None rather than a silent wrong estimate for unknown dtypes."""
+    event = _dispatch_event(dtype="unknown_dtype")
+    model = deepep_dispatch(event)
+    assert model.bytes() is None
 
 
 def test_deepep_all_inherit_epcomm():
