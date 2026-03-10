@@ -638,7 +638,9 @@ class TraceToTree:
         self.ac2g_event_map = {"start": {}, "end": {}}
         self.pid_tid_event_map = {}
         self.seq_num2event_uids_map = {}  # from seq id to list uids
-        self.runtime_event_uids = []  # UIDs of cuda_runtime/cuda_driver events for fast add_gpu_ops_to_tree
+        self.runtime_event_uids = (
+            []
+        )  # UIDs of cuda_runtime/cuda_driver events for fast add_gpu_ops_to_tree
         # Index: linking_key value -> list of GPU events (for _get_graph_gpu_events, avoids O(N) scan per graph launch)
         self.linking_id_to_gpu_events = defaultdict(list)
         # self.dict_pythonID2UID = {}  # Commented out: never read, only written
