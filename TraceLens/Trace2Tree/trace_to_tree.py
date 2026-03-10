@@ -6,6 +6,8 @@
 
 from collections import defaultdict
 from typing import Dict, Any, Callable
+import time
+
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
@@ -113,16 +115,18 @@ class BaseTraceToTree(ABC):
         print(f"Building CPU op tree with add_python_func={add_python_func}")
 
         self.add_python_func = add_python_func
-        list_events = filter(event_filter, self.events)
-
+        t0 = time.time()
+        list_events = list(filter(event_filter, self.events))
         events_sorted = sorted(
             list_events,
             key=lambda e: e[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp],
         )
+        print(f"[timing] build_host_call_stack_tree: filter + sort ({len(events_sorted)} events) {time.time() - t0:.3f}s")
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
         dict_pidtid2nn_module_stack = defaultdict(list)
 
+        t0 = time.time()
         for event in events_sorted:
             event["tree"] = True
             self.name2event_uids[
@@ -583,22 +587,33 @@ class TraceToTree:
         ] = TraceLens.util.TraceEventUtils.default_categorizer,
     ):
         UID_KEY = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        t0 = time.time()
         for i, event in enumerate(events_data):
             event[UID_KEY] = i
         self.events = events_data
         self.metadata = TraceEventUtils.get_metadata(events_data)
+        print(f"[timing] TraceToTree.__init__: UID + events + get_metadata {time.time() - t0:.3f}s")
 
-        # Build UID lookup dictionary
+        t0 = time.time()
         self.events_by_uid = {event[UID_KEY]: event for event in self.events}
+        print(f"[timing] TraceToTree.__init__: events_by_uid {time.time() - t0:.3f}s")
         self.event_to_category = event_to_category
+        t0 = time.time()
         if compute_end_times:
             self._compute_event_end_times()
+        print(f"[timing] TraceToTree.__init__: _compute_event_end_times {time.time() - t0:.3f}s")
+        t0 = time.time()
         if linking_key is not None:
             self.linking_key = linking_key
         else:
             self._set_linking_key()
+        print(f"[timing] TraceToTree.__init__: _set_linking_key {time.time() - t0:.3f}s")
+        t0 = time.time()
         self._preprocess_and_index_events()
+        print(f"[timing] TraceToTree.__init__: _preprocess_and_index_events {time.time() - t0:.3f}s")
+        t0 = time.time()
         self._annotate_gpu_events_with_stream_index()
+        print(f"[timing] TraceToTree.__init__: _annotate_gpu_events_with_stream_index {time.time() - t0:.3f}s")
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
         self.name2event_uids = defaultdict(list)
@@ -702,16 +717,18 @@ class TraceToTree:
         print(f"Building CPU op tree with add_python_func={add_python_func}")
 
         self.add_python_func = add_python_func
-        list_events = filter(event_filter, self.events)
-
+        t0 = time.time()
+        list_events = list(filter(event_filter, self.events))
         events_sorted = sorted(
             list_events,
             key=lambda e: e[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp],
         )
+        print(f"[timing] build_host_call_stack_tree: filter + sort ({len(events_sorted)} events) {time.time() - t0:.3f}s")
         dict_pidtid2stack = defaultdict(list)
         dict_pidtid2num_cpu_ops = defaultdict(int)
         dict_pidtid2nn_module_stack = defaultdict(list)
 
+        t0 = time.time()
         for event in events_sorted:
             event["tree"] = True
             self.name2event_uids[
@@ -773,6 +790,7 @@ class TraceToTree:
                         event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
                     )
                 dict_pidtid2num_cpu_ops[stack_key] += 1
+        print(f"[timing] build_host_call_stack_tree: stack pass {time.time() - t0:.3f}s")
 
     def add_gpu_ops_to_tree(self):
         for runtime_event in self.events:
@@ -824,14 +842,20 @@ class TraceToTree:
 
     def build_tree(self, add_python_func=False, link_fwd_bwd=True) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
+        t0 = time.time()
         self.build_host_call_stack_tree(add_python_func)
+        print(f"[timing] build_tree: build_host_call_stack_tree {time.time() - t0:.3f}s")
+        t0 = time.time()
         self.add_gpu_ops_to_tree()
-
+        print(f"[timing] build_tree: add_gpu_ops_to_tree {time.time() - t0:.3f}s")
+        t0 = time.time()
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
-
+        print(f"[timing] build_tree: label_non_gpu_paths {time.time() - t0:.3f}s")
+        t0 = time.time()
         if link_fwd_bwd:
             self.link_all_fwd_bwd_events()
+        print(f"[timing] build_tree: link_all_fwd_bwd_events {time.time() - t0:.3f}s")
 
     # TODO base class includes this, remove
     def get_UID2event(self, UID):
