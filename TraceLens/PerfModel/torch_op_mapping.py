@@ -68,6 +68,11 @@ op_to_perf_model_class_map = {
     "FusedRoPEFunc": perf_model.fused_rope_fwd,
     # CrossEntropy (fused softmax + nll loss)
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
+    # DeepEP Expert-Parallel communication ops
+    "DeepEPDispatch": perf_model.deepep_dispatch,
+    "DeepEPCombine": perf_model.deepep_combine,
+    "DeepEPDispatchBackward": perf_model.deepep_dispatch_backward,
+    "DeepEPCombineBackward": perf_model.deepep_combine_backward,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
 }
@@ -162,6 +167,7 @@ dict_base_class2category = {
     perf_model.CausalConv1d: "SSM",
     perf_model.FusedRoPE: "RoPE",
     perf_model.CrossEntropy: "CrossEntropy",
+    perf_model.EPComm: "EP_Communication",
     perf_model.MambaSSD: "SSM",
 }
 
@@ -247,6 +253,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("EP_Communication", []):
+        return "EP_Communication"
     elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
         "MambaSplitConv1dScanCombinedFn",
     ]:
