@@ -654,6 +654,8 @@ class TraceToTree:
         self.pid_tid_event_map = {}
         self.seq_num2event_uids_map = {}  # from seq id to list uids
         self.runtime_event_uids = []  # UIDs of cuda_runtime/cuda_driver events for fast add_gpu_ops_to_tree
+        # Index: linking_key value -> list of GPU events (for _get_graph_gpu_events, avoids O(N) scan per graph launch)
+        self.linking_id_to_gpu_events = defaultdict(list)
         # self.dict_pythonID2UID = {}  # Commented out: never read, only written
 
         UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
@@ -661,6 +663,7 @@ class TraceToTree:
         TID = TraceLens.util.TraceEventUtils.TraceKeys.TID
         Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
         runtime_cats = {"cuda_runtime", "cuda_driver"}
+        gpu_cats = {"kernel", "gpu_memset", "gpu_memcpy"}
 
         for event in self.events:
             cat = event.get("cat")
@@ -680,6 +683,12 @@ class TraceToTree:
             args = event.get(Args)
             if args is None:
                 continue
+
+            # Index GPU events by linking_key for fast _get_graph_gpu_events (graph launch lookup)
+            if cat in gpu_cats:
+                link_id = args.get(self.linking_key)
+                if link_id is not None:
+                    self.linking_id_to_gpu_events[link_id].append(event)
 
             # Process PID-TID-linking key events
             pid = event.get(PID)
@@ -798,33 +807,66 @@ class TraceToTree:
         print(f"[timing] build_host_call_stack_tree: stack pass {time.time() - t0:.3f}s")
 
     def add_gpu_ops_to_tree(self):
+        t_fn_start = time.time()
+        print(f"[timing] add_gpu_ops_to_tree: start")
         UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
         Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
         events_by_uid = self.events_by_uid
         name2event_uids = self.name2event_uids
         graph_launch_names = {"cudaGraphLaunch", "hipGraphLaunch"}
-
-        for runtime_uid in self.runtime_event_uids:
+        n_runtime = len(self.runtime_event_uids)
+        print(f"[timing] add_gpu_ops_to_tree: will process {n_runtime} runtime events")
+        t_lookup = 0.0
+        t_lookup_graph = 0.0
+        t_lookup_eager = 0.0
+        n_lookup_graph = 0
+        n_lookup_eager = 0
+        t_setup = 0.0
+        t_parent_walk = 0.0
+        progress_interval = max(1, n_runtime // 100)  # print every ~10%
+        for idx, runtime_uid in enumerate(self.runtime_event_uids):
+            # if idx > 0 and idx % progress_interval == 0:
+            #     print(
+            #         f"[timing] add_gpu_ops_to_tree: {idx}/{n_runtime} runtime events, "
+            #         f"lookup {t_lookup:.3f}s (graph {t_lookup_graph:.3f}s n={n_lookup_graph}, eager {t_lookup_eager:.3f}s n={n_lookup_eager}), "
+            #         f"setup {t_setup:.3f}s, parent_walk {t_parent_walk:.3f}s"
+            #     )
             runtime_event = events_by_uid[runtime_uid]
+            t0 = time.time()
             if runtime_event["name"] in graph_launch_names:
                 corresponding_gpu_events = self._get_graph_gpu_events(runtime_event)
+                t_lookup_graph += time.time() - t0
+                n_lookup_graph += 1
             else:
                 gpu_evt = self._find_corresponding_output_event(runtime_event)
                 corresponding_gpu_events = [gpu_evt] if gpu_evt else []
+                t_lookup_eager += time.time() - t0
+                n_lookup_eager += 1
+            t_lookup += time.time() - t0
             for gpu_evt in corresponding_gpu_events:
+                t0 = time.time()
                 gpu_evt_uid = gpu_evt[UID]
                 runtime_event.setdefault("children", []).append(gpu_evt_uid)
                 gpu_evt["parent"] = runtime_uid
                 gpu_evt["tree"] = True
                 name2event_uids[gpu_evt[Name]].append(gpu_evt_uid)
                 runtime_event.setdefault("gpu_events", []).append(gpu_evt_uid)
+                t_setup += time.time() - t0
 
                 # Walk parent chain inline (no get_parent_event calls) to propagate gpu_events
+                t0 = time.time()
                 parent_uid = runtime_event.get("parent")
                 while parent_uid is not None:
                     parent = events_by_uid[parent_uid]
                     parent.setdefault("gpu_events", []).append(gpu_evt_uid)
                     parent_uid = parent.get("parent")
+                t_parent_walk += time.time() - t0
+        print(
+            f"[timing] add_gpu_ops_to_tree: done {n_runtime} runtime events, "
+            f"lookup {t_lookup:.3f}s (graph {t_lookup_graph:.3f}s n={n_lookup_graph}, eager {t_lookup_eager:.3f}s n={n_lookup_eager}), "
+            f"setup {t_setup:.3f}s, parent_walk {t_parent_walk:.3f}s, "
+            f"total {time.time() - t_fn_start:.3f}s"
+        )
 
     # TODO base class includes this, remove
     def label_non_gpu_paths(self):
@@ -1269,16 +1311,7 @@ class TraceToTree:
         ).get(self.linking_key)
         if corr is None:
             return []
-        gpu_cats = {"kernel", "gpu_memset", "gpu_memcpy"}
-        return [
-            evt
-            for evt in self.events
-            if self.event_to_category(evt) in gpu_cats
-            and evt.get(TraceLens.util.TraceEventUtils.TraceKeys.Args, {}).get(
-                "correlation"
-            )
-            == corr
-        ]
+        return self.linking_id_to_gpu_events.get(corr, [])
 
     def _find_corresponding_output_event(self, input_event):
         # 1. Get the linking id from the input event
