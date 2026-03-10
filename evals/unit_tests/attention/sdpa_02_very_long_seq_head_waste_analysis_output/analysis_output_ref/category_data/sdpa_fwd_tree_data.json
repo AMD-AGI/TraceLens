@@ -1,0 +1,11 @@
+{
+  "1": {
+    "op_name": "aten::_scaled_dot_product_flash_attention",
+    "ex_uid": 1,
+    "input_dims": "((1, 8, 65536, 192), (1, 8, 65536, 192), (1, 8, 65536, 192), (), (), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}

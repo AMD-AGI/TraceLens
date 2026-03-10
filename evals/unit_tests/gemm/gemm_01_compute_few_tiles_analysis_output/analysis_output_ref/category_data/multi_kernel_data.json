@@ -1,0 +1,23 @@
+{
+  "memcpy_summary": {
+    "total_count": 0,
+    "total_time_us": 0,
+    "by_direction": {}
+  },
+  "nccl_summary": {
+    "total_count": 0,
+    "total_time_us": 0
+  },
+  "overlap_analysis": {
+    "total_time_us": 10890,
+    "computation_time_us": 10890,
+    "total_comm_time_us": 0,
+    "exposed_comm_time_us": 0,
+    "total_memcpy_time_us": 0,
+    "exposed_memcpy_time_us": 0,
+    "comm_overlap_ratio": null,
+    "memcpy_overlap_ratio": null,
+    "comm_percent_of_total": 0.0,
+    "memcpy_percent_of_total": 0.0
+  }
+}

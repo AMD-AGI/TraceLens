@@ -1,0 +1,38 @@
+{
+  "category": "gemm",
+  "status": "OK",
+  "total_time_ms": 0.135,
+  "percent_of_compute": 93.75,
+  "operation_count": 1,
+  "average_efficiency_percent": 23.51,
+  "operations": [
+    {
+      "name": "aten::mm",
+      "count": 1,
+      "time_ms": 0.135,
+      "percent_of_category": 100.0,
+      "efficiency": {
+        "tflops_achieved": 19.93,
+        "tb_s_achieved": 1.25,
+        "efficiency_percent": 23.51,
+        "bound_type": "memory",
+        "flops_per_byte": 16.0,
+        "compute_spec": "matrix_fp16",
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((131072, 32), (32, 32))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    }
+  ],
+  "category_specific": {
+    "quantized_count": 0,
+    "missing_perf_model_count": 0,
+    "peak_maf_tflops": 708,
+    "peak_hbm_bw_tbs": 5.3
+  }
+}

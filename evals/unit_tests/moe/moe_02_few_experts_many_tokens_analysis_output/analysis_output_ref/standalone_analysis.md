@@ -1,116 +1,140 @@
-# moe_02_few_experts_many_tokens — MI300X Standalone Analysis
+# TraceLens Standalone Analysis Report
+
+**Trace:** `moe_02_few_experts_many_tokens.json`
+**Platform:** MI300X
+**Total GPU Time:** 6.50 ms
+**Analysis Date:** 2026-03-09
+
+---
 
 ## Executive Summary
 
-Standalone performance analysis of MoE trace `moe_02_few_experts_many_tokens` on MI300X. The trace contains a single fused MoE operation with 8 experts, topk=1, hidden=4096, intermediate=11008, and 8192 tokens. **Good load balance expected**: each expert processes ~1024 tokens on average.
+This trace profiles a single MoE (Mixture of Experts) fused kernel invocation on MI300X. The GPU is fully utilized with 100% computation and zero idle time. The sole operation is `vllm::rocm_aiter_fused_moe`, a fused MoE kernel combining routing and expert compute in BF16 precision. No performance model is available for this kernel, so efficiency cannot be assessed quantitatively.
+
+---
+
+## GPU Utilization Breakdown
 
 | Metric | Value |
 |--------|-------|
-| Total Compute Time | 6.5 ms |
-| Computation | 100% |
-| Idle Time | 0% |
-| Exposed Communication | 0.00% |
-| Top Bottleneck Category | MoE Fused (6.5 ms) |
-| Approx. FLOPs | ~1.48 TFLOPs |
-| Efficiency (TFLOPS/BW) | N/A (no perf model for fused MoE) |
+| Total Time | 6.50 ms |
+| Computation | 100.0% |
+| Idle | 0.0% |
+| Communication | 0.0% |
+| MemCpy | 0.0% |
+
+GPU is 100% utilized for computation with no idle time.
 
 ---
 
-## Compute Kernel Optimizations
+## Prioritized Recommendations
 
-### Top Operations
+### P1: MoE Fused Kernel — Efficiency Assessment Unavailable
 
-| Rank | Operation | Category | Time (ms) | % of Compute |
-|------|-----------|----------|-----------|--------------|
-| 1 | vllm::rocm_aiter_fused_moe | MoE Fused | 6.5 | 100.0% |
-
-### 🔴 P1: MoE Fused — Focus on Algorithmic Tuning (No Kernel Efficiency Metrics)
-
-**Issue**: MoE Fused operations consume 6.5 ms (100% of compute). Fused MoE kernels have no efficiency metrics (TFLOPS, BW all null) — this is expected for fused MoE. With 8 experts, topk=1, and 8192 tokens, load balance is favorable (~1024 tokens/expert on average).
-
-**Action**: (1) Verify token distribution across experts at runtime — if routing is skewed, consider auxiliary load-balancing loss. (2) Profile expert utilization; if balanced, kernel is likely well-utilized. (3) For further speedup, consider FP8 quantization if model supports it (MI300X peak FP8: 1273 TFLOPS vs BF16: 708 TFLOPS).
-
-**Impact**: Not quantifiable from trace data.
-
-→ *See Detailed Analysis: Compute Kernels > MoE Fused below*
+| | |
+|---|---|
+| **Category** | MoE Fused |
+| **Operation** | vllm::rocm_aiter_fused_moe (6.50 ms, 100% of compute) |
+| **Issue** | The sole compute operation lacks a performance model (`has_perf_model: False`), preventing quantitative efficiency assessment against MI300X peak throughput |
+| **Recommendation** | Enable performance modeling for fused MoE kernels in the profiling pipeline; for longer traces with multiple MoE layers, validate token distribution across experts and routing balance to identify load imbalance |
+| **Estimated Savings** | Not quantifiable (no perf model available) |
+| **Confidence** | Medium |
 
 ---
 
-## System-Level Optimizations
+## System-Level Analysis
 
-> **Note:** System-level analysis is exploratory.
+> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
 
-✅ No system-level bottlenecks detected. GPU activity breakdown shows 100% computation, 0% idle. CPU duration (6.7 ms) closely matches GPU kernel time (6.5 ms), indicating minimal launch/sync overhead (~0.2 ms, 3% of total).
+No system-level bottlenecks detected. GPU activity breakdown shows 100.0% computation, with negligible memcpy and communication overhead.
+
+### CPU/Idle Time Analysis
+
+**Idle Time:** 0.0% (0.0 ms out of 6.50 ms total)
+
+| Metric | Value |
+|--------|-------|
+| Computation | 100.00% |
+| Idle | 0.00% |
+| Communication | 0.00% |
+| MemCpy | 0.00% |
+
+Idle time is 0.0%, well within acceptable range (threshold: 15%). No action needed. GPU is fully utilized for computation.
+
+### Multi-Kernel Issues
+
+No multi-kernel issues detected. This trace has no memcpy (D2H/H2D) transfers and no NCCL/collective communication events.
+
+| Assessment | Flagged | Details |
+|-----------|---------|---------|
+| Memcpy D2H/H2D | No | 0 memcpy events |
+| NCCL Blocking Compute | No | No communication events detected |
+| Compute/Comm Overlap | No | Insufficient communication data |
+
+Cross-validation with gpu_timeline.csv: **PASS** (overlap metrics consistent)
 
 ---
 
-## Detailed Analysis: Compute Kernels
+## Compute Kernel Analysis
 
-### 1. MoE Fused (100% of compute)
+### 1. MoE Fused (100.0% of compute)
 
-**Status:** SUCCESS
+**Operation Count:** 1
+**Total GPU Kernel Time:** 6.50 ms
 
-**Overview:**
-Single `vllm::rocm_aiter_fused_moe` operation dominates 100% of GPU compute (6.5 ms). Kernel `aiter_fused_moe_kernel_bf16`, grid=[512,1,1], block=[256,1,1]. **Efficiency metrics N/A** — fused MoE ops have no direct performance model mapping; this is expected.
+| Operation | Type | Count | Time (ms) | % of Category | Efficiency |
+|-----------|------|-------|-----------|---------------|------------|
+| vllm::rocm_aiter_fused_moe | Fused | 1 | 6.50 | 100.0% | N/A |
 
-**Time Breakdown:**
-- GPU kernel time: 6.5 ms
-- CPU duration: 6.7 ms (CPU/GPU ratio: 1.03x — minimal sync overhead)
-- Kernel: `aiter_fused_moe_kernel_bf16`, grid=[512,1,1], block=[256,1,1]
+**Classification:**
+- **Fused:** `vllm::rocm_aiter_fused_moe` — End-to-end fused MoE kernel combining routing and expert compute (`aiter_fused_moe_kernel_bf16`).
 
-**Operations Breakdown:**
+**Input Dimensions:**
+- Hidden states: (8192, 4096) BFloat16
+- Gate weights: (8, 22016, 4096) BFloat16
+- Down/Up weights: (8, 4096, 11008) BFloat16
+- Expert indices: (8192, 1) Float
 
-| Operation | Count | Time (ms) | % of Category | Efficiency | Bound |
-|-----------|-------|-----------|---------------|------------|-------|
-| vllm::rocm_aiter_fused_moe | 1 | 6.5 | 100.0% | N/A | N/A |
-
-**Key Metrics:**
-- **Shapes:** tokens=[8192,4096], w1=[8,22016,4096], w2=[8,4096,11008], topk_weights=[8192,1]
-- **Config:** 8 experts, topk=1, hidden=4096, intermediate=11008, 8192 tokens
-- **dtype:** BFloat16
-- **Expert-token pairs:** 8192 × 1 = 8192 across 8 experts
-- **Approx. FLOPs:** tokens × topk × (2 × hidden × intermediate × 2) ≈ 8192 × 1 × 4 × 4096 × 11008 ≈ 1.48 TFLOPs
-
-**Expert Utilization & Load Balancing:**
-- 8192 expert-token pairs / 8 experts ≈ 1024 tokens per expert on average
-- topk=1 (sparse routing) with few experts and many tokens yields good load balance
-- Each expert processes a large, contiguous workload — favorable for GPU utilization
+**Bottleneck Assessment:**
+- Time: 6.50 ms — below 100 ms threshold
+- Efficiency: Not available — perf model not supported for this fused kernel
+- No efficiency anomalies to flag
 
 **Recommendations:**
-- **Algorithmic:** Verify routing distribution; if skewed, apply load-balancing loss
-- **Quantization:** Consider FP8 for 1.8× theoretical peak uplift (if supported)
-- **Profiling:** Confirm expert utilization at application level
+- *Algorithmic:* No actionable recommendations with single invocation. For production traces with multiple MoE layers, validate expert routing balance and token distribution.
+- *Kernel:* MoE kernels are specialized with limited kernel-level tuning opportunity. Consider enabling perf modeling for fused MoE kernels if available.
 
-**Impact Summary:**
+---
+
+## Validation Summary
+
+| Check | Status |
+|-------|--------|
+| Time Sanity | PASS |
+| Efficiency Anomalies | PASS |
+| Coverage | PASS |
+| Priority Consistency | INFO — Top by GPU time: [moe_fused] |
+
+---
+
+## Impact Summary
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
-|---------------|------|------------------------|------------|
+|---------------|------|----------------------|------------|
+| MoE fused kernel efficiency assessment | kernel_profiling | Not quantifiable | Medium |
 
 ---
-
-## Detailed Analysis: System-Level
-
-### GPU Utilization Breakdown
-
-| Metric | Value |
-|--------|-------|
-| Total Compute Time | 6.5 ms |
-| Computation | 100% |
-| Idle Time | 0% |
-| Exposed Communication | 0.00% |
-| Exposed MemCpy | 0.00% |
-
-No CPU/idle or multi-kernel bottlenecks. Single-kernel trace with full GPU utilization. Launch overhead (~0.2 ms) is negligible (3% of total).
-
----
-
-## Appendix
 
 ### Hardware Reference
-- **Platform:** MI300X
-- **Peak HBM BW:** 5.3 TB/s
-- **Peak MAF (BF16):** 708 TFLOPS
-- **Peak MAF (FP16):** 654 TFLOPS
-- **Peak MAF (FP32):** 163 TFLOPS
-- **Peak MAF (FP8):** 1273 TFLOPS
-- **Memory:** 192 GB HBM3
+
+- **Platform**: MI300X
+- **Peak HBM BW**: 5.3 TB/s
+- **Peak MAF (BF16)**: 708 TFLOPS
+- **Peak MAF (FP16)**: 654 TFLOPS
+- **Peak MAF (FP8)**: 1273 TFLOPS
+- **Peak MAF (FP32)**: 163 TFLOPS
+- **Memory**: 192 GB HBM3
+
+---
+
+*Report generated by TraceLens AgenticMode Standalone Analysis*

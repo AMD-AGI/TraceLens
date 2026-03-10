@@ -1,0 +1,33 @@
+{
+  "category": "moe_fused",
+  "status": "OK",
+  "total_time_ms": 0.95,
+  "percent_of_compute": 100.0,
+  "operation_count": 1,
+  "average_efficiency_percent": 0,
+  "operations": [
+    {
+      "name": "vllm::rocm_aiter_fused_moe",
+      "count": 1,
+      "time_ms": 0.95,
+      "percent_of_category": 100.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": null,
+        "efficiency_label": null,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 708,
+        "warning": null,
+        "is_anomaly": false
+      }
+    }
+  ],
+  "category_specific": {
+    "peak_maf_tflops": 708,
+    "peak_hbm_bw_tbs": 5.3
+  },
+  "impact_estimates": []
+}

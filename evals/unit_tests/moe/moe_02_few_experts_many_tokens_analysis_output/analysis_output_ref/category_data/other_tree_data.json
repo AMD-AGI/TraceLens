@@ -1,0 +1,11 @@
+{
+  "4": {
+    "op_name": "vllm::rocm_aiter_fused_moe",
+    "ex_uid": 4,
+    "input_dims": "((8192, 4096), (8, 22016, 4096), (8, 4096, 11008), (8192, 1))",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}

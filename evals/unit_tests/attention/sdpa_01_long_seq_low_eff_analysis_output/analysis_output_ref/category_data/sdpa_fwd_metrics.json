@@ -1,0 +1,71 @@
+{
+  "category": "sdpa_fwd",
+  "status": "OK",
+  "total_time_ms": 658.46,
+  "percent_of_compute": 100.0,
+  "operation_count": 10,
+  "average_efficiency_percent": 40.44,
+  "operations": [
+    {
+      "name": "aten::_scaled_dot_product_flash_attention",
+      "count": 10,
+      "time_ms": 658.46,
+      "percent_of_category": 100.0,
+      "efficiency": {
+        "tflops_achieved": 286.31,
+        "tb_s_achieved": 0.02,
+        "efficiency_percent": 40.44,
+        "efficiency_label": "40.44% of peak MAF (286.31 TFLOPS achieved vs 708 TFLOPS peak)",
+        "bound_type": "compute",
+        "flops_per_byte": 16384.0,
+        "compute_spec": null,
+        "resolved_peak_maf": 708,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((1, 32, 32768, 128), (1, 32, 32768, 128), (1, 32, 32768, 128), (), (), (), ())",
+      "has_perf_model": true,
+      "perf_params": "{'B': 1, 'N_Q': 32768, 'H_Q': 32, 'N_KV': 32768, 'H_KV': 32, 'd_h_qk': 128, 'd_h_v': 128, 'dropout': 0.0, 'causal': False, 'flash_impl': True}",
+      "kernel_details_summary": "[{'name': 'attn_fwd.kd', 'stream': 1, 'count': 10, 'total_duration_us': np.float64(658460.0380000001), 'mean_duration_us': np.float64(65846.0038), 'median_duration_us': np.float64(56552.7295), 'std_dev_duration_us': np.float64(21797.335329942583), 'min_duration_us': np.float64(54177.121), 'max_duration_us': np.float64(125690.326)}]",
+      "classification": {
+        "is_flash_attention": true,
+        "is_paged_attention": false,
+        "has_perf_model": true,
+        "attention_type": "flash",
+        "workload_profile": {
+          "n_q": 32768,
+          "n_kv": 32768,
+          "h_q": 32,
+          "h_kv": 32,
+          "sum_ctx_tokens": 0,
+          "sum_gen_tokens": 0,
+          "ctx_ratio": null,
+          "workload_type": "unknown",
+          "attention_pattern": "MHA",
+          "gqa_ratio": null
+        }
+      }
+    }
+  ],
+  "category_specific": {
+    "flash_attention_count": 1,
+    "paged_attention_count": 0,
+    "has_perf_model_count": 1,
+    "flash_attention_detected": true,
+    "paged_attention_detected": false,
+    "peak_maf_tflops": 708,
+    "peak_hbm_bw_tbs": 5.3
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::_scaled_dot_product_flash_attention",
+      "category": "sdpa_fwd",
+      "type": "kernel_tuning",
+      "savings_ms": 392.179,
+      "confidence": "high",
+      "efficiency_pct": 40.44,
+      "bound_type": "compute",
+      "time_ms": 658.46
+    }
+  ]
+}

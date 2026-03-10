@@ -1,4 +1,11 @@
-# conv_05_pointwise_1x1 — MI300X Standalone Analysis
+# TraceLens Standalone Analysis Report
+
+**Trace:** `conv_05_pointwise_1x1.json`
+**Platform:** MI300X
+**Total GPU Time:** 0.8 ms
+**Analysis Date:** 2026-03-09
+
+---
 
 ## Executive Summary
 
@@ -14,35 +21,55 @@ Standalone performance analysis of convolution trace `conv_05_pointwise_1x1` on 
 
 ---
 
-## Compute Kernel Optimizations
+## GPU Utilization Breakdown
 
-### Top Operations
-
-| Rank | Operation | Category | Time (ms) | % of Compute Time |
-|------|-----------|----------|-----------|-------------------|
-| 1 | aten::convolution (1×1) [16,1024,14,14]×[2048,1024,1,1] | Convolution | 0.600 | 100.0% |
-
-### 🔴 P1: 1×1 Pointwise Convolution — Best Efficiency but Still Suboptimal
-
-**Issue**: 1×1 pointwise (batched GEMM) achieves 13.45% of peak FP32 (21.92 TFLOPS vs 163 TFLOPS) — best among convolutions — but still only ~1/7 of peak. Kernel `igemm_fwd_gtcx_nhwc_fp32_bx0_bt256x128x16` (grid=[512,1,1], block=[256,1,1]) has FLOPS/Byte=280.31 (compute-bound).
-
-**Action**: Generate replay artifact for kernel team. 1×1 conv maps cleanly to GEMM; investigate whether tile sizes 256×128×16 are optimal for batch×spatial=16×14×14=3136. Consider `torch.compile` or cuDNN/cuBLAS backend selection for pointwise-heavy models.
-
-**Impact**: ~0.52 ms savings from closing efficiency gaps (pre-computed).
-
-→ *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
+| Metric | Value |
+|--------|-------|
+| Total Time | 0.8 ms |
+| Computation | 75.0% |
+| Idle Time | 25.0% |
+| Exposed Communication | 0.00% |
 
 ---
 
-## System-Level Optimizations
+## Prioritized Recommendations
+
+### P1: 1×1 Pointwise Convolution — Best Efficiency but Still Suboptimal
+
+| | |
+|---|---|
+| **Category** | Convolution |
+| **Operation** | aten::convolution (1×1) [16,1024,14,14]×[2048,1024,1,1] |
+| **Current Efficiency** | 13.45% of peak FP32 (21.92 TFLOPS vs 163 TFLOPS) |
+| **HBM BW** | 0.08 TB/s vs 5.3 TB/s peak (1.5%) |
+| **Issue** | 1×1 pointwise (batched GEMM) achieves 13.45% of peak FP32 — best among convolutions — but still only ~1/7 of peak. Kernel `igemm_fwd_gtcx_nhwc_fp32_bx0_bt256x128x16` (grid=[512,1,1], block=[256,1,1]) has FLOPS/Byte=280.31 (compute-bound) |
+| **Recommendation** | Generate replay artifact for kernel team. 1×1 conv maps cleanly to GEMM; investigate whether tile sizes 256×128×16 are optimal for batch×spatial=16×14×14=3136. Consider `torch.compile` or cuDNN/cuBLAS backend selection for pointwise-heavy models |
+| **Estimated Savings** | ~0.52 ms from closing efficiency gaps (pre-computed) |
+| **Confidence** | Medium |
+
+**Detail:** 1×1 conv reduces to batched GEMM with M=batch×H×W, N=out_ch, K=in_ch. Shape (16×14×14, 2048, 1024) = (3136, 2048, 1024) is a reasonable GEMM; the 256×128×16 tile may not fully utilize the 3136 rows or 2048 columns.
+
+---
+
+## System-Level Analysis
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
 
-✅ No system-level bottlenecks detected. GPU activity breakdown shows 75.0% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
+No system-level bottlenecks detected. GPU activity breakdown shows 75.0% computation, with negligible memcpy and communication overhead.
+
+### Multi-Kernel Issues
+
+No multi-kernel issues detected:
+- **Memcpy events:** 0 (no D2H/H2D transfers)
+- **Collective communication events:** 0
+- **Exposed communication time:** 0.0%
+- **Exposed memcpy time:** 0.0%
+
+No memory transfer or communication overlap issues to report.
 
 ---
 
-## Detailed Analysis: Compute Kernels
+## Compute Kernel Analysis
 
 ### 1. Convolution (100% of compute)
 
@@ -54,6 +81,12 @@ Single 1×1 pointwise `aten::convolution`. Input [16,1024,14,14], weight [2048,1
 **Time Breakdown:**
 - GPU kernel time: 0.6 ms
 - CPU duration: 0.8 ms (CPU/GPU ratio: 1.33x — no sync bottleneck)
+
+**Top Operations:**
+
+| Rank | Operation | Category | Time (ms) | % of Compute Time |
+|------|-----------|----------|-----------|-------------------|
+| 1 | aten::convolution (1×1) [16,1024,14,14]×[2048,1024,1,1] | Convolution | 0.600 | 100.0% |
 
 **Operations Breakdown:**
 
@@ -71,9 +104,25 @@ Single 1×1 pointwise `aten::convolution`. Input [16,1024,14,14], weight [2048,1
 - **HBM BW:** 0.08 TB/s achieved vs 5.3 TB/s peak (1.5% of peak)
 - **Bound type:** Compute-bound (FLOPS/Byte = 280.31)
 
-**Issue:** 1×1 conv reduces to batched GEMM with M=batch×H×W, N=out_ch, K=in_ch. Shape (16×14×14, 2048, 1024) = (3136, 2048, 1024) is a reasonable GEMM; the 256×128×16 tile may not fully utilize the 3136 rows or 2048 columns.
+#### Additional Notes
 
-**Impact Summary:**
+- Missing perf models: 0
+- Quantized GEMMs detected: 0
+
+---
+
+## Validation Summary
+
+| Check | Status |
+|-------|--------|
+| Time Sanity | PASS |
+| Efficiency Anomalies | PASS |
+| Coverage | PASS |
+| Priority Consistency | INFO — Top by GPU time: [convolution] |
+
+---
+
+## Impact Summary
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
@@ -81,24 +130,8 @@ Single 1×1 pointwise `aten::convolution`. Input [16,1024,14,14], weight [2048,1
 
 ---
 
-## Detailed Analysis: System-Level
-
-> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
-
-### GPU Utilization Breakdown
-
-| Metric | Value |
-|--------|-------|
-| Total Time | 0.8 ms |
-| Computation | 75.0% |
-| Idle Time | 25.0% |
-| Exposed Communication | 0.00% |
-
----
-
-## Appendix
-
 ### Hardware Reference
+
 - **Platform**: MI300X
 - **Peak HBM BW**: 5.3 TB/s
 - **Peak MAF (FP32)**: 163 TFLOPS
@@ -106,3 +139,7 @@ Single 1×1 pointwise `aten::convolution`. Input [16,1024,14,14], weight [2048,1
 - **Peak MAF (BF16)**: 708 TFLOPS
 - **Peak MAF (FP8)**: 1273 TFLOPS
 - **Memory**: 192 GB HBM3
+
+---
+
+*Report generated by TraceLens AgenticMode Standalone Analysis*

@@ -1,0 +1,41 @@
+{
+  "platform": "MI300X",
+  "trace_path": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/gemm_02_compute_non_pow2.json",
+  "output_dir": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/analysis_output",
+  "gpu_utilization": {
+    "total_time_ms": 1.071,
+    "computation_time_percent": 100.0,
+    "exposed_comm_time_percent": 0.0,
+    "exposed_memcpy_time_percent": 0.0,
+    "idle_time_percent": 0.0
+  },
+  "categories": [
+    {
+      "name": "cpu_idle",
+      "display_name": "CPU/Idle Analysis",
+      "skill": "cpu-idle-analysis",
+      "tier": "system",
+      "ops_count": 0,
+      "csv_file": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/analysis_output/category_data/cpu_idle_ops.csv",
+      "metadata_file": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/analysis_output/metadata/cpu_idle_metadata.json",
+      "tree_data_file": null,
+      "priority": 0
+    },
+    {
+      "name": "gemm",
+      "display_name": "GEMM",
+      "skill": "gemm-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 1,
+      "csv_file": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/analysis_output/category_data/gemm_ops.csv",
+      "metadata_file": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/analysis_output/metadata/gemm_metadata.json",
+      "tree_data_file": "/home/tsrikris@amd.com/TraceLens-internal/evals/unit_tests_2/gemm/gemm_02_compute_non_pow2_analysis_output/analysis_output/category_data/gemm_tree_data.json",
+      "gpu_kernel_time_ms": 1.071,
+      "cpu_duration_ms": 0.073,
+      "sync_time_ms": 0,
+      "sync_ops_count": 0,
+      "has_sync_bottleneck": false
+    }
+  ],
+  "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead."
+}
