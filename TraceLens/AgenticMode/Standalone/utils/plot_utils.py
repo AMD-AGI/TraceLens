@@ -32,15 +32,10 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
     Generate the performance improvement plot from plot_data.json.
 
     Reads plot_data.json (produced by generate_plot_data), computes cumulative
-    projections, renders a two-panel matplotlib chart (bar + line), and saves
-    both the PNG image and a base64-encoded text file for report embedding.
-
-    Args:
-        output_dir: Base output directory containing plot_data.json
-        title: Plot suptitle (e.g. '<Model> on <Platform> — Kernel Tuning Potential')
-
-    Returns:
-        True if the plot was generated successfully, False otherwise
+    projections using the 75–100% roofline potential improvement range
+    (savings_ms_low / savings_ms_high per recommendation), renders a two-panel
+    matplotlib chart (bar + line), and saves both the PNG image and a
+    base64-encoded text file for report embedding.
     """
     plot_data_path = os.path.join(output_dir, "plot_data.json")
     if not os.path.exists(plot_data_path):
@@ -50,28 +45,61 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
     with open(plot_data_path, "r") as f:
         plot_data = json.load(f)
 
-    baseline_ms = plot_data.get("baseline_ms", 0)
+    baseline_ms = float(plot_data.get("baseline_ms", 0))
     recommendations = plot_data.get("recommendations", [])
 
     if not recommendations or baseline_ms <= 0:
         print("No kernel tuning recommendations or invalid baseline - skipping plot")
         return False
 
-    current_ms = baseline_ms
+    # Cumulative savings: midpoint (savings_ms), low bound (savings_ms_low), high bound (savings_ms_high)
+    # 75–100% roofline: less savings = savings_ms_low, more savings = savings_ms_high
+    cum_savings_mid = 0.0
+    cum_savings_low = 0.0
+    cum_savings_high = 0.0
+
     steps = ["Baseline"]
     e2e_ms = [baseline_ms]
     savings_list = [0]
-    cumulative_rel = [100]
+    cumulative_rel = [100.0]
+    # For left pane: asymmetric error bars (lower = toward better latency, upper = toward worse)
+    err_lower = [0.0]   # bar - err_lower = best-case latency (more savings)
+    err_upper = [0.0]   # bar + err_upper = worst-case latency (less savings)
+    # For right pane: throughput band from improvement range
+    cum_rel_low = [100.0]
+    cum_rel_high = [100.0]
 
     for rec in recommendations:
-        current_ms -= rec["savings_ms"]
-        current_ms = max(current_ms, 0.01)
+        sav_mid = float(rec.get("savings_ms", 0))
+        sav_lo = float(rec.get("savings_ms_low", sav_mid))
+        sav_hi = float(rec.get("savings_ms_high", sav_mid))
+        cum_savings_mid += sav_mid
+        cum_savings_low += sav_lo
+        cum_savings_high += sav_hi
+        # Clamp so projected latency stays positive
+        latency_mid = max(0.01, baseline_ms - cum_savings_mid)
+        latency_best = max(0.01, baseline_ms - cum_savings_high)
+        latency_worst = max(0.01, baseline_ms - cum_savings_low)
         count = rec.get("operation_count", 1)
         label = rec["category"] + f"\n({count} ops)"
         steps.append(label)
-        e2e_ms.append(current_ms)
-        savings_list.append(rec["savings_ms"])
-        cumulative_rel.append(round(baseline_ms / current_ms * 100))
+        e2e_ms.append(latency_mid)
+        savings_list.append(sav_mid)
+        cumulative_rel.append(round(baseline_ms / latency_mid * 100, 1))
+        # Left pane: bar = latency_mid; error bar down = latency_mid - latency_best, up = latency_worst - latency_mid
+        err_lower.append(latency_mid - latency_best)
+        err_upper.append(latency_worst - latency_mid)
+        # Right pane: throughput band from improvement range (no uncertainty at baseline)
+        rel_lo = baseline_ms / latency_worst * 100 if latency_worst > 0 else 100.0
+        rel_hi = baseline_ms / latency_best * 100 if latency_best > 0 else 100.0
+        cum_rel_low.append(round(rel_lo, 1))
+        cum_rel_high.append(round(rel_hi, 1))
+
+    e2e_ms = np.array(e2e_ms)
+    err_lower = np.array(err_lower)
+    err_upper = np.array(err_upper)
+    # Baseline has no error bar; rest use 75–100% roofline range
+    yerr_rest = np.array([err_lower[1:], err_upper[1:]])
 
     fig, (ax1, ax2) = plt.subplots(
         1, 2, figsize=(14, 5.5), gridspec_kw={"width_ratios": [1.1, 1]}
@@ -79,12 +107,16 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
 
     colors = ['#4a90d9', '#e74c3c', '#e67e22', '#f1c40f', '#2ecc71',
               '#9b59b6', '#1abc9c'][:len(steps)]
-    yerr_left = 0.05 * np.array(e2e_ms)
-    bars = ax1.bar(steps, e2e_ms, color=colors, edgecolor='white',
-                   linewidth=1.2, width=0.65, yerr=yerr_left, capsize=4,
-                   error_kw=dict(ecolor='#333333', linewidth=1.2))
+    # Draw baseline bar with no error bar, then remaining bars with error bars
+    bar0 = ax1.bar(steps[0:1], e2e_ms[0:1], color=colors[0], edgecolor='white',
+                   linewidth=1.2, width=0.65)
+    bars_rest = ax1.bar(steps[1:], e2e_ms[1:], color=colors[1:], edgecolor='white',
+                        linewidth=1.2, width=0.65, yerr=yerr_rest, capsize=4,
+                        error_kw=dict(ecolor='#333333', linewidth=1.2))
+    bars = list(bar0) + list(bars_rest)
+    y_max_for_label = e2e_ms + err_upper
     for i, (bar, val, sav) in enumerate(zip(bars, e2e_ms, savings_list)):
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + yerr_left[i] + 1.5,
+        ax1.text(bar.get_x() + bar.get_width()/2, y_max_for_label[i] + 1.5,
                  f'{val:.1f} ms', ha='center', va='bottom', fontsize=10,
                  fontweight='bold')
         if sav > 0:
@@ -92,18 +124,18 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
                      f'-{sav:.1f} ms', ha='center', va='center',
                      fontsize=9, color='white', fontweight='bold')
     ax1.set_ylabel('E2E Latency (ms)', fontsize=11)
-    ax1.set_title('Projected E2E Latency After Each Optimization (±5% uncertainty)',
+    ax1.set_title('Projected E2E Latency After Each Optimization\n(75–100% roofline potential)',
                   fontsize=12, fontweight='bold', pad=12)
-    ax1.set_ylim(0, (max(e2e_ms) + max(yerr_left)) * 1.2)
+    ax1.set_ylim(0, (np.max(y_max_for_label) + 50) * 1.15)
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
     ax1.tick_params(axis='x', labelsize=9)
 
-    # Right pane: cumulative throughput with uncertainty band (volume) and line along outside
+    # Right pane: cumulative throughput with uncertainty band from expected improvement range
     x_vals = np.arange(len(steps))
     cum_arr = np.array(cumulative_rel, dtype=float)
-    cum_low = cum_arr * 0.95
-    cum_high = cum_arr * 1.05
+    cum_low = np.array(cum_rel_low, dtype=float)
+    cum_high = np.array(cum_rel_high, dtype=float)
     # No uncertainty at baseline (first point)
     cum_low[0] = cum_high[0] = cum_arr[0]
     ax2.fill_between(x_vals, cum_low, cum_high, color='#2ecc71', alpha=0.35, zorder=0)
@@ -125,7 +157,7 @@ def generate_perf_plot(output_dir: str, title: str) -> bool:
     ax2.set_xticks(range(len(steps)))
     ax2.set_xticklabels(steps, fontsize=9)
     ax2.set_ylabel('Relative Throughput (Baseline = 100)', fontsize=11)
-    ax2.set_title('Cumulative Throughput Improvement (±5% uncertainty)',
+    ax2.set_title('Cumulative Throughput Improvement\n(75–100% roofline potential)',
                   fontsize=12, fontweight='bold', pad=12)
     ax2.set_ylim(80, max(cum_high) * 1.15)
     ax2.axhline(y=100, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
