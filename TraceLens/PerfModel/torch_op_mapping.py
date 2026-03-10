@@ -35,9 +35,9 @@ op_to_perf_model_class_map = {
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
-    "aiter::mha_fwd": perf_model.aiter_mha_fwd,
-    "aiter::fmha_v3_fwd": perf_model.aiter_fmha_v3_fwd,
-    "aiter::mha_bwd": perf_model.aiter_mha_bwd,
+    "aiter::mha_fwd": perf_model.aiter__mha_fwd,
+    "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::mha_bwd": perf_model.aiter__mha_bwd,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
     # TEv2 pseudo ops

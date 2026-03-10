@@ -5,9 +5,9 @@
 ###############################################################################
 
 from TraceLens.PerfModel.perf_model import (
-    aiter_mha_fwd,
-    aiter_fmha_v3_fwd,
-    aiter_mha_bwd,
+    aiter__mha_fwd,
+    aiter__fmha_v3_fwd,
+    aiter__mha_bwd,
 )
 from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
@@ -20,9 +20,9 @@ from TraceLens.PerfModel.torch_op_mapping import (
 
 
 def test_aiter_mha_ops_are_mapped():
-    assert op_to_perf_model_class_map["aiter::mha_fwd"] is aiter_mha_fwd
-    assert op_to_perf_model_class_map["aiter::fmha_v3_fwd"] is aiter_fmha_v3_fwd
-    assert op_to_perf_model_class_map["aiter::mha_bwd"] is aiter_mha_bwd
+    assert op_to_perf_model_class_map["aiter::mha_fwd"] is aiter__mha_fwd
+    assert op_to_perf_model_class_map["aiter::fmha_v3_fwd"] is aiter__fmha_v3_fwd
+    assert op_to_perf_model_class_map["aiter::mha_bwd"] is aiter__mha_bwd
 
 
 def test_aiter_mha_fwd_categorizes_as_sdpa_fwd():
@@ -44,7 +44,7 @@ def test_aiter_mha_bwd_categorizes_as_sdpa_bwd():
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-# q/k/v shape: (B=2, N=512, H=16, d_h=64) in bhnd layout → [B, N, H, d_h]
+# q/k/v shape: (B=2, N=512, H=16, d_h=64) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h
 _Q_SHAPE = [2, 512, 16, 64]
 _K_SHAPE = [2, 512, 16, 64]
 _V_SHAPE = [2, 512, 16, 64]
@@ -82,22 +82,22 @@ def _bwd_event():
 
 
 def test_aiter_mha_fwd_flops():
-    model = aiter_mha_fwd(_fwd_event("aiter::mha_fwd"))
+    model = aiter__mha_fwd(_fwd_event("aiter::mha_fwd"))
     # causal=True: 2 * B * H_Q * N_Q * N_KV/2 * (d_h_qk + d_h_v) = SDPA.flops_func causal
     assert model.flops() > 0
 
 
 def test_aiter_mha_fwd_causal_flag():
-    model = aiter_mha_fwd(_fwd_event("aiter::mha_fwd"))
+    model = aiter__mha_fwd(_fwd_event("aiter::mha_fwd"))
     assert model.param_details["causal"] is True
 
 
 def test_aiter_mha_fwd_non_causal():
     concrete = list(_FWD_CONCRETE)
     concrete[5] = "False"
-    model = aiter_mha_fwd(_fwd_event("aiter::mha_fwd", concrete))
+    model = aiter__mha_fwd(_fwd_event("aiter::mha_fwd", concrete))
     assert model.param_details["causal"] is False
-    causal_model = aiter_mha_fwd(_fwd_event("aiter::mha_fwd"))
+    causal_model = aiter__mha_fwd(_fwd_event("aiter::mha_fwd"))
     # non-causal attends to full KV → higher flops than causal
     assert model.flops() > causal_model.flops()
 
@@ -109,24 +109,24 @@ def test_aiter_mha_fwd_non_causal():
 
 def test_aiter_fmha_v3_fwd_flops_match_mha_fwd():
     # Same argument layout as mha_fwd — flops must be identical for same shapes
-    mha = aiter_mha_fwd(_fwd_event("aiter::mha_fwd"))
-    v3 = aiter_fmha_v3_fwd(_fwd_event("aiter::fmha_v3_fwd"))
+    mha = aiter__mha_fwd(_fwd_event("aiter::mha_fwd"))
+    v3 = aiter__fmha_v3_fwd(_fwd_event("aiter::fmha_v3_fwd"))
     assert mha.flops() == v3.flops()
     assert mha.bytes() == v3.bytes()
 
 
 # ---------------------------------------------------------------------------
-# aiter_mha_bwd
+# aiter__mha_bwd
 # ---------------------------------------------------------------------------
 
 
 def test_aiter_mha_bwd_flops():
-    model = aiter_mha_bwd(_bwd_event())
+    model = aiter__mha_bwd(_bwd_event())
     assert model.flops() > 0
 
 
 def test_aiter_mha_bwd_flops_greater_than_fwd():
-    fwd = aiter_mha_fwd(_fwd_event("aiter::mha_fwd"))
-    bwd = aiter_mha_bwd(_bwd_event())
+    fwd = aiter__mha_fwd(_fwd_event("aiter::mha_fwd"))
+    bwd = aiter__mha_bwd(_bwd_event())
     # Backward FLOPs > forward FLOPs (flash bwd is ~2.5x fwd for causal)
     assert bwd.flops() > fwd.flops()
