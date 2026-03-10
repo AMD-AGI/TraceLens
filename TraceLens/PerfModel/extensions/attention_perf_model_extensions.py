@@ -81,7 +81,7 @@ class InferenceAttention:
         input_dims = event["args"]["Input Dims"]
         q_shape, k_shape = input_dims[0], input_dims[1]
         N_Q, H_Q, d_h_qk = q_shape
-        N_KV, H_KV, d_h_v = k_shape
+        N_KV, H_KV, d_h_v = k_shape[-3:]
 
         return {
             "B": 1,
@@ -207,65 +207,4 @@ class mha_varlen_fwd(InferenceAttention):
     pass
 
 class mla_decode_fwd(InferenceAttention):
-    @staticmethod
-    def get_param_details(event):
-        annotation = str(event.get("annotation"))
-        if annotation == "NA":
-            raise NotImplementedError(
-                "VLLM attention without annotation is not supported"
-            )
-
-        if "sq" not in annotation:
-            requests = annotation.replace("(", "_").replace(")", "_").split("_")
-            if len(requests) < 8:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[3])
-            c_sk = int(requests[3])
-            c_sqsq = int(requests[4])
-            c_sqsk = int(requests[4])
-            g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
-        else:
-            name = annotation.replace("(", "_").replace(")", "_")
-            requests = re.sub(r"[sqk]+", "_", name).split("_")
-            if len(requests) < 16:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[5])
-            c_sk = int(requests[6])
-            c_sqsq = int(requests[7])
-            c_sqsk = int(requests[8])
-            g_sq = int(requests[13])
-            g_sk = int(requests[14])
-            g_sqsq = int(requests[15])
-            g_sqsk = int(requests[16])
-
-        input_dims = event["args"]["Input Dims"]
-        q_shape, k_shape = input_dims[0], input_dims[1]
-        N_Q, H_Q, d_h_qk = q_shape
-        _, N_KV, H_KV, d_h_v = k_shape
-
-        return {
-            "B": 1,
-            "N_Q": N_Q,
-            "H_Q": H_Q,
-            "N_KV": N_KV,
-            "H_KV": H_KV,
-            "d_h_qk": d_h_qk,
-            "d_h_v": d_h_v,
-            "dropout": 0.0,
-            "causal": False,
-            "flash_impl": True,
-            "c_sq": c_sq,
-            "c_sk": c_sk,
-            "c_sqsq": c_sqsq,
-            "c_sqsk": c_sqsk,
-            "g_sq": g_sq,
-            "g_sk": g_sk,
-            "g_sqsq": g_sqsq,
-            "g_sqsk": g_sqsk,
-        }
-
-        
+    pass
