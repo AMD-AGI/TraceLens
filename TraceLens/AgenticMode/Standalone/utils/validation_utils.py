@@ -94,12 +94,17 @@ def _check_efficiency_anomalies(output_dir):
                 for m in matches:
                     if float(m) > 100:
                         anomalies.append(
-                            {"category": f.replace("_findings.md", ""), "value": f"{m}%"}
+                            {
+                                "category": f.replace("_findings.md", ""),
+                                "value": f"{m}%",
+                            }
                         )
 
     if anomalies:
         messages = [f"{a['category']}: {a['value']}" for a in anomalies]
-        messages.append("Anomalies indicate measurement issues - do not use for prioritization")
+        messages.append(
+            "Anomalies indicate measurement issues - do not use for prioritization"
+        )
         return {"status": "WARN", "messages": messages}
 
     return {"status": "PASS", "messages": []}
@@ -124,7 +129,9 @@ def _check_coverage(output_dir, manifest):
         messages.append(f"Missing system findings: {', '.join(missing_system)}")
 
     compute_dir = os.path.join(output_dir, "category_findings")
-    expected_compute = [c["name"] for c in categories if c.get("tier") == "compute_kernel"]
+    expected_compute = [
+        c["name"] for c in categories if c.get("tier") == "compute_kernel"
+    ]
     found_compute = []
     if os.path.isdir(compute_dir):
         found_compute = [
