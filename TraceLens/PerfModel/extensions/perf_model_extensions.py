@@ -38,6 +38,29 @@ class gemm_a8w8_blockscale(GEMM):
             bpe_output=self.bpe_output,
         )
 
+class vllm_rocm_unquantized_gemm(GEMM):
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1],
+            "bias": True,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], event["args"]["Input type"][2]),
+        }
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2]) 
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
 class per_group_quant(BinaryElementwise):
 
     def __init__(self, event, arch=None, python_path=None):

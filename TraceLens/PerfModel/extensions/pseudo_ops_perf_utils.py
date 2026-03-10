@@ -36,6 +36,7 @@ def get_pseudo_op_mappings():
         ## Misc ops
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
+        "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
     }
 
     return pseudo_op_mappings
