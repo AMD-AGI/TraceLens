@@ -779,9 +779,8 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
 
 class moe_aiter_unfused_up(UnfusedMoE_Up):
     """
-    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
-
-    TO DO: Expand support for other AITER MoE kernels.
+    Performance model for AITER-based unfused MoE up projection.
+    Handles aiter::moe_cktile2stages_gemm1_ck launches (CK-tile 2-stage GEMM1).
     """
     
     def __init__(self, event, arch=None, python_path=None):
@@ -795,12 +794,12 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
         """
         Extract MoE dimensions and data types from event args.
         
-        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
-        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim], 
-         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
+        Expected Input Dims format (from aiter::moe_cktile2stages_gemm1_ck):
+        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim_packed],
+         [tokens, topk, inter_dim], [sorted_ids], [sorted_expert_ids], [max_token_ids], ...]
         
         Expected Input type format:
-        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
+        [dtype_XQ, dtype_WQ, dtype_Y, ...]
         """
 
         args = event.get('args', {})
@@ -882,9 +881,8 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
 
 class moe_aiter_unfused_down(UnfusedMoE_Down):
     """
-    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
-
-    TO DO: Expand support for other AITER MoE kernels.
+    Performance model for AITER-based unfused MoE down projection.
+    Handles aiter::moe_cktile2stages_gemm2_ck launches (CK-tile 2-stage GEMM2).
     """
     
     def __init__(self, event, arch=None, python_path=None):
@@ -898,12 +896,12 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
         """
         Extract MoE dimensions and data types from event args.
         
-        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
-        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim], 
-         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
+        Expected Input Dims format (from aiter::moe_cktile2stages_gemm2_ck):
+        [[tokens, topk, inter_dim], [experts, hidden_dim, inter_dim_packed],
+         [tokens, hidden_dim], [sorted_ids], [sorted_expert_ids], [max_token_ids], ...]
         
         Expected Input type format:
-        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
+        [dtype_XQ, dtype_WQ, dtype_Y, ...]
         """
 
         args = event.get('args', {})

@@ -39,6 +39,19 @@ class gemm_a8w8_blockscale(GEMM):
         )
 
 class vllm_rocm_unquantized_gemm(GEMM):
+    """
+    Performance model for vllm::rocm_unquantized_gemm.
+    Dispatches to aiter triton gemm (gemm_a16w16) or skinny GEMM (wvSplitK/LLMM1)
+    depending on shape heuristics; falls back to torch.nn.functional.linear.
+
+    Computes: output[M, N] = x[M, K] @ weight[N, K].T + bias[N]
+
+    Expected Input Dims format (from vllm::rocm_unquantized_gemm):
+    [[M, K], [N, K], [N]]  (x, weight, bias)
+
+    Expected Input type format:
+    [dtype_x, dtype_weight, dtype_bias]
+    """
     @staticmethod
     def get_param_details(event):
         return {
@@ -62,6 +75,20 @@ class vllm_rocm_unquantized_gemm(GEMM):
             bpe_output=self.bpe_output,
         )
 class per_group_quant(BinaryElementwise):
+    """
+    Performance model for aiter::dynamic_per_token_scaled_quant.
+    Performs dynamic per-token quantization: each row of the input is
+    quantized independently with its own scale factor.
+
+    AITER signature: dynamic_per_token_scaled_quant(out, input, scales,
+        scale_ub=None, shuffle_scale=False, num_rows=None, num_rows_factor=1)
+
+    Expected Input Dims format (from aiter::dynamic_per_token_scaled_quant):
+    [[out_shape], [input_shape], [scales_shape], ...]
+
+    Expected Input type format:
+    [dtype_out, dtype_input, dtype_scales, ...]
+    """
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
