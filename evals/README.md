@@ -139,3 +139,30 @@ Results are written to `evals/results/<id>/` and include:
 - `eval_summary.csv` -- merged results for the test case.
 
 The aggregated summary across all test cases is at `evals/results/eval_summary.csv`.
+
+## Repeatability Study
+
+Because the pipeline uses LLMs, outputs are non-deterministic. The repeatability study runs each test case multiple times (default: 5) and aggregates pass rates across runs to surface flaky or inconsistent behavior. This **should be run** (ideally on a 'screen' to prevent disconnects) before merging changes to the agent. 
+
+```bash
+cd TraceLens-internal
+bash evals/run_repeatability.sh
+```
+
+After the runs complete, analyze and aggregate the results by prompting Cursor:
+
+```bash
+python evals/utils/aggregate_repeatability.py
+```
+
+This produces three CSVs in `evals/utils/output/`:
+
+- `pass_rate_summary.csv` -- per-trace, per-eval pass rates across all runs
+- `aggregated_results.csv` -- full eval results for every run
+- `stream_diagnostics.csv` -- per-run metadata (outcome, token usage, last step reached, whether the report was written)
+
+**What to look for using Cursor:**
+
+- **Overall pass rate** should not regress compared to the baseline on `main`.
+- **Per-eval consistency** -- an eval that passes in 3/5 runs indicates flaky behavior that needs investigation.
+- **Stream diagnostics regressions** -- runs where the report was not written or the last step reached regressed (e.g., stuck at Step 7 instead of reaching Step 11) signal a reliability problem.
