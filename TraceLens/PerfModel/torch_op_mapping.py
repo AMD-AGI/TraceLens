@@ -159,9 +159,10 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
 
 def categorize_torch_op(row):
     """
-    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Categorizes a row based on the 'name' and 'kernel_details' fields.
     Args:
-        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+        row (dict): A dictionary representing a row with a 'name' key (str) and an optional
+            'kernel_details' key (list of dicts, each with a 'name' field for the GPU kernel name).
     Returns:
         str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
              'SDPA_fwd', 'SDPA_bwd', 'EP_Communication', 'triton', 'elementwise', 'reduce',
