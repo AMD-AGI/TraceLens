@@ -3632,7 +3632,9 @@ class Normalization:
         # read grad_out and the input once, invstd if it is saved
 
         # read grad_out and input (if mask is true and is_training), write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] and is_training else 1)
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (
+            2 if output_mask[0] and is_training else 1
+        )
         if is_training:
             bytes += num_channels * bpe_in  # invstd
         # read weight if affine
@@ -4132,3 +4134,101 @@ class RMSNormBwd(Normalization):
         if self.is_affine:
             bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes
+
+
+# ==============================================================================
+# Expert-Parallel (EP) Communication – DeepEP token dispatch / combine
+# ==============================================================================
+
+
+class EPComm:
+    """
+    Base class for Expert-Parallel communication operations.
+
+    These all-to-all token-routing ops are used in MoE models (e.g., DeepEP /
+    Primus Turbo Deep EP).  They move token tensors between GPU ranks; there is
+    no matrix multiply, so flops() = 0 and bytes() = token-tensor volume.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_tokens = self.param_details["num_tokens"]
+        self.hidden_dim = self.param_details["hidden_dim"]
+        self.bpe = self.param_details["bpe"]
+
+    @staticmethod
+    def get_param_details(event):
+        raise NotImplementedError
+
+    @staticmethod
+    def _parse_token_tensor(event):
+        """Parse (num_tokens, hidden_dim, bpe) from input_dims[0] / input_types[0]."""
+        input_dims = event["args"].get("Input Dims", [])
+        input_types = event["args"].get("Input type", [])
+        tok_shape = input_dims[0] if input_dims else []
+        num_tokens = tok_shape[0] if len(tok_shape) >= 1 else None
+        hidden_dim = tok_shape[1] if len(tok_shape) >= 2 else None
+        dtype = input_types[0] if input_types else ""
+        bpe = name2bpe(dtype) if dtype else None
+        bpe = bpe if bpe is not None else 2  # default BF16
+        return {"num_tokens": num_tokens, "hidden_dim": hidden_dim, "bpe": bpe}
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        if self.num_tokens is None or self.hidden_dim is None:
+            return None
+        return self.num_tokens * self.hidden_dim * self.bpe
+
+
+class deepep_dispatch(EPComm):
+    """
+    DeepEPDispatch (forward): routes local tokens to remote expert ranks.
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    Concrete Inputs[3] = num_experts (total), [6] = dispatch capacity.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine(EPComm):
+    """
+    DeepEPCombine (forward): collects expert outputs back to local tokens.
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_dispatch_backward(EPComm):
+    """
+    DeepEPDispatchBackward: backward of DeepEPDispatch (combines expert gradients).
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine_backward(EPComm):
+    """
+    DeepEPCombineBackward: backward of DeepEPCombine (scatters local token gradients).
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)

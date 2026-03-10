@@ -44,6 +44,11 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # DeepEP Expert-Parallel communication ops
+    "DeepEPDispatch": perf_model.deepep_dispatch,
+    "DeepEPCombine": perf_model.deepep_combine,
+    "DeepEPDispatchBackward": perf_model.deepep_dispatch_backward,
+    "DeepEPCombineBackward": perf_model.deepep_combine_backward,
 }
 
 # Add pseudo-op extension mappings
@@ -131,6 +136,7 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.EPComm: "EP_Communication",
 }
 
 # Add pseudo-op extension categories
@@ -203,6 +209,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("EP_Communication", []):
+        return "EP_Communication"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
