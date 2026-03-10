@@ -775,3 +775,207 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
         return "matrix"
+
+
+class moe_aiter_unfused_up(UnfusedMoE_Up):
+    """
+    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
+
+    TO DO: Expand support for other AITER MoE kernels.
+    """
+    
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        """
+        Extract MoE dimensions and data types from event args.
+        
+        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
+        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim], 
+         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
+        
+        Expected Input type format:
+        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
+        """
+
+        args = event.get('args', {})
+        
+        kernel_input_shape = args['Input Dims']
+        input_shape = kernel_input_shape[0]
+        w1_shape = kernel_input_shape[1]
+        w2_shape = kernel_input_shape[2]
+        num_tokens,hidden_dim = input_shape
+
+        num_experts, _, _ = w1_shape
+        _, topk, inter_dim = w2_shape
+
+        
+        
+        # Check if MoE is using gated activation (SwiGLU)
+        gated = (w1_shape[1] == 2 * inter_dim)
+        
+        input_dtype = args['Input type'][0]
+        weight_dtype = args['Input type'][1]
+        
+        return {
+            'num_tokens': num_tokens,
+            'hidden_dim': hidden_dim,
+            'inter_dim': inter_dim,
+            'num_experts': num_experts,
+            'topk': topk,
+            'gated': gated,
+            'input_dtype': input_dtype,
+            'weight_dtype': weight_dtype,
+        }
+    
+    def flops(self):
+        """Calculate FLOPs using the static flops_func."""
+
+        return self.flops_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            self.param_details['gated']
+        )
+
+    
+    def bytes(self):
+        """Calculate bytes moved using the static bytes_func."""
+
+        input_bpe = DTYPE_TO_BYTES.get(self.param_details['input_dtype'], 2)  # Default to 2
+        weight_bpe = DTYPE_TO_BYTES.get(self.param_details['weight_dtype'], 1)  # Default to 1 (FP8)
+        output_bpe = input_bpe  # Output typically same as input
+        
+        return self.bytes_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            self.param_details['gated'],
+            input_bpe,
+            weight_bpe,
+            output_bpe
+        )
+    
+    def flops_bwd(self):
+        """Backward pass FLOPs (not implemented for inference-only MoE)."""
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+    
+    def bytes_bwd(self):
+        """Backward pass bytes (not implemented for inference-only MoE)."""
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+    
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+    
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for MoE)."""
+        return "matrix"
+
+class moe_aiter_unfused_down(UnfusedMoE_Down):
+    """
+    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
+
+    TO DO: Expand support for other AITER MoE kernels.
+    """
+    
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        """
+        Extract MoE dimensions and data types from event args.
+        
+        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
+        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim], 
+         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
+        
+        Expected Input type format:
+        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
+        """
+
+        args = event.get('args', {})
+        
+        kernel_input_shape = args['Input Dims']
+        input_shape = kernel_input_shape[0]
+        w1_shape = kernel_input_shape[1]
+        w2_shape = kernel_input_shape[2]
+        
+        num_tokens,topk,inter_dim = input_shape
+
+        num_experts, hidden_dim, _ = w1_shape
+       
+
+        
+        
+        # Check if MoE is using gated activation (SwiGLU)
+        
+        input_dtype = args['Input type'][0]
+        weight_dtype = args['Input type'][1]
+        
+        return {
+            'num_tokens': num_tokens,
+            'hidden_dim': hidden_dim,
+            'inter_dim': inter_dim,
+            'num_experts': num_experts,
+            'topk': topk,
+            'input_dtype': input_dtype,
+            'weight_dtype': weight_dtype,
+        }
+    
+    def flops(self):
+        """Calculate FLOPs using the static flops_func."""
+
+        return self.flops_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+        )
+
+    
+    def bytes(self):
+        """Calculate bytes moved using the static bytes_func."""
+
+        input_bpe = DTYPE_TO_BYTES.get(self.param_details['input_dtype'], 2)  # Default to 2
+        weight_bpe = DTYPE_TO_BYTES.get(self.param_details['weight_dtype'], 1)  # Default to 1 (FP8)
+        output_bpe = input_bpe  # Output typically same as input
+        
+        return self.bytes_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            input_bpe,
+            weight_bpe,
+            output_bpe
+        )
+    
+    def flops_bwd(self):
+        """Backward pass FLOPs (not implemented for inference-only MoE)."""
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+    
+    def bytes_bwd(self):
+        """Backward pass bytes (not implemented for inference-only MoE)."""
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+    
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+    
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for MoE)."""
+        return "matrix"
