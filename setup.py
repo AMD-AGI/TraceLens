@@ -40,6 +40,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_api = TraceLens.Reporting.generate_perf_report_pftrace_hip_api:main",
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
+            "TraceLens_compare_traces_jax_llama = TraceLens.Reporting.compare_traces_jax_llama:main",
         ],
     },
 )
