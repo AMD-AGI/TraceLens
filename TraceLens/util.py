@@ -63,10 +63,8 @@ class DataLoader:
             )
         except Exception as e:
             # orjson is strict about UTF-8; fall back to stdlib json which is more lenient
-            logger.warning(
-                f"orjson decode failed ({e}), falling back to standard json"
-            )
-        
+            logger.warning(f"orjson decode failed ({e}), falling back to standard json")
+
         # Fallback to standard json (more lenient with encoding issues)
         if isinstance(data, bytes):
             data = data.decode("utf-8", errors="surrogateescape")
