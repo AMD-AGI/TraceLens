@@ -16,6 +16,8 @@ import TraceLens.util
 from TraceLens import TraceToTree
 from ..TreePerf import GPUEventAnalyser
 
+_RE_HEX_ADDR = re.compile(r"0x[0-9a-fA-F]+")
+_RE_PY_LINENO = re.compile(r"\.py\(\d+\):")
 
 class TraceDiff:
     def __init__(self, tree1: TraceToTree, tree2: TraceToTree):
@@ -90,6 +92,7 @@ class TraceDiff:
         return cat in ("kernel", "gpu_memcpy")
 
     @staticmethod
+    @functools.lru_cache(maxsize=4096) # eliminating regex work for repeated names (vast majority of calls)
     def _normalize_name_for_comparison(name):
         """
         Normalize node names by removing variable parts (hex memory addresses and line numbers)
@@ -108,9 +111,11 @@ class TraceDiff:
         if name is None:
             return name
         # Remove hex memory addresses but keep the "at 0x" part for context
-        normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+        #normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+        normalized = _RE_HEX_ADDR.sub("0xXXXX", name) # replace with pre-compiled
         # Remove line numbers from Python stack frames (filename.py(line_number): function)
-        normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+        #normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+        normalized = _RE_PY_LINENO.sub(".py:", normalized) # replace with pre-compiled
         return normalized
 
     def _get_op_name(self, uid, tree_num):
