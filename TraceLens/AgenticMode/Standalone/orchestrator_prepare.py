@@ -541,9 +541,7 @@ def main():
     # CPU/Idle Category Creation (always created)
     # ============================================================================
     print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
-    print(
-        f"    Idle time: {gpu_utilization_metrics['idle_time_percent']:.1f}%"
-    )
+    print(f"    Idle time: {gpu_utilization_metrics['idle_time_percent']:.1f}%")
 
     cpu_idle_metadata = {
         "platform": platform,

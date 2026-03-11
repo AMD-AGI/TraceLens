@@ -1,4 +1,11 @@
-# conv_04_depthwise — MI300X Standalone Analysis
+# TraceLens Standalone Analysis Report
+
+**Trace:** `conv_04_depthwise.json`
+**Platform:** MI300X
+**Total GPU Time:** 0.55 ms
+**Analysis Date:** 2026-03-09
+
+---
 
 ## Executive Summary
 
@@ -14,35 +21,55 @@ Standalone performance analysis of convolution trace `conv_04_depthwise` on MI30
 
 ---
 
-## Compute Kernel Optimizations
+## GPU Utilization Breakdown
 
-### Top Operations
-
-| Rank | Operation | Category | Time (ms) | % of Compute Time |
-|------|-----------|----------|-----------|-------------------|
-| 1 | aten::convolution (depthwise) [8,1024,32,32]×[1024,1,3,3] | Convolution | 0.350 | 100.0% |
-
-### 🔴 P1: Depthwise Convolution — Extremely Low Efficiency Despite Specialized Kernel
-
-**Issue**: Depthwise conv (groups=1024) has FLOPS/Byte=2.25 — inherently memory-bound — yet achieves only 0.26% of peak FP32 (0.43 TFLOPS vs 163 TFLOPS). The specialized `depthwise_conv2d_fwd_fp32_kernel` (grid=[256,1,1], block=[256,1,1]) shows very poor utilization; HBM BW is 0.19 TB/s vs 5.3 TB/s peak (3.6%).
-
-**Action**: Profile the depthwise kernel for memory coalescing, warp occupancy, and L2 utilization. Consider algorithmic alternatives: fuse with adjacent pointwise conv (depthwise-separable block), or evaluate if im2col+GEMM path performs better for this shape. Investigate whether FP16/BF16 would improve throughput.
-
-**Impact**: ~0.35 ms savings from closing efficiency gaps (pre-computed).
-
-→ *See [Detailed Analysis: Compute Kernels > Convolution](#1-convolution-100-of-compute) for details*
+| Metric | Value |
+|--------|-------|
+| Total Time | 0.55 ms |
+| Computation | 63.6% |
+| Idle Time | 36.4% |
+| Exposed Communication | 0.00% |
 
 ---
 
-## System-Level Optimizations
+## Prioritized Recommendations
+
+### P1: Depthwise Convolution — Extremely Low Efficiency Despite Specialized Kernel
+
+| | |
+|---|---|
+| **Category** | Convolution |
+| **Operation** | aten::convolution (depthwise) [8,1024,32,32]×[1024,1,3,3], groups=1024 |
+| **Current Efficiency** | 0.26% of peak FP32 (0.43 TFLOPS vs 163 TFLOPS) |
+| **HBM BW** | 0.19 TB/s vs 5.3 TB/s peak (3.6%) |
+| **Issue** | Depthwise conv (groups=1024) has FLOPS/Byte=2.25 — inherently memory-bound — yet achieves only 0.26% of peak FP32. The specialized `depthwise_conv2d_fwd_fp32_kernel` (grid=[256,1,1], block=[256,1,1]) shows very poor utilization |
+| **Recommendation** | Profile the depthwise kernel for memory coalescing, warp occupancy, and L2 utilization. Consider algorithmic alternatives: fuse with adjacent pointwise conv (depthwise-separable block), or evaluate if im2col+GEMM path performs better for this shape. Investigate whether FP16/BF16 would improve throughput |
+| **Estimated Savings** | ~0.35 ms from closing efficiency gaps (pre-computed) |
+| **Confidence** | Low |
+
+**Detail:** Depthwise convolutions have minimal arithmetic per byte (2.25 FLOPS/Byte), so they are typically memory-bound. Achieving only 3.6% of peak HBM bandwidth indicates severe kernel inefficiency — likely poor memory coalescing, low occupancy, or suboptimal tiling for the 32×32 spatial tiles with 1024 channels.
+
+---
+
+## System-Level Analysis
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
 
-✅ No system-level bottlenecks detected. GPU activity breakdown shows 63.6% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
+No system-level bottlenecks detected. GPU activity breakdown shows 63.6% computation, with negligible memcpy and communication overhead.
+
+### Multi-Kernel Issues
+
+No multi-kernel issues detected:
+- **Memcpy events:** 0 (no D2H/H2D transfers)
+- **Collective communication events:** 0
+- **Exposed communication time:** 0.0%
+- **Exposed memcpy time:** 0.0%
+
+No memory transfer or communication overlap issues to report.
 
 ---
 
-## Detailed Analysis: Compute Kernels
+## Compute Kernel Analysis
 
 ### 1. Convolution (100% of compute)
 
@@ -54,6 +81,12 @@ Single depthwise `aten::convolution`. Input [8,1024,32,32], weight [1024,1,3,3],
 **Time Breakdown:**
 - GPU kernel time: 0.35 ms
 - CPU duration: 0.55 ms (CPU/GPU ratio: 1.57x — no sync bottleneck)
+
+**Top Operations:**
+
+| Rank | Operation | Category | Time (ms) | % of Compute Time |
+|------|-----------|----------|-----------|-------------------|
+| 1 | aten::convolution (depthwise) [8,1024,32,32]×[1024,1,3,3] | Convolution | 0.350 | 100.0% |
 
 **Operations Breakdown:**
 
@@ -71,9 +104,25 @@ Single depthwise `aten::convolution`. Input [8,1024,32,32], weight [1024,1,3,3],
 - **HBM BW:** 0.19 TB/s achieved vs 5.3 TB/s peak (3.6% of peak)
 - **Bound type:** Compute-bound (FLOPS/Byte = 2.25) — note: depthwise is inherently memory-bound; low FLOPS/Byte suggests bandwidth should dominate, yet efficiency is extremely poor
 
-**Issue:** Depthwise convolutions have minimal arithmetic per byte (2.25 FLOPS/Byte), so they are typically memory-bound. Achieving only 3.6% of peak HBM bandwidth indicates severe kernel inefficiency — likely poor memory coalescing, low occupancy, or suboptimal tiling for the 32×32 spatial tiles with 1024 channels.
+#### Additional Notes
 
-**Impact Summary:**
+- Missing perf models: 0
+- Quantized GEMMs detected: 0
+
+---
+
+## Validation Summary
+
+| Check | Status |
+|-------|--------|
+| Time Sanity | PASS |
+| Efficiency Anomalies | PASS |
+| Coverage | PASS |
+| Priority Consistency | INFO — Top by GPU time: [convolution] |
+
+---
+
+## Impact Summary
 
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
@@ -81,24 +130,8 @@ Single depthwise `aten::convolution`. Input [8,1024,32,32], weight [1024,1,3,3],
 
 ---
 
-## Detailed Analysis: System-Level
-
-> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
-
-### GPU Utilization Breakdown
-
-| Metric | Value |
-|--------|-------|
-| Total Time | 0.55 ms |
-| Computation | 63.6% |
-| Idle Time | 36.4% |
-| Exposed Communication | 0.00% |
-
----
-
-## Appendix
-
 ### Hardware Reference
+
 - **Platform**: MI300X
 - **Peak HBM BW**: 5.3 TB/s
 - **Peak MAF (FP32)**: 163 TFLOPS
@@ -106,3 +139,7 @@ Single depthwise `aten::convolution`. Input [8,1024,32,32], weight [1024,1,3,3],
 - **Peak MAF (BF16)**: 708 TFLOPS
 - **Peak MAF (FP8)**: 1273 TFLOPS
 - **Memory**: 192 GB HBM3
+
+---
+
+*Report generated by TraceLens AgenticMode Standalone Analysis*

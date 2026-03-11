@@ -38,20 +38,25 @@ def load_manifest_categories(output_dir):
     }
 
     gpu_util = result["gpu_utilization"]
-    print(json.dumps({
-        "system_categories": [c["name"] for c in result["system_categories"]],
-        "compute_categories": [c["name"] for c in result["compute_categories"]],
-        "gpu_utilization": {
-            k: gpu_util.get(k)
-            for k in (
-                "total_time_ms",
-                "computation_time_percent",
-                "idle_time_percent",
-                "exposed_comm_time_percent",
-                "exposed_memcpy_time_percent",
-            )
-        },
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "system_categories": [c["name"] for c in result["system_categories"]],
+                "compute_categories": [c["name"] for c in result["compute_categories"]],
+                "gpu_utilization": {
+                    k: gpu_util.get(k)
+                    for k in (
+                        "total_time_ms",
+                        "computation_time_percent",
+                        "idle_time_percent",
+                        "exposed_comm_time_percent",
+                        "exposed_memcpy_time_percent",
+                    )
+                },
+            },
+            indent=2,
+        )
+    )
 
     return result
 
@@ -114,12 +119,17 @@ def load_findings(output_dir):
         "top_ops": top_ops,
     }
 
-    print(json.dumps({
-        "system_findings": list(system_findings.keys()),
-        "failed_system": [f["category"] for f in failed_system],
-        "compute_findings": list(compute_findings.keys()),
-        "failed_compute": [f["category"] for f in failed_compute],
-        "top_ops_count": len(top_ops),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "system_findings": list(system_findings.keys()),
+                "failed_system": [f["category"] for f in failed_system],
+                "compute_findings": list(compute_findings.keys()),
+                "failed_compute": [f["category"] for f in failed_compute],
+                "top_ops_count": len(top_ops),
+            },
+            indent=2,
+        )
+    )
 
     return result
