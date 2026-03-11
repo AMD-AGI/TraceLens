@@ -20,6 +20,7 @@ op_to_perf_model_class_map = {
     "vllm::gemm_with_dynamic_quant": perf_model.vllm_gemm_with_dynamic_quant,
     "FlashAttnFunc": perf_model.flash_attention,
     "flash_attn::_flash_attn_forward": perf_model.flash_attention,
+    "flash_attn::_flash_attn_backward": perf_model.flash_attention_backward,
     "flash_attn::_flash_attn_varlen_forward": perf_model.flash_attention_varlen_forward,
     "flash_attn::_flash_attn_varlen_backward": perf_model.flash_attention_varlen_backward,
     "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,
@@ -149,6 +150,7 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
         )
     dict_cat2names[cat].append(op_name)
 
+
 def categorize_torch_op(row):
     """
     Categorizes a row based on the 'name' and 'kernel_names' fields.
@@ -216,7 +218,7 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-    for k,v in dict_cat2names.items():
+    for k, v in dict_cat2names.items():
         if row["name"] in v:
             return k
     # if none of the above cases match, return 'other'

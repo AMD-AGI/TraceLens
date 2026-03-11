@@ -191,6 +191,20 @@ Do not flag collectives as the main problem since that is a known problem.
 
 This pattern generalizes: any step can be overridden or contextualized by adding instructions to the invocation prompt.
 
+## Best Practices for Evolving the Agent
+
+Any major change to the agent -- orchestrator logic, sub-agent skills, pattern libraries, or analysis thresholds -- must be validated before merging. Because the pipeline uses LLMs, outputs are non-deterministic, so both correctness and consistency must be verified.
+
+### 1. Run Evals
+
+After making a change, run the eval suite against the test cases in `evals/unit_test_traces.csv`. The suite validates **workflow correctness** (directory structure, required files, report formatting) and **output quality** (comparison against reference reports).
+
+See [evals/README.md](../../../evals/README.md) for full documentation on the eval harness, adding test cases, and interpreting results.
+
+### 2. Run the Repeatability Study Before Merging
+
+The repeatability study runs each test case multiple times (default: 5) and aggregates pass rates across runs. This surfaces flaky behavior that a single eval pass would miss and is essential for robustness.
+
 ## Continual Learning
 
 After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.

@@ -114,6 +114,7 @@ CATEGORY_SKILL_MAP = {
     "gemm": "gemm-analysis",
     "moe_fused": "moe-analysis",
     "sdpa_fwd": "sdpa-analysis",
+    "sdpa_bwd": "sdpa-analysis",
     "elementwise": "elementwise-analysis",
     "reduce": "reduce-analysis",
     "triton": "triton-analysis",

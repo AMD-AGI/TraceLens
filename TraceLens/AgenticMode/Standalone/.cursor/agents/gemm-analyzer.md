@@ -95,7 +95,7 @@ Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 60% of peak
+- Efficiency: < 70% of peak TFLOPS
 
 ### Step 4: Generate Markdown Tables
 
@@ -105,6 +105,12 @@ Build the operations breakdown table from `metrics['operations']`:
 | Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type |
 |-----------|-------|-----------|---------------|------------|------------|------|
 ```
+
+**Column mappings:**
+- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`
+- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
+- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`). Do NOT use `classification.gemm_type` here — that field distinguishes quantized vs regular, not the compute/memory bound type.
 
 ### Step 5: Determine Optimization Recommendations
 
@@ -140,7 +146,7 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute)
-- **Efficiency:** Z% of peak MAF
+- **Efficiency:** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
 - **Issue:** [Brief description]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
@@ -152,15 +158,18 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Peak TFLOPS reference:** When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON. This is the precision-specific peak for the operation's data type (e.g., 654 for FP16, 708 for BF16). Do not look up peaks independently from the metadata dict.
+
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: Batching opportunity, quantization format change — estimate based on expected parallelism or precision improvement
+- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 
@@ -199,10 +208,8 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 | Efficiency | Assessment | Action |
 |------------|------------|--------|
-| >80% | Excellent | Focus on algorithmic improvements |
-| 60-80% | Good | Limited optimization potential |
-| 40-60% | Acceptable | Consider kernel optimization if high time |
-| <40% | Needs investigation | Priority for kernel optimization, generate replay artifact |
+| >70% | Good | Limited optimization potential |
+| <70% | Needs investigation | Priority for kernel optimization, generate replay artifact |
 
 ---
 

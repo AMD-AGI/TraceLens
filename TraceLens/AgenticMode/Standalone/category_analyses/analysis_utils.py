@@ -80,7 +80,11 @@ def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
     return {
         "total_time_ms": round(total_time_ms, 3),
         "percent_of_compute": round(percent_of_compute, 2),
-        "operation_count": len(ops_df),
+        "operation_count": (
+            int(ops_df["operation_count"].sum())
+            if "operation_count" in ops_df.columns
+            else len(ops_df)
+        ),
     }
 
 
@@ -219,9 +223,11 @@ def calculate_efficiency(
         "tflops_achieved": None,
         "tb_s_achieved": None,
         "efficiency_percent": None,
+        "efficiency_label": None,
         "bound_type": None,
         "flops_per_byte": None,
         "compute_spec": None,
+        "resolved_peak_maf": None,
         "warning": None,
         "is_anomaly": False,
     }
@@ -243,6 +249,14 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
+    # Resolve peak_maf upfront so it's available for all tiers
+    if isinstance(peak_maf_or_maf_dict, dict):
+        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
+        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
+    else:
+        peak_maf = peak_maf_or_maf_dict
+    result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
+
     # --- Tier 1: Use Pct Roofline from TreePerf if available ---
     pct_roofline = row.get("Pct Roofline")
     if pct_roofline is not None and not pd.isna(pct_roofline):
@@ -260,15 +274,20 @@ def calculate_efficiency(
                 f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
             )
             result["is_anomaly"] = True
+        # Generate human-readable efficiency label
+        if result["bound_type"] == "memory" and result["tb_s_achieved"] is not None:
+            result["efficiency_label"] = (
+                f"{result['efficiency_percent']:.2f}% of peak HBM bandwidth "
+                f"({result['tb_s_achieved']} TB/s achieved vs {peak_hbm_bw} TB/s peak)"
+            )
+        elif (
+            result["bound_type"] == "compute" and result["tflops_achieved"] is not None
+        ):
+            result["efficiency_label"] = (
+                f"{result['efficiency_percent']:.2f}% of peak MAF "
+                f"({result['tflops_achieved']} TFLOPS achieved vs {result['resolved_peak_maf']} TFLOPS peak)"
+            )
         return result
-
-    # --- Tier 2/3: Manual calculation with precision-aware peak ---
-    # Resolve peak_maf: if dict, look up by Compute Spec; if float, use directly
-    if isinstance(peak_maf_or_maf_dict, dict):
-        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
-        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
-    else:
-        peak_maf = peak_maf_or_maf_dict
 
     # Determine bound type and calculate efficiency with validation
     def set_efficiency_with_validation(achieved, peak, bound_type, metric_name):
@@ -324,6 +343,21 @@ def calculate_efficiency(
                 tflops_s, peak_maf, "compute", "Compute efficiency"
             )
 
+    # Generate human-readable efficiency label
+    if result["efficiency_percent"] is not None and result["bound_type"] is not None:
+        if result["bound_type"] == "memory" and result["tb_s_achieved"] is not None:
+            result["efficiency_label"] = (
+                f"{result['efficiency_percent']:.2f}% of peak HBM bandwidth "
+                f"({result['tb_s_achieved']} TB/s achieved vs {peak_hbm_bw} TB/s peak)"
+            )
+        elif (
+            result["bound_type"] == "compute" and result["tflops_achieved"] is not None
+        ):
+            result["efficiency_label"] = (
+                f"{result['efficiency_percent']:.2f}% of peak MAF "
+                f"({result['tflops_achieved']} TFLOPS achieved vs {result['resolved_peak_maf']} TFLOPS peak)"
+            )
+
     return result
 
 
@@ -365,7 +399,7 @@ def build_operation_metrics(
 
     for _, row in sorted_df.iterrows():
         op_name = row.get("name", "Unknown")
-        count = int(row.get("count", 1))
+        count = int(row.get("count", row.get("operation_count", 1)))
         time_ms = row.get("Kernel Time (µs)_sum", 0) / 1000
         percent_of_category = (
             (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
@@ -491,61 +525,102 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
     Returns:
         Path to written plot_data.json
     """
+    out_path = f"{output_dir}/plot_data.json"
     category_data_dir = f"{output_dir}/category_data"
     manifest_path = f"{category_data_dir}/category_manifest.json"
 
-    with open(manifest_path, "r") as f:
-        manifest = json.load(f)
+    try:
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
 
-    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
 
-    all_estimates: List[dict] = []
-    for fname in sorted(os.listdir(category_data_dir)):
-        if not fname.endswith("_metrics.json"):
-            continue
-        fpath = os.path.join(category_data_dir, fname)
-        with open(fpath, "r") as f:
-            metrics = json.load(f)
-        if metrics.get("status") in ("ERROR", "NO_DATA"):
-            continue
-        all_estimates.extend(metrics.get("impact_estimates", []))
+        all_estimates: List[dict] = []
+        for fname in sorted(os.listdir(category_data_dir)):
+            if not fname.endswith("_metrics.json"):
+                continue
+            fpath = os.path.join(category_data_dir, fname)
+            with open(fpath, "r") as f:
+                metrics = json.load(f)
+            if metrics.get("status") in ("ERROR", "NO_DATA"):
+                continue
+            all_estimates.extend(metrics.get("impact_estimates", []))
 
-    category_savings = defaultdict(lambda: {"savings_ms": 0, "count": 0, "ops": []})
-    for e in all_estimates:
-        if e.get("type") == "kernel_tuning" and e.get("confidence") in (
-            "high",
-            "medium",
-        ):
-            cat = e["category"]
-            category_savings[cat]["savings_ms"] += e["savings_ms"]
-            category_savings[cat]["count"] += 1
-            category_savings[cat]["ops"].append(e.get("operation", ""))
+        category_savings = defaultdict(lambda: {"savings_ms": 0, "count": 0, "ops": []})
+        for e in all_estimates:
+            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
+                "high",
+                "medium",
+            ):
+                cat = e["category"]
+                category_savings[cat]["savings_ms"] += e["savings_ms"]
+                category_savings[cat]["count"] += 1
+                category_savings[cat]["ops"].append(e.get("operation", ""))
 
-    plot_recs = sorted(
-        [
-            {
-                "category": cat,
-                "savings_ms": round(v["savings_ms"], 3),
-                "operation_count": v["count"],
-                "type": "kernel_tuning",
-            }
-            for cat, v in category_savings.items()
-        ],
-        key=lambda x: x["savings_ms"],
-        reverse=True,
-    )[:max_recommendations]
+        plot_recs = sorted(
+            [
+                {
+                    "category": cat,
+                    "savings_ms": round(v["savings_ms"], 3),
+                    "operation_count": v["count"],
+                    "type": "kernel_tuning",
+                }
+                for cat, v in category_savings.items()
+            ],
+            key=lambda x: x["savings_ms"],
+            reverse=True,
+        )[:max_recommendations]
 
-    plot_data = {
-        "baseline_ms": baseline_ms,
-        "recommendations": plot_recs,
-        "all_estimates": all_estimates,
-    }
+        plot_data = {
+            "baseline_ms": baseline_ms,
+            "recommendations": plot_recs,
+            "all_estimates": all_estimates,
+        }
+    except Exception:
+        plot_data = {
+            "baseline_ms": 0,
+            "recommendations": [],
+            "all_estimates": [],
+        }
 
-    out_path = f"{output_dir}/plot_data.json"
     with open(out_path, "w") as f:
         json.dump(plot_data, f, indent=2)
 
     return out_path
+
+
+REQUIRED_REPORT_HEADERS = [
+    "Executive Summary",
+    "Compute Kernel Optimizations",
+    "System-Level Optimizations",
+    "Detailed Analysis: Compute Kernels",
+    "Detailed Analysis: System-Level",
+    "Appendix",
+]
+
+
+def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
+    """
+    Validate that standalone_analysis.md contains all required ## section headers.
+
+    Args:
+        output_dir: Base output directory containing standalone_analysis.md
+
+    Returns:
+        Tuple of (passed: bool, missing_sections: list of missing header names)
+    """
+    report_path = os.path.join(output_dir, "standalone_analysis.md")
+    if not os.path.exists(report_path):
+        return False, ["<file not found>"]
+
+    with open(report_path, "r") as f:
+        content = f.read()
+
+    if len(content.strip()) < 100:
+        return False, ["<report is empty or too short>"]
+
+    missing = [h for h in REQUIRED_REPORT_HEADERS if f"## {h}" not in content]
+    return len(missing) == 0, missing
 
 
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:

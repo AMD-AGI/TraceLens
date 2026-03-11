@@ -2068,7 +2068,7 @@ class SDPA:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
             bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = True if type(self).__name__ == "flash_attention" else False
+            fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
             simulated_time = SDPA.get_simulation_time_bwd_func(
                 self.arch,
                 dtype,
@@ -2179,15 +2179,65 @@ class flash_attention(SDPA):
         }
 
 
-class flash_attention_backward(flash_attention):
+class flash_attention_backward(SDPA):
+    """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
-    def __init__(self, event):
-        super().__init__(event)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.d_h = (
+            self.d_h_qk
+        )  # head dimension for simulation (used by get_simulation_time_bwd_func)
+
+    @staticmethod
+    def get_param_details(event):
+        # Argument order: dout (0), q (1), k (2), v (3), out, softmax_lse, ...
+        input_dims = event["args"]["Input Dims"]
+        q_idx, k_idx, v_idx = 1, 2, 3
+        q_shape, k_shape, v_shape = (
+            input_dims[q_idx],
+            input_dims[k_idx],
+            input_dims[v_idx],
+        )
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+
+        concrete = event["args"].get("Concrete Inputs", [])
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+        strides = event["args"]["Input Strides"]
+        q_stride, k_stride, v_stride = (
+            tuple(strides[q_idx]),
+            tuple(strides[k_idx]),
+            tuple(strides[v_idx]),
+        )
+        dropout = float(concrete[8]) if len(concrete) > 8 and concrete[8] else 0.0
+        causal = eval(concrete[10]) if len(concrete) > 10 and concrete[10] else True
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "q_stride": q_stride,
+            "k_stride": k_stride,
+            "v_stride": v_stride,
+            "dropout": dropout,
+            "causal": causal,
+            "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
+        }
 
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element):
+    def bytes(self, bytes_per_element=None):
+        if bytes_per_element is None:
+            bytes_per_element = name2bpe(self.param_details["dtype_A_B"][0])
         return self.bytes_bwd(bytes_per_element)
 
 
@@ -3534,7 +3584,9 @@ class Normalization:
         # read grad_out and the input once, invstd if it is saved
 
         # read grad_out and input (if mask is true and is_training), write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] and is_training else 1)
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (
+            2 if output_mask[0] and is_training else 1
+        )
         if is_training:
             bytes += num_channels * bpe_in  # invstd
         # read weight if affine

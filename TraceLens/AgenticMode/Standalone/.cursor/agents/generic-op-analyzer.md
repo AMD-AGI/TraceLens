@@ -107,7 +107,7 @@ For each operation consuming significant time or with notable invocation count:
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 60% of peak
+- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
 - Count: very high invocation count suggesting fusion/batching opportunity
 
 **Key questions to answer for each bottleneck:**
@@ -168,7 +168,7 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning / algorithmic | X.X | high/medium/low |
+| <rec title>   | kernel_tuning | X.X | high/medium/low |
 
 ## Notes
 - Communication kernels (NCCL/RCCL) are excluded from this analysis — use TraceLens's NCCL Analyzer
@@ -176,13 +176,14 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows. Only derive `algorithmic` estimates manually.
+**Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON (pre-computed as `savings_ms = op_time_ms * (1 - efficiency_pct / 100)`)
-- `algorithmic`: Fusion opportunity: `savings_ms = sum_of_fused_ops_time * (1 - 1/num_passes)`. Miscategorized ops: estimate based on what the true category optimization would yield
+- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
+- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 
@@ -231,8 +232,8 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 
 | Operation Type | Expected Efficiency | Notes |
 |----------------|---------------------|-------|
-| Memory-bound (embedding, index, scatter) | 50-70% of peak HBM BW | Standard memory-bound expectation |
-| Compute-bound (custom kernels) | 40-60% of peak MAF | Varies widely for custom ops |
+| Memory-bound (embedding, index, scatter) | >70% of peak HBM BW | Standard memory-bound expectation |
+| Compute-bound (custom kernels) | >70% of peak TFLOPS | Varies widely for custom ops |
 | Graph launch | N/A | Measure overhead vs benefit |
 
 **Note:** Efficiency expectations for uncategorized ops vary widely. Use the operation's FLOPS/Byte ratio to determine if it's compute-bound or memory-bound, then compare to the appropriate peak.
