@@ -33,6 +33,7 @@ class GEMM:
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
+        kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
         elif "kernel_details" in event and len(event["kernel_details"]) > 0:
@@ -3258,6 +3259,247 @@ class GroupedGemm:
     def bytes_bwd(self):
         return self.bytes_bwd_func(
             self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
+        )
+
+
+def _collect_2d_shapes(obj):
+    """Recursively extract all (rows, cols) int pairs from nested lists/tuples."""
+    shapes = []
+    if isinstance(obj, (list, tuple)):
+        if len(obj) == 2 and all(isinstance(v, int) and v > 0 for v in obj):
+            shapes.append((obj[0], obj[1]))
+        else:
+            for item in obj:
+                shapes.extend(_collect_2d_shapes(item))
+    return shapes
+
+
+class primus_turbo_grouped_gemm(GroupedGemm):
+    """
+    Primus Turbo fixed-K grouped GEMM: X(M,K) @ W(G,K,N) -> Y(M,N).
+
+    All groups share the same K and N, matching GroupedGemm's canonical layout.
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [G,K,N]] or [[M,K], [G,N,K]]
+      - Zipped:         [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]]
+
+    Inherits flops(), bytes(), flops_bwd(), bytes_bwd() from GroupedGemm.
+
+    Mapped op names:
+      primus_turbo::grouped_gemm
+      primus_turbo::grouped_gemm_impl
+      primus_turbo_cpp_extension::grouped_gemm
+    """
+
+    @staticmethod
+    def _extract_impl_dims(input_dims):
+        """
+        Parse compact _impl trace format: [[M,K], [G,K,N]] or [[M,K], [G,N,K]].
+        Returns (M, K, N, G), or None if the format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) >= 2
+            and len(b_shape) == 3
+            and all(isinstance(v, int) and v > 0 for v in a_shape[:2])
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        G = int(b_shape[0])
+        # Some traces store grouped W as [G,K,N]; others use [G,N,K].
+        if b_shape[1] == K:
+            N = int(b_shape[2])
+        elif b_shape[2] == K:
+            N = int(b_shape[1])
+        else:
+            return None
+        return M, K, N, G
+
+    @staticmethod
+    def _extract_zipped_dims(input_dims):
+        """
+        Parse zipped trace format: [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]].
+        Requires uniform K and N across all groups.
+        Returns (M_total, K, N, G), or None if the format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        K = lhs[0][1]
+        N = rhs[0][1]
+        if not all(a[1] == K and b[0] == K and b[1] == N for a, b in zip(lhs, rhs)):
+            return None
+        M_total = sum(a[0] for a in lhs)
+        G = len(lhs)
+        return M_total, K, N, G
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        dims = primus_turbo_grouped_gemm._extract_impl_dims(input_dims)
+        if dims is None:
+            dims = primus_turbo_grouped_gemm._extract_zipped_dims(input_dims)
+        if dims is None:
+            raise ValueError(
+                f"primus_turbo::grouped_gemm could not parse Input Dims: {input_dims}"
+            )
+        M, K, N, G = dims
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        return {"M": M, "K": K, "N": N, "G": G, "bpe_in": bpe_in, "bpe_out": bpe_out}
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+
+class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
+    """
+    Primus Turbo variable-K grouped GEMM: each group i computes X_i(M_i,K_i) @ W_i(K_i,N_i).
+
+    Because K (and potentially N) differs per group, GroupedGemm's single-tensor bytes
+    formula (M*K + G*K*N) does not apply. flops() and bytes() are overridden to sum
+    per-group contributions using GroupedGemm.flops_func / GroupedGemm.bytes_func(G=1).
+
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [M,N]]  (aggregate view; treated as one group)
+      - Zipped:         [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]]
+
+    Mapped op names:
+      primus_turbo::grouped_gemm_variable_k
+      primus_turbo::grouped_gemm_variable_k_impl
+      primus_turbo_cpp_extension::grouped_gemm_variable_k
+    """
+
+    @staticmethod
+    def _extract_impl_pairs(input_dims):
+        """
+        Parse compact variable-K _impl trace format: [[M,K], [M,N]].
+        The trace gives aggregate totals; treated as a single effective group.
+        Returns a list with one ((M,K),(K,N)) pair, or None if format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) == 2
+            and len(b_shape) == 2
+            and all(isinstance(v, int) and v > 0 for v in a_shape)
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        N = int(b_shape[1])
+        return [((M, K), (K, N))]
+
+    @staticmethod
+    def _extract_zipped_pairs(input_dims):
+        """
+        Parse zipped trace format with variable K: [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]].
+        Returns list of ((M_i,K_i),(K_i,N_i)) pairs, or None if format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        if not all(a[1] == b[0] for a, b in zip(lhs, rhs)):
+            return None
+        return list(zip(lhs, rhs))
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        group_pairs = primus_turbo_grouped_gemm_variable_k._extract_impl_pairs(
+            input_dims
+        )
+        if group_pairs is None:
+            group_pairs = primus_turbo_grouped_gemm_variable_k._extract_zipped_pairs(
+                input_dims
+            )
+        if not group_pairs:
+            raise ValueError(
+                "primus_turbo::grouped_gemm_variable_k could not parse"
+                f" Input Dims: {input_dims}"
+            )
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        first_a, first_b = group_pairs[0]
+        return {
+            # M/K/N/G are approximate aggregates; overridden flops/bytes use group_pairs.
+            "M": sum(a[0] for a, _ in group_pairs),
+            "K": first_a[1],
+            "N": first_b[1],
+            "G": len(group_pairs),
+            "bpe_in": bpe_in,
+            "bpe_out": bpe_out,
+            "group_pairs": group_pairs,
+        }
+
+    def flops(self):
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            total += GroupedGemm.flops_func(M=a_shape[0], K=a_shape[1], N=b_shape[1])
+        return total
+
+    def bytes(self):
+        bpe_in, bpe_out = self.bpe_in, self.bpe_out
+        if bpe_in is None or bpe_out is None:
+            return None
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            # Each group has its own weight matrix (G_i=1), so reads X_i + W_i, writes Y_i.
+            total += GroupedGemm.bytes_func(
+                M=a_shape[0],
+                K=a_shape[1],
+                N=b_shape[1],
+                G=1,
+                bpe_in=bpe_in,
+                bpe_out=bpe_out,
+            )
+        return total
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
         )
 
 
