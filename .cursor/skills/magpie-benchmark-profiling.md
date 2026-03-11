@@ -73,6 +73,89 @@ When enabled, the benchmarker automatically sets these env vars inside the conta
 
 No manual env var configuration is needed.
 
+### Step 2b: Ask About Profiler Tuning (vLLM only)
+
+Before running the benchmark, ask the user whether they want to profile a targeted steady-state window or the entire benchmark run.
+
+#### Profiling mode
+
+Ask:
+
+> "Would you like to profile a **targeted window** (recommended — smaller traces, captures steady-state decode) or the **entire benchmark** run?"
+
+##### Option A: Targeted window (delay + max iterations)
+
+Compute recommended `delay_iterations` and `max_iterations` from the YAML config values. Read `OSL`, `CONC`, and `RANDOM_RANGE_RATIO` from the `envs` section (default `RANDOM_RANGE_RATIO` to `1.0` if absent).
+
+**Formulas:**
+
+```
+max_iters = max(OSL, OSL * 5 / CONC)
+
+if RANDOM_RANGE_RATIO < 1:
+    delay_iters = OSL * RANDOM_RANGE_RATIO * 5
+else:                          # RANDOM_RANGE_RATIO == 1
+    delay_iters = OSL * 5 - max_iters / 2
+```
+
+Compute the values, round to integers, then present them to the user for confirmation:
+
+> "Based on your config (OSL=X, CONC=Y, RANDOM_RANGE_RATIO=Z), I'd suggest:
+> - **delay_iterations** = A  (skip A engine iterations before profiling)
+> - **max_iterations** = B  (profile B iterations then stop)
+>
+> This targets steady-state decode after warmup. Does this look good, or would you like different values?"
+
+Once the user confirms (or provides overrides), apply **three** temporary edits on the remote node:
+
+**1. Add profiler iteration args to the benchmark script.**
+
+The script lives at `<magpie_repo>/InferenceMAX/benchmarks/<benchmark_script>` (the script name comes from the YAML `benchmark_script` field, defaulting to `vllm_mi300x.sh`). Find the `PROFILER_ARGS` block (the `if [[ "${PROFILE:-}" == "1" ]]` section) and append these lines:
+
+```bash
+ssh <node> "sed -i '/profiler-config.torch_profiler_use_gzip/a\\
+  PROFILER_ARGS+=(--profiler-config.delay_iterations <DELAY>)\\
+  PROFILER_ARGS+=(--profiler-config.max_iterations <MAX>)\\
+  PROFILER_ARGS+=(--profiler-config.ignore_frontend True)' \
+  <magpie_repo>/InferenceMAX/benchmarks/<benchmark_script>"
+```
+
+`ignore_frontend` must be `True` when using delay/max iterations, otherwise the AsyncLLM front-end profiler captures the entire range and adds significant overhead.
+
+**2. Ensure `PROFILER_ARGS` is passed to `vllm serve`.**
+
+The benchmark script may not include `"${PROFILER_ARGS[@]}"` in the `vllm serve` command. Check whether the `vllm serve` line already references `PROFILER_ARGS`. If it does not, inject it before the output redirection (`> $SERVER_LOG`):
+
+```bash
+ssh <node> "sed -i 's|\$EXTRA_VLLM_ARGS > \$SERVER_LOG|\$EXTRA_VLLM_ARGS \"\${PROFILER_ARGS[@]}\" > \$SERVER_LOG|' \
+  <magpie_repo>/InferenceMAX/benchmarks/<benchmark_script>"
+```
+
+Without this, the `PROFILER_ARGS` array is built but never actually passed to the vLLM server.
+
+**3. Increase `num_prompts` so the benchmark runs long enough for the profiling window.**
+
+By default, when profiling is enabled, `benchmark_lib.sh` caps `num_prompts` to `max_concurrency` (i.e. `CONC`). With delay + max iterations the benchmark needs many more prompts to reach and complete the profiling window. Override to `CONC * 10`:
+
+```bash
+ssh <node> "sed -i 's/num_prompts=\"\$max_concurrency\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
+  <magpie_repo>/InferenceMAX/benchmarks/benchmark_lib.sh"
+```
+
+Replace `10` with a different multiplier if the user requests it.
+
+##### Option B: Profile the entire benchmark
+
+Do **not** edit either script. The defaults are appropriate:
+- No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish.
+- `num_prompts` stays at `CONC` — keeps the trace to a manageable size since every iteration is profiled.
+
+Warn the user that full-benchmark traces will be very large (potentially several GB per rank for large models).
+
+#### Cleanup
+
+These edits are temporary. Magpie re-clones InferenceMAX when the directory is absent, so deleting `<magpie_repo>/InferenceMAX` before a future run restores defaults. No permanent code changes are made.
+
 ### Step 3: Run the Benchmark
 
 SSH into the target node, activate the conda environment, and run:
