@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Standalone analysis tools — run_full_standalone_analysis and its internal helpers."""
 
 import json
@@ -14,6 +20,7 @@ def _get_platform_specs():
     if standalone_dir not in sys.path:
         sys.path.insert(0, standalone_dir)
     from utils.platform_specs import PLATFORM_SPECS, CATEGORY_SKILL_MAP
+
     return PLATFORM_SPECS, CATEGORY_SKILL_MAP
 
 
@@ -21,60 +28,85 @@ def _get_platform_specs():
 # Internal pipeline steps (not exposed as MCP tools)
 # ---------------------------------------------------------------------------
 
-def _generate_perf_report(trace_path: str, output_dir: str,
-                          trace_type: str = "pytorch",
-                          enable_pseudo_ops: bool = True) -> dict:
+
+def _generate_perf_report(
+    trace_path: str,
+    output_dir: str,
+    trace_type: str = "pytorch",
+    enable_pseudo_ops: bool = True,
+) -> dict:
     import subprocess
 
     csv_dir = os.path.join(output_dir, "perf_report_csvs")
 
     if trace_type == "jax":
         cmd = [
-            sys.executable, "-m",
+            sys.executable,
+            "-m",
             "TraceLens.Reporting.generate_perf_report_jax",
-            "--profile_pb_path", trace_path,
-            "--output_csvs_dir", csv_dir,
+            "--profile_pb_path",
+            trace_path,
+            "--output_csvs_dir",
+            csv_dir,
         ]
     else:
         cmd = [
-            sys.executable, "-m",
+            sys.executable,
+            "-m",
             "TraceLens.Reporting.generate_perf_report_pytorch",
-            "--profile_json_path", trace_path,
-            "--output_csvs_dir", csv_dir,
+            "--profile_json_path",
+            trace_path,
+            "--output_csvs_dir",
+            csv_dir,
         ]
         if enable_pseudo_ops:
             cmd.append("--enable_pseudo_ops")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return {"error": f"Perf report generation failed (exit {result.returncode})",
-                "stderr": result.stderr[-2000:] if result.stderr else ""}
+        return {
+            "error": f"Perf report generation failed (exit {result.returncode})",
+            "stderr": result.stderr[-2000:] if result.stderr else "",
+        }
 
-    csvs = [f for f in os.listdir(csv_dir) if f.endswith(".csv")] if os.path.isdir(csv_dir) else []
+    csvs = (
+        [f for f in os.listdir(csv_dir) if f.endswith(".csv")]
+        if os.path.isdir(csv_dir)
+        else []
+    )
     return {"csv_dir": csv_dir, "csvs": csvs}
 
 
-def _prepare_agentic(platform: str, output_dir: str,
-                     trace_path: str = None,
-                     enable_pseudo_ops: bool = True) -> dict:
+def _prepare_agentic(
+    platform: str,
+    output_dir: str,
+    trace_path: str = None,
+    enable_pseudo_ops: bool = True,
+) -> dict:
     import subprocess
 
     script_path = os.path.join(_get_standalone_dir(), "orchestrator_prepare.py")
     effective_trace_path = trace_path or "none"
 
     cmd = [
-        sys.executable, script_path,
-        "--trace-path", effective_trace_path,
-        "--platform", platform,
-        "--output-dir", output_dir,
+        sys.executable,
+        script_path,
+        "--trace-path",
+        effective_trace_path,
+        "--platform",
+        platform,
+        "--output-dir",
+        output_dir,
     ]
     if not enable_pseudo_ops:
         cmd.append("--disable_pseudo_ops")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return {"error": f"orchestrator_prepare failed (exit {result.returncode})",
-                "stderr": result.stderr[-2000:] if result.stderr else ""}
+        return {
+            "error": f"orchestrator_prepare failed (exit {result.returncode})",
+            "stderr": result.stderr[-2000:] if result.stderr else "",
+        }
 
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
     if os.path.exists(manifest_path):
@@ -111,7 +143,8 @@ def _run_single_category(output_dir: str, category: str) -> dict:
 
     result = subprocess.run(
         [sys.executable, script_path, "--output-dir", output_dir],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
 
     metrics_path = os.path.join(output_dir, "category_data", f"{category}_metrics.json")
@@ -120,10 +153,17 @@ def _run_single_category(output_dir: str, category: str) -> dict:
             return json.load(f)
 
     if result.returncode != 0:
-        return {"category": category, "error": f"{module_name} failed (exit {result.returncode})",
-                "stderr": result.stderr[-2000:] if result.stderr else ""}
+        return {
+            "category": category,
+            "error": f"{module_name} failed (exit {result.returncode})",
+            "stderr": result.stderr[-2000:] if result.stderr else "",
+        }
 
-    return {"category": category, "status": "completed", "note": "No metrics JSON produced."}
+    return {
+        "category": category,
+        "status": "completed",
+        "note": "No metrics JSON produced.",
+    }
 
 
 def _run_all_category_analyses(output_dir: str) -> dict:
@@ -137,9 +177,12 @@ def _run_all_category_analyses(output_dir: str) -> dict:
     categories = [c["name"] for c in manifest.get("categories", [])]
 
     from concurrent.futures import ThreadPoolExecutor
+
     with ThreadPoolExecutor() as pool:
-        futures = {cat: pool.submit(_run_single_category, output_dir, cat)
-                   for cat in categories}
+        futures = {
+            cat: pool.submit(_run_single_category, output_dir, cat)
+            for cat in categories
+        }
         results = {cat: fut.result() for cat, fut in futures.items()}
 
     try:
@@ -147,6 +190,7 @@ def _run_all_category_analyses(output_dir: str) -> dict:
         if analyses_dir not in sys.path:
             sys.path.insert(0, analyses_dir)
         from analysis_utils import generate_plot_data
+
         generate_plot_data(output_dir)
     except Exception as e:
         results["_plot_data_error"] = str(e)
@@ -158,11 +202,15 @@ def _run_all_category_analyses(output_dir: str) -> dict:
 # Public: run_full_standalone_analysis
 # ---------------------------------------------------------------------------
 
-def run_full_standalone_analysis(trace_path: str, platform: str,
-                                 output_dir: str = None,
-                                 trace_type: str = "pytorch",
-                                 enable_pseudo_ops: bool = True,
-                                 cleanup: bool = True) -> dict:
+
+def run_full_standalone_analysis(
+    trace_path: str,
+    platform: str,
+    output_dir: str = None,
+    trace_type: str = "pytorch",
+    enable_pseudo_ops: bool = True,
+    cleanup: bool = True,
+) -> dict:
     """Run the complete standalone analysis pipeline in one call.
 
     Returns everything the AI Agent needs to write standalone_analysis.md.
@@ -172,6 +220,7 @@ def run_full_standalone_analysis(trace_path: str, platform: str,
 
     if not output_dir:
         import tempfile
+
         output_dir = tempfile.mkdtemp(prefix="tracelens_")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -187,21 +236,24 @@ def run_full_standalone_analysis(trace_path: str, platform: str,
         return result
 
     stat = os.stat(trace_path)
-    result["file_size_mb"] = round(stat.st_size / (1024 ** 2), 2)
+    result["file_size_mb"] = round(stat.st_size / (1024**2), 2)
 
     # Step 1: generate perf report
-    step1 = _generate_perf_report(trace_path, output_dir,
-                                  trace_type=trace_type,
-                                  enable_pseudo_ops=enable_pseudo_ops)
+    step1 = _generate_perf_report(
+        trace_path,
+        output_dir,
+        trace_type=trace_type,
+        enable_pseudo_ops=enable_pseudo_ops,
+    )
     result["steps"]["generate_perf_report"] = step1
     if "error" in step1:
         result["error"] = "generate_perf_report failed"
         return result
 
     # Step 2: prepare agentic
-    step2 = _prepare_agentic(platform, output_dir,
-                             trace_path=trace_path,
-                             enable_pseudo_ops=enable_pseudo_ops)
+    step2 = _prepare_agentic(
+        platform, output_dir, trace_path=trace_path, enable_pseudo_ops=enable_pseudo_ops
+    )
     result["steps"]["prepare_agentic"] = step2
     if "error" in step2:
         result["error"] = "prepare_agentic failed"

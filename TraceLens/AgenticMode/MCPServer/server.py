@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """TraceLens HTTP MCP Server — main entry point.
 
 Runs a single Starlette app via FastMCP that serves:

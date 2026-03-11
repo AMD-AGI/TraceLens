@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Comparative analysis tools — run_comparative_analysis."""
 
 import gzip
@@ -8,7 +14,9 @@ import tempfile
 
 
 def _init_comparative_path():
-    analysis_dir = os.path.join(os.path.dirname(__file__), "..", "Comparative", "Analysis")
+    analysis_dir = os.path.join(
+        os.path.dirname(__file__), "..", "Comparative", "Analysis"
+    )
     if analysis_dir not in sys.path:
         sys.path.insert(0, analysis_dir)
 
@@ -18,8 +26,8 @@ def _decompress_if_needed(trace_path: str, temp_dir: str) -> str:
     if trace_path.endswith(".gz"):
         base_name = os.path.basename(trace_path).replace(".gz", "")
         decompressed_path = os.path.join(temp_dir, base_name)
-        with gzip.open(trace_path, 'rb') as f_in:
-            with open(decompressed_path, 'wb') as f_out:
+        with gzip.open(trace_path, "rb") as f_in:
+            with open(decompressed_path, "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out)
         return decompressed_path
     return trace_path

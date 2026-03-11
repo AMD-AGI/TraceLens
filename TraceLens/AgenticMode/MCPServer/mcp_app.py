@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """MCP application — TraceLens GPU performance analysis server.
 
 Exposes 3 core tools:
@@ -17,7 +23,6 @@ from starlette.responses import JSONResponse
 
 from . import standalone_tools, comparative_tools
 from .config import config
-
 
 # ---------------------------------------------------------------------------
 # FastMCP instance
@@ -41,6 +46,7 @@ mcp = FastMCP(
 # Enums
 # ---------------------------------------------------------------------------
 
+
 class Platform(str, Enum):
     MI300X = "MI300X"
     MI325X = "MI325X"
@@ -59,6 +65,7 @@ class TraceType(str, Enum):
 # Tool 1: check_trace_file
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 def check_trace_file(trace_path: str) -> dict:
     """Check if a trace file exists on the server and return its metadata.
@@ -71,7 +78,7 @@ def check_trace_file(trace_path: str) -> dict:
         return {"exists": False, "path": p, "error": "Path is not a file."}
 
     stat = os.stat(p)
-    size_mb = round(stat.st_size / (1024 ** 2), 2)
+    size_mb = round(stat.st_size / (1024**2), 2)
 
     if p.endswith(".json.gz"):
         file_type = "json.gz (compressed trace)"
@@ -90,6 +97,7 @@ def check_trace_file(trace_path: str) -> dict:
 # ---------------------------------------------------------------------------
 # Tool 2: run_full_standalone_analysis
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 def run_full_standalone_analysis(
@@ -124,6 +132,7 @@ def run_full_standalone_analysis(
 # Tool 3: run_comparative_analysis
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 def run_comparative_analysis(
     gpu1_kineto: str,
@@ -152,6 +161,7 @@ def run_comparative_analysis(
 # Resources
 # ---------------------------------------------------------------------------
 
+
 @mcp.resource("tracelens://platform-specs")
 def get_platform_specs() -> str:
     """GPU platform specifications (HBM bandwidth, peak TFLOPS) for all supported platforms."""
@@ -162,6 +172,7 @@ def get_platform_specs() -> str:
 # ---------------------------------------------------------------------------
 # Prompt — standalone analysis workflow
 # ---------------------------------------------------------------------------
+
 
 @mcp.prompt()
 def standalone_analysis(
@@ -202,6 +213,7 @@ Exception: when quoting kernel names from traces, include the actual name.
 # ---------------------------------------------------------------------------
 # Custom HTTP routes
 # ---------------------------------------------------------------------------
+
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:

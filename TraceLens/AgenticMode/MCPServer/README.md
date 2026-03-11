@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TraceLens MCP Server
 
 TraceLens MCP Server is a GPU performance analysis service built on MCP (Model Context Protocol), enabling AI Agents (e.g., Cursor) to perform GPU trace analysis via natural language.
