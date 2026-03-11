@@ -125,7 +125,7 @@ Use the Common Recommendations table below as guidance. If idle <= 15%, state th
 idle time is within acceptable range and no action is needed.]
 
 ### [Recommendation Title]
-**Issue**: [1 sentence description]
+**Insight**: [1 sentence description]
 **Action**: [Specific steps to take]
 
 ## Impact Summary

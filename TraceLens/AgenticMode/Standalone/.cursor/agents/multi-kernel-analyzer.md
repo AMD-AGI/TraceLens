@@ -180,11 +180,11 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 ## Recommendations
 
 ### System P<N>: [Highest Priority Multi-Kernel Issue]
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 **Action**: [1-2 sentences]
 
 ### System P<N+1>: [Next Issue]
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 **Action**: [1-2 sentences]
 
 ## Technical Details
