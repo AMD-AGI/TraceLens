@@ -34,7 +34,7 @@ TraceLens MCP Server is a GPU performance analysis service built on MCP (Model C
                                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Shared NFS Storage                         │
-│                   /shared_nfs/xiaofei/...                        │
+│                        /shared_nfs/...                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -43,7 +43,8 @@ TraceLens MCP Server is a GPU performance analysis service built on MCP (Model C
 ### 1. Deploy the Server
 
 ```bash
-cd /shared_nfs/xiaofei/TraceLens-internal/TraceLens/AgenticMode/MCPServer
+git clone git@github.com:AMD-AGI/TraceLens-internal.git
+cd TraceLens-internal/TraceLens/AgenticMode/MCPServer
 ./run.sh
 ```
 
@@ -68,7 +69,7 @@ Add the MCP Server in Cursor Settings:
 Use natural language in Cursor to request analysis:
 
 ```
-Analyze this trace file: /shared_nfs/xiaofei/verl/outputs/profile/e2e/prof_rank-0.json.gz
+Analyze this trace file: /shared_nfs/<your_directory>/prof_rank-0.json.gz
 Platform is MI355X
 ```
 
@@ -199,8 +200,6 @@ Compares two trace files.
 |----------|---------|-------------|
 | `TRACELENS_HOST` | 0.0.0.0 | Listen address |
 | `TRACELENS_PORT` | 8000 | Listen port |
-| `TRACELENS_TTL_HOURS` | 24 | Cache TTL in hours |
-| `TRACELENS_MAX_CACHED` | 20 | Max number of cached traces |
 
 ## Supported Platforms
 
@@ -236,16 +235,16 @@ Response:
 
 ```
 MCPServer/
-├── __init__.py           # Package init
-├── __main__.py           # Entry point
-├── config.py             # Server configuration
-├── state.py              # TraceCache
-├── mcp_app.py            # MCP application
-├── standalone_tools.py   # Standalone analysis
-├── comparative_tools.py  # Comparative analysis
-├── server.py             # Server launcher
-├── run.sh                # Deployment script
-└── requirements.txt      # Dependencies
+├── __init__.py                    # Package init
+├── __main__.py                    # Entry point
+├── config.py                      # Server configuration
+├── server.py                      # Server launcher
+├── mcp_app.py                     # MCP application (tools, resources, prompts)
+├── standalone_tools.py            # Standalone analysis pipeline
+├── comparative_tools.py           # Comparative analysis pipeline
+├── run.sh                         # Deployment script
+├── requirements.txt               # Dependencies
+└── cursor_mcp_config.example.json # Cursor MCP config example
 ```
 
 ## FAQ

@@ -1,17 +1,8 @@
-"""Standalone analysis tools — run_full_standalone_analysis and its internal helpers.
-
-Adapted from PR #23 MCPServer/standalone_tools.py.
-Path resolution uses the same relative layout (MCPServer/ sits next to Standalone/).
-"""
+"""Standalone analysis tools — run_full_standalone_analysis and its internal helpers."""
 
 import json
 import os
 import sys
-from typing import Optional
-
-from .state import TraceCache
-
-_cache = TraceCache()
 
 
 def _get_standalone_dir() -> str:
@@ -207,7 +198,7 @@ def run_full_standalone_analysis(trace_path: str, platform: str,
         result["error"] = "generate_perf_report failed"
         return result
 
-    # Step 2-5: prepare agentic
+    # Step 2: prepare agentic
     step2 = _prepare_agentic(platform, output_dir,
                              trace_path=trace_path,
                              enable_pseudo_ops=enable_pseudo_ops)
@@ -246,7 +237,7 @@ def run_full_standalone_analysis(trace_path: str, platform: str,
     specs, _ = _get_platform_specs()
     platform_spec = specs.get(platform, {})
     max_tflops = platform_spec.get("max_achievable_tflops", {})
-    
+
     result["report_instructions"] = {
         "action": "IMPORTANT: Create a file named 'standalone_analysis.md' with the analysis report. Use the Write tool to save the file.",
         "output_file": "standalone_analysis.md",

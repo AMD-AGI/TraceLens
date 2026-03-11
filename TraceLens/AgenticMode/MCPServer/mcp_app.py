@@ -7,7 +7,6 @@ Exposes 3 core tools:
 """
 
 import json
-import logging
 import os
 from enum import Enum
 from typing import Optional
@@ -18,9 +17,6 @@ from starlette.responses import JSONResponse
 
 from . import standalone_tools, comparative_tools
 from .config import config
-from .standalone_tools import _cache
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +133,10 @@ def run_comparative_analysis(
     cleanup: bool = True,
 ) -> dict:
     """Compare two GPU traces (deterministic analysis, no LLM).
-    
+
     When cleanup=True (default), intermediate files are deleted after
     analysis — zero disk footprint.
-    
+
     Returns comparison data that can be used to write a comparison report.
     """
     return comparative_tools.run_comparative_analysis(
@@ -209,7 +205,4 @@ Exception: when quoting kernel names from traces, include the actual name.
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
-    return JSONResponse({
-        "status": "ok",
-        "cached_traces": len(_cache._entries),
-    })
+    return JSONResponse({"status": "ok"})

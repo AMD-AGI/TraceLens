@@ -5,15 +5,12 @@ import os
 import shutil
 import sys
 import tempfile
-from pathlib import Path
 
 
-def _get_comparative_dir():
-    comp_dir = os.path.join(os.path.dirname(__file__), "..", "Comparative")
-    analysis_dir = os.path.join(comp_dir, "Analysis")
+def _init_comparative_path():
+    analysis_dir = os.path.join(os.path.dirname(__file__), "..", "Comparative", "Analysis")
     if analysis_dir not in sys.path:
         sys.path.insert(0, analysis_dir)
-    return comp_dir, analysis_dir
 
 
 def _decompress_if_needed(trace_path: str, temp_dir: str) -> str:
@@ -36,11 +33,11 @@ def run_comparative_analysis(
     cleanup: bool = True,
 ) -> dict:
     """Run the deterministic part of comparative analysis (no LLM).
-    
+
     When cleanup=True (default), intermediate files are deleted after
     analysis and only the comparison data is returned.
     """
-    _get_comparative_dir()
+    _init_comparative_path()
 
     from jarvis_analysis import JarvisAnalyzer
 

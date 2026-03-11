@@ -7,12 +7,6 @@ mcp>=1.0.0
 # ASGI server
 uvicorn[standard]
 
-# Web framework
-fastapi
-
-# Async file I/O for large uploads
-aiofiles
-
 # Required by TraceLens core
 pandas
 openpyxl
