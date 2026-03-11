@@ -90,10 +90,10 @@ Compute recommended `delay_iterations` and `max_iterations` from the YAML config
 **Formulas:**
 
 ```
-max_iters = max(OSL, OSL * 5 / CONC)
+max_iters = min(OSL, OSL * 16 / CONC)
 
 if RANDOM_RANGE_RATIO < 1:
-    delay_iters = OSL * RANDOM_RANGE_RATIO * 5
+    delay_iters = OSL * RANDOM_RANGE_RATIO * 6
 else:                          # RANDOM_RANGE_RATIO == 1
     delay_iters = OSL * 5 - max_iters / 2
 ```
