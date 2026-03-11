@@ -51,7 +51,7 @@ class DataLoader:
                 writefile.write(data_str)
 
         # Use orjson for faster parsing (23% faster than stdlib json)
-        # Falls back to json if orjson not available
+        # Falls back to json if orjson not available or on decode errors
         try:
             import orjson
 
@@ -61,9 +61,16 @@ class DataLoader:
                 "orjson not available, falling back to standard json. "
                 "Install orjson for faster JSON parsing: pip install orjson"
             )
-            if isinstance(data, bytes):
-                data = data.decode("utf-8")
-            return json.loads(data)
+        except Exception as e:
+            # orjson is strict about UTF-8; fall back to stdlib json which is more lenient
+            logger.warning(
+                f"orjson decode failed ({e}), falling back to standard json"
+            )
+        
+        # Fallback to standard json (more lenient with encoding issues)
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", errors="surrogateescape")
+        return json.loads(data)
 
 
 class JaxProfileProcessor:

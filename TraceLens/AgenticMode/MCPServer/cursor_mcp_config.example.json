@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tracelens": {
+      "url": "http://<SERVER_IP>:8000/mcp",
+      "description": "TraceLens GPU performance analysis — remote HTTP MCP server"
+    }
+  }
+}
