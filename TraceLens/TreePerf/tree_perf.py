@@ -13,6 +13,7 @@ import pprint
 
 # TODO: warning should show the stack as well
 import warnings
+import multiprocessing
 from collections import defaultdict
 from functools import partial
 from typing import Any, Callable, Dict
@@ -33,6 +34,46 @@ from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
+
+
+# Minimum number of launchers before using a fork-based worker pool.
+# Below this the pool startup overhead exceeds the parallel benefit.
+_PARALLEL_LAUNCHER_THRESHOLD = 50
+
+# Module-level globals written by the main process before pool creation so
+# that forked workers inherit them via copy-on-write.  Only the int
+# launcher UID is pickled per task; the tree and kernel data are accessed
+# directly from the inherited address space.
+# NOTE: not thread-safe — assumes a single-threaded pipeline (typical).
+_FORK_ANALYZER: "TreePerfAnalyzer | None" = None
+_FORK_LAUNCHER_KERNELS: "dict | None" = None
+
+
+def _compute_launcher_metrics_fork(launcher_uid):
+    """Fork-worker: compute direct and subtree GPU busy times for one launcher.
+
+    Reads _FORK_ANALYZER and _FORK_LAUNCHER_KERNELS from the forked address
+    space — no pickling of the tree or kernel lists.  Returns (direct_time,
+    subtree_time) as plain floats.
+    """
+    analyzer = _FORK_ANALYZER
+    direct_kernels = _FORK_LAUNCHER_KERNELS[launcher_uid]
+    event = analyzer.tree.get_UID2event(launcher_uid)
+
+    direct_time = (
+        analyzer.GPUEventAnalyser(direct_kernels).compute_metrics()["busy_time"]
+        if direct_kernels
+        else 0
+    )
+
+    _, subtree_uids = analyzer.loop_and_aggregate_kernels([event])
+    subtree_kernels = [analyzer.tree.events_by_uid[uid] for uid in subtree_uids]
+    subtree_time = (
+        analyzer.GPUEventAnalyser(subtree_kernels).compute_metrics()["busy_time"]
+        if subtree_kernels
+        else 0
+    )
+    return direct_time, subtree_time
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -306,18 +347,18 @@ class TreePerfAnalyzer:
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
-        if len(list_kernels) > 0:
+        if list_kernels:
             busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
                 "busy_time"
             ]
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
-            cpu_op_list, filter_func=self.non_data_mov_filter
-        )
+        # Filter non-data-movement kernels from the already-collected list instead
+        # of re-traversing the subtree with a filter function.  non_data_mov_filter
+        # only inspects event["name"], so it is safe to apply after collection.
         list_non_data_mov_kernels = [
-            self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
+            k for k in list_kernels if self.non_data_mov_filter(k)
         ]
         busy_non_data_mov_time = 0
-        if len(list_non_data_mov_kernels) > 0:
+        if list_non_data_mov_kernels:
             busy_non_data_mov_time = self.GPUEventAnalyser(
                 list_non_data_mov_kernels
             ).compute_metrics()["busy_time"]
@@ -745,16 +786,57 @@ class TreePerfAnalyzer:
             key=lambda uid: self.tree.get_UID2event(uid).get("ts", 0),
         )
 
-        for launcher_uid in sorted_launcher_uids:
+        # Phase 3 — parallel launcher metric computation.
+        #
+        # Strategy: set module-level globals before creating a fork-based pool
+        # so that worker processes inherit the full tree via copy-on-write
+        # without pickling.  Each task sends only a single int (launcher_uid)
+        # and receives back two floats (direct_time, subtree_time).
+        #
+        # Falls back to serial execution for small traces where pool startup
+        # overhead would exceed the parallel benefit.
+        n = len(sorted_launcher_uids)
+        if n >= _PARALLEL_LAUNCHER_THRESHOLD:
+            global _FORK_ANALYZER, _FORK_LAUNCHER_KERNELS
+            _FORK_ANALYZER = self
+            _FORK_LAUNCHER_KERNELS = launcher_to_kernels
+            try:
+                _ctx = multiprocessing.get_context("fork")
+                _chunksize = max(1, n // ((os.cpu_count() or 4) * 4))
+                with _ctx.Pool() as _pool:
+                    _results = _pool.map(
+                        _compute_launcher_metrics_fork,
+                        sorted_launcher_uids,
+                        chunksize=_chunksize,
+                    )
+            finally:
+                _FORK_ANALYZER = None
+                _FORK_LAUNCHER_KERNELS = None
+            direct_times = [r[0] for r in _results]
+            subtree_times = [r[1] for r in _results]
+        else:
+            direct_times = []
+            subtree_times = []
+            for launcher_uid in sorted_launcher_uids:
+                kernels = launcher_to_kernels[launcher_uid]
+                event = self.tree.get_UID2event(launcher_uid)
+                direct_times.append(
+                    self.GPUEventAnalyser(kernels).compute_metrics()["busy_time"]
+                    if kernels else 0
+                )
+                _, subtree_uids = self.loop_and_aggregate_kernels([event])
+                subtree_kernels = [self.tree.events_by_uid[uid] for uid in subtree_uids]
+                subtree_times.append(
+                    self.GPUEventAnalyser(subtree_kernels).compute_metrics()["busy_time"]
+                    if subtree_kernels else 0
+                )
+
+        # Apply results and build output list.
+        for i, launcher_uid in enumerate(sorted_launcher_uids):
             kernels = launcher_to_kernels[launcher_uid]
             event = self.tree.get_UID2event(launcher_uid)
-
-            event["total_direct_kernel_time"] = self.GPUEventAnalyser(
-                kernels
-            ).compute_metrics()["busy_time"]
-            event["total_subtree_kernel_time"] = self._compute_subtree_kernel_time_us(
-                event
-            )
+            event["total_direct_kernel_time"] = direct_times[i]
+            event["total_subtree_kernel_time"] = subtree_times[i]
             event["direct_kernel_count"] = len(kernels)
             event["kernel_details"] = [
                 {
