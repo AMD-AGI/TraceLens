@@ -599,7 +599,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ### 🔴 P1: <Brief Title>
 
-**Issue**: [1 sentence - what's wrong]
+**Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
@@ -611,7 +611,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ### 🟡 P2: <Brief Title>
 
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
 
@@ -623,7 +623,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ### 🟢 P3: <Brief Title>
 
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
 
@@ -654,7 +654,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 🔴 P1: <CPU/Idle Title OR Multi-Kernel Issue Title>
 
-**Issue**: [1-2 sentences - what's wrong]
+**Insight**: [1-2 sentences - what's wrong]
 
 **Action**: [1-2 sentences - what to do]
 
@@ -666,7 +666,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 🟡 P2: <Multi-Kernel Issue Title>
 
-**Issue**: [1 sentence - what's wrong]
+**Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - what to do]
 
@@ -676,7 +676,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 🟢 P3: <Next Multi-Kernel Issue>
 
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
 
