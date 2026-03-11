@@ -4882,6 +4882,17 @@ class EPComm:
     These all-to-all token-routing ops are used in MoE models (e.g., DeepEP /
     Primus Turbo Deep EP).  They move token tensors between GPU ranks; there is
     no matrix multiply, so flops() = 0 and bytes() = token-tensor volume.
+
+    Placement note
+    --------------
+    EPComm lives in perf_model.py so that DeepEP ops surface in the TraceLens
+    perf report with a named category (EP_Communication) and a bandwidth metric
+    (TB/s) instead of disappearing into "other".  The relevant performance
+    metric for these ops is TB/s, not TFLOPS/s or roofline efficiency — callers
+    should interpret GFLOPS = 0 / TFLOPS/s = nan as expected, not as missing
+    data.  A more natural home would be alongside NcclAnalyser (which handles
+    NCCL collectives), but DeepEP uses intra-node shared memory (not NCCL) and
+    there is no existing EP-specific comm analysis infrastructure to extend.
     """
 
     def __init__(self, event, arch=None, python_path=None):
@@ -4920,6 +4931,12 @@ class EPComm:
         if self.num_tokens is None or self.hidden_dim is None or self.bpe is None:
             return None
         return self.num_tokens * self.hidden_dim * self.bpe
+
+    def get_maf_type(self):
+        return None
+
+    def get_compute_precision(self):
+        return None
 
 
 class deepep_dispatch(EPComm):
