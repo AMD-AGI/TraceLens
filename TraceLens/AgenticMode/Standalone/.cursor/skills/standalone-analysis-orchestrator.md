@@ -35,6 +35,12 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ---
 
+## Shell Permissions for Remote Commands
+ 
+**All `ssh` commands** (and any shell commands that connect to the node/container) should first be attempted with `required_permissions: ["full_network"]`. If the command fails due to SSH authentication or agent access issues (e.g., "Permission denied", "Connection refused", or the command is rejected/aborted by the sandbox), ask the user for permission to retry with `required_permissions: ["all"]`, explaining that full sandbox access is needed for SSH agent and config access. Once the user approves `"all"` permissions, use `"all"` for all subsequent SSH commands in the session without asking again.
+ 
+---
+
 ## Workflow Steps
 
 ```
@@ -78,9 +84,31 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 4. **Container Name**
    - Ask: "Which Docker container has TraceLens installed?"
 
-5. **Output Directory** (Optional)
+5. **Virtual Environment Path** (Optional)
+   - Ask: "If TraceLens is installed in a virtual environment on the remote server / container, provide the path to the venv (e.g. `/opt/venvs/tracelens`). Press Enter to skip."
+   - When provided, **all** Python commands must be prefixed with `source <venv_path>/bin/activate &&` inside the remote shell to ensure the correct Python environment is used.
+   - Example with venv: `ssh <node> "docker exec <container> bash -c 'source /opt/venvs/tracelens/bin/activate && python3 ...'"` 
+   - Example without venv: `ssh <node> "docker exec <container> python3 ..."`
+
+6. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+### Command Execution Pattern
+
+All remote commands follow one of two patterns depending on whether a virtual environment path was provided:
+
+**Without venv (`<venv_path>` not set):**
+```bash
+ssh <node> "docker exec <container> <command>"
+```
+
+**With venv (`<venv_path>` set):**
+```bash
+ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && <command>'"
+```
+
+Throughout this document, commands are shown in the **without-venv** form for brevity. When a `<venv_path>` is configured, wrap every command using the **with-venv** pattern above.
 
 ---
 
@@ -663,7 +691,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ### 🔴 P1: <Brief Title>
 
-**Issue**: [1 sentence - what's wrong]
+**Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
@@ -675,7 +703,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ### 🟡 P2: <Brief Title>
 
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
 
@@ -687,7 +715,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ### 🟢 P3: <Brief Title>
 
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
 
@@ -718,7 +746,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 🔴 P1: <CPU/Idle Title OR Multi-Kernel Issue Title>
 
-**Issue**: [1-2 sentences - what's wrong]
+**Insight**: [1-2 sentences - what's wrong]
 
 **Action**: [1-2 sentences - what to do]
 
@@ -730,7 +758,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 🟡 P2: <Multi-Kernel Issue Title>
 
-**Issue**: [1 sentence - what's wrong]
+**Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - what to do]
 
@@ -740,7 +768,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### 🟢 P3: <Next Multi-Kernel Issue>
 
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
 
@@ -750,7 +778,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 For each category, include total time, % of compute, average efficiency (if from metrics), and either:
 
-- **Per-op table from `*_metrics.json`**: columns **Operation | Kernel time (ms) | % of category | Count | Efficiency | Potential improvement (time, E2E %)**. The last column shows both time range and E2E % range from `impact_estimates` when kernel_tuning estimates exist (e.g. "~635–2378 ms (1.12–4.19% E2E)"); use "—" when no estimates. Match impact rows to ops by `time_ms` (and operation name) from the same metrics file.
+- **Per-op table from `*_metrics.json`**: columns **Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Potential improvement (time, E2E %)**. The FLOPS/Byte column shows arithmetic intensity from `operations[i].efficiency.flops_per_byte` (use "—" when null); this grounds the compute-bound vs memory-bound classification against the platform's ridge point (peak MAF / peak HBM BW). The last column shows both time range and E2E % range from `impact_estimates` when kernel_tuning estimates exist (e.g. "~635–2378 ms (1.12–4.19% E2E)"); use "—" when no estimates. Match impact rows to ops by `time_ms` (and operation name) from the same metrics file.
 
 - **For categories with a CSV but no metrics** (e.g. **multi_tensor_apply**): a **Most expensive instances** table from the category CSV: top N rows by `Kernel Time (µs)_sum`, columns Operation | Kernel time (ms) | % of category | Count. (No Efficiency or Potential improvement columns when metrics are absent.)
 
@@ -839,7 +867,7 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 8. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
    - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
    - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
-9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. For compute categories with metrics, use a per-op table from `*_metrics.json` with columns: Operation | Kernel time (ms) | % of category | Count | Efficiency | **Potential improvement (time, E2E %)** (from impact_estimates; "—" when none). For categories with a CSV but no metrics (e.g. multi_tensor_apply), include a "Most expensive instances" table from the category CSV (top ops by kernel time). In System-Level, use explicit HTML anchors `<a id="cpu-idle-time-analysis"></a>` and `<a id="multi-kernel-issues"></a>` before the subsection headings so in-report links (`#cpu-idle-time-analysis`, `#multi-kernel-issues`) work in all renderers. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
+9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. For compute categories with metrics, use a per-op table from `*_metrics.json` with columns: Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | **Potential improvement (time, E2E %)** (FLOPS/Byte from `efficiency.flops_per_byte`, "—" when null; improvement from impact_estimates, "—" when none). For categories with a CSV but no metrics (e.g. multi_tensor_apply), include a "Most expensive instances" table from the category CSV (top ops by kernel time). In System-Level, use explicit HTML anchors `<a id="cpu-idle-time-analysis"></a>` and `<a id="multi-kernel-issues"></a>` before the subsection headings so in-report links (`#cpu-idle-time-analysis`, `#multi-kernel-issues`) work in all renderers. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
 10. **No redundancy**: Information appears in ONE place only
 11. **Recommendations**: Max ~10 lines PER recommendation. Use category-specific Action text (SDPA: tile/block, backend; GEMM: fusion, tile, library; elementwise: fuse with adjacent; do not suggest kernel fusion for SDPA).
 
