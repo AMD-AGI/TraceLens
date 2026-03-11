@@ -229,6 +229,63 @@ To detect graph mode: check the raw trace for `hipGraphLaunch` or `cudaGraphLaun
 
 When working with vLLM traces captured in graph-replay mode, split them before running TraceLens analysis. If the trace is eager-mode (no graph replay events), skip this section and use `TraceLens_generate_perf_report_pytorch` directly on the raw trace.
 
+### Prerequisites: Patched vLLM for graph capture profiling
+
+For full graph-mode analysis (shapes, roofline, call stacks for graph-replayed kernels), vLLM must be patched to profile the graph capture phase. Without the patch, the trace only contains opaque graph replay events with no kernel-level detail inside the graphs.
+
+**Option A: Build a patched Docker image (recommended)**
+
+TraceLens provides a build script that applies the patch automatically:
+
+```bash
+cd <TraceLens_repo>
+bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
+    <version_tag> \
+    /path/to/TraceLens-internal \
+    -t tracelens-vllm
+```
+
+Supported version tags and base images:
+
+| Tag | Base Image | vLLM Version |
+|-----|-----------|--------------|
+| `v14` | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` | v0.14.0 |
+| `v15` | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` | v0.15.0 |
+| `v16` | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0 |
+
+Then tell Magpie to use this image by adding `docker_image` to the benchmark YAML config:
+
+```yaml
+benchmark:
+  framework: vllm
+  docker_image: tracelens-vllm
+  ...
+```
+
+This overrides the default auto-selected image from `benchmark_images.yaml`.
+
+**Option B: Apply the patch manually inside the Magpie Docker container**
+
+If you cannot build a custom image, you can patch the running container that Magpie creates. This requires exec-ing into the container before or during the benchmark run, since the patch must be applied to the vLLM installation inside the container (not on the host).
+
+```bash
+# Exec into the running Magpie benchmark container
+docker exec -it <container_name> bash
+
+# Find where vLLM is installed inside the container
+python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
+
+# Apply the matching patch (TraceLens repo must be mounted or copied in)
+cd /path/to/vllm/../
+git apply /path/to/TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_v0.15.0.patch
+```
+
+Available patches: `vllm_v0.13.0.patch`, `vllm_v0.14.0.patch`, `vllm_v0.15.0.patch`, `vllm_v0.16.0.patch`.
+
+Note: Option A (pre-built image) is strongly preferred since it avoids the need to patch a running container and ensures the patch is applied before profiling begins.
+
+### Step 1: Split the trace by annotation iteration
+
 ```bash
 ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
   cd <TraceLens_repo> && \
@@ -244,6 +301,7 @@ This produces ~3 files in `graph_split/`:
 - `decode_*_.json.gz` — decode-only phase
 - `execution_details.json` — iteration metadata
 
+### Step 2: Process the split trace
 
 Run the standard perf report tool on the split iteration trace (not the raw trace).
 
