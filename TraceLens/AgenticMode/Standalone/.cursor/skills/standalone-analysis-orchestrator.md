@@ -44,10 +44,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0.   Query User Inputs (Platform, Trace Path, Node, Container)
-0.5. Detect Trace Type (eager vs graph-mode) — route to Step 1 or Step 1-SB
-1.   Generate Performance Report (eager-mode path)
-1-SB. Semantic Breakdown fallback (graph-mode path) — produces same CSVs
+0. Query User Inputs (Platform, Trace Path, Node, Container)
+1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
@@ -112,39 +110,7 @@ Throughout this document, commands are shown in the **without-venv** form for br
 
 ---
 
-## Step 0.5: Detect Trace Type
-
-Before running any TraceLens commands, detect whether the trace is eager-mode or graph-mode. This lightweight check avoids wasting time on a TraceLens perf report that would fail for graph-mode traces.
-
-**Run on the node/container:**
-
-```bash
-ssh <node> "docker exec <container> python3 -c \"
-import json, sys
-with open('<trace_path>') as f:
-    raw = f.read(2_000_000)  # read first 2MB
-graph_markers = ['hipGraphLaunch', 'cudaGraphLaunch']
-compile_markers = ['triton_poi_fused_', 'triton_red_fused_', 'triton_per_fused_', 'CompiledFunction']
-is_graph = any(m in raw for m in graph_markers)
-is_compile = any(m in raw for m in compile_markers)
-if is_graph or is_compile:
-    detected = 'graph_replay' if is_graph else 'torch_compile'
-    print(f'GRAPH_MODE:{detected}')
-    sys.exit(0)
-print('EAGER_MODE')
-\""
-```
-
-**Routing:**
-
-- If output is `EAGER_MODE`: proceed to **Step 1** (TraceLens perf report).
-- If output starts with `GRAPH_MODE`: skip Step 1, proceed to **Step 1-SB** (Semantic Breakdown fallback). Inform the user which mode was detected.
-
----
-
 ## Step 1: Generate Performance Report
-
-**(Eager-mode path only — skipped when graph-mode detected in Step 0.5)**
 
 Execute TraceLens CLI in the container:
 
@@ -160,54 +126,6 @@ ssh <node> "docker exec <container> \
 This generates:
 - `perf_report.xlsx` - Excel report with all sheets
 - `perf_report_csvs/` directory with CSV files
-
----
-
-## Step 1-SB: Semantic Breakdown Fallback
-
-**(Graph-mode path only — used when graph-mode detected in Step 0.5)**
-
-When the trace is graph-mode (GPU Graph replay or torch.compile), TraceLens perf report generation cannot produce the required CSVs because there are no CPU-side operations. Instead, use the Semantic Breakdown skill to label kernels and generate standalone-compatible CSVs.
-
-**Invoke the `trace-semantic-breakdown` skill** (located at `TraceLens/AgenticMode/SemanticComparison/.cursor/skills/trace-semantic-breakdown.md`). Run its Steps 1 through 6, with the output CSVs directory set to `<output_dir>/perf_report_csvs`:
-
-```bash
-# Steps 1-3 are scripts; Step 4 is LLM labeling; Step 5 requires config.json
-
-# Step 1: Extract trace data
-python TraceLens/AgenticMode/SemanticComparison/trace_breakdown/extract_trace_data.py \
-    <trace_path> -o <output_dir>/extracted.json
-
-# Step 2: Find layer pattern
-python TraceLens/AgenticMode/SemanticComparison/trace_breakdown/find_layer_pattern.py \
-    <output_dir>/extracted.json -o <output_dir>/pattern.json
-
-# Step 3: Classify kernel types
-python TraceLens/AgenticMode/SemanticComparison/trace_breakdown/classify_kernels.py \
-    <output_dir>/extracted.json -o <output_dir>/classified.json
-
-# Step 4: LLM assigns semantic labels → <output_dir>/semantic_labels.json
-# (Follow the labeling instructions in the semantic breakdown skill)
-
-# Step 5: Derive shapes (requires HuggingFace config.json for the model)
-python TraceLens/AgenticMode/SemanticComparison/trace_breakdown/derive_shapes.py \
-    <output_dir>/semantic_labels.json <config.json> \
-    --num_tokens <T> -o <output_dir>/derived_shapes.json
-
-# Step 6: Generate report with standalone-compatible CSVs
-python TraceLens/AgenticMode/SemanticComparison/trace_breakdown/generate_semantic_report.py \
-    <output_dir>/semantic_labels.json <output_dir>/derived_shapes.json \
-    --gpu_arch <gpu_arch.json> \
-    --output_csvs_dir <output_dir>/perf_report_csvs
-```
-
-**Additional inputs needed from the user** (ask when entering graph-mode path):
-- HuggingFace `config.json` path for the model being traced
-- Number of tokens (`--num_tokens`): batch size for decode, prompt_length * batch for prefill
-
-After Step 1-SB completes, `perf_report_csvs/` contains `gpu_timeline.csv`, `ops_summary.csv`, and `unified_perf_summary.csv` in the same format as Step 1 would produce. **Continue with Steps 2-5 as normal.**
-
-**Note:** System-level analysis (Step 6: CPU/idle and multi-kernel) is typically not applicable for graph-mode traces since they are pure GPU computation with no idle time, memcpy, or exposed communication. The `gpu_timeline.csv` reports 100% computation, so CPU/idle analysis will not be triggered and multi-kernel analysis will find no events.
 
 ---
 
@@ -875,9 +793,14 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 
 ## Error Handling
 
-### Graph-Mode / Torch Compile Traces
+### Unsupported Trace Features
 
-Graph-mode and torch.compile traces are handled via the Semantic Breakdown fallback (Step 1-SB), which is routed to automatically by Step 0.5. If Step 0.5 was bypassed and Step 1 fails unexpectedly, check the trace for graph-mode markers (`hipGraphLaunch`, `cudaGraphLaunch`) or torch.compile patterns (`triton_poi_fused_*`, `CompiledFunction`). If found, go back and run Step 1-SB instead.
+If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
+
+- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`.
+- **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
+
+If found, inform the user which feature was detected and that TraceLens Agentic Mode currently supports eager-mode PyTorch traces only. **Abort** -- do not retry or continue.
 
 ### Before Invoking Subagents
 - Read `category_data/category_manifest.json` to get valid categories
