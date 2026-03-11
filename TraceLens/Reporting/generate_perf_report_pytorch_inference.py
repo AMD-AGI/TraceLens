@@ -538,7 +538,7 @@ def generate_perf_report_pytorch(
 
         graph_launch_events = [event for event in perf_analyzer.tree.events if "graphlaunch" in event.get("name", "").lower()]
         if len(graph_launch_events) > 0:
-            warnings.warn("There are hipgraph launches (Count: %d) in this trace, but a graph capture folder not provided, the analysis might be limited", len(graph_launch_events))
+            warnings.warn(f"There are hipgraph launches (Count: {len(graph_launch_events)}) in this trace, but a graph capture folder not provided, the analysis might be limited", UserWarning)
     
     ## Apply annotation for vLLM eager and replay phase
     perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd"])
@@ -855,7 +855,7 @@ def generate_perf_report_pytorch(
             for sheet_name, df in dict_name2df.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"DataFrames successfully written to {output_xlsx_path}")
-
+    
     return dict_name2df
 
 
