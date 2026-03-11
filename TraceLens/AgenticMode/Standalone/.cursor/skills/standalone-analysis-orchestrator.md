@@ -82,9 +82,31 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 4. **Container Name**
    - Ask: "Which Docker container has TraceLens installed?"
 
-5. **Output Directory** (Optional)
+5. **Virtual Environment Path** (Optional)
+   - Ask: "If TraceLens is installed in a virtual environment on the remote server / container, provide the path to the venv (e.g. `/opt/venvs/tracelens`). Press Enter to skip."
+   - When provided, **all** Python commands must be prefixed with `source <venv_path>/bin/activate &&` inside the remote shell to ensure the correct Python environment is used.
+   - Example with venv: `ssh <node> "docker exec <container> bash -c 'source /opt/venvs/tracelens/bin/activate && python3 ...'"` 
+   - Example without venv: `ssh <node> "docker exec <container> python3 ..."`
+
+6. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+### Command Execution Pattern
+
+All remote commands follow one of two patterns depending on whether a virtual environment path was provided:
+
+**Without venv (`<venv_path>` not set):**
+```bash
+ssh <node> "docker exec <container> <command>"
+```
+
+**With venv (`<venv_path>` set):**
+```bash
+ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && <command>'"
+```
+
+Throughout this document, commands are shown in the **without-venv** form for brevity. When a `<venv_path>` is configured, wrap every command using the **with-venv** pattern above.
 
 ---
 
