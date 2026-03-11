@@ -27,14 +27,14 @@ class BaseTraceToTree(ABC):
         event_to_category: Callable[[dict], str] = None,
     ):
 
-        self.events = [
-            {**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i}
-            for i, data in enumerate(events_data)
-        ]
-        self.events_by_uid = {
-            event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event
-            for event in self.events
-        }
+        # Stamp each event with a sequential UID in-place rather than copying
+        # the entire dict just to add one key.  Avoids O(N * dict_size) peak
+        # allocation; callers pass freshly-loaded JSON dicts not shared elsewhere.
+        _UID_KEY = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        for i, event in enumerate(events_data):
+            event[_UID_KEY] = i
+        self.events = list(events_data)
+        self.events_by_uid = {event[_UID_KEY]: event for event in self.events}
 
         if compute_end_times:
             self._compute_event_end_times()
@@ -89,7 +89,9 @@ class BaseTraceToTree(ABC):
         pass
 
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
-        return self.event_to_category(event) == "python_function" and event.get(
+        # Use the already-cached "cat" key directly instead of calling
+        # event_to_category(), which adds function-call overhead in tight loops.
+        return event.get("cat") == "python_function" and event.get(
             TraceLens.util.TraceEventUtils.TraceKeys.Name, ""
         ).startswith("nn.Module:")
 
@@ -106,9 +108,10 @@ class BaseTraceToTree(ABC):
         def event_filter(event):
             cat = self.event_to_category(event)
             event["cat"] = cat
-            is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
-            is_python_event = self.event_to_category(event) == "python_function"
-            return is_cpu_or_cuda_event or (add_python_func and is_python_event)
+            # Use the already-computed cat value — do not call event_to_category again.
+            return cat in {"cpu_op", "cuda_runtime", "cuda_driver"} or (
+                add_python_func and cat == "python_function"
+            )
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
 
@@ -141,7 +144,7 @@ class BaseTraceToTree(ABC):
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
                 popped_event = stack.pop()
-                if self.event_to_category(popped_event) == "cpu_op":
+                if popped_event.get("cat") == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
                 # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
@@ -177,7 +180,7 @@ class BaseTraceToTree(ABC):
                     event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
                 )
 
-            if self.event_to_category(event) == "cpu_op":
+            if event.get("cat") == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
                     self.cpu_root_nodes.append(
@@ -691,13 +694,12 @@ class TraceToTree:
         #      - Mark as a root node if it is the first CPU operation in the stack.
         #      - Increment the count of CPU operations in the stack.
         def event_filter(event):
-            is_cpu_or_cuda_event = self.event_to_category(event) in {
-                "cpu_op",
-                "cuda_runtime",
-                "cuda_driver",
-            }
-            is_python_event = self.event_to_category(event) == "python_function"
-            return is_cpu_or_cuda_event or (add_python_func and is_python_event)
+            # PyTorch trace events already carry "cat" from the JSON; read it
+            # once and reuse — avoids two event_to_category() call overheads.
+            cat = event.get("cat")
+            return cat in {"cpu_op", "cuda_runtime", "cuda_driver"} or (
+                add_python_func and cat == "python_function"
+            )
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
 
@@ -730,7 +732,7 @@ class TraceToTree:
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
                 popped_event = stack.pop()
-                if self.event_to_category(popped_event) == "cpu_op":
+                if popped_event.get("cat") == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
                 # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
@@ -766,7 +768,7 @@ class TraceToTree:
                 name = re.sub(r"_\d+$", "", name)
                 nn_module_stack.append(name)
 
-            if self.event_to_category(event) == "cpu_op":
+            if event.get("cat") == "cpu_op":
                 if dict_pidtid2num_cpu_ops[stack_key] == 0:
                     event["cpu_op_root"] = True
                     self.cpu_root_nodes.append(
@@ -1335,7 +1337,9 @@ class TraceToTree:
         return None
 
     def _is_nn_module_event(self, event: Dict[str, Any]) -> bool:
-        return self.event_to_category(event) == "python_function" and event.get(
+        # Use the already-cached "cat" key directly instead of calling
+        # event_to_category(), which adds function-call overhead in tight loops.
+        return event.get("cat") == "python_function" and event.get(
             TraceLens.util.TraceEventUtils.TraceKeys.Name, ""
         ).startswith("nn.Module:")
 
