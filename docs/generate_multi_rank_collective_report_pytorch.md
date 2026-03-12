@@ -76,6 +76,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 | `--agg_metrics` | `mean median min max` | Aggregations to compute in summaries. Allowed: `mean`, `median`, `min`, `max` (space-separated). |
 | `--use_multiprocessing` | `False` | Enable parallel trace loading using multiprocessing. Can provide speedup (system-dependent) but uses more CPU resources. |
 | `--max_workers` | `os.cpu_count()` | Maximum number of worker processes for parallel loading (requires `--use_multiprocessing`). Override to limit resource usage if needed. |
+| `--gpus_per_node` | _auto-detected_ | Number of GPUs per node. When known, `node_id` and `node_span` columns are added to report sheets, labeling each collective's process group as `intra_node` or `inter_node`. Auto-detected from trace `deviceProperties` if omitted. |
 
 
 ---
@@ -92,6 +93,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 
 _Notes:_
 - Summary sheets (`nccl_summary_*`) are **always** produced; detailed per-event sheets (`nccl_long`, `nccl_implicit_sync`, `nccl_all2allv`) appear when `--detailed_analysis` is set.
+- When `gpus_per_node` is known (auto-detected or set via `--gpus_per_node`), all sheets gain `node_id` and `node_span` columns. `node_span` is `intra_node` when all ranks in the process group reside on the same node, or `inter_node` otherwise. You can filter or pivot on these columns in Excel to compare intra- vs inter-node communication.
 - Column sets can evolve; the above reflects the provided example workbook.
 ---
 
