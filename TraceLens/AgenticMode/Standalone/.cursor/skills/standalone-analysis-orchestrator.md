@@ -35,10 +35,16 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ---
 
+## Shell Permissions for Remote Commands
+ 
+**All `ssh` commands** (and any shell commands that connect to the node/container) should first be attempted with `required_permissions: ["full_network"]`. If the command fails due to SSH authentication or agent access issues (e.g., "Permission denied", "Connection refused", or the command is rejected/aborted by the sandbox), ask the user for permission to retry with `required_permissions: ["all"]`, explaining that full sandbox access is needed for SSH agent and config access. Once the user approves `"all"` permissions, use `"all"` for all subsequent SSH commands in the session without asking again.
+ 
+---
+
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Node, Container)
+0. Query User Inputs (Platform, Trace Path, Environment Setup)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
@@ -70,15 +76,40 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      4. **MI355X**
      5. **MI400**
 
-3. **Node Name**
-   - Ask: "Which Node should we use for analysis?"
+3. **Environment Setup**
+   - Ask: "Are you running locally or on a cluster?"
+     - If **cluster**: Ask "Which node should we use?" → `<node>`
+   - Ask: "Are you working in a containerized environment (e.g. Docker)?"
+     - If **yes**: Ask "What is the container name?" → `<container>`
+   - Ask: "Are you using a virtual environment?"
+     - If **yes**: Ask "What is the path to the venv? (e.g. `/opt/venvs/tracelens`)" → `<venv_path>`
 
-4. **Container Name**
-   - Ask: "Which Docker container has TraceLens installed?"
-
-5. **Output Directory** (Optional)
+4. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+### Build and Cache Command Prefix
+
+After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
+
+The template uses `{CMD}` as a placeholder for the actual command. Build using this lookup:
+
+| Local/Cluster | Container | Venv | Template |
+|---------------|-----------|------|----------|
+| Local | No | No | `{CMD}` |
+| Local | Yes | No | `docker exec <container> {CMD}` |
+| Local | No | Yes | `bash -c 'source <venv_path>/bin/activate && {CMD}'` |
+| Local | Yes | Yes | `docker exec <container> bash -c 'source <venv_path>/bin/activate && {CMD}'` |
+| Cluster | No | No | `ssh <node> "{CMD}"` |
+| Cluster | Yes | No | `ssh <node> "docker exec <container> {CMD}"` |
+| Cluster | No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && {CMD}'"` |
+| Cluster | Yes | Yes | `ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && {CMD}'"` |
+
+Write the resolved template (with actual node/container/venv values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
+
+### Command Execution Pattern
+
+All commands in this document are shown as `ssh <node> "docker exec <container> <command>"` for brevity. **Before executing any command**, read `<output_dir>/cache/cmd_prefix.txt` and substitute `{CMD}` with the actual command.
 
 ---
 
@@ -207,8 +238,7 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: <list from agent file's "Input files" section>
 - Output file: <from agent file's "Output file" section>
 
@@ -289,8 +319,7 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: category_data/<category>_ops.csv, metadata/<category>_metadata.json,
   category_data/<category>_tree_data.json (if available)
 - Output file: category_findings/<category>_findings.md
