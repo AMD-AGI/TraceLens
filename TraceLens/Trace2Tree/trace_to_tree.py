@@ -338,40 +338,49 @@ class JaxTraceToTree(BaseTraceToTree):
         """
         self.linking_key = "correlation_id"
 
+    @staticmethod
+    def _is_gpu_event(event: dict) -> bool:
+        """Return True if event's process_name contains /device:GPU."""
+        proc = event.get("process", {})
+        proc_name = (
+            proc.get("process_name", "") if isinstance(proc, dict) else str(proc)
+        )
+        return "/device:GPU" in proc_name
+
     def add_gpu_ops_to_tree(self) -> None:
         """
         Associates GPU operation events with their corresponding parent events in the event tree.
 
-        Iterates through all events and, for those with a process ID (pid) less than or equal to 100,
-        checks if the event has a parent. If so, it sets the 'gpu_events' field of the event and its
-        ancestors to include the unique identifier (UID) of the GPU event. This allows for tracking
-        GPU operations across the event hierarchy.
+        Iterates through all events and, for those identified as GPU events (process_name contains
+        "/device:GPU"), checks if the event has a parent. If so, it sets the 'gpu_events' field of
+        the event and its ancestors to include the unique identifier (UID) of the GPU event. This
+        allows for tracking GPU operations across the event hierarchy.
 
-        Assumes that each event is a dictionary containing at least 'pid', 'parent', and UID fields,
-        and that TraceLens.util.TraceEventUtils.TraceKeys.UID provides the key for the UID.
+        Assumes that each event is a dictionary containing at least 'process', 'parent', and UID
+        fields, and that TraceLens.util.TraceEventUtils.TraceKeys.UID provides the key for the UID.
 
         Returns:
             None
         """
         for event in self.events:
-            # GPU
-            if event.get("pid") <= 100:
-                # set the parents['gpu_events'] to the corresponding gpu event
-                if "parent" in event.keys():
-                    corresponding_gpu_event = event
-                    event["gpu_events"] = [
+            if not self._is_gpu_event(event):
+                continue
+            # set the parents['gpu_events'] to the corresponding gpu event
+            if "parent" in event.keys():
+                corresponding_gpu_event = event
+                event["gpu_events"] = [
+                    corresponding_gpu_event[
+                        TraceLens.util.TraceEventUtils.TraceKeys.UID
+                    ]
+                ]
+                while self.get_parent_event(event):
+                    parent = self.get_parent_event(event)
+                    parent.setdefault("gpu_events", []).append(
                         corresponding_gpu_event[
                             TraceLens.util.TraceEventUtils.TraceKeys.UID
                         ]
-                    ]
-                    while self.get_parent_event(event):
-                        parent = self.get_parent_event(event)
-                        parent.setdefault("gpu_events", []).append(
-                            corresponding_gpu_event[
-                                TraceLens.util.TraceEventUtils.TraceKeys.UID
-                            ]
-                        )
-                        event = parent
+                    )
+                    event = parent
 
     def build_tree(
         self,
@@ -411,50 +420,51 @@ class JaxTraceToTree(BaseTraceToTree):
         """
         Categorizes GPU kernel operations in the event list based on their names and HLO operation types.
 
-        Iterates through each event in `self.events` with a process ID (pid) less than or equal to 100.
-        For events categorized as 'kernel', attempts to assign a GPU kernel operation category by matching
-        the event's name and, if available, its 'hlo_op' argument against predefined category filters in
-        `TraceEventUtils.JaxOpKeys.ClassCategories`. If no category is matched, assigns a default
-        'Uncategorized/XLA' category.
+        Iterates through each event in `self.events` identified as a GPU event (process_name contains
+        "/device:GPU"). For events categorized as 'kernel', attempts to assign a GPU kernel operation
+        category by matching the event's name and, if available, its 'hlo_op' argument against
+        predefined category filters in `TraceEventUtils.JaxOpKeys.ClassCategories`. If no category is
+        matched, assigns a default 'Uncategorized/XLA' category.
 
         Modifies:
             Each relevant event in `self.events` by adding or updating the 'gpu_kernel_op_cat' key.
         """
 
         for event in self.events:
-            if event.get("pid") <= 100:
+            if not self._is_gpu_event(event):
+                continue
+            if event.get("cat") != "kernel":
+                continue
+            name = event.get("name") or ""
+            gpu_kernel_op_cat_not_found = True
 
-                if event.get("cat") == "kernel":
-                    name = event.get("name")
+            for (
+                category,
+                filters,
+            ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                if any(f in name for f in filters):
+                    event["gpu_kernel_op_cat"] = category
+                    gpu_kernel_op_cat_not_found = False
+                    break
 
-                    gpu_kernel_op_cat_not_found = True
-
+            args = event.get("args")
+            if args and "hlo_op" in args:
+                hlo_op = args.get("hlo_op")
+                if hlo_op:
                     for (
                         category,
                         filters,
                     ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                        if any(f in name for f in filters):
+                        if any(f in hlo_op for f in filters):
                             event["gpu_kernel_op_cat"] = category
                             gpu_kernel_op_cat_not_found = False
                             break
 
-                    if "hlo_op" in event.get("args").keys():
-                        hlo_op = event.get("args").get("hlo_op")
-
-                        for (
-                            category,
-                            filters,
-                        ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                            if any(f in hlo_op for f in filters):
-                                event["gpu_kernel_op_cat"] = category
-                                gpu_kernel_op_cat_not_found = False
-                                break
-
-                    # if still not found, set to Uncategorized/XLA
-                    if gpu_kernel_op_cat_not_found:
-                        event["gpu_kernel_op_cat"] = (
-                            TraceEventUtils.JaxOpKeys.UncategorizedEventKey + "/XLA"
-                        )
+            # if still not found, set to Uncategorized/XLA
+            if gpu_kernel_op_cat_not_found:
+                event["gpu_kernel_op_cat"] = (
+                    TraceEventUtils.JaxOpKeys.UncategorizedEventKey + "/XLA"
+                )
 
     def _set_metadata(self, metadata: Dict) -> None:
         """
