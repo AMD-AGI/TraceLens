@@ -20,6 +20,7 @@ op_to_perf_model_class_map = {
     "vllm::gemm_with_dynamic_quant": perf_model.vllm_gemm_with_dynamic_quant,
     "FlashAttnFunc": perf_model.flash_attention,
     "flash_attn::_flash_attn_forward": perf_model.flash_attention,
+    "flash_attn::_flash_attn_backward": perf_model.flash_attention_backward,
     "flash_attn::_flash_attn_varlen_forward": perf_model.flash_attention_varlen_forward,
     "flash_attn::_flash_attn_varlen_backward": perf_model.flash_attention_varlen_backward,
     "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,
@@ -35,8 +36,17 @@ op_to_perf_model_class_map = {
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
+    "aiter::mha_fwd": perf_model.aiter__mha_fwd,
+    "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::mha_bwd": perf_model.aiter__mha_bwd,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
+    "primus_turbo::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_impl": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo_cpp_extension::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo::grouped_gemm_variable_k_impl": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo_cpp_extension::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
     # TEv2 pseudo ops
     "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
@@ -131,6 +141,7 @@ for op_name, op_class in norm_ops.items():
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
+    perf_model.GroupedGemm: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
     perf_model.UnaryElementwise: "UnaryElementwise",
@@ -201,6 +212,7 @@ def categorize_torch_op(row):
         "aten::_scaled_dot_product_flash_attention_backward",
         "aiter::_flash_attn_backward",
         "aiter::wrapper_fmha_v3_bwd",
+        "aiter::mha_bwd",
     ]
     if row["name"] in dict_cat2names["SDPA"]:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
@@ -232,6 +244,5 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-
     # if none of the above cases match, return 'other'
     return "other"
