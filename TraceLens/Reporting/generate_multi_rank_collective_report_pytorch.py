@@ -9,9 +9,7 @@ import re
 import argparse
 import pandas as pd
 import glob
-import sys
-from typing import List, Dict, Optional, Union
-import subprocess
+from typing import Dict, List, Optional
 import warnings
 from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import (
