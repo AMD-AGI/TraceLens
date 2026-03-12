@@ -78,11 +78,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 3. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
-     - If **cluster**: Ask "Which node should we use?" → `<node>`
-   - Ask: "Are you working in a containerized environment (e.g. Docker)?"
-     - If **yes**: Ask "What is the container name?" → `<container>`
-   - Ask: "Are you using a virtual environment?"
-     - If **yes**: Ask "What is the path to the venv? (e.g. `/opt/venvs/tracelens`)" → `<venv_path>`
+     - If **local**: No further environment questions — prefix is `{CMD}`.
+     - If **cluster**:
+       - Ask "Which node should we use?" → `<node>`
+       - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
+       - Ask "Are you using a virtual environment?" → if yes, ask for venv path (e.g. `/opt/venvs/tracelens`) → `<venv_path>`
 
 4. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
@@ -92,20 +92,24 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
 
-The template uses `{CMD}` as a placeholder for the actual command. Build using this lookup:
+The template uses `{CMD}` as a placeholder for the actual command.
 
-| Local/Cluster | Container | Venv | Template |
-|---------------|-----------|------|----------|
-| Local | No | No | `{CMD}` |
-| Local | Yes | No | `docker exec <container> {CMD}` |
-| Local | No | Yes | `bash -c 'source <venv_path>/bin/activate && {CMD}'` |
-| Local | Yes | Yes | `docker exec <container> bash -c 'source <venv_path>/bin/activate && {CMD}'` |
-| Cluster | No | No | `ssh <node> "{CMD}"` |
-| Cluster | Yes | No | `ssh <node> "docker exec <container> {CMD}"` |
-| Cluster | No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && {CMD}'"` |
-| Cluster | Yes | Yes | `ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && {CMD}'"` |
+**Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment:
 
-Write the resolved template (with actual node/container/venv values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
+1. SSH into the node (and enter the container if applicable).
+2. Run `find / -maxdepth 5 -type d -name "TraceLens" 2>/dev/null | head -5` to find candidate directories.
+3. Confirm the correct one (it should contain `TraceLens/AgenticMode/`). Store as `<tracelens_dir>`.
+
+Build the cluster prefix using this lookup:
+
+| Container | Venv | Template |
+|-----------|------|----------|
+| No | No | `ssh <node> "cd <tracelens_dir> && {CMD}"` |
+| Yes | No | `ssh <node> "docker exec <container> bash -c 'cd <tracelens_dir> && {CMD}'"` |
+| No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
+| Yes | Yes | `ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
+
+Write the resolved template (with actual node/container/venv/tracelens_dir values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
 
 ### Command Execution Pattern
 
