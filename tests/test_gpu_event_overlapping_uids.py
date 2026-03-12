@@ -17,6 +17,10 @@ overlapping_uids computation (GPUEventAnalyser):
 - Same cpu_op: overlapping kernels under the same cpu_op are NOT marked overlapping
 - Different cpu_ops: overlapping kernels under different cpu_ops ARE marked overlapping
 - Mixed: some kernels share a cpu_op, others don't
+- Same stream: overlapping kernels on the same stream are NOT marked overlapping
+- Different streams: overlapping kernels on different streams ARE marked overlapping
+- Missing stream info: conservatively falls back to marking as overlapping
+- Same stream + different cpu_ops: stream check takes priority, NOT marked overlapping
 - Sub-microsecond overlap (<1µs) filtered as timestamp noise (Bug 1 regression)
 - Exactly 1µs overlap meets threshold and IS marked (strict < 1.0 check)
 - Above-threshold overlap (>1µs) correctly marked
@@ -43,9 +47,9 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
-def _make_event(uid, ts_us, dur_us, cat="kernel", name=""):
+def _make_event(uid, ts_us, dur_us, cat="kernel", name="", args=None):
     """Minimal GPU event compatible with get_gpu_event_lists (PyTorch-style)."""
-    return {
+    event = {
         "UID": uid,
         "ts": ts_us,
         "dur": dur_us,
@@ -53,6 +57,9 @@ def _make_event(uid, ts_us, dur_us, cat="kernel", name=""):
         "name": name
         or "kernel",  # required: event.get("name") used with "in", so must not be None
     }
+    if args is not None:
+        event["args"] = args
+    return event
 
 
 def _get_overlapping_uids_by_uid(result):
@@ -243,6 +250,57 @@ def test_no_parent_info_falls_back_to_overlap():
     by_uid = _get_overlapping_uids_by_uid(result)
     assert by_uid[1] == {2}
     assert by_uid[2] == {1}
+
+
+def test_same_stream_overlap_not_marked():
+    """Two temporally overlapping kernels on the SAME stream should NOT be
+    marked overlapping — the GPU serialises work on a single stream."""
+    k1 = _make_event(1, 0, 10, args={"stream": 7})
+    k2 = _make_event(2, 5, 10, args={"stream": 7})
+    analyser = GPUEventAnalyser([k1, k2])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == set(), "same-stream kernels must not be marked overlapping"
+    assert by_uid[2] == set(), "same-stream kernels must not be marked overlapping"
+
+
+def test_different_stream_overlap_is_marked():
+    """Two temporally overlapping kernels on DIFFERENT streams should be
+    marked overlapping."""
+    k1 = _make_event(1, 0, 10, args={"stream": 7})
+    k2 = _make_event(2, 5, 10, args={"stream": 8})
+    analyser = GPUEventAnalyser([k1, k2])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {2}, "different-stream kernels should be marked overlapping"
+    assert by_uid[2] == {1}, "different-stream kernels should be marked overlapping"
+
+
+def test_missing_stream_info_falls_back_to_overlap():
+    """When stream info is absent from one or both kernels, conservatively
+    assume they could be on different streams and mark as overlapping."""
+    k1 = _make_event(1, 0, 10, args={"stream": 7})
+    k2 = _make_event(2, 5, 10)  # no args / no stream
+    analyser = GPUEventAnalyser([k1, k2])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == {2}, "missing stream should be treated conservatively"
+    assert by_uid[2] == {1}, "missing stream should be treated conservatively"
+
+
+def test_same_stream_different_cpu_ops_not_marked():
+    """Even when kernels come from different cpu_ops, same-stream should
+    prevent them from being marked overlapping (stream check comes first)."""
+    cpu_a = {"UID": 100, "cat": "cpu_op", "name": "aten::mm"}
+    cpu_b = {"UID": 101, "cat": "cpu_op", "name": "aten::add"}
+    k1 = _make_event(1, 0, 10, args={"stream": 7})
+    k2 = _make_event(2, 5, 10, args={"stream": 7})
+    events = _make_tree([cpu_a, cpu_b], [(k1, 201, 100), (k2, 202, 101)])
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == set()
+    assert by_uid[2] == set()
 
 
 def test_sub_microsecond_overlap_not_marked():

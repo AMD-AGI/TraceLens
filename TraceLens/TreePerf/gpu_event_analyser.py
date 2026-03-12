@@ -156,7 +156,16 @@ class GPUEventAnalyser:
                     event = event_map[uid]
                     my_cpu_op = uid_to_cpu_op[uid]
                     if active_uids:
+                        my_stream = event.get("args", {}).get("stream")
                         for active_uid in active_uids:
+                            active_event = event_map[active_uid]
+                            active_stream = active_event.get("args", {}).get("stream")
+                            if (
+                                my_stream is not None
+                                and active_stream is not None
+                                and my_stream == active_stream
+                            ):
+                                continue
                             active_cpu_op = uid_to_cpu_op[active_uid]
                             if (
                                 my_cpu_op is not None
