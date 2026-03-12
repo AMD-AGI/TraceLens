@@ -481,7 +481,7 @@ def generate_perf_report_pytorch(
             # Note: Basic 'Parent op category' is added by get_kernel_details() in tree_perf.py
             # This adds categorization for kernels that don't have a parent cpu_op
             if "Parent op category" not in df_kernels.columns:
-                df_kernels["Parent op category"] = np.nan
+                df_kernels["Parent op category"] = pd.NA
 
             if "Launcher" in df_kernels.columns:
                 mask_missing_cat = df_kernels["Parent op category"].isna()
