@@ -41,6 +41,7 @@ TraceLens features for inference analysis have been primarily tested with vLLM, 
 
 #### Option A: Build a Docker image using the [provided scripts](../examples/custom_workflows/inference_analysis/) (recommended)
 
+##### vLLM Script
 A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, or `v16`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 | Version | Base Image | vLLM Version |
@@ -58,8 +59,22 @@ bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
 
 Then create a container from the image.
 
+##### SGLang Script
+The build script for SGLang supports SGLang 0.5.9 with rocm 7. The script takes in the path to the local TraceLens-internal clone and the GPU type that is being run on. It currently supports MI300 and MI355 and defaults to MI355 if not provided.
 
-#### Option B: Apply framework patches manually (currently supported for vLLM)
+| GPU Type | Base Image | SGLang Version |
+|----------|------------|----------------|
+|`MI300` | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9 | 
+|`MI355` | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9 |
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
+    /path/to/TraceLens-internal \
+    mi355
+```
+A container with the name sglang-deepseek-mi300/355x will be created depending on the GPU type specified.
+
+#### Option B: Apply framework patches manually 
 If you prefer to patch an existing environment instead of building a new image, apply patches to your inference framework to:
 
 - Add custom annotations with request packing information (See [roofline conceptual details](#roofline-analysis))
@@ -69,20 +84,31 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 1. **Locate your inference engine:**
 
+  For vllm: 
+
    ```bash
    python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
    ```
+
+  For SGLang:
+
+  ```bash
+   python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
+   ```
+
 2. **Find and apply the relevant patch:**
 
    - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
    - Select by framework and version
-   - Apply: `cd /path/to/vllm/../ && git apply /path/to/patchfile`
+   - Apply: `cd /path/to/vllm_or_sglang/../ && git apply /path/to/patchfile`
+
+    SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
 
 #### Collection Parameters
 
 - **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. InferenceMax uses `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio (R) = 0.8. We recommend tracing 1.6–2.0 OSL execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details.
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
-- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceMax can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh).
+- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh) and to run DSR-1 model using InferenceX is present [here](/home/mohbasit/TraceLens-internal/examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh).
 
 ### Step 2: Installation
 
@@ -96,7 +122,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
 
-Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
+Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher and SGLang v0.5.9; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
 
 ```python
 python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -o ./steady_state_analysis \\
@@ -105,7 +131,7 @@ python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz  -
 
 Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps.
 
-Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher). This is recommended if the user wants to perform analysis on isolated execution step.
+Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher and SGLang v0.5.9). This is recommended if the user wants to perform analysis on isolated execution step.
 
 ```python
 python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
@@ -113,7 +139,7 @@ python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o
 
 Output: Single trace file per execution step.
 
-Option 3: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher; using the patchfile is recommended).
+Option 3: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher and SGLang v0.5.9; using the patchfile is recommended).
 
 ```python
 python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --iterations 10:20
