@@ -219,15 +219,6 @@ Include:
 - **Kernel:** Profile backward kernel for tile/block tuning opportunities
 - **Note:** Backward pass computes gradients for Q, K, V and requires more memory bandwidth than forward
 
-#### Backward Pass Efficiency Context
-
-| Sequence Length | Expected Efficiency (BWD) |
-|----------------|---------------------------|
-| N < 512 | 3-10% |
-| N = 1024 | 15-30% |
-| N = 2048 | 30-50% |
-| N > 4096 | 40-60% |
-
 ### Paged Attention Patterns (vLLM)
 
 #### Decode-Heavy Workload
