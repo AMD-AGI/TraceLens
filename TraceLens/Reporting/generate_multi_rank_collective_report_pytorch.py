@@ -41,7 +41,6 @@ def _resolve_trace_files_glob(
     trace_glob: str,
     world_size: int,
     rank_regex: str = DEFAULT_RANK_REGEX,
-    strict: bool = True,
 ) -> List[str]:
     """Resolve trace file paths from a recursive glob pattern.
 
@@ -61,10 +60,10 @@ def _resolve_trace_files_glob(
         m = rx.search(os.path.basename(path)) or rx.search(path)
         if m is None:
             continue
-        rank_str = m.groupdict().get("rank") or m.group(1)
         try:
+            rank_str = m.groupdict().get("rank") or m.group(1)
             rank = int(rank_str)
-        except (ValueError, IndexError):
+        except (IndexError, ValueError):
             continue
         by_rank.setdefault(rank, path)
 
@@ -76,12 +75,13 @@ def _resolve_trace_files_glob(
 
     missing = [r for r in range(world_size) if r not in by_rank]
     if missing:
-        msg = f"Missing ranks after glob resolution: {missing}"
-        if strict:
-            raise FileNotFoundError(msg)
-        warnings.warn(msg)
+        raise FileNotFoundError(
+            f"Missing ranks after glob resolution: {missing}. "
+            f"NcclAnalyser requires a complete rank set (0..{world_size - 1}) "
+            f"for correct results."
+        )
 
-    return [by_rank[r] for r in range(world_size) if r in by_rank]
+    return [by_rank[r] for r in range(world_size)]
 
 
 def generate_collective_report(
@@ -139,7 +139,6 @@ def generate_collective_report(
             trace_glob,
             world_size,
             rank_regex=rank_regex,
-            strict=strict_world_size_check,
         )
     elif trace_pattern:
         if trace_pattern.count("*") != 1:
@@ -305,18 +304,17 @@ def main():
         if args.trace_dir:
             output_dir = args.trace_dir
         elif args.trace_pattern:
-            p0 = args.trace_pattern.replace("*", "0")
-            p1 = args.trace_pattern.replace("*", "1")
-            d0, d1 = os.path.dirname(p0), os.path.dirname(p1)
-            while d0 != d1:
-                d0, d1 = os.path.dirname(d0), os.path.dirname(d1)
-            output_dir = d0
+            paths = [
+                os.path.abspath(args.trace_pattern.replace("*", str(i)))
+                for i in range(min(args.world_size, 2))
+            ]
+            common = os.path.commonpath(paths)
+            output_dir = os.path.dirname(common) if os.path.isfile(common) else common
         else:
             trace_files = _resolve_trace_files_glob(
                 args.trace_glob,
                 args.world_size,
                 rank_regex=args.rank_regex,
-                strict=True,
             )
             common = os.path.commonpath([os.path.abspath(p) for p in trace_files])
             output_dir = os.path.dirname(common) if os.path.isfile(common) else common
