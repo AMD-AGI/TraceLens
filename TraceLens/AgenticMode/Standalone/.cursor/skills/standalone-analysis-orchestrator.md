@@ -113,21 +113,20 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 ### Command Execution Pattern
 
-All commands in this document are shown as `ssh <node> "docker exec <container> <command>"` for brevity. **Before executing any command**, read `<output_dir>/cache/cmd_prefix.txt` and substitute `{CMD}` with the actual command.
+**Before executing any command**, read `<output_dir>/cache/cmd_prefix.txt`. It contains a template with a `{CMD}` placeholder. Substitute `{CMD}` with the actual command. All commands below use `<prefix>` to represent this resolved template.
 
 ---
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI in the container:
+Execute TraceLens CLI:
 
 ```bash
-ssh <node> "docker exec <container> \
-  TraceLens_generate_perf_report_pytorch \
+<prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --enable_pseudo_ops"
+  --enable_pseudo_ops
 ```
 
 This generates:
@@ -138,14 +137,14 @@ This generates:
 
 ## Steps 2-5: Prepare Category Data
 
-Execute the TraceLens Agentic Mode orchestrator preparation script in the container:
+Execute the TraceLens Agentic Mode orchestrator preparation script:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>"
+  --output-dir <output_dir>
 ```
 
 This script performs:
@@ -197,10 +196,10 @@ System-level analysis examines issues that affect the GPU pipeline as a whole --
 ### 6.1 Read Manifest and Identify System-Level Subagents
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c "
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest_categories
 load_manifest_categories('<output_dir>')
-\""
+"
 ```
 
 This prints `system_categories` and `compute_categories` lists. Use `system_categories` for Step 6 and `compute_categories` for Step 7.
@@ -405,13 +404,11 @@ After all subagents complete:
 
 Before aggregating results, validate outputs from **both** tiers (system_findings/ and category_findings/).
 
-Run in the container on the node:
-
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c "
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_subagent_outputs
 validate_subagent_outputs('<output_dir>')
-\""
+"
 ```
 
 This runs four checks:
@@ -426,13 +423,11 @@ This runs four checks:
 
 ### Read Findings from BOTH Tiers
 
-Run in the container on the node:
-
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c "
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_findings
 load_findings('<output_dir>')
-\""
+"
 ```
 
 Then read the individual findings files through the container as needed for report assembly.
@@ -490,7 +485,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path> << 'REPORT_EOF' ... REPORT_EOF"`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it.
+Create `standalone_analysis.md` in `<output_dir>` **using `<prefix>`** (e.g., via `<prefix> tee <path> << 'REPORT_EOF' ... REPORT_EOF`). When running on a cluster, do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it.
 
 The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
 
@@ -673,17 +668,17 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 ### 10.1 Validate Report Structure (Retry up to 2x)
 
 After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
-**Validation procedure** (run on the node, inside the container using `validate_report()` from `analysis_utils`):
+**Validation procedure:**
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c "
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
 passed, missing = validate_report('<output_dir>')
 if not passed:
     print('FAIL: Missing sections: ' + ', '.join(missing))
     import sys; sys.exit(1)
 print('PASS: All required sections present')
-\""
+"
 ```
 
 **If validation fails (exit code 1):**
@@ -703,10 +698,10 @@ After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c "
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
 generate_and_embed_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
-\""
+"
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
