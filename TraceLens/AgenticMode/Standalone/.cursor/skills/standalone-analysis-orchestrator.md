@@ -170,9 +170,10 @@ System-level analysis examines issues that affect the GPU pipeline as a whole --
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest_categories
-load_manifest_categories('<output_dir>')
-\""
+load_manifest_categories(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 This prints `system_categories` and `compute_categories` lists. Use `system_categories` for Step 6 and `compute_categories` for Step 7.
@@ -385,9 +386,10 @@ Run in the container on the node:
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_subagent_outputs
-validate_subagent_outputs('<output_dir>')
-\""
+validate_subagent_outputs(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 This runs four checks:
@@ -406,9 +408,10 @@ Run in the container on the node:
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_findings
-load_findings('<output_dir>')
-\""
+load_findings(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 Then read the individual findings files through the container as needed for report assembly.
@@ -480,18 +483,20 @@ Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from 
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
-generate_plot_data('<output_dir>')
-\""
+generate_plot_data(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 ### 9.5.3 Generate Plot and Base64 File
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
-generate_perf_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
-\""
+generate_perf_plot(sys.argv[1], sys.argv[2])
+\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'"
 ```
 
 The function handles these edge cases automatically:
@@ -536,13 +541,14 @@ After writing `standalone_analysis.md`, validate that the report contains all 6 
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
-passed, missing = validate_report('<output_dir>')
+passed, missing = validate_report(sys.argv[1])
 if not passed:
     print('FAIL: Missing sections: ' + ', '.join(missing))
-    import sys; sys.exit(1)
+    sys.exit(1)
 print('PASS: All required sections present')
-\""
+\" '<output_dir>'"
 ```
 
 **If validation fails (exit code 1):**
@@ -562,9 +568,10 @@ After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
-generate_and_embed_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
-\""
+generate_and_embed_plot(sys.argv[1], sys.argv[2])
+\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'"
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
