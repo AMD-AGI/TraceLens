@@ -12,7 +12,7 @@ This utility analyzes **PyTorch JSON profile traces** from **multiple ranks** an
 
 ## 🚀 Quick Start
 
-Run the script with **either** a directory containing trace files **or** a trace file **pattern** with a single `*` placeholder for rank id.
+Run the script with **one** of: a directory containing trace files, a trace file **pattern** with a single `*` placeholder for rank id, or a **glob** pattern with a regex to extract the rank.
 
 ### Directory mode
 ```bash
@@ -22,6 +22,15 @@ python generate_multi_rank_collective_report_pytorch.py   --trace_dir /path/to/t
 ### Pattern mode (strict rank substitution)
 ```bash
 python generate_multi_rank_collective_report_pytorch.py   --trace_pattern "/logs/job123/rank*/trace.json"   --world_size 8
+```
+
+### Glob mode (tensorboard-style / arbitrary filenames)
+When traces are produced by `torch.profiler.tensorboard_trace_handler`, filenames are typically not `rank{i}_trace.json`. Use `--trace_glob` with an optional `--rank_regex` to extract the rank id:
+```bash
+python generate_multi_rank_collective_report_pytorch.py \
+  --trace_glob "/path/to/tensorboard/**/*.pt.trace.json.gz" \
+  --rank_regex "rank\[(?P<rank>\d+)\]" \
+  --world_size 16
 ```
 
 ### Parallel mode (for faster processing)
@@ -46,17 +55,20 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 - Naming patterns:
   - Directory mode (files inside `--trace_dir`): `rank0_trace.json`, `rank1_trace.json`, ...
   - Pattern mode: `--trace_pattern "/path/to/rank*_trace.json"`
+  - Glob mode: `--trace_glob "/path/to/**/*.pt.trace.json.gz"` with `--rank_regex` for rank extraction
 
 ---
 
 ## ⚙️ Command-Line Options
 
-> Provide **either** `--trace_dir` **or** `--trace_pattern`.
+> Provide **exactly one** of `--trace_dir`, `--trace_pattern`, or `--trace_glob`.
 
 | Argument | Default | Description |
 |---|---|---|
 | `--trace_dir` | `None` | Directory containing trace files (expects names like `rank*_trace.json`). |
 | `--trace_pattern` | `None` | Template path with a **single** `*` placeholder for the rank id (strict substitution: `* → 0..world_size-1`). |
+| `--trace_glob` | `None` | Glob for trace files with arbitrary names (supports `**`). Requires `--world_size` and uses `--rank_regex` to map files to ranks. |
+| `--rank_regex` | `rank[\[\-_/]?(?P<rank>\d+)` | Regex used with `--trace_glob` to extract rank id. Must contain a named group `rank` or a single capture group. |
 | `--world_size` | `Required` | Number of ranks in the distributed run.  |
 | `--output_xlsx_path` | _auto-inferred_ | Path to save the Excel workbook. If omitted, a sensible default is created (see Output Behavior). |
 | `--output_csvs_dir` | `None` | If provided, writes each sheet as an individual `.csv` under this directory. |
@@ -87,7 +99,7 @@ _Notes:_
 
 - If **neither** `--output_xlsx_path` nor `--output_csvs_dir` is specified, the tool writes an Excel file to:
   - the provided `--trace_dir`, or
-  - the **lowest common directory** of the expanded `--trace_pattern` file paths.
+  - the **lowest common directory** of the resolved trace files (from `--trace_pattern` or `--trace_glob`).
 - If `--output_csvs_dir` is set, all sheets are written as individual CSV files under that directory.
 - If `--output_xlsx_path` is set, a single Excel workbook containing all sheets is created.
 - `openpyxl` is required for Excel; the tool will attempt to install it when missing.

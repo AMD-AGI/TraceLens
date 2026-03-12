@@ -5,6 +5,7 @@
 ###############################################################################
 
 import os
+import re
 import argparse
 import pandas as pd
 import glob
@@ -14,6 +15,8 @@ import subprocess
 import warnings
 from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import request_install
+
+DEFAULT_RANK_REGEX = r"rank[\[\-_/]?(?P<rank>\d+)"
 
 
 def find_trace_files(input_dir: str, pattern: str = "rank*_trace.json") -> List[str]:
@@ -34,9 +37,57 @@ def infer_world_size(trace_files: List[str]) -> int:
     return len(trace_files)
 
 
+def _resolve_trace_files_glob(
+    trace_glob: str,
+    world_size: int,
+    rank_regex: str = DEFAULT_RANK_REGEX,
+    strict: bool = True,
+) -> List[str]:
+    """Resolve trace file paths from a recursive glob pattern.
+
+    Files are matched against *rank_regex* to extract the rank id.  When
+    multiple files match the same rank, the lexicographically first path is
+    kept (stable, deterministic selection).
+
+    Returns an ordered list of length *world_size* with one path per rank.
+    """
+    rx = re.compile(rank_regex)
+    matches = sorted(glob.glob(trace_glob, recursive=True))
+    if not matches:
+        raise FileNotFoundError(f"No files matched --trace_glob: {trace_glob}")
+
+    by_rank: Dict[int, str] = {}
+    for path in matches:
+        m = rx.search(os.path.basename(path)) or rx.search(path)
+        if m is None:
+            continue
+        rank_str = m.groupdict().get("rank") or m.group(1)
+        try:
+            rank = int(rank_str)
+        except (ValueError, IndexError):
+            continue
+        by_rank.setdefault(rank, path)
+
+    if not by_rank:
+        raise ValueError(
+            f"--trace_glob matched {len(matches)} file(s), but none matched "
+            f"--rank_regex '{rank_regex}'"
+        )
+
+    missing = [r for r in range(world_size) if r not in by_rank]
+    if missing:
+        msg = f"Missing ranks after glob resolution: {missing}"
+        if strict:
+            raise FileNotFoundError(msg)
+        warnings.warn(msg)
+
+    return [by_rank[r] for r in range(world_size) if r in by_rank]
+
+
 def generate_collective_report(
     trace_dir: Optional[str] = None,
     trace_pattern: Optional[str] = None,
+    trace_glob: Optional[str] = None,
     world_size: Optional[int] = None,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
@@ -45,6 +96,7 @@ def generate_collective_report(
     strict_world_size_check: bool = True,
     use_multiprocessing: bool = False,
     max_workers: Optional[int] = None,
+    rank_regex: str = DEFAULT_RANK_REGEX,
 ) -> Dict[str, pd.DataFrame]:
     """
     Generate comprehensive NCCL communication analysis reports.
@@ -54,6 +106,9 @@ def generate_collective_report(
         trace_pattern: Template path with a single `*` placeholder for rank.
                         Example: /path/to/trace_rank_*_step_3.json
                         The `*` will be replaced with 0..world_size-1.
+        trace_glob: Glob pattern (supports ``**``) for trace files with arbitrary
+                    names.  Requires *world_size* and uses *rank_regex* to extract
+                    the rank id from each matched path.
         world_size: Number of ranks
         output_xlsx_path: Path to output Excel file
         output_csvs_dir: Directory to save CSV files
@@ -63,6 +118,8 @@ def generate_collective_report(
                             When enabled, can provide significant speedup (system-dependent). When False, uses sequential loading.
         max_workers: Maximum number of worker processes for parallel loading (only used if use_multiprocessing=True).
                     Default: os.cpu_count(). Override to limit resource usage if needed.
+        rank_regex: Regex with a named group ``rank`` (or a single capture group)
+                    used to extract the rank id from filenames matched by *trace_glob*.
 
     Returns:
         Dictionary mapping sheet names to DataFrames
@@ -70,20 +127,26 @@ def generate_collective_report(
     if world_size is None:
         raise ValueError("world_size must be provided")
 
-    if not trace_dir and not trace_pattern:
-        raise ValueError("Either trace_dir or trace_pattern must be provided")
+    if sum(bool(x) for x in [trace_dir, trace_pattern, trace_glob]) != 1:
+        raise ValueError(
+            "Provide exactly one of trace_dir, trace_pattern, or trace_glob"
+        )
 
-    list_trace_filepaths = []
+    list_trace_filepaths: List[str] = []
 
-    # Generate file paths based on input mode
-    if trace_pattern:
-        # Use trace_pattern with wildcard replacement
+    if trace_glob:
+        list_trace_filepaths = _resolve_trace_files_glob(
+            trace_glob,
+            world_size,
+            rank_regex=rank_regex,
+            strict=strict_world_size_check,
+        )
+    elif trace_pattern:
+        if trace_pattern.count("*") != 1:
+            raise ValueError(
+                "trace_pattern must contain exactly one '*' character as a placeholder for rank id"
+            )
         for i in range(world_size):
-            # ensure there is exactly one '*'
-            if trace_pattern.count("*") != 1:
-                raise ValueError(
-                    "trace_pattern must contain exactly one '*' character as a placeholder for rank id"
-                )
             expected_file = trace_pattern.replace("*", str(i))
             if not os.path.isfile(expected_file):
                 if strict_world_size_check:
@@ -97,7 +160,6 @@ def generate_collective_report(
                     continue
             list_trace_filepaths.append(expected_file)
     else:
-        # Use trace_dir with standard naming pattern
         for i in range(world_size):
             expected_file = os.path.join(trace_dir, f"rank{i}_trace.json")
             if not os.path.isfile(expected_file):
@@ -182,9 +244,27 @@ def main():
         type=str,
         help="Template path with a single * placeholder for rank. Example: /path/to/trace_rank_*_step_3.json",
     )
+    input_group.add_argument(
+        "--trace_glob",
+        type=str,
+        help=(
+            "Glob for trace files with arbitrary names (supports **). "
+            "Requires --world_size and uses --rank_regex to map files to ranks."
+        ),
+    )
 
     parser.add_argument(
         "--world_size", type=int, default=None, help="Number of ranks (required)"
+    )
+    parser.add_argument(
+        "--rank_regex",
+        type=str,
+        default=DEFAULT_RANK_REGEX,
+        help=(
+            "Regex used with --trace_glob to extract rank id from filenames. "
+            "Must contain a named group 'rank' or a single capture group. "
+            f"Default: {DEFAULT_RANK_REGEX!r}"
+        ),
     )
 
     # Output arguments
@@ -223,29 +303,35 @@ def main():
     # If no output specified, create default Excel output
     if args.output_xlsx_path is None and args.output_csvs_dir is None:
         if args.trace_dir:
-            default_output = os.path.join(args.trace_dir, "nccl_analysis_report.xlsx")
-            print(f"No output specified. Using default: {default_output}")
-            args.output_xlsx_path = default_output
+            output_dir = args.trace_dir
         elif args.trace_pattern:
-
-            def common_dir(pattern: str) -> str:
-                p0 = pattern.replace("*", "0")
-                p1 = pattern.replace("*", "1")
-                d0, d1 = os.path.dirname(p0), os.path.dirname(p1)
-                while d0 != d1:
-                    d0, d1 = os.path.dirname(d0), os.path.dirname(d1)
-                return d0
-
-            default_output = os.path.join(
-                common_dir(args.trace_pattern), "nccl_analysis_report.xlsx"
+            p0 = args.trace_pattern.replace("*", "0")
+            p1 = args.trace_pattern.replace("*", "1")
+            d0, d1 = os.path.dirname(p0), os.path.dirname(p1)
+            while d0 != d1:
+                d0, d1 = os.path.dirname(d0), os.path.dirname(d1)
+            output_dir = d0
+        else:
+            trace_files = _resolve_trace_files_glob(
+                args.trace_glob,
+                args.world_size,
+                rank_regex=args.rank_regex,
+                strict=True,
             )
-            print(f"No output specified. Using default: {default_output}")
-            args.output_xlsx_path = default_output
+            common = os.path.commonpath([os.path.abspath(p) for p in trace_files])
+            output_dir = (
+                os.path.dirname(common) if os.path.isfile(common) else common
+            )
+
+        default_output = os.path.join(output_dir, "nccl_analysis_report.xlsx")
+        print(f"No output specified. Using default: {default_output}")
+        args.output_xlsx_path = default_output
 
     # Generate report
     generate_collective_report(
         trace_dir=args.trace_dir,
         trace_pattern=args.trace_pattern,
+        trace_glob=args.trace_glob,
         world_size=args.world_size,
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
@@ -253,6 +339,7 @@ def main():
         agg_metrics=args.agg_metrics,
         use_multiprocessing=args.use_multiprocessing,
         max_workers=args.max_workers,
+        rank_regex=args.rank_regex,
     )
 
 
