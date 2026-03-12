@@ -108,7 +108,7 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 - **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. InferenceMax uses `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio (R) = 0.8. We recommend tracing 1.6–2.0 OSL execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details.
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
-- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh) and to run DSR-1 model using InferenceX is present [here](/home/mohbasit/TraceLens-internal/examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh).
+- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh) and to run DSR-1 model using InferenceX is present [here](../home/mohbasit/TraceLens-internal/examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh).
 
 ### Step 2: Installation
 
