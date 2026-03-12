@@ -24,15 +24,15 @@ When invoked by the orchestrator, you will receive the following context:
 - `output_dir`: Base analysis output directory
 - `node`: Node name for SSH access (e.g., `my_node`)
 - `container`: Docker container with TraceLens installed (e.g., `my_container`)
-- `category`: Either `sdpa_fwd` (forward pass) or `sdpa_bwd` (backward pass)
+- `sdpa`: Either `sdpa_fwd` (forward pass) or `sdpa_bwd` (backward pass)
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/<category>_ops.csv` - Filtered SDPA operations
-2. `<output_dir>/metadata/<category>_metadata.json` - Hardware specs, GPU utilization
-3. `<output_dir>/category_data/<category>_tree_data.json` - Pre-computed parent chains
+1. `<output_dir>/category_data/<sdpa>_ops.csv` - Filtered SDPA operations
+2. `<output_dir>/metadata/<sdpa>_metadata.json` - Hardware specs, GPU utilization
+3. `<output_dir>/category_data/<sdpa>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
-- `<output_dir>/category_findings/<category>_findings.md`
+- `<output_dir>/category_findings/<sdpa>_findings.md`
 
 ---
 
@@ -69,17 +69,17 @@ Execute the Python script inside the container on the node. Pass `--category` to
 ssh <node> "docker exec <container> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/sdpa_analysis.py \
   --output-dir <output_dir> \
-  --category <category>"
+  --category <sdpa>"
 ```
 
-Where `<category>` is `sdpa_fwd` or `sdpa_bwd`.
+Where `<sdpa>` is `sdpa_fwd` or `sdpa_bwd`.
 
 ### Step 2: Read Metrics
 
 After the script completes, read the JSON metrics file:
 
 ```bash
-cat <output_dir>/category_data/<category>_metrics.json
+cat <output_dir>/category_data/<sdpa>_metrics.json
 ```
 
 ### Step 2.5: Identify Attention Implementation Type
@@ -147,7 +147,7 @@ For Paged Attention, include additional columns:
 
 ### Step 7: Determine Optimization Recommendations
 
-For each validated bottleneck, provide recommendations based on attention type:
+For each validated bottleneck, provide recommendations based on attention type. **Do NOT suggest "kernel fusion" for SDPA — these kernels are already fused.**
 
 **For Standard/Unfused Attention:**
 - **Algorithmic:** Migrate to Flash Attention
@@ -158,7 +158,7 @@ For each validated bottleneck, provide recommendations based on attention type:
 
 ### Step 8: Write Category Findings
 
-Create `<output_dir>/category_findings/<category>_findings.md`. Create it through the container on the node:
+Create `<output_dir>/category_findings/<sdpa>_findings.md`. Create it through the container on the node:
 
 Include:
 - Attention type detected (Flash, Paged, Standard)
@@ -175,7 +175,7 @@ Include:
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/<category>_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/<sdpa>_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)

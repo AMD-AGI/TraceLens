@@ -488,9 +488,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ## Step 9.5: Generate Performance Improvement Plot
 
-After aggregating all recommendations (Step 9), generate a matplotlib performance improvement plot as `perf_improvement.png` and produce a base64-encoded version for embedding directly in the report. This makes the final report fully portable -- it can be shared or moved without losing the plot image.
-
-**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only. Impact estimates assume tuning can reach 75–100% of roofline; the plot uses the 87.5% midpoint for projected improvements.
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
 ### 9.5.1 Ensure matplotlib is available
 
@@ -509,18 +507,7 @@ generate_plot_data('<output_dir>')
 \""
 ```
 
-This produces `<output_dir>/plot_data.json` containing:
-- `baseline_ms`: Total GPU time from manifest
-- `recommendations`: Top kernel_tuning estimates grouped by category (high/medium confidence), sorted by total savings, max 6 categories
-- `all_estimates`: All estimates across all categories and types (for report aggregation)
-
 ### 9.5.3 Generate Plot and Base64 File
-
-Call `generate_perf_plot()` which reads `plot_data.json`, computes cumulative projections, renders the matplotlib chart, and writes both `perf_improvement.png` and `perf_improvement_base64.txt`. The title should follow the format `<Model> on <Platform> — Kernel Tuning Potential`.
-
-**Plot layout:**
-- **Left pane — Projected E2E Latency After Each Optimization:** Bar chart of projected latency after each optimization step at the midpoint of the expected performance. The **baseline bar has no error bar**. All subsequent bars have error bars showing the potential performance improvement for 75–100% of roofline performance (from `savings_ms_low` and `savings_ms_high` in `plot_data.json`). Y-axis: E2E Latency (ms).
-- **Right pane — Cumulative Throughput Improvement:** Central line with markers (relative throughput, baseline=100). A filled band (volume) shows uncertainty due to the expected performance improvement (same 75–100% roofline range). **No uncertainty at baseline** (first point): band has zero width there. Boundary lines connect the outside of the uncertainty area. Y-axis: Relative Throughput (Baseline = 100).
 
 ```bash
 ssh <node> "docker exec <container> python3 -c \"
@@ -559,7 +546,6 @@ The report **must** use these exact `##` headers — do NOT rename them:
 6. `## Appendix`
 
 Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
-
 **Deterministic report generation (optional):** The script `TraceLens/AgenticMode/Standalone/generate_standalone_report.py` produces the full report body from `category_data/`, `plot_data.json`, and `*_metrics.json`. Run with `--output-dir <output_dir>` and `--model "<Model>"`; then run `embed_plot_in_report()` to substitute the plot. This ensures consistency with the plot and with category-specific recommendation text.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
@@ -592,7 +578,7 @@ print('PASS: All required sections present')
 
 ### 10.2 Generate and Embed Performance Improvement Plot
 
-After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`.
+After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report.
 
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
