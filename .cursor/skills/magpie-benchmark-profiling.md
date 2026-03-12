@@ -62,6 +62,79 @@ benchmark:
   hf_cache_path: "/path/to/hf/cache"
 ```
 
+### Step 1b: Check Docker Image for Profiling Patches
+
+After reading the config, ask the user whether their Docker image already includes TraceLens profiling patches. These patches are required for capturing kernel-level detail (shapes, roofline data, call stacks) in both eager and graph-mode traces.
+
+Ask:
+
+> "Does the Docker image in your config (or the default image Magpie will select) already have TraceLens profiling patches applied? If you're unsure, I can build a patched image for you."
+
+#### If the user's image is already patched
+
+Proceed to Step 2. No changes needed.
+
+#### If the user needs a patched image
+
+Present the supported inference server and version options based on the `framework` field in the YAML config:
+
+**For vLLM (`framework: vllm`):**
+
+> "Which vLLM version would you like to build a patched image for?
+>
+> | Option | vLLM Version | Base Image |
+> |--------|-------------|------------|
+> | 1 | v0.14.0 | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` |
+> | 2 | v0.15.0 | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` |
+> | 3 | v0.16.0 | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` |"
+
+Once the user selects a version, build the patched image on the remote node:
+
+```bash
+ssh <node> "cd <TraceLens_repo> && \
+  bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
+    <version_tag> \
+    <TraceLens_repo> \
+    -t tracelens-vllm"
+```
+
+Where `<version_tag>` is `v14`, `v15`, or `v16` based on the user's selection.
+
+**For SGLang (`framework: sglang`):**
+
+> "Which GPU type are you targeting?
+>
+> | Option | GPU | Base Image |
+> |--------|-----|------------|
+> | 1 | MI300X | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` |
+> | 2 | MI355X | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` |"
+
+Once the user selects, build the patched image on the remote node:
+
+```bash
+ssh <node> "cd <TraceLens_repo> && \
+  bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
+    <TraceLens_repo> \
+    <gpu_type>"
+```
+
+Where `<gpu_type>` is `mi300` or `mi355` based on the user's selection. The script starts a container, applies sglang roofline patches, and installs TraceLens inside it.
+
+**After building:** Update the `docker_image` field in the benchmark YAML config to use the newly built image:
+
+```yaml
+benchmark:
+  framework: vllm  # or sglang
+  docker_image: tracelens-vllm  # or the sglang container name
+  ...
+```
+
+This overrides the default auto-selected image from `benchmark_images.yaml`.
+
+#### If the user declines
+
+Proceed with the user's chosen image. Warn that traces may lack kernel-level detail for graph-replayed operations, and roofline analysis may not be available.
+
 ### Step 2: Ensure Profiling Is Enabled
 
 If the user wants a profiler trace, verify `profiler.torch_profiler.enabled` is `true` in the YAML. If it is `false`, edit it to `true` before running.
@@ -236,6 +309,41 @@ for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
 - `profiler_out_{N}.txt` — profiler summary text per rank
 - Expect `TP` rank files + 1 async_llm file + `TP` profiler_out files
 
+### Step 6: Split Traces for Analysis
+
+All vLLM and sglang traces — regardless of whether they were collected in eager mode or graph-replay mode — must be split before running TraceLens analysis. The raw per-rank traces are large (vLLM: ~100-150MB, 5-9M events; sglang: smaller but still benefit from splitting) and `TraceLens_generate_perf_report_pytorch` cannot handle them efficiently without preprocessing (it will hang or run for 10+ minutes with no output).
+
+Run trace preprocessing on the rank-0 trace file:
+
+```bash
+ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
+  cd <TraceLens_repo> && \
+  python examples/custom_workflows/split_vllm_trace_annotation.py \
+    <workspace>/torch_trace/<rank-0-trace>.pt.trace.json.gz \
+    -o <workspace>/torch_trace/trace_split \
+    --find-steady-state --num-steps 32"
+```
+
+Despite the script name referencing "vllm", it handles both vLLM and sglang traces.
+
+This produces ~3 files in `trace_split/`:
+- `*_annotation_iteration_0_*.json.gz` — full iteration (prefill + decode), ~16MB. **Use this for analysis.**
+- `prefilldecode_*_.json.gz` — prefill/decode phase only
+- `decode_*_.json.gz` — decode-only phase
+- `execution_details.json` — iteration metadata
+
+Then construct and print the following command for the user to run manually (do **not** execute it). Fill in the absolute paths based on the workspace and split output:
+
+```
+python <TraceLens_repo>/TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
+    --capture_folder <workspace>/torch_trace \
+    --profile_json_path <workspace>/torch_trace/trace_split/<split_trace>.json.gz \
+    --output_csvs_dir <workspace>/torch_trace/analysis_output \
+    --group_by_parent_module --enable_pseudo_ops
+```
+
+Use absolute paths for all three arguments. The `--profile_json_path` should point to the `*_annotation_iteration_0_*.json.gz` file from the split output.
+
 ## Output Structure
 
 ```
@@ -302,93 +410,6 @@ In the Python config dataclass, `TorchProfilerConfig.enabled` defaults to `True`
 
 If the node has a shared HuggingFace cache, set `hf_cache_path` in the config to avoid multi-hour model downloads. This path is mounted into the container.
 
-### 9. vLLM graph-mode traces cannot be processed directly
-
-vLLM v0.15+ captures traces with GPU graph replay enabled by default. These raw per-rank traces are very large (~100-150MB, 5-9M events) and contain graph replay events that the standard `TraceLens_generate_perf_report_pytorch` tool cannot handle efficiently (it will hang or run for 10+ minutes with no output). You must split the trace first, then run the perf report on the smaller split output. See the "vLLM Graph-Mode Trace Processing" section below.
-
-To detect graph mode: check the raw trace for `hipGraphLaunch` or `cudaGraphLaunch` events in `cuda_runtime` category, or look for `StreamBeginCapture`/`StreamEndCapture` events. If these are absent, the trace is eager-mode and can be processed directly with `TraceLens_generate_perf_report_pytorch` without splitting.
-
-## vLLM Graph-Mode Trace Processing
-
-When working with vLLM traces captured in graph-replay mode, split them before running TraceLens analysis. If the trace is eager-mode (no graph replay events), skip this section and use `TraceLens_generate_perf_report_pytorch` directly on the raw trace.
-
-### Prerequisites: Patched vLLM for graph capture profiling
-
-For full graph-mode analysis (shapes, roofline, call stacks for graph-replayed kernels), vLLM must be patched to profile the graph capture phase. Without the patch, the trace only contains opaque graph replay events with no kernel-level detail inside the graphs.
-
-**Option A: Build a patched Docker image (recommended)**
-
-TraceLens provides a build script that applies the patch automatically:
-
-```bash
-cd <TraceLens_repo>
-bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
-    <version_tag> \
-    /path/to/TraceLens-internal \
-    -t tracelens-vllm
-```
-
-Supported version tags and base images:
-
-| Tag | Base Image | vLLM Version |
-|-----|-----------|--------------|
-| `v14` | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` | v0.14.0 |
-| `v15` | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` | v0.15.0 |
-| `v16` | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0 |
-
-Then tell Magpie to use this image by adding `docker_image` to the benchmark YAML config:
-
-```yaml
-benchmark:
-  framework: vllm
-  docker_image: tracelens-vllm
-  ...
-```
-
-This overrides the default auto-selected image from `benchmark_images.yaml`.
-
-**Option B: Apply the patch manually inside the Magpie Docker container**
-
-If you cannot build a custom image, you can patch the running container that Magpie creates. This requires exec-ing into the container before or during the benchmark run, since the patch must be applied to the vLLM installation inside the container (not on the host).
-
-```bash
-# Exec into the running Magpie benchmark container
-docker exec -it <container_name> bash
-
-# Find where vLLM is installed inside the container
-python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
-
-# Apply the matching patch (TraceLens repo must be mounted or copied in)
-cd /path/to/vllm/../
-git apply /path/to/TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_v0.15.0.patch
-```
-
-Available patches: `vllm_v0.13.0.patch`, `vllm_v0.14.0.patch`, `vllm_v0.15.0.patch`, `vllm_v0.16.0.patch`.
-
-Note: Option A (pre-built image) is strongly preferred since it avoids the need to patch a running container and ensures the patch is applied before profiling begins.
-
-### Step 1: Split the trace by annotation iteration
-
-```bash
-ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
-  cd <TraceLens_repo> && \
-  python examples/custom_workflows/split_vllm_trace_annotation.py \
-    <workspace>/torch_trace/<rank-0-trace>.pt.trace.json.gz \
-    -o <workspace>/graph_split \
-    --find-steady-state --num-steps 10"
-```
-
-This produces ~3 files in `graph_split/`:
-- `*_annotation_iteration_0_*.json.gz` — full iteration (prefill + decode), ~16MB. **Use this for analysis.**
-- `prefilldecode_*_.json.gz` — prefill/decode phase only
-- `decode_*_.json.gz` — decode-only phase
-- `execution_details.json` — iteration metadata
-
-### Step 2: Process the split trace
-
-Run the standard perf report tool on the split iteration trace (not the raw trace).
-
-When feeding into the standalone analysis skill, use the split trace path (not the raw trace).
 
 ## Optional: Post-Benchmark Analysis
 
