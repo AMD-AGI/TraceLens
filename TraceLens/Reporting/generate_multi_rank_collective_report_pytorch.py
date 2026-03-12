@@ -319,9 +319,7 @@ def main():
                 strict=True,
             )
             common = os.path.commonpath([os.path.abspath(p) for p in trace_files])
-            output_dir = (
-                os.path.dirname(common) if os.path.isfile(common) else common
-            )
+            output_dir = os.path.dirname(common) if os.path.isfile(common) else common
 
         default_output = os.path.join(output_dir, "nccl_analysis_report.xlsx")
         print(f"No output specified. Using default: {default_output}")
