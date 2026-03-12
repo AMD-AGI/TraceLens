@@ -164,19 +164,29 @@ def add_node_span_columns(
     if df is None or df.empty:
         return df
 
-    if world_size is None:
-        if "rank" in df.columns:
-            world_size = int(df["rank"].max()) + 1
-        else:
-            logger.warning(
-                "Cannot infer world_size for node_span labeling; "
-                "skipping node columns."
-            )
-            return df
+    if gpus_per_node <= 0:
+        raise ValueError(
+            f"gpus_per_node must be a positive integer, got {gpus_per_node}"
+        )
 
     has_rank = "rank" in df.columns
     has_pg_ranks = "Process Group Ranks" in df.columns
     if not has_rank and not has_pg_ranks:
+        return df
+
+    if world_size is None:
+        if has_rank:
+            world_size = int(df["rank"].max()) + 1
+        elif has_pg_ranks:
+            all_ranks: set = set()
+            for v in df["Process Group Ranks"].dropna().unique():
+                all_ranks.update(_parse_pg_ranks(v))
+            world_size = max(all_ranks) + 1 if all_ranks else None
+
+    if world_size is None:
+        logger.warning(
+            "Cannot infer world_size for node_span labeling; " "skipping node columns."
+        )
         return df
 
     r2n = _rank_to_node_map(world_size, gpus_per_node)
@@ -186,9 +196,10 @@ def add_node_span_columns(
         df["node_id"] = df["rank"].map(r2n)
 
     if has_pg_ranks:
-        df["node_span"] = df["Process Group Ranks"].apply(
-            lambda v: _node_span_for_pg(v, r2n, gpus_per_node)
-        )
+        pg_series = df["Process Group Ranks"]
+        unique_pgs = pg_series.unique()
+        pg_to_span = {v: _node_span_for_pg(v, r2n, gpus_per_node) for v in unique_pgs}
+        df["node_span"] = pg_series.map(pg_to_span)
 
     return df
 

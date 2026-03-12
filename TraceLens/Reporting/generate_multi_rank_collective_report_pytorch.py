@@ -8,9 +8,7 @@ import os
 import argparse
 import pandas as pd
 import glob
-import sys
-from typing import List, Dict, Optional, Union
-import subprocess
+from typing import Dict, List, Optional
 import warnings
 from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import (
@@ -120,6 +118,12 @@ def generate_collective_report(
                     )
                     continue
             list_trace_filepaths.append(expected_file)
+
+    # Validate explicit gpus_per_node
+    if gpus_per_node is not None and gpus_per_node <= 0:
+        raise ValueError(
+            f"--gpus_per_node must be a positive integer, got {gpus_per_node}"
+        )
 
     # Auto-detect gpus_per_node from trace metadata if not provided
     if gpus_per_node is None and list_trace_filepaths:

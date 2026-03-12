@@ -81,7 +81,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 
 _Notes:_
 - Summary sheets (`nccl_summary_*`) are **always** produced; detailed per-event sheets (`nccl_long`, `nccl_implicit_sync`, `nccl_all2allv`) appear when `--detailed_analysis` is set.
-- When `gpus_per_node` is known (auto-detected or set via `--gpus_per_node`), all sheets gain `node_id` and `node_span` columns. `node_span` is `intra_node` when all ranks in the process group reside on the same node, or `inter_node` otherwise. You can filter or pivot on these columns in Excel to compare intra- vs inter-node communication.
+- When `gpus_per_node` is known (auto-detected or set via `--gpus_per_node`), sheets that contain `rank` and/or `Process Group Ranks` columns gain `node_id` and `node_span` columns (fully aggregated summary sheets without these columns remain unchanged). `node_span` is `intra_node` when all ranks in the process group reside on the same node, or `inter_node` otherwise. You can filter or pivot on these columns in Excel to compare intra- vs inter-node communication.
 - Column sets can evolve; the above reflects the provided example workbook.
 ---
 
