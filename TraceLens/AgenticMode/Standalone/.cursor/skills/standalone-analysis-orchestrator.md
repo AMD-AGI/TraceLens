@@ -109,7 +109,6 @@ Build the cluster prefix using this lookup:
 | No | No | `ssh <node> "cd <tracelens_dir> && {CMD}"` |
 | Yes | No | `ssh <node> "docker exec <container> bash -c 'cd <tracelens_dir> && {CMD}'"` |
 | No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
-| Yes | Yes | `ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
 
 Write the resolved template (with actual node/container/venv/tracelens_dir values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
 
