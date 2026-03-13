@@ -50,13 +50,14 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 #### Option A: Build a Docker image using the [provided scripts](../examples/custom_workflows/inference_analysis/) (recommended)
 
 ##### vLLM Script
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, or `v16`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, or `v17`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 | Version | Base Image | vLLM Version |
 |---------|-----------|--------------|
 | `v14` | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` | v0.14.0 |
 | `v15` | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` | v0.15.0 |
 | `v16` | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0 |
+| `v17` | `vllm/vllm-openai-rocm:v0.17.0` | v0.17.0 | 
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \

@@ -87,6 +87,7 @@ Present the supported inference server and version options based on the `framewo
 > | 1 | v0.14.0 | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` |
 > | 2 | v0.15.0 | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` |
 > | 3 | v0.16.0 | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` |"
+> | 4 | v0.17.0 | `vllm/vllm-openai-rocm:v0.17.0` |"
 
 Once the user selects a version, build the patched image on the remote node:
 
@@ -98,7 +99,7 @@ ssh <node> "cd <TraceLens_repo> && \
     -t tracelens-vllm"
 ```
 
-Where `<version_tag>` is `v14`, `v15`, or `v16` based on the user's selection.
+Where `<version_tag>` is `v14`, `v15`, `v16`, or `v17` based on the user's selection.
 
 **For SGLang (`framework: sglang`):**
 
