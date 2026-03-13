@@ -3036,6 +3036,37 @@ class vllm_unified_attention_with_output(SDPA):
         )
 
 
+class evoformer_attention(SDPA):
+    # EvoformerAttention(Q, K, V, res_mask, pair_bias)
+    # Q, K, V: [Batch, N_seq, N_res, Head, Dim] — N_seq is an MSA/template depth
+    # dimension that is folded into the effective batch.  Attention is computed
+    # over N_res for every (Batch, N_seq) slice; always non-causal.
+    # res_mask  [Batch, N_seq, 1, 1, N_res] and
+    # pair_bias [Batch, 1,     Head, N_res, N_res] are extra reads not counted
+    # in the standard SDPA bytes formula.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"].get("Input type", [])
+        # Q is input 0: [Batch, N_seq, N_res, Head, Dim]
+        q_shape = input_dims[0]
+        B, N_seq, N_res, Head, Dim = q_shape
+        dtype = input_types[0] if input_types else None
+        return {
+            "B": B * N_seq,
+            "N_Q": N_res,
+            "H_Q": Head,
+            "N_KV": N_res,
+            "H_KV": Head,
+            "d_h_qk": Dim,
+            "d_h_v": Dim,
+            "causal": False,
+            "flash_impl": False,
+            "dtype_A_B": [dtype],
+        }
+
+
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
@@ -3209,6 +3240,32 @@ class aten_binary_elementwise(BinaryElementwise):
             "stride_input1": stride_input1,
             "stride_input2": stride_input2,
             "stride_output": stride_output,
+        }
+
+
+class liger_silu_mul_function(BinaryElementwise):
+    # LigerSiLUMulFunction(a, b)  — from linkedin/Liger-Kernel (swiglu.py)
+    # Fused Triton kernel: output = SiLU(a) * b
+    # a, b: same shape; output has the same shape and dtype.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+        input_strides = event["args"]["Input Strides"]
+        a_shape = tuple(input_dims[0])
+        b_shape = tuple(input_dims[1])
+        dtype_a = input_types[0]
+        dtype_b = input_types[1]
+        stride_a = tuple(input_strides[0])
+        stride_b = tuple(input_strides[1])
+        return {
+            "shape_in1": a_shape,
+            "shape_in2": b_shape,
+            "dtype_in1_in2_out": (dtype_a, dtype_b, None),
+            "stride_input1": stride_a,
+            "stride_input2": stride_b,
+            "stride_output": None,
         }
 
 
