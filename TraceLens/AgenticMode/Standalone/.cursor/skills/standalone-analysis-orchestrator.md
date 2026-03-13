@@ -504,7 +504,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 ### 9.5.1 Ensure matplotlib is available
 
 ```bash
-ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null || docker exec <container> pip install matplotlib"
+<prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
 ```
 
 ### 9.5.2 Generate plot_data.json (Deterministic)
@@ -512,21 +512,21 @@ ssh <node> "docker exec <container> python3 -c 'import matplotlib' 2>/dev/null |
 Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
 generate_plot_data(sys.argv[1])
-\" '<output_dir>'"
+\" '<output_dir>'
 ```
 
 ### 9.5.3 Generate Plot and Base64 File
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'"
+\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
 
 The function handles these edge cases automatically:
@@ -542,13 +542,13 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 ## Step 10: Generate Final Report
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` through the container on the node (e.g., via `ssh <node> "docker exec <container> cp ..."` or write via `tee`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
+2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
 3. **Fill in** each section by substituting placeholders with data from:
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items, detailed analysis)
    - `system_findings/*.md` (system-level P-items, detailed analysis)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
-4. **Write** the completed report back to `<output_dir>/standalone_analysis.md` through the container on the node.
+4. **Write** the completed report back to `<output_dir>/standalone_analysis.md` using `<prefix>`.
 
 The report **must** use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
