@@ -32,7 +32,7 @@ Orchestrate modular standalone PyTorch trace analysis using a **two-tier archite
 Use vendor-agnostic terminology throughout such as GPU kernels, collective communication, vendor GEMM library, DNN primitives, GPU graph, etc. Focus on operation semantics, not vendor implementation details
 
 **Exception:** When quoting kernel names from traces, it's acceptable to include the actual name for identification.
-
+ 
 ---
 
 ## Shell Permissions for Remote Commands
@@ -44,7 +44,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Node, Container)
+0. Query User Inputs (Platform, Trace Path, Environment Setup)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
@@ -76,29 +76,65 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      4. **MI355X**
      5. **MI400**
 
-3. **Node Name**
-   - Ask: "Which Node should we use for analysis?"
+3. **Environment Setup**
+   - Ask: "Are you running locally or on a cluster?"
+     - If **local**: No further environment questions — prefix is blank (commands run directly).
+     - If **cluster**:
+       - Ask "Which node should we use?" → `<node>`
+       - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
+       - Ask "Are you using a virtual environment?" → if yes, ask for venv path (e.g. `/opt/venvs/tracelens`) → `<venv_path>`
 
-4. **Container Name**
-   - Ask: "Which Docker container has TraceLens installed?"
-
-5. **Output Directory** (Optional)
+4. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+### Build and Cache Command Prefix
+
+After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
+
+The template uses `{CMD}` as a placeholder for the actual command.
+
+**Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment.
+
+Run the following command (adjust for container if applicable):
+
+```bash
+# Without container:
+ssh <node> "find / -maxdepth 5 -type d -name 'TraceLens' 2>/dev/null | head -5"
+
+# With container:
+ssh <node> "docker exec <container> bash -c 'find / -maxdepth 5 -type d -name TraceLens 2>/dev/null | head -5'"
+```
+
+Pick the result that contains `TraceLens/AgenticMode/` and store it as `<tracelens_dir>`.
+
+Build the cluster prefix using this lookup:
+
+| Container | Venv | Template |
+|-----------|------|----------|
+| No | No | `ssh <node> "cd <tracelens_dir> && {CMD}"` |
+| Yes | No | `ssh <node> "docker exec <container> bash -c 'cd <tracelens_dir> && {CMD}'"` |
+| No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
+| Yes | Yes | `ssh <node> "docker exec <container> bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
+
+Write the resolved template (with actual node/container/venv/tracelens_dir values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
+
+### Command Execution Pattern
+
+**Before executing any command**, read `<output_dir>/cache/cmd_prefix.txt`. It contains a template with a `{CMD}` placeholder. Substitute `{CMD}` with the actual command. All commands below use `<prefix>` to represent this resolved template.
 
 ---
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI in the container:
+Execute TraceLens CLI:
 
 ```bash
-ssh <node> "docker exec <container> \
-  TraceLens_generate_perf_report_pytorch \
+<prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --enable_pseudo_ops"
+  --enable_pseudo_ops
 ```
 
 This generates:
@@ -109,14 +145,14 @@ This generates:
 
 ## Steps 2-5: Prepare Category Data
 
-Execute the TraceLens Agentic Mode orchestrator preparation script in the container:
+Execute the TraceLens Agentic Mode orchestrator preparation script:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>"
+  --output-dir <output_dir>
 ```
 
 This script performs:
@@ -169,7 +205,7 @@ System-level analysis examines issues that affect the GPU pipeline as a whole --
 ### 6.1 Read Manifest and Identify System-Level Subagents
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest_categories
 load_manifest_categories(sys.argv[1])
@@ -215,8 +251,7 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: <list from agent file's "Input files" section>
 - Output file: <from agent file's "Output file" section>
 
@@ -298,8 +333,7 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: category_data/<category>_ops.csv, metadata/<category>_metadata.json,
   category_data/<category>_tree_data.json (if available)
 - Output file: category_findings/<category>_findings.md
@@ -382,10 +416,8 @@ After all subagents complete:
 
 Before aggregating results, validate outputs from **both** tiers (system_findings/ and category_findings/).
 
-Run in the container on the node:
-
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_subagent_outputs
 validate_subagent_outputs(sys.argv[1])
@@ -404,10 +436,8 @@ This runs four checks:
 
 ### Read Findings from BOTH Tiers
 
-Run in the container on the node:
-
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_findings
 load_findings(sys.argv[1])
@@ -536,10 +566,10 @@ Validate the report before sharing the priority recommendations on the chat and 
 
 After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
 
-**Validation procedure** (run on the node, inside the container using `validate_report()` from `analysis_utils`):
+**Validation procedure:**
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
 passed, missing = validate_report(sys.argv[1])
@@ -547,7 +577,7 @@ if not passed:
     print('FAIL: Missing sections: ' + ', '.join(missing))
     sys.exit(1)
 print('PASS: All required sections present')
-\" '<output_dir>'"
+\" '<output_dir>'
 ```
 
 **If validation fails (exit code 1):**
@@ -566,11 +596,11 @@ After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
 generate_and_embed_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'"
+\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
