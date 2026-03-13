@@ -500,7 +500,7 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 <prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
 ```
 
-### 9.5.2 Generate plot_data.json (Deterministic)
+### 9.5.2 Generate plot_data.json
 
 Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
 
@@ -521,12 +521,6 @@ from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
 \" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
-
-The function handles these edge cases automatically:
-- Missing `plot_data.json` → skips plot, prints message
-- Empty recommendations (all categories efficient) → skips plot
-- Savings exceeding baseline → clamps to prevent division by zero
-- Missing matplotlib → prints clear error message
 
 If the plot fails or is skipped, proceed to Step 10 without the plot and note the failure in the report.
 
@@ -555,7 +549,7 @@ Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
-### 10.1 Validate Report Structure (Retry up to 1x)
+### 10.1 Validate Report Structure (Retry up to 2x)
 
 After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
 
@@ -578,7 +572,7 @@ print('PASS: All required sections present')
 1. Read the FAIL output to identify missing sections
 2. Fix the report by adding the missing sections with the correct `##` headers, keeping existing content
 3. Run validation again
-4. Maximum 1 retry attempt. If still failing after retry, proceed to Step 10.2 with a warning
+4. Maximum 2 retry attempt. If still failing after retry, proceed to Step 10.2 with a warning
 
 ---
 
