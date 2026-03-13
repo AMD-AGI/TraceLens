@@ -1,16 +1,16 @@
-# moe_01_many_experts_few_tokens — MI300X Standalone Analysis
+# moe_06_tiny_batch_many_experts — MI300X Standalone Analysis
 
 ## Executive Summary
 
-Standalone performance analysis of synthetic test trace `moe_01_many_experts_few_tokens` on MI300X. The trace contains 2 compute kernel categories and 1 system-level categories.
+Standalone performance analysis of synthetic test trace `moe_06_tiny_batch_many_experts` on MI300X. The trace contains 2 compute kernel categories and 1 system-level categories.
 
 | Metric | Value |
 |--------|-------|
-| Total Compute Time | 1.27 ms |
-| Computation | 29.1% |
-| Idle Time | 70.9% |
+| Total Compute Time | 1.17 ms |
+| Computation | 23.1% |
+| Idle Time | 76.9% |
 | Exposed Communication | 0.0000% |
-| Top Bottleneck Category | MoE Fused (0.280 ms) |
+| Top Bottleneck Category | MoE Fused (0.180 ms) |
 
 ---
 
@@ -20,12 +20,12 @@ Standalone performance analysis of synthetic test trace `moe_01_many_experts_few
 
 | Rank | Category | GPU Time (ms) | % of Compute |
 |------|----------|---------------|--------------|
-| 1 | MoE Fused | 0.280 | 75.7% |
-| 2 | elementwise | 0.090 | 24.3% |
+| 1 | MoE Fused | 0.180 | 66.7% |
+| 2 | elementwise | 0.090 | 33.3% |
 
 ### 🔴 P1: MoE Fused Optimization
 
-**Insight**: MoE Fused operations at 0.0% average efficiency, consuming 0.280 ms (22.1% of compute).
+**Insight**: MoE Fused operations at 0.0% average efficiency, consuming 0.180 ms (15.4% of compute).
 
 **Action**: Review kernel configurations and consider algorithmic optimizations.
 
@@ -39,19 +39,19 @@ Standalone performance analysis of synthetic test trace `moe_01_many_experts_few
 
 > **Note:** System-level analysis is exploratory.
 
-✅ No system-level bottlenecks detected. GPU activity breakdown shows 29.1% computation, with negligible memcpy and communication overhead.
+✅ No system-level bottlenecks detected. GPU activity breakdown shows 23.1% computation, with negligible memcpy and communication overhead.
 
 ---
 
 ## Detailed Analysis: Compute Kernels
 
-### 1. MoE Fused (75.7% of compute)
+### 1. MoE Fused (66.7% of compute)
 
 # MoE Analysis Findings
 
 **Status**: SUCCESS
 **Analysis Tier**: Compute Kernel
-**Total Time**: 0.280 ms (22.1% of compute)
+**Total Time**: 0.180 ms (15.4% of compute)
 **Operation Count**: 1
 **Average Efficiency**: 0.0%
 
@@ -59,7 +59,7 @@ Standalone performance analysis of synthetic test trace `moe_01_many_experts_few
 
 | Operation | Count | Time (ms) | % of Category | Efficiency (%) | Bound |
 |-----------|-------|-----------|---------------|----------------|-------|
-| vllm::rocm_aiter_fused_moe | 1 | 0.280 | 100.0% | N/A | N/A |
+| vllm::rocm_aiter_fused_moe | 1 | 0.180 | 100.0% | N/A | N/A |
 
 ## Operation Classification
 
@@ -68,7 +68,7 @@ Standalone performance analysis of synthetic test trace `moe_01_many_experts_few
 ## Bottleneck Analysis
 
 ### vllm::rocm_aiter_fused_moe
-- **Time**: 0.280 ms (100.0% of category)
+- **Time**: 0.180 ms (100.0% of category)
 - **Efficiency**: N/A (no perf model — MoE ops lack direct perf model mapping)
 - **Assessment**: MoE operations are typically already fused; focus on expert routing balance
 
@@ -92,15 +92,15 @@ Standalone performance analysis of synthetic test trace `moe_01_many_experts_few
 
 ---
 
-### 2. elementwise (24.3% of compute)
+### 2. elementwise (33.3% of compute)
 
 # Elementwise Analysis Findings
 
 **Status**: SUCCESS
-**Total Time**: 0.090 ms (7.1% of compute)
+**Total Time**: 0.090 ms (7.7% of compute)
 **Average Efficiency**: 2.0%
 
-Elementwise operations are minor (7.1% of compute). No significant optimization opportunity.
+Elementwise operations are minor (7.7% of compute). No significant optimization opportunity.
 
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Confidence |

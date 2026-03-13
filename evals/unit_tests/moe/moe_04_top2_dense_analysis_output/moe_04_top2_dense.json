@@ -43,7 +43,7 @@
       "pid": 470,
       "tid": 711,
       "ts": 1000000.0,
-      "dur": 1150.0,
+      "dur": 2000.0,
       "args": {
         "Input Dims": [
           [
@@ -62,7 +62,7 @@
           ],
           [
             512,
-            1
+            2
           ]
         ],
         "Input type": [
@@ -87,7 +87,7 @@
             1
           ],
           [
-            1,
+            2,
             1
           ]
         ],
@@ -118,13 +118,13 @@
       "pid": 0,
       "tid": 7,
       "ts": 1000050.0,
-      "dur": 950.0,
+      "dur": 1800.0,
       "args": {
         "device": 0,
         "context": 1,
         "stream": 7,
         "grid": [
-          128,
+          256,
           1,
           1
         ],
@@ -161,7 +161,7 @@
       "name": "aten::mul_",
       "pid": 470,
       "tid": 711,
-      "ts": 1001250.0,
+      "ts": 1002100.0,
       "dur": 230.0,
       "args": {
         "Input Dims": [
@@ -200,7 +200,7 @@
       "name": "cudaLaunchKernel",
       "pid": 470,
       "tid": 711,
-      "ts": 1001260.0,
+      "ts": 1002110.0,
       "dur": 5.0,
       "args": {
         "External id": 101
@@ -212,7 +212,7 @@
       "name": "void at::native::elementwise_kernel<1>",
       "pid": 0,
       "tid": 7,
-      "ts": 1001300.0,
+      "ts": 1002150.0,
       "dur": 30.0,
       "args": {
         "device": 0,
@@ -236,7 +236,7 @@
       "id": 101,
       "pid": 0,
       "tid": 7,
-      "ts": 1001300.0,
+      "ts": 1002150.0,
       "cat": "ac2g",
       "name": "ac2g"
     },
@@ -245,7 +245,7 @@
       "id": 101,
       "pid": 0,
       "tid": 7,
-      "ts": 1001300.0,
+      "ts": 1002150.0,
       "cat": "ac2g",
       "name": "ac2g",
       "bp": "e"
@@ -256,7 +256,7 @@
       "name": "aten::mul_",
       "pid": 470,
       "tid": 711,
-      "ts": 1001580.0,
+      "ts": 1002430.0,
       "dur": 230.0,
       "args": {
         "Input Dims": [
@@ -295,7 +295,7 @@
       "name": "cudaLaunchKernel",
       "pid": 470,
       "tid": 711,
-      "ts": 1001590.0,
+      "ts": 1002440.0,
       "dur": 5.0,
       "args": {
         "External id": 102
@@ -307,7 +307,7 @@
       "name": "void at::native::elementwise_kernel<1>",
       "pid": 0,
       "tid": 7,
-      "ts": 1001630.0,
+      "ts": 1002480.0,
       "dur": 30.0,
       "args": {
         "device": 0,
@@ -331,7 +331,7 @@
       "id": 102,
       "pid": 0,
       "tid": 7,
-      "ts": 1001630.0,
+      "ts": 1002480.0,
       "cat": "ac2g",
       "name": "ac2g"
     },
@@ -340,7 +340,7 @@
       "id": 102,
       "pid": 0,
       "tid": 7,
-      "ts": 1001630.0,
+      "ts": 1002480.0,
       "cat": "ac2g",
       "name": "ac2g",
       "bp": "e"
@@ -351,7 +351,7 @@
       "name": "aten::mul_",
       "pid": 470,
       "tid": 711,
-      "ts": 1001910.0,
+      "ts": 1002760.0,
       "dur": 230.0,
       "args": {
         "Input Dims": [
@@ -390,7 +390,7 @@
       "name": "cudaLaunchKernel",
       "pid": 470,
       "tid": 711,
-      "ts": 1001920.0,
+      "ts": 1002770.0,
       "dur": 5.0,
       "args": {
         "External id": 103
@@ -402,7 +402,7 @@
       "name": "void at::native::elementwise_kernel<1>",
       "pid": 0,
       "tid": 7,
-      "ts": 1001960.0,
+      "ts": 1002810.0,
       "dur": 30.0,
       "args": {
         "device": 0,
@@ -426,7 +426,7 @@
       "id": 103,
       "pid": 0,
       "tid": 7,
-      "ts": 1001960.0,
+      "ts": 1002810.0,
       "cat": "ac2g",
       "name": "ac2g"
     },
@@ -435,7 +435,7 @@
       "id": 103,
       "pid": 0,
       "tid": 7,
-      "ts": 1001960.0,
+      "ts": 1002810.0,
       "cat": "ac2g",
       "name": "ac2g",
       "bp": "e"

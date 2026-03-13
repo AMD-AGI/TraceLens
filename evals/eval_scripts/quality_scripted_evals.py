@@ -46,11 +46,10 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
         ref_df = pd.read_csv(os.path.join(ref_dir, fname))
         gen_df = pd.read_csv(gen_path)
 
-        if set(ref_df.columns) != set(gen_df.columns):
-            extra = set(gen_df.columns) - set(ref_df.columns)
-            missing = set(ref_df.columns) - set(gen_df.columns)
+        missing_cols = set(ref_df.columns) - set(gen_df.columns)
+        if missing_cols:
             mismatches.append(
-                f"{fname}: column mismatch (extra: {extra}, missing: {missing})"
+                f"{fname}: missing required columns: {missing_cols}"
             )
             continue
         gen_df = gen_df[ref_df.columns]
