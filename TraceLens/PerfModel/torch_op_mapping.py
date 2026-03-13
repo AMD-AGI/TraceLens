@@ -54,6 +54,11 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # DeepEP Expert-Parallel communication ops
+    "DeepEPDispatch": perf_model.deepep_dispatch,
+    "DeepEPCombine": perf_model.deepep_combine,
+    "DeepEPDispatchBackward": perf_model.deepep_dispatch_backward,
+    "DeepEPCombineBackward": perf_model.deepep_combine_backward,
 }
 
 # Add pseudo-op extension mappings
@@ -142,6 +147,7 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.EPComm: "EP_Communication",
 }
 
 # Add pseudo-op extension categories
@@ -164,12 +170,14 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
 
 def categorize_torch_op(row):
     """
-    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Categorizes a row based on the 'name' and 'kernel_details' fields.
     Args:
-        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+        row (dict): A dictionary representing a row with a 'name' key (str) and an optional
+            'kernel_details' key (list of dicts, each with a 'name' field for the GPU kernel name).
     Returns:
         str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+             'SDPA_fwd', 'SDPA_bwd', 'EP_Communication', 'triton', 'elementwise', 'reduce',
+             'multi_tensor_apply', 'record_param_comms', or 'other'.
     """
 
     debug = False
@@ -215,6 +223,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("EP_Communication", []):
+        return "EP_Communication"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
