@@ -23,25 +23,14 @@ _B_STRIDES = [745216, 256, 1]
 _DTYPE = "float"
 
 
-def _event(a_shape=None, b_shape=None, dtype=None):
-    a = a_shape or _A_SHAPE
-    b = b_shape or _B_SHAPE
+def _event(dtype=None):
+    """Build an event using the real trace shapes and strides (_A_SHAPE / _A_STRIDES).
+    Use _simple_event() when you need arbitrary shapes with dummy unit strides."""
     dt = dtype or _DTYPE
-    n = len(a)
-    strides_a = list(
-        reversed(
-            [1]
-            + [
-                1 if i == 0 else a[n - 1 - i] * (1 if i == 1 else a[n - i])
-                for i in range(n - 1)
-            ]
-        )
-    )
-    strides_b = strides_a[:]
     return {
         "name": "LigerSiLUMulFunction",
         "args": {
-            "Input Dims": [a, b],
+            "Input Dims": [_A_SHAPE, _B_SHAPE],
             "Input type": [dt, dt],
             "Input Strides": [_A_STRIDES, _B_STRIDES],
             "Concrete Inputs": ["", ""],
