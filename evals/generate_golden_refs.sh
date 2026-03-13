@@ -81,7 +81,21 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
 
     # Copy output as reference
     cp -r "$OUTPUT_DIR" "$REF_DIR"
-    echo "  [$id] Reference saved to $reference_dir"
+
+    # Remove unwanted files from reference dir (keep only standalone_analysis.md + perf_report_csvs/)
+    rm -rf "$REF_DIR/category_data" \
+           "$REF_DIR/category_findings" \
+           "$REF_DIR/system_findings" \
+           "$REF_DIR/metadata" \
+           "$REF_DIR/perf_improvement.png" \
+           "$REF_DIR/perf_improvement_base64.txt" \
+           "$REF_DIR/plot_data.json"
+
+    # Remove intermediate analysis output and log
+    rm -rf "$OUTPUT_DIR"
+    rm -f "$CASE_DIR/analysis.log"
+
+    echo "  [$id] Reference saved to $reference_dir (cleaned)"
     generated=$((generated + 1))
 
     sleep 30
