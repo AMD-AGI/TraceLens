@@ -32,12 +32,6 @@ Orchestrate modular standalone PyTorch trace analysis using a **two-tier archite
 Use vendor-agnostic terminology throughout such as GPU kernels, collective communication, vendor GEMM library, DNN primitives, GPU graph, etc. Focus on operation semantics, not vendor implementation details
 
 **Exception:** When quoting kernel names from traces, it's acceptable to include the actual name for identification.
-
----
-
-## Shell Permissions for Remote Commands
- 
-**All `ssh` commands** (and any shell commands that connect to the node/container) should first be attempted with `required_permissions: ["full_network"]`. If the command fails due to SSH authentication or agent access issues (e.g., "Permission denied", "Connection refused", or the command is rejected/aborted by the sandbox), ask the user for permission to retry with `required_permissions: ["all"]`, explaining that full sandbox access is needed for SSH agent and config access. Once the user approves `"all"` permissions, use `"all"` for all subsequent SSH commands in the session without asking again.
  
 ---
 
@@ -94,11 +88,19 @@ After collecting inputs, build a command template and save it to `<output_dir>/c
 
 The template uses `{CMD}` as a placeholder for the actual command.
 
-**Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment:
+**Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment.
 
-1. SSH into the node (and enter the container if applicable).
-2. Run `find / -maxdepth 5 -type d -name "TraceLens" 2>/dev/null | head -5` to find candidate directories.
-3. Confirm the correct one (it should contain `TraceLens/AgenticMode/`). Store as `<tracelens_dir>`.
+Run the following command (adjust for container if applicable):
+
+```bash
+# Without container:
+ssh <node> "find / -maxdepth 5 -type d -name 'TraceLens' 2>/dev/null | head -5"
+
+# With container:
+ssh <node> "docker exec <container> bash -c 'find / -maxdepth 5 -type d -name TraceLens 2>/dev/null | head -5'"
+```
+
+Pick the result that contains `TraceLens/AgenticMode/` and store it as `<tracelens_dir>`.
 
 Build the cluster prefix using this lookup:
 
