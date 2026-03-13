@@ -37,11 +37,12 @@ This enables efficient performance analysis and comparison without processing ma
     --store-single-iteration  Store each iteration/dummy run as individual file
                              
     --find-steady-state      Automatically detect and extract steady-state region:
-                            - Combines 256 iterations from steady-state window
+                            - Combines specified number of iterations from steady-state window
                             - Extracts separate prefill-decode phase trace
                             - Extracts separate decode-only phase trace
                             (Requires --iterations all # Default value)
 
+    --num-steps             Number of iterations to extract for steady-state (default: 32)
 💡 QUICK EXAMPLES
 ───────────────────────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ This enables efficient performance analysis and comparison without processing ma
    
    This automatically:
    • Analyzes all iterations to find steady-state region
-   • Extracts 256 representative iterations
+   • Extracts the specified number  (default: 32) representative iterations
    • Splits into phase-specific traces:
      - Combined steady-state trace
      - Prefill-decode phase trace
@@ -546,8 +547,8 @@ def main():
     parser.add_argument("--find-steady-state", action="store_true", default=False,
                         help="For iterations, find steady state region and extract from there instead of sequential iterations"
     )
-    parser.add_argument("--num-steps", type=int, default=256,
-                        help="Number of iterations to extract for steady state (default: 256)"
+    parser.add_argument("--num-steps", type=int, default=32,
+                        help="Number of iterations to extract for steady state (default: 32)"
     )
     parser.add_argument("--decode-only", action="store_true", default=False,
                         help="Extract only decode phase"
