@@ -30,23 +30,18 @@ logger = logging.getLogger(__name__)
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
+        import time
+        t0 = time.time()
         if filename_path.endswith("pb"):
             from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
-
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
             import gzip
-            import time
-
-            t0 = time.time()
             with gzip.open(filename_path, "r") as fin:
                 data = fin.read()  # Keep as bytes for orjson
             print(f"[timing] load_data: file read (gzip) {time.time() - t0:.3f}s")
         elif filename_path.endswith("json"):
-            import time
-
-            t0 = time.time()
             with open(filename_path, "rb") as fin:  # Read as bytes for orjson
                 data = fin.read()
             print(f"[timing] load_data: file read (json) {time.time() - t0:.3f}s")
@@ -58,10 +53,7 @@ class DataLoader:
                 writefile.write(data_str)
 
         # Use orjson for faster parsing (23% faster than stdlib json)
-        # Falls back to json if orjson not available
-        import time
-
-        t0 = time.time()
+        # Falls back to json if orjson not available or on decode errors
         try:
             import orjson
 
@@ -73,11 +65,14 @@ class DataLoader:
                 "orjson not available, falling back to standard json. "
                 "Install orjson for faster JSON parsing: pip install orjson"
             )
-            if isinstance(data, bytes):
-                data = data.decode("utf-8")
-            result = json.loads(data)
-            print(f"[timing] load_data: JSON parse (stdlib) {time.time() - t0:.3f}s")
-            return result
+        except Exception as e:
+            # orjson is strict about UTF-8; fall back to stdlib json which is more lenient
+            logger.warning(f"orjson decode failed ({e}), falling back to standard json")
+
+        # Fallback to standard json (more lenient with encoding issues)
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", errors="surrogateescape")
+        return json.loads(data)
 
 
 class JaxProfileProcessor:

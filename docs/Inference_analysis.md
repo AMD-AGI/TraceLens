@@ -121,26 +121,37 @@ python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o
 
 ### Step 4: Generate Performance Report
 
-Run standalone performance analysis on eager or graph mode traces:
+Performance report generation is supported for both eager-mode and graph-mode (capture + replay) traces.
+
+**Eager or graph replay traces (no graph capture folder):**
 
 ```bash
-python TraceLens/Reporting/generate_perf_report_pytorch_vllm.py \
+python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
   --profile_json_path /path/to/trace.json \
   --output_xlsx_path perf_report.xlsx \
   --group_by_parent_module \
   --enable_pseudo_ops
 ```
 
-Run standalone performance analysis on graph replay and graph capture traces:
+**Graph replay traces augmented with graph capture traces:**
+
+When a `--capture_folder` is provided, the script automatically classifies graph capture traces (batch sizes, full vs. piecewise mode) and merges their call-stack and shape information into the graph replay tree before generating the report.
 
 ```bash
-python TraceLens/Reporting/generate_perf_report_pytorch_vllm_graph.py \
-  --capture_folder path/to/capture/traces/folder \
-  --graph_json_path path/to/graph/replay/trace \
+python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
+  --profile_json_path /path/to/graph/replay/trace.json \
+  --capture_folder /path/to/capture/traces/folder \
   --output_xlsx_path perf_report.xlsx \
   --group_by_parent_module \
   --enable_pseudo_ops
 ```
+
+**Additional options:**
+
+| Flag | Description |
+|------|-------------|
+| `--output_csvs_dir DIR` | Write per-sheet CSV files instead of a single Excel workbook |
+| `--gpu_arch_json_path PATH` | Provide a GPU architecture spec for roofline analysis |
 
 ### Step 5: Compare Traces with TraceDiff
 

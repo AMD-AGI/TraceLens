@@ -110,6 +110,7 @@ Example execution_details.json entry:
   "event_count": 45230,
   "num_gpu_events": 1250,
   "gpu_duration": 2300000,
+  "gpu_busy_duration": 1000000,
   "phase": {
     "num_prefill": 5,
     "num_prefilldecode": 10,
@@ -140,7 +141,9 @@ import zipfile
 from typing import List, Set, Tuple, Optional
 from dataclasses import dataclass, field
 import csv
+from statistics import mean
 from TraceLens.util import DataLoader
+import pandas as pd
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
 import orjson
 from tqdm import tqdm
@@ -174,21 +177,7 @@ def find_events_by_pattern(events: List[dict], patterns, name: str, cat: str = N
     if len(matches) == 0:
         return None
     return matches
-
-
-def extract_iteration(
-    iteration_roots: List[dict],
-    events: List[dict],
-    trace_json: dict,
-) -> dict:
-    """Extract a single iteration trace."""
-
-    filtered_events = []
-    gpu_dur = 0
-    num_gpu_events = 0
-    batch_list = []
-
-    # Pre-index GPU and flow events by correlation id
+def preprocess_trace( events: List[dict]):
     gpu_corr_map = {}
     flow_corr_map = {}
     meta_events = []
@@ -209,6 +198,25 @@ def extract_iteration(
             if corr is not None:
                 gpu_corr_map.setdefault(corr, []).append(e)
             continue
+    return gpu_corr_map, flow_corr_map, meta_events
+def extract_iteration(
+    iteration_roots: List[dict],
+    events: List[dict],
+    trace_json: dict,
+    gpu_corr_map: dict,
+    flow_corr_map: dict,
+    meta_events: List[dict],
+) -> dict:
+    """Extract a single iteration trace."""
+
+    filtered_events = []
+    gpu_dur = 0
+    gpu_busy = 0
+    num_gpu_events = 0
+    batch_list = []
+
+    # Pre-index GPU and flow events by correlation id
+    
 
 
     # Compute the global time window for all iteration roots
@@ -269,6 +277,7 @@ def extract_iteration(
                 filtered_events.append(e)
                 start_time.append(e.get("ts"))
                 end_time.append(e.get("ts") + e.get("dur"))
+                gpu_busy += e.get("dur")
                 num_gpu_events += 1
         gpu_dur += max(end_time) - min(start_time) if start_time else 0
 
@@ -284,7 +293,7 @@ def extract_iteration(
     # Create output trace
     output = trace_json.copy()
     output["traceEvents"] = filtered_events
-    return output, list(set(batch_list)), num_gpu_events, gpu_dur
+    return output, list(set(batch_list)), num_gpu_events, gpu_dur,gpu_busy   
 
 
 def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
@@ -343,6 +352,9 @@ def extract_and_save(
     prefix: str,
     start: int,
     end: int,
+    gpu_corr_map: dict,
+    flow_corr_map: dict,
+    meta_events: List[dict],
 ):
     """Extract and save a range of iterations/dummy runs."""
     extraction_summary= []
@@ -353,7 +365,7 @@ def extract_and_save(
         return extraction_summary
     for idx, root in zip(indices, selected):
         iter_details=[get_iter_details_from_name(r["name"],prefix) for r in root]
-        iter_trace,batch_list,num_gpu_events,gpu_dur = extract_iteration(root, events, trace_json)
+        iter_trace,batch_list,num_gpu_events,gpu_dur,gpu_busy = extract_iteration(root, events, trace_json, gpu_corr_map, flow_corr_map, meta_events)
         if "annotation_iteration" in prefix and len(root)==1:
             name_append=root[0]["name"].replace("(", "_").replace(")", "")
         else:
@@ -379,6 +391,7 @@ def extract_and_save(
             "event_count": len(iter_trace['traceEvents']),
             "num_gpu_events": num_gpu_events,
             "gpu_duration": gpu_dur,
+            "gpu_busy_duration": gpu_busy,
             "steps": iter_details,
             "phase": phase_details,
         })
@@ -393,6 +406,9 @@ def extract_phases_and_save(
     prefix: str,
     start: int,
     end: int,
+    gpu_corr_map: dict,
+    flow_corr_map: dict,
+    meta_events: List[dict],
 ):
     """Extract and save a range of iterations/dummy runs."""
     extraction_summary= []
@@ -403,29 +419,35 @@ def extract_phases_and_save(
     for root in roots:
         iter_details=[get_iter_details_from_name(r["name"],prefix) for r in root]
         phase_details= find_phase_from_window(iter_details)
-        prefilldecode_steps = [r for r,i in zip(root, iter_details) if i.get("context_requests", 0) > 0 and i.get("generation_requests", 0)>0]
+        prefilldecode_steps = [r for r,i in zip(root, iter_details) if i.get("context_requests", 0) > 0]
         decode_steps = [r for r,i in zip(root, iter_details) if i.get("generation_requests", 0) > 0 and i.get("context_requests", 0)==0]
         
+        if len(prefilldecode_steps)>0:
+            iter_details=[get_iter_details_from_name(r["name"],prefix) for r in prefilldecode_steps]
+            phase_details= find_phase_from_window(iter_details)
         
-        iter_trace,batch_list,num_gpu_events,gpu_dur = extract_iteration(prefilldecode_steps, events, trace_json)
-        name_append=f"prefilldecode_{phase_details['num_prefilldecode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
+            iter_trace,batch_list,num_gpu_events,gpu_dur,gpu_busy = extract_iteration(prefilldecode_steps, events, trace_json, gpu_corr_map, flow_corr_map, meta_events)
+            name_append=f"prefilldecode_{phase_details['num_prefilldecode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
-        out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
-        with gzip.open(out_path, "wb") as f:
-            f.write(json.dumps(iter_trace).encode('utf-8'))
-        
-        print(f"  {prefix}: {len(iter_trace['traceEvents'])} events -> {out_path}")
-        extraction_summary.append({
-            "idx": 0,
-            "output_path": out_path,
-            "event_count": len(iter_trace['traceEvents']),
-            "num_gpu_events": num_gpu_events,
-            "gpu_duration": gpu_dur,
-            "steps": iter_details,
-            "phase": phase_details,
-        })
+            out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
+            with gzip.open(out_path, "wb") as f:
+                f.write(json.dumps(iter_trace).encode('utf-8'))
+            
+            print(f"  {prefix}: {len(iter_trace['traceEvents'])} events -> {out_path}")
+            extraction_summary.append({
+                "idx": 0,
+                "output_path": out_path,
+                "event_count": len(iter_trace['traceEvents']),
+                "num_gpu_events": num_gpu_events,
+                "gpu_duration": gpu_dur,
+                "gpu_busy_duration": gpu_busy,
+                "steps": iter_details,
+                "phase": phase_details,
+            })
 
-        iter_trace,batch_list,num_gpu_events,gpu_dur = extract_iteration(decode_steps, events, trace_json)
+        iter_details=[get_iter_details_from_name(r["name"],prefix) for r in decode_steps]
+        phase_details= find_phase_from_window(iter_details)
+        iter_trace,batch_list,num_gpu_events,gpu_dur,gpu_busy = extract_iteration(decode_steps, events, trace_json, gpu_corr_map, flow_corr_map, meta_events)
         name_append=f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
         out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
@@ -439,12 +461,13 @@ def extract_phases_and_save(
             "event_count": len(iter_trace['traceEvents']),
             "num_gpu_events": num_gpu_events,
             "gpu_duration": gpu_dur,
+            "gpu_busy_duration": gpu_busy,
             "steps": iter_details,
             "phase": phase_details,
         })
     return extraction_summary
 
-def find_steady_state_iterations(iteration_roots: List[dict], num_steps: int = 5) -> List[dict]:
+def find_steady_state_iterations(iteration_roots: List[dict], num_steps: int = 5, decode_only: bool = False) -> List[dict]:
     n = len(iteration_roots)
     thresh=0.1
     if n < num_steps:
@@ -468,18 +491,20 @@ def find_steady_state_iterations(iteration_roots: List[dict], num_steps: int = 5
             if steady_state_started:
                 prev_events_in_steady-=1
         if prev_events_in_steady>5 and not steady_state_started:
-            print("steady state started at index", i)
+            print("steady state started at index", i-5)
             steady_state_started=True
-            start_index=i-prev_events_in_steady
+            start_index=i-prev_events_in_steady+1
         if prev_events_in_steady<=0 and steady_state_started and not steady_state_ended:
             print("steady state ended at index", i)
             steady_state_ended=True
-            end_index=i-1
+            end_index=i
             regions.append((start_index, end_index))
             steady_state_started=False
             steady_state_ended=False
             prev_events_in_steady=0
-
+    if steady_state_started and not steady_state_ended:
+        regions.append((start_index, i))
+    print("steady state regions:", regions)
             
     if len(regions)==0:
         delta=max(8,num_steps-n)
@@ -490,13 +515,14 @@ def find_steady_state_iterations(iteration_roots: List[dict], num_steps: int = 5
         if (e-s)> num_steps:
             for s1 in range(s,e,num_steps//10):
                 region=iter_details[s1:s1+num_steps]
-                sub_regions.append([s1, s1+num_steps,len([t for t in region if t['context_requests']>0])])
+                sub_regions.append([s1, s1+num_steps,len([t for t in region if t['context_requests']>0]),mean([t["num_requests"] for t in region])])
         else:
-            sub_regions.append([s,e,len([t for t in iter_details[s:e+1] if t['context_requests']>0])])
-    
-    best_window=sorted(sub_regions, key=lambda x: x[2], reverse=True)[0]
+            sub_regions.append([s,e,len([t for t in iter_details[s:e] if t['context_requests']>0]),mean([t["num_requests"] for t in iter_details[s:e]])])
+    if not decode_only:
+        sub_regions = [t for t in sub_regions if t[2]>0]
+    best_window=sorted(sub_regions, key=lambda x: x[3], reverse=True)[0]
     print("Selected steady state window:", best_window)
-    return iteration_roots[best_window[0]:best_window[1]+1]
+    return iteration_roots[best_window[0]:best_window[1]]
 
 
 def main():
@@ -523,6 +549,9 @@ def main():
     parser.add_argument("--num-steps", type=int, default=256,
                         help="Number of iterations to extract for steady state (default: 256)"
     )
+    parser.add_argument("--decode-only", action="store_true", default=False,
+                        help="Extract only decode phase"
+    )   
     args= parser.parse_args()
     execution_details=[]
     # Iteration marker patterns
@@ -534,16 +563,18 @@ def main():
     ]
     RUNTIME_EVENT_PATTERN=[
         re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run"),
-        re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch"),
+        ## re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch"),
+        re.compile(r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph")
     ]
 
     # Load trace
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
     events = trace_json.get("traceEvents", [])
+    gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events")
     
     # Find iterations and dummy runs
-    iteration_roots = find_events_by_pattern(events, ANNOTATION_PATTERN, "execute_model (iteration)", cat="user_annotation")
+    iteration_roots = find_events_by_pattern(events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation")
     dummy_roots = find_events_by_pattern(events, RUNTIME_EVENT_PATTERN, "_dummy_run")
     
     # Create output directory
@@ -558,7 +589,7 @@ def main():
             print(f"\nExtracting iterations {start} to {end-1}...")
             temp_execution_details = extract_and_save(
                  [[root] for root in iteration_roots], events, trace_json, args.output_dir,
-                base_name, "annotation_iteration", start, end
+                base_name, "annotation_iteration", start, end, gpu_corr_map, flow_corr_map, meta_events
             )
             execution_details.extend(temp_execution_details)
 
@@ -566,17 +597,17 @@ def main():
             if args.iterations!="all":
                 iteration_roots_subset=iteration_roots[start:end]
             else:
-                iteration_roots_subset=find_steady_state_iterations(iteration_roots,num_steps=args.num_steps)
+                iteration_roots_subset=find_steady_state_iterations(iteration_roots,num_steps=args.num_steps,decode_only=args.decode_only)
             print(f"\nExtracting iterations {start} to {end-1}...")
             temp_execution_details = extract_and_save(
                 [iteration_roots_subset], events, trace_json, args.output_dir,
-                base_name, "annotation_iteration", 0, 1
+                base_name, "annotation_iteration", 0, 1, gpu_corr_map, flow_corr_map, meta_events
             )
             execution_details.extend(temp_execution_details)
             print("starting phase extraction...")
             temp_execution_details = extract_phases_and_save(
                 [iteration_roots_subset], events, trace_json, args.output_dir,
-                base_name, "annotation_iteration", 0, 1
+                base_name, "annotation_iteration", 0, 1, gpu_corr_map, flow_corr_map, meta_events
             )
             execution_details.extend(temp_execution_details)
     # Extract dummy runs
@@ -586,14 +617,14 @@ def main():
             print(f"\nExtracting dummy runs {start} to {end-1}...")
             temp_execution_details = extract_and_save(
                 [[root] for root in dummy_roots], events, trace_json, args.output_dir,
-                base_name, "run_iteration", start, end
+                base_name, "run_iteration", start, end, gpu_corr_map, flow_corr_map, meta_events
             )
             execution_details.extend(temp_execution_details)
         if args.dummy!="all":
             print(f"\nExtracting dummy runs {start} to {end-1}...")
             temp_execution_details = extract_and_save(
                 [dummy_roots[start:end]], events, trace_json, args.output_dir,
-                base_name, "run_iteration", 0, 1
+                base_name, "run_iteration", 0, 1, gpu_corr_map, flow_corr_map, meta_events
             )
             execution_details.extend(temp_execution_details)
         if args.find_steady_state:
@@ -607,5 +638,21 @@ def main():
             json.dump(execution_details, f, indent=2)
         print(f"Wrote execution details JSON to {json_path}")
 
+        rows = []
+        for entry in execution_details:
+            row = {k: v for k, v in entry.items() if k not in ("steps", "phase")}
+            if "phase" in entry and entry["phase"]:
+                for pk, pv in entry["phase"].items():
+                    row[f"phase_{pk}"] = pv
+            row["num_steps"] = len(entry.get("steps", []))
+            row["gpu_busy_duration"] = entry.get("gpu_busy_duration", 0)
+            row["gpu_duration"] = entry.get("gpu_duration", 0)
+            row["num_gpu_events"] = entry.get("num_gpu_events", 0)
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        csv_path = os.path.join(args.output_dir, "execution_details.csv")
+        df.to_csv(csv_path, index=False, float_format="%.2f")
+        print(f"Wrote execution details CSV to {csv_path}")
 if __name__ == "__main__":
     main()

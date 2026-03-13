@@ -4,8 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import re
 import logging
-from typing import Optional, List, Callable
+from typing import Any, Optional, List, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,81 @@ def inject_pseudo_op(
     children.append(pseudo_evt["UID"])
 
 
+def inject_pseudo_op_wrap_children(
+    tree,
+    parent_evt,
+    name,
+    shape_donor_evt=None,
+    extra_args=None,
+):
+    """
+    Create pseudo op that wraps all children of a parent event.
+    Creates: Parent → Pseudo Op → [all original children]
+
+    Unlike inject_pseudo_op (which isolates a single kernel), this wraps
+    the entire subtree under a parent into a single pseudo op.
+
+    Args:
+        tree: TraceToTree instance
+        parent_evt: Parent event whose children will be wrapped
+        name: Name of the pseudo-op
+        shape_donor_evt: Event to inherit shapes from (uses parent if None)
+        extra_args: Additional custom args to add to pseudo-op (dict)
+    """
+
+    children_uids = parent_evt.get("children", [])
+    if not children_uids:
+        return
+
+    donor = shape_donor_evt if shape_donor_evt is not None else parent_evt
+    donor_args = donor.get("args", {})
+
+    pseudo_evt = {
+        "ph": "X",
+        "name": name,
+        "cat": "cpu_op",
+        "pid": parent_evt["pid"],
+        "tid": parent_evt["tid"],
+        "ts": parent_evt["ts"],
+        "dur": parent_evt["dur"],
+        "args": {
+            "Input Dims": donor_args.get("Input Dims"),
+            "Input type": donor_args.get("Input type"),
+            "Input Strides": donor_args.get("Input Strides"),
+            "Concrete Inputs": donor_args.get("Concrete Inputs"),
+            "Sequence number": donor_args.get("Sequence number", parent_evt.get("UID")),
+            "Pseudo op": True,
+        },
+        "children": list(children_uids),
+        "gpu_events": list(parent_evt.get("gpu_events", [])),
+    }
+
+    if extra_args:
+        pseudo_evt["args"].update(extra_args)
+
+    set_bookkeeping_attr(tree, pseudo_evt)
+
+    for child_uid in children_uids:
+        child_evt = tree.get_UID2event(child_uid)
+        child_evt["parent"] = pseudo_evt["UID"]
+
+    parent_evt["children"] = [pseudo_evt["UID"]]
+    pseudo_evt["parent"] = parent_evt["UID"]
+
+    # Descendants that were cpu_root_nodes are no longer roots since they
+    # now live under the pseudo op. Remove them and promote the pseudo op.
+    root_set = set(tree.cpu_root_nodes)
+    stack = list(children_uids)
+    while stack:
+        uid = stack.pop()
+        if uid in root_set:
+            tree.cpu_root_nodes.remove(uid)
+            root_set.discard(uid)
+        evt = tree.get_UID2event(uid)
+        stack.extend(evt.get("children", []))
+    tree.cpu_root_nodes.append(pseudo_evt["UID"])
+
+
 def apply_pseudo_op_extensions(
     tree, 
     verbose: bool = False
@@ -122,6 +198,18 @@ def apply_pseudo_op_extensions(
                 if verbose:
                     logger.info("Auto-detected GPT_OSS unfused MoE operations with Triton kernels")
     
+    # MLA Decode: AITER implementation
+    if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:
+        has_mla_python_func = any(
+            re.search(r"aiter/mla.py\(\d+\): mla_decode_fwd", name)
+            for name in tree.name2event_uids
+        )
+        if has_mla_python_func:
+            from .mla_decode_pseudo_ops import create_pseudo_ops_mla_decode
+            extensions.append(("MLA_Decode", create_pseudo_ops_mla_decode))
+            if verbose:
+                logger.info("Auto-detected MLA decode operations")
+
     # Apply extensions onto tree
     for ext_info in extensions:
         # ext_info tuple of (extension_name, extension_function)

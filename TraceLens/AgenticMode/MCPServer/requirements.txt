@@ -1,0 +1,12 @@
+# TraceLens HTTP MCP Server dependencies
+# Install with: pip install -r requirements.txt
+
+# MCP SDK (Streamable HTTP transport support)
+mcp>=1.0.0
+
+# ASGI server
+uvicorn[standard]
+
+# Required by TraceLens core
+pandas
+openpyxl
