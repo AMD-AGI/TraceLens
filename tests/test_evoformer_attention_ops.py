@@ -89,8 +89,8 @@ def test_evoformer_attention_batch_scaling():
 
 def test_evoformer_attention_flops():
     # B_eff=129, H_Q=4, N_Q=N_KV=256, d_h=16, non-causal
-    # flops_qk = 129 * 4 * (2 * 256 * 256 * 16) = 2,164,260,864 / 2
-    # flops_pv = same → total = 2,164,260,864
+    # flops_qk = 129 * 4 * (2 * 256 * 256 * 16) = 1,082,130,432
+    # flops_pv = same → total = 2 * 1,082,130,432 = 2,164,260,864
     expected = 129 * 4 * 2 * 256 * 256 * 16 + 129 * 4 * 2 * 256 * 256 * 16  # QK^T  # AV
     evt = _event()
     m = evoformer_attention(evt)
