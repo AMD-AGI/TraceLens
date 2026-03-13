@@ -92,7 +92,8 @@ def main():
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
 
-    impact_estimates = compute_impact_estimates(operations, "convolution")
+    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+    impact_estimates = compute_impact_estimates(operations, "convolution", baseline_ms=baseline_ms)
 
     metrics = {
         "category": "convolution",

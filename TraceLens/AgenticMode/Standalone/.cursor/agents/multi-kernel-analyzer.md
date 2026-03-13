@@ -180,11 +180,11 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 ## Recommendations
 
 ### System P<N>: [Highest Priority Multi-Kernel Issue]
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 **Action**: [1-2 sentences]
 
 ### System P<N+1>: [Next Issue]
-**Issue**: [1 sentence]
+**Insight**: [1 sentence]
 **Action**: [1-2 sentences]
 
 ## Technical Details
@@ -202,8 +202,8 @@ Create `<output_dir>/system_findings/multi_kernel_findings.md`. Create it throug
 | D2D | ... | ... | ... | ... |
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Confidence |
-|---------------|------|----------------------|------------|
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 **Impact estimates are not produced for system-level analyses.** The Impact Summary table header must be present but must have **zero data rows**. Do NOT estimate savings for overlap improvement, memcpy reduction, or any other system-level recommendation.

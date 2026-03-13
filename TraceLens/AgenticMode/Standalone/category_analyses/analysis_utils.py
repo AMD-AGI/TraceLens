@@ -465,22 +465,39 @@ def calculate_average_efficiency(
 
 
 def compute_impact_estimates(
-    operations: List[dict], category: str, min_savings_ms: float = 0.1
+    operations: List[dict],
+    category: str,
+    min_savings_ms: float = 0.1,
+    baseline_ms: float = 0,
 ) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    Uses the documented formula: savings_ms = op_time_ms * (1 - efficiency_pct / 100).
+    Assumes tuning can reach 75%–100% of roofline performance. Produces a range:
+      - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
+      - savings_ms_low  = op_time_ms * (1 - efficiency_pct / 75)    [75% target]
+      - savings_ms      = op_time_ms * (1 - efficiency_pct / 87.5)  [87.5% midpoint]
+
+    The midpoint (87.5%) is the primary estimate used for plots and aggregation.
+    Low/high values are negative-clamped to zero (already above target).
     Anomalous efficiencies (>100%) are excluded.
+
+    When baseline_ms > 0, each estimate also includes e2e_pct_low / e2e_pct_high
+    (savings as a percentage of end-to-end time).
 
     Args:
         operations: List of operation metric dicts (from build_operation_metrics)
         category: Category name for labelling
         min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
+        baseline_ms: Total end-to-end GPU time for E2E % calculation (0 to skip)
 
     Returns:
         List of impact estimate dicts sorted by savings descending
     """
+    TARGET_HIGH = 100.0
+    TARGET_LOW = 75.0
+    TARGET_MID = 87.5
+
     estimates = []
     for op in operations:
         eff = op.get("efficiency", {})
@@ -490,22 +507,30 @@ def compute_impact_estimates(
         time_ms = op.get("time_ms", 0)
         if time_ms <= 0:
             continue
-        savings_ms = time_ms * (1 - eff_pct / 100)
-        if savings_ms < min_savings_ms:
+
+        savings_high = max(0, time_ms * (1 - eff_pct / TARGET_HIGH))
+        savings_low = max(0, time_ms * (1 - eff_pct / TARGET_LOW))
+        savings_mid = max(0, time_ms * (1 - eff_pct / TARGET_MID))
+
+        if savings_high < min_savings_ms:
             continue
         confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
-        estimates.append(
-            {
-                "operation": op.get("name", "Unknown"),
-                "category": category,
-                "type": "kernel_tuning",
-                "savings_ms": round(savings_ms, 3),
-                "confidence": confidence,
-                "efficiency_pct": round(eff_pct, 2),
-                "bound_type": eff.get("bound_type"),
-                "time_ms": round(time_ms, 3),
-            }
-        )
+        estimate = {
+            "operation": op.get("name", "Unknown"),
+            "category": category,
+            "type": "kernel_tuning",
+            "savings_ms": round(savings_mid, 3),
+            "savings_ms_low": round(savings_low, 3),
+            "savings_ms_high": round(savings_high, 3),
+            "confidence": confidence,
+            "efficiency_pct": round(eff_pct, 2),
+            "bound_type": eff.get("bound_type"),
+            "time_ms": round(time_ms, 3),
+        }
+        if baseline_ms > 0:
+            estimate["e2e_pct_low"] = round(savings_low / baseline_ms * 100, 2)
+            estimate["e2e_pct_high"] = round(savings_high / baseline_ms * 100, 2)
+        estimates.append(estimate)
     return sorted(estimates, key=lambda x: x["savings_ms"], reverse=True)
 
 
@@ -546,7 +571,9 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
                 continue
             all_estimates.extend(metrics.get("impact_estimates", []))
 
-        category_savings = defaultdict(lambda: {"savings_ms": 0, "count": 0, "ops": []})
+        category_savings = defaultdict(
+            lambda: {"savings_ms": 0, "savings_ms_low": 0, "savings_ms_high": 0, "count": 0, "ops": []}
+        )
         for e in all_estimates:
             if e.get("type") == "kernel_tuning" and e.get("confidence") in (
                 "high",
@@ -554,6 +581,8 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
             ):
                 cat = e["category"]
                 category_savings[cat]["savings_ms"] += e["savings_ms"]
+                category_savings[cat]["savings_ms_low"] += e.get("savings_ms_low", e["savings_ms"])
+                category_savings[cat]["savings_ms_high"] += e.get("savings_ms_high", e["savings_ms"])
                 category_savings[cat]["count"] += 1
                 category_savings[cat]["ops"].append(e.get("operation", ""))
 
@@ -562,6 +591,8 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
                 {
                     "category": cat,
                     "savings_ms": round(v["savings_ms"], 3),
+                    "savings_ms_low": round(v["savings_ms_low"], 3),
+                    "savings_ms_high": round(v["savings_ms_high"], 3),
                     "operation_count": v["count"],
                     "type": "kernel_tuning",
                 }

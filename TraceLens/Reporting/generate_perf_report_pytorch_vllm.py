@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -266,8 +266,7 @@ def generate_perf_report_pytorch(
     
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd"])
-    
+    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd"])
     
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -437,7 +436,6 @@ def generate_perf_report_pytorch(
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)
-
     # Kernel summary: aggregate per-kernel durations and counts
     if kernel_summary:
         try:

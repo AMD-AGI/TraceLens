@@ -81,7 +81,7 @@ class InferenceAttention:
         input_dims = event["args"]["Input Dims"]
         q_shape, k_shape = input_dims[0], input_dims[1]
         N_Q, H_Q, d_h_qk = q_shape
-        N_KV, H_KV, d_h_v = k_shape
+        N_KV, H_KV, d_h_v = k_shape[-3:]
 
         return {
             "B": 1,
@@ -205,4 +205,6 @@ class vllm_unified_attention_with_output(InferenceAttention):
 
 class mha_varlen_fwd(InferenceAttention):
     pass
-        
+
+class mla_decode_fwd(InferenceAttention):
+    pass

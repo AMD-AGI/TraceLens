@@ -216,7 +216,7 @@ def classify_graph_capture_trace(input_folder: str):
     def count_stream_begin_captures(events):
         return sum(
             1 for e in events
-            if "StreamBeginCapture" in e.get("name", "")
+            if e.get("name", "").startswith("StreamBeginCapture")
             and e.get("cat") == "cuda_runtime"
         )
 
@@ -865,7 +865,7 @@ def main():
         description="Process a JSON trace profile and generate performance report tables."
     )
     parser.add_argument(
-        "--graph_json_path",
+        "--profile_json_path",
         type=str,
         required=True,
         help="Path to the profile.json or .json.gz file",
@@ -992,11 +992,11 @@ def main():
     if args.capture_folder:
         classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
-        graph_tree= merge_capture_trace_into_graph(args.capture_folder, metadata_json_path, args.graph_json_path)
+        graph_tree= merge_capture_trace_into_graph(args.capture_folder, metadata_json_path, args.profile_json_path)
     else:
         graph_tree=None
     generate_perf_report_pytorch(
-        profile_json_path=args.graph_json_path,
+        profile_json_path=args.profile_json_path,
         augmented_tree=graph_tree,
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
