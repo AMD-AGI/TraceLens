@@ -529,7 +529,6 @@ The report **must** use these exact `##` headers — do NOT rename them:
 6. `## Appendix`
 
 Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
-**Deterministic report generation (optional):** The script `TraceLens/AgenticMode/Standalone/generate_standalone_report.py` produces the full report body from `category_data/`, `plot_data.json`, and `*_metrics.json`. Run with `--output-dir <output_dir>` and `--model "<Model>"`; then run `embed_plot_in_report()` to substitute the plot. This ensures consistency with the plot and with category-specific recommendation text.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
