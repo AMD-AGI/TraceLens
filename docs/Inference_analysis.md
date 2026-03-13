@@ -37,7 +37,15 @@ TraceLens features for inference analysis have been primarily tested with vLLM, 
 
 ## 📖 Quickstart Guide
 
-### Step 1: Trace Collection
+### Step 1: Installation
+
+Install TraceLens from GitHub (requires AMD-AGI organization access):
+
+```bash
+pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
+```
+
+### Step 2: Trace Collection
 
 #### Option A: Build a Docker image using the [provided scripts](../examples/custom_workflows/inference_analysis/) (recommended)
 
@@ -110,14 +118,6 @@ If you prefer to patch an existing environment instead of building a new image, 
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh) and to run DSR-1 model using InferenceX is present [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh).
 
-### Step 2: Installation
-
-Install TraceLens from GitHub (requires AMD-AGI organization access):
-
-```bash
-pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
-```
-
 ### Step 3: Trace Preparation (Optional)
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
@@ -179,7 +179,7 @@ python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
 | `--output_csvs_dir DIR` | Write per-sheet CSV files instead of a single Excel workbook |
 | `--gpu_arch_json_path PATH` | Provide a GPU architecture spec for roofline analysis |
 
-### Step 5: Compare Traces with TraceDiff
+### Step 5: Compare Traces with TraceDiff (Eager-mode only)
 
 Compare two tracefiles and analyze execution differences using Lowest Common Ancestor (LCA) analysis:
 
