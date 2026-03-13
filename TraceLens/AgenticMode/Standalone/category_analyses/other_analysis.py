@@ -123,7 +123,9 @@ def main():
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
 
     baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    impact_estimates = compute_impact_estimates(operations, category, baseline_ms=baseline_ms)
+    impact_estimates = compute_impact_estimates(
+        operations, category, baseline_ms=baseline_ms
+    )
 
     metrics = {
         "category": category,

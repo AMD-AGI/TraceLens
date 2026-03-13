@@ -572,7 +572,13 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
             all_estimates.extend(metrics.get("impact_estimates", []))
 
         category_savings = defaultdict(
-            lambda: {"savings_ms": 0, "savings_ms_low": 0, "savings_ms_high": 0, "count": 0, "ops": []}
+            lambda: {
+                "savings_ms": 0,
+                "savings_ms_low": 0,
+                "savings_ms_high": 0,
+                "count": 0,
+                "ops": [],
+            }
         )
         for e in all_estimates:
             if e.get("type") == "kernel_tuning" and e.get("confidence") in (
@@ -581,8 +587,12 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
             ):
                 cat = e["category"]
                 category_savings[cat]["savings_ms"] += e["savings_ms"]
-                category_savings[cat]["savings_ms_low"] += e.get("savings_ms_low", e["savings_ms"])
-                category_savings[cat]["savings_ms_high"] += e.get("savings_ms_high", e["savings_ms"])
+                category_savings[cat]["savings_ms_low"] += e.get(
+                    "savings_ms_low", e["savings_ms"]
+                )
+                category_savings[cat]["savings_ms_high"] += e.get(
+                    "savings_ms_high", e["savings_ms"]
+                )
                 category_savings[cat]["count"] += 1
                 category_savings[cat]["ops"].append(e.get("operation", ""))
 

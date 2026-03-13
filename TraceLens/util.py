@@ -31,13 +31,16 @@ class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
         import time
+
         t0 = time.time()
         if filename_path.endswith("pb"):
             from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
             import gzip
+
             with gzip.open(filename_path, "r") as fin:
                 data = fin.read()  # Keep as bytes for orjson
             print(f"[timing] load_data: file read (gzip) {time.time() - t0:.3f}s")
