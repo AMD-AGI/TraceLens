@@ -41,6 +41,8 @@ op_to_perf_model_class_map = {
     "aiter::mha_bwd": perf_model.aiter__mha_bwd,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
+    "EvoformerAttention": perf_model.evoformer_attention,
+    "LigerSiLUMulFunction": perf_model.liger_silu_mul_function,
     "primus_turbo::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
     "primus_turbo::grouped_gemm_impl": perf_model.primus_turbo_grouped_gemm,
     "primus_turbo_cpp_extension::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
@@ -164,12 +166,17 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
 
 def categorize_torch_op(row):
     """
-    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Categorizes a row based on the 'name' and 'kernel_details' fields.
+
     Args:
-        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+        row (dict): A dictionary with at minimum a 'name' key. May also contain
+            a 'kernel_details' key — a list of dicts each having a 'name' field
+            that holds the underlying GPU kernel name.
+
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+        str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused', 'elementwise',
+             'triton', 'reduce', 'multi_tensor_apply', 'record_param_comms', or 'other'.
     """
 
     debug = False
@@ -215,6 +222,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
+        return "elementwise"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
