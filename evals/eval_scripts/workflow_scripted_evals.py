@@ -142,7 +142,10 @@ def _check_plot(output_dir: str) -> tuple[str, str]:
                     metrics = json.load(fh)
                 total_estimates += len(metrics.get("impact_estimates", []))
         if total_estimates == 0:
-            return "PASS", "No kernel tuning recommendations in any metrics — plot correctly skipped"
+            return (
+                "PASS",
+                "No kernel tuning recommendations in any metrics — plot correctly skipped",
+            )
 
     return "FAIL", "perf_improvement.png not found"
 

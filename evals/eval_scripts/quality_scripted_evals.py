@@ -48,9 +48,7 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
 
         missing_cols = set(ref_df.columns) - set(gen_df.columns)
         if missing_cols:
-            mismatches.append(
-                f"{fname}: missing required columns: {missing_cols}"
-            )
+            mismatches.append(f"{fname}: missing required columns: {missing_cols}")
             continue
         gen_df = gen_df[ref_df.columns]
         if len(ref_df) != len(gen_df):
