@@ -1,5 +1,5 @@
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index a7c2a8800..9966185df 100644
+index e4ddefc81..775b07e56 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
 @@ -8,7 +8,7 @@ import threading
@@ -88,7 +88,7 @@ index a7c2a8800..9966185df 100644
  
      def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 969627170..ddd5e7839 100644
+index c0654abd5..ef8905667 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
 @@ -578,18 +578,50 @@ class Worker(WorkerBase):
