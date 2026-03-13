@@ -78,7 +78,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 3. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
-     - If **local**: No further environment questions — prefix is `{CMD}`.
+     - If **local**: No further environment questions — prefix is blank (commands run directly).
      - If **cluster**:
        - Ask "Which node should we use?" → `<node>`
        - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
