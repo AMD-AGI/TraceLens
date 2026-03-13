@@ -216,7 +216,7 @@ def classify_graph_capture_trace(input_folder: str):
     def count_stream_begin_captures(events):
         return sum(
             1 for e in events
-            if e.get("name", "").startswith("StreamBeginCapture")
+            if "StreamBeginCapture" in e.get("name", "")
             and e.get("cat") == "cuda_runtime"
         )
 
