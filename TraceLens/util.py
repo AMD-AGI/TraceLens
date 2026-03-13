@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
+        import time
+
+        t0 = time.time()
         if filename_path.endswith("pb"):
             from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
 
@@ -40,9 +43,11 @@ class DataLoader:
 
             with gzip.open(filename_path, "r") as fin:
                 data = fin.read()  # Keep as bytes for orjson
+            print(f"[timing] load_data: file read (gzip) {time.time() - t0:.3f}s")
         elif filename_path.endswith("json"):
             with open(filename_path, "rb") as fin:  # Read as bytes for orjson
                 data = fin.read()
+            print(f"[timing] load_data: file read (json) {time.time() - t0:.3f}s")
         else:
             raise ValueError("Unknown file type", filename_path)
         if save_preprocessed:
@@ -55,7 +60,9 @@ class DataLoader:
         try:
             import orjson
 
-            return orjson.loads(data)
+            result = orjson.loads(data)
+            print(f"[timing] load_data: JSON parse {time.time() - t0:.3f}s")
+            return result
         except ImportError:
             logger.warning(
                 "orjson not available, falling back to standard json. "

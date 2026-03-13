@@ -125,12 +125,12 @@ Use the Common Recommendations table below as guidance. If idle <= 15%, state th
 idle time is within acceptable range and no action is needed.]
 
 ### [Recommendation Title]
-**Issue**: [1 sentence description]
+**Insight**: [1 sentence description]
 **Action**: [Specific steps to take]
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Confidence |
-|---------------|------|----------------------|------------|
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 **Impact estimates are not produced for system-level analyses.** The Impact Summary table header must be present but must have **zero data rows**. Do NOT estimate savings for idle time reduction, GPU graph mode, sync reduction, or any other system-level recommendation.

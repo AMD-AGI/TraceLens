@@ -32,13 +32,13 @@ Orchestrate modular standalone PyTorch trace analysis using a **two-tier archite
 Use vendor-agnostic terminology throughout such as GPU kernels, collective communication, vendor GEMM library, DNN primitives, GPU graph, etc. Focus on operation semantics, not vendor implementation details
 
 **Exception:** When quoting kernel names from traces, it's acceptable to include the actual name for identification.
-
+ 
 ---
 
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Node, Container)
+0. Query User Inputs (Platform, Trace Path, Environment Setup)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
@@ -70,29 +70,64 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      4. **MI355X**
      5. **MI400**
 
-3. **Node Name**
-   - Ask: "Which Node should we use for analysis?"
+3. **Environment Setup**
+   - Ask: "Are you running locally or on a cluster?"
+     - If **local**: No further environment questions — prefix is blank (commands run directly).
+     - If **cluster**:
+       - Ask "Which node should we use?" → `<node>`
+       - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
+       - Ask "Are you using a virtual environment?" → if yes, ask for venv path (e.g. `/opt/venvs/tracelens`) → `<venv_path>`
 
-4. **Container Name**
-   - Ask: "Which Docker container has TraceLens installed?"
-
-5. **Output Directory** (Optional)
+4. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+### Build and Cache Command Prefix
+
+After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
+
+The template uses `{CMD}` as a placeholder for the actual command.
+
+**Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment.
+
+Run the following command (adjust for container if applicable):
+
+```bash
+# Without container:
+ssh <node> "find / -maxdepth 5 -type d -name 'TraceLens' 2>/dev/null | head -5"
+
+# With container:
+ssh <node> "docker exec <container> bash -c 'find / -maxdepth 5 -type d -name TraceLens 2>/dev/null | head -5'"
+```
+
+Pick the result that contains `TraceLens/AgenticMode/` and store it as `<tracelens_dir>`.
+
+Build the cluster prefix using this lookup:
+
+| Container | Venv | Template |
+|-----------|------|----------|
+| No | No | `ssh <node> "cd <tracelens_dir> && {CMD}"` |
+| Yes | No | `ssh <node> "docker exec <container> bash -c 'cd <tracelens_dir> && {CMD}'"` |
+| No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
+
+Write the resolved template (with actual node/container/venv/tracelens_dir values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
+
+### Command Execution Pattern
+
+**Before executing any command**, read `<output_dir>/cache/cmd_prefix.txt`. It contains a template with a `{CMD}` placeholder. Substitute `{CMD}` with the actual command. All commands below use `<prefix>` to represent this resolved template.
 
 ---
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI in the container:
+Execute TraceLens CLI:
 
 ```bash
-ssh <node> "docker exec <container> \
-  TraceLens_generate_perf_report_pytorch \
+<prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --enable_pseudo_ops"
+  --enable_pseudo_ops
 ```
 
 This generates:
@@ -103,14 +138,14 @@ This generates:
 
 ## Steps 2-5: Prepare Category Data
 
-Execute the TraceLens Agentic Mode orchestrator preparation script in the container:
+Execute the TraceLens Agentic Mode orchestrator preparation script:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>"
+  --output-dir <output_dir>
 ```
 
 This script performs:
@@ -143,6 +178,7 @@ The following maps category names to their agent definition files. These files c
 | multi_kernel | multi-kernel-analyzer.md |
 | gemm | gemm-analyzer.md |
 | sdpa_fwd | sdpa-analyzer.md |
+| sdpa_bwd | sdpa-analyzer.md |
 | moe_fused | moe-analyzer.md |
 | elementwise | elementwise-analyzer.md |
 | triton | triton-analyzer.md |
@@ -162,10 +198,11 @@ System-level analysis examines issues that affect the GPU pipeline as a whole --
 ### 6.1 Read Manifest and Identify System-Level Subagents
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest_categories
-load_manifest_categories('<output_dir>')
-\""
+load_manifest_categories(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 This prints `system_categories` and `compute_categories` lists. Use `system_categories` for Step 6 and `compute_categories` for Step 7.
@@ -207,8 +244,7 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: <list from agent file's "Input files" section>
 - Output file: <from agent file's "Output file" section>
 
@@ -263,7 +299,8 @@ For each category in `compute_categories`, launch the corresponding subagent **s
 **Compute Kernel Subagent Mapping:**
 
 - `gemm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/gemm-analyzer.md`
-- `sdpa_fwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md`
+- `sdpa_fwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` (pass `--category sdpa_fwd`)
+- `sdpa_bwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` (pass `--category sdpa_bwd`)
 - `elementwise` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/elementwise-analyzer.md`
 - `reduce` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md`
 - `triton` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md`
@@ -289,8 +326,7 @@ Then launch a Task subagent with the following prompt:
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Node: <node>
-- Container: <container>
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: category_data/<category>_ops.csv, metadata/<category>_metadata.json,
   category_data/<category>_tree_data.json (if available)
 - Output file: category_findings/<category>_findings.md
@@ -343,6 +379,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
 - Resolved Peak MAF: Each operation's `efficiency.resolved_peak_maf` has the precision-correct peak — use this when citing peak TFLOPS
+- Impact estimates assume tuning can reach 75–100% of roofline (midpoint 87.5% used for plots)
 
 **Input files:**
 - category_data/{category}_ops.csv
@@ -372,13 +409,12 @@ After all subagents complete:
 
 Before aggregating results, validate outputs from **both** tiers (system_findings/ and category_findings/).
 
-Run in the container on the node:
-
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_subagent_outputs
-validate_subagent_outputs('<output_dir>')
-\""
+validate_subagent_outputs(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 This runs four checks:
@@ -393,13 +429,12 @@ This runs four checks:
 
 ### Read Findings from BOTH Tiers
 
-Run in the container on the node:
-
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_findings
-load_findings('<output_dir>')
-\""
+load_findings(sys.argv[1])
+\" '<output_dir>'"
 ```
 
 Then read the individual findings files through the container as needed for report assembly.
@@ -455,11 +490,52 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 
 ---
 
+## Step 9.5: Generate Performance Improvement Plot
+
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+
+### 9.5.1 Ensure matplotlib is available
+
+```bash
+<prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
+```
+
+### 9.5.2 Generate plot_data.json
+
+Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
+
+```bash
+<prefix> python3 -c \"
+import sys
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
+generate_plot_data(sys.argv[1])
+\" '<output_dir>'
+```
+
+### 9.5.3 Generate Plot and Base64 File
+
+```bash
+<prefix> python3 -c \"
+import sys
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
+generate_perf_plot(sys.argv[1], sys.argv[2])
+\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+```
+
+If the plot fails or is skipped, proceed to Step 10 without the plot and note the failure in the report.
+
+---
+
 ## Step 10: Generate Final Report
 
-Create `standalone_analysis.md` in `<output_dir>` **through the container on the node** (e.g., via `ssh <node> "docker exec <container> tee <path> << 'REPORT_EOF' ... REPORT_EOF"`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.1 will use to read and modify it.
-
-The report uses a **two-section structure**: Compute Kernel Optimizations and System-Level Optimizations. Each section is independently composable and can stand alone as a deliverable.
+1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md`
+2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
+3. **Fill in** each section by substituting placeholders with data from:
+   - `category_data/category_manifest.json` (metrics, GPU utilization)
+   - `category_findings/*.md` (compute kernel P-items, detailed analysis)
+   - `system_findings/*.md` (system-level P-items, detailed analysis)
+   - `category_data/*_metrics.json` (per-op tables, impact estimates)
+4. **Write** the completed report back to `<output_dir>/standalone_analysis.md` using `<prefix>`.
 
 The report **must** use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
@@ -469,229 +545,52 @@ The report **must** use these exact `##` headers — do NOT rename them:
 5. `## Detailed Analysis: System-Level`
 6. `## Appendix`
 
-Each compute kernel P-item must use **Issue** / **Action** / **Impact** fields.
+Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
-
-**Purpose:** Stakeholder report with prioritized recommendations in two tiers
-
-```markdown
-# <Model> - <Platform> Standalone Analysis
-
-## Executive Summary
-[1 paragraph overview + key metrics table]
-
-| Metric | Value |
-|--------|-------|
-| Total Compute Time | X ms |
-| Computation | Y% |
-| Idle Time | Z% |
-| Exposed Communication | W% |
-| Top Bottleneck Category | Category (V%) |
-
-{{PERF_PLOT}}
-
-## Warnings
-
-**Include this section ONLY if any subagent failed:**
-
-The following analyses could not be completed due to script failures:
-
-| Analysis | Tier | Error Summary |
-|----------|------|---------------|
-| <name> | System / Compute Kernel | <brief error description> |
-
-These are excluded from the recommendations below.
-
----
-
-## Compute Kernel Optimizations
-
-Findings from per-category kernel analysis (GEMM, SDPA, elementwise, etc.).
-Summaries of recommendations from Step 7 sub-agents, focused on individual kernel efficiency.
-
-### Top Operations
-
-Use **% of computation time** (not % of total trace time) so readers can see each operation's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`.
-
-| Rank | Operation | Category | Time (ms) | % of Compute Time |
-|------|-----------|----------|-----------|-------------------|
-| 1 | ... | ... | ... | ... |
-| 2 | ... | ... | ... | ... |
-
-<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
-
-### 🔴 P1: <Brief Title>
-
-**Issue**: [1 sentence - what's wrong]
-
-**Action**: [1-2 sentences - what to do]
-
-**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
-
-→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
-
----
-
-### 🟡 P2: <Brief Title>
-
-**Issue**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
-**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
-
-→ *See [Detailed Analysis: Compute Kernels > Section](#section-link) for details*
-
----
-
-### 🟢 P3: <Brief Title>
-
-**Issue**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
-**Impact**: [~X.X ms savings from closing efficiency gaps (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
-
----
-
-## System-Level Optimizations
-
-> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
-
-Findings from system-level analysis (GPU utilization, memory transfer patterns,
-communication/compute overlap). These affect the GPU pipeline as a whole.
-
-<!-- CONDITIONAL: If NO actionable system-level issues found (idle <= 15% and all multi-kernel assessments flagged: false), use Template A. -->
-<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if idle > 15%. -->
-<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
-<!-- Title format: Descriptive name only. -->
-<!-- System-level recommendations have NO **Impact** field -- impact is not quantifiable for system-level issues. -->
-
-<!-- === TEMPLATE A: No actionable system-level issues === -->
-<!-- Use this when idle <= 15% and all multi-kernel assessments have flagged: false -->
-
-✅ No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead. See [Detailed Analysis: System-Level](#detailed-analysis-system-level) for full metrics.
-
-<!-- === TEMPLATE B: Actionable issues found === -->
-<!-- Use this when idle > 15% or at least one multi-kernel assessment has flagged: true -->
-
-### 🔴 P1: <CPU/Idle Title OR Multi-Kernel Issue Title>
-
-**Issue**: [1-2 sentences - what's wrong]
-
-**Action**: [1-2 sentences - what to do]
-
-→ *See [Detailed Analysis: System-Level > CPU/Idle Time](#cpu-idle-time-analysis) for details* OR → *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
-
----
-
-### 🟡 P2: <Multi-Kernel Issue Title>
-
-**Issue**: [1 sentence - what's wrong]
-
-**Action**: [1-2 sentences - what to do]
-
-→ *See [Detailed Analysis: System-Level > Multi-Kernel Issues](#multi-kernel-issues) for details*
-
----
-
-### 🟢 P3: <Next Multi-Kernel Issue>
-
-**Issue**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
----
-
-## Detailed Analysis: Compute Kernels
-
-### 1. <Operation Category> (X% of compute)
-[All kernel breakdowns, calculations, tables, explanations from category_findings/]
-
-### 2. <Operation Category> (X% of compute)
-[...]
-
----
-
-## Detailed Analysis: System-Level
-
-> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
-
-### 1. CPU/Idle Time Analysis
-[Full cpu_idle_findings.md content from system_findings/]
-
-### 2. Multi-Kernel Issues
-[Full multi_kernel_findings.md content from system_findings/]
-
----
-
-## Appendix
-
-### Hardware Reference
-- **Platform**: <platform>
-- **Peak HBM BW**: X TB/s
-- **Peak MAF (BF16)**: Y TFLOPS
-- **Peak MAF (FP8)**: Z TFLOPS (if supported)
-- **Peak MAF (FP4)**: W TFLOPS (if supported)
-
-```
 
 ### 10.1 Validate Report Structure (Retry up to 2x)
 
 After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
-**Validation procedure** (run on the node, inside the container using `validate_report()` from `analysis_utils`):
+
+**Validation procedure:**
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
-passed, missing = validate_report('<output_dir>')
+passed, missing = validate_report(sys.argv[1])
 if not passed:
     print('FAIL: Missing sections: ' + ', '.join(missing))
-    import sys; sys.exit(1)
+    sys.exit(1)
 print('PASS: All required sections present')
-\""
+\" '<output_dir>'
 ```
 
 **If validation fails (exit code 1):**
 
 1. Read the FAIL output to identify missing sections
-2. Prompt the LLM with a correction request:
-   > "Your report at `<output_dir>/standalone_analysis.md` is missing these sections: [list]. The report **must** use these exact `##` headers: Executive Summary, Compute Kernel Optimizations, System-Level Optimizations, Detailed Analysis: Compute Kernels, Detailed Analysis: System-Level, Appendix. Rewrite `standalone_analysis.md` with all required sections, keeping existing content."
-3. After the LLM rewrites, run validation again
-4. Maximum 2 retry attempts. If still failing after retries, proceed to Step 10.1 with a warning
+2. Fix the report by adding the missing sections with the correct `##` headers, keeping existing content
+3. Run validation again
+4. Maximum 2 retry attempt. If still failing after retry, proceed to Step 10.2 with a warning
 
 ---
 
 ### 10.2 Generate and Embed Performance Improvement Plot
 
-After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png.
+After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report.
 
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
 ```bash
-ssh <node> "docker exec <container> python3 -c \"
+<prefix> python3 -c \"
+import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
-generate_and_embed_plot('<output_dir>', '<Model> on <Platform> — Kernel Tuning Potential')
-\""
+generate_and_embed_plot(sys.argv[1], sys.argv[2])
+\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
-
-**Key formatting rules:**
-1. **Warnings section**: Only include if there were errors; omit entirely if all succeeded
-2. **Executive Summary**: Max ~20 lines
-3. **Performance plot**: The `{{PERF_PLOT}}` placeholder is replaced by Step 10.1 with a base64-embedded PNG data URI (`![Performance Improvement](data:image/png;base64,...)`). The plot shows **kernel tuning potential only**.
-4. **Compute Kernel Optimizations**: P1-P3+ from category subagent findings
-5. **System-Level Optimizations**: If all system-level analyses report no actionable issues (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue exists (Number sequentially from P1, including CPU/Idle first if invoked)
-6. **Each section is independently composable** -- can be shared standalone
-7. **Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps)**
-8. **Priority icons are assigned by PRIORITY NUMBER, not severity:**
-   - **Compute Kernel:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
-   - **System-Level:** 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
-9. **Detailed Analysis**: Split into Compute Kernels and System-Level subsections. Always include the Detailed Analysis: System-Level section with full metrics even when no actionable issues exist.
-10. **No redundancy**: Information appears in ONE place only
-11. **Recommendations**: Max ~10 lines PER recommendation
 
 ---
 

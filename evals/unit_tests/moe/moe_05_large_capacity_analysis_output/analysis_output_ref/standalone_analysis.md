@@ -1,141 +1,122 @@
-# TraceLens Standalone Analysis Report
-
-**Trace:** `moe_05_large_capacity.json`
-**Platform:** MI300X
-**Total GPU Time:** 12.0 ms
-**Analysis Date:** 2026-03-09
-
----
+# moe_05_large_capacity — MI300X Standalone Analysis
 
 ## Executive Summary
 
-This trace captures a single fused Mixture of Experts (MoE) operation (`vllm::rocm_aiter_fused_moe`) executing on MI300X with 100% GPU compute utilization and zero idle time. The fused MoE kernel accounts for the entirety of the 12.0 ms trace duration. TraceLens cannot decompose efficiency metrics for this vendor-fused kernel, so roofline-based optimization opportunities cannot be quantified from trace data alone.
-
----
-
-## GPU Utilization Breakdown
+Standalone performance analysis of synthetic test trace `moe_05_large_capacity` on MI300X. The trace contains 2 compute kernel categories and 0 system-level categories.
 
 | Metric | Value |
 |--------|-------|
-| Total Time | 12.0 ms |
-| Computation | 100.0% |
-| Idle | 0.0% |
-| Communication | 0.0% |
-| MemCpy | 0.0% |
-
-GPU is 100% utilized for computation with no idle time.
+| Total Compute Time | 12.99 ms |
+| Computation | 93.1% |
+| Idle Time | 6.9% |
+| Exposed Communication | 0.0000% |
+| Top Bottleneck Category | MoE Fused (12.000 ms) |
 
 ---
 
-## Prioritized Recommendations
+## Compute Kernel Optimizations
 
-### P1: Fused MoE Kernel — Efficiency Not Measurable
+### Top Operations
 
-| | |
-|---|---|
-| **Category** | MoE Fused |
-| **Operation** | vllm::rocm_aiter_fused_moe (12.0 ms, 100% of compute) |
-| **Issue** | TraceLens cannot derive FLOPS or memory bandwidth for this specialized fused kernel, preventing roofline efficiency analysis |
-| **Recommendation** | Profile with framework-specific tools that understand the fused kernel internal structure; validate expert routing balance via token distribution metrics; check capacity factor settings if latency is a concern |
-| **Estimated Savings** | Not quantifiable (efficiency metrics unavailable for fused MoE kernel) |
-| **Confidence** | Medium |
+| Rank | Category | GPU Time (ms) | % of Compute |
+|------|----------|---------------|--------------|
+| 1 | MoE Fused | 12.000 | 99.3% |
+| 2 | elementwise | 0.090 | 0.7% |
 
----
+### 🔴 P1: MoE Fused Optimization
 
-## System-Level Analysis
+**Insight**: MoE Fused operations at 0.0% average efficiency, consuming 12.000 ms (92.4% of compute).
 
-> **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+**Action**: Review kernel configurations and consider algorithmic optimizations.
 
-No system-level bottlenecks detected. GPU activity breakdown shows 100.00% computation, with negligible memcpy and communication overhead.
+**Impact**: Up to 0.000 ms savings through kernel tuning.
 
-### CPU/Idle Time Analysis
-
-**Idle Time**: 0.0% (0.0 ms out of 12.0 ms total)
-
-| Metric | Value |
-|--------|-------|
-| Computation | 100.00% |
-| Idle | 0.00% |
-| Communication | 0.00% |
-| MemCpy | 0.00% |
-
-Idle time is 0.0%, well within the acceptable range (threshold: 15%). No action needed. GPU utilization is at 100% computation, indicating efficient GPU pipeline scheduling.
+→ *See Detailed Analysis: MoE Fused below*
 
 ---
 
-## Compute Kernel Analysis
+## System-Level Optimizations
 
-### 1. MoE Fused (100.0% of compute)
+> **Note:** System-level analysis is exploratory.
 
-This trace contains **1 MoE operation** consuming **12.0 ms** of GPU kernel time (100% of MoE category compute). The operation is a fused MoE kernel that combines routing and expert compute in a single GPU kernel.
-
-#### Operations Table
-
-| Operation | Count | Time (ms) | % of Category | Efficiency | Resolved Peak (TFLOPS) |
-|-----------|-------|-----------|---------------|------------|------------------------|
-| vllm::rocm_aiter_fused_moe | 1 | 12.0 | 100.0 | N/A (fused) | 708 |
-
-#### Efficiency Analysis
-
-**Efficiency cannot be computed** for the fused MoE operation `vllm::rocm_aiter_fused_moe`. TraceLens could not derive FLOPS or memory bandwidth for this specialized fused kernel, so `tflops_achieved`, `tb_s_achieved`, and `efficiency_percent` are all null.
-
-- **Resolved peak MAF**: 708 TFLOPS (bf16 matrix precision for MI300X)
-- **Peak HBM BW**: 5.3 TB/s
-
-Fused MoE kernels combine routing logic and expert forward passes; their arithmetic intensity and access patterns are opaque to standard roofline analysis. This is expected for vendor/framework-specific fused implementations.
-
-#### Operation Classification
-
-| Operation | Classification | Notes |
-|-----------|----------------|-------|
-| vllm::rocm_aiter_fused_moe | **Fused** | End-to-end fused MoE kernel (routing + expert compute) |
-
-#### Bottleneck Assessment
-
-No bottlenecks can be validated by efficiency criteria because efficiency metrics are unavailable for this fused kernel. Without FLOPS/BW derivation, we cannot compare achieved vs. peak TFLOPS, identify compute-bound vs. memory-bound behavior, or quantify kernel tuning opportunity.
-
-#### Optimization Recommendations
-
-**Algorithmic:**
-- Validate expert routing balance (token distribution across experts)
-- Check capacity factor settings if load imbalance is suspected
-- Consider routing algorithm adjustments if some experts are overloaded
-
-**Kernel Optimization:**
-- MoE kernels are specialized; limited generic optimization opportunity
-- Fused implementation is already optimized by the framework
+✅ No system-level bottlenecks detected. GPU activity breakdown shows 93.1% computation, with negligible memcpy and communication overhead.
 
 ---
 
-## Validation Summary
+## Detailed Analysis: Compute Kernels
 
-| Check | Status |
-|-------|--------|
-| Time Sanity | PASS |
-| Efficiency Anomalies | PASS |
-| Coverage | PASS |
-| Priority Consistency | INFO — Top by GPU time: [moe_fused] |
+### 1. MoE Fused (99.3% of compute)
 
----
+# MoE Analysis Findings
+
+**Status**: SUCCESS
+**Analysis Tier**: Compute Kernel
+**Total Time**: 12.000 ms (92.4% of compute)
+**Operation Count**: 1
+**Average Efficiency**: 0.0%
+
+## Operations Summary
+
+| Operation | Count | Time (ms) | % of Category | Efficiency (%) | Bound |
+|-----------|-------|-----------|---------------|----------------|-------|
+| vllm::rocm_aiter_fused_moe | 1 | 12.000 | 100.0% | N/A | N/A |
+
+## Operation Classification
+
+- **vllm::rocm_aiter_fused_moe**: Fused MoE (end-to-end kernel)
+
+## Bottleneck Analysis
+
+### vllm::rocm_aiter_fused_moe
+- **Time**: 12.000 ms (100.0% of category)
+- **Efficiency**: N/A (no perf model — MoE ops lack direct perf model mapping)
+- **Assessment**: MoE operations are typically already fused; focus on expert routing balance
+
+## Recommendations
+
+### Note: No Efficiency Metrics Available
+- MoE operations in this trace lack a direct performance model mapping
+- Focus analysis on expert routing balance and token distribution
+- Consider profiling expert utilization at the application level
+
+### Algorithmic: Check Expert Routing Balance
+- Verify token distribution across experts is balanced
+- Adjust capacity factor if experts are underutilized
+- Consider auxiliary load-balancing loss
 
 ## Impact Summary
-
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| MoE fused kernel efficiency assessment | kernel_profiling | Not quantifiable | Medium |
+| Expert load rebalancing | algorithmic | N/A | low |
+
 
 ---
+
+### 2. elementwise (0.7% of compute)
+
+# Elementwise Analysis Findings
+
+**Status**: SUCCESS
+**Total Time**: 0.090 ms (0.7% of compute)
+**Average Efficiency**: 2.0%
+
+Elementwise operations are minor (0.7% of compute). No significant optimization opportunity.
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+
+
+---
+
+## Detailed Analysis: System-Level
+
+## Appendix
 
 ### Hardware Reference
-
 - **Platform**: MI300X
 - **Peak HBM BW**: 5.3 TB/s
-- **Peak MAF (FP16)**: 654 TFLOPS
 - **Peak MAF (BF16)**: 708 TFLOPS
 - **Peak MAF (FP8)**: 1273 TFLOPS
-- **Peak MAF (FP32)**: 163 TFLOPS
-- **Memory**: 192 GB HBM3
 
----
-
-*Report generated by TraceLens AgenticMode Standalone Analysis*
+*Generated: 2026-02-25 13:39:16*

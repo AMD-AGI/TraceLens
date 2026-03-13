@@ -41,7 +41,8 @@ pip install -e .
 
 ## Quick Start - How to Use
 
-### To run performance analysis:
+
+### To run via Cursor chat:
 
 1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke:**
    ```
@@ -55,6 +56,18 @@ pip install -e .
    - Node name
    - Container name
    - Output directory (optional)
+
+### To run via CLI (headless):
+
+Use the Cursor `agent` CLI to run the orchestrator non-interactively:
+
+```bash
+cd TraceLens/AgenticMode/Standalone
+agent --print --force --trust \
+    "Run standalone analysis on <path_to_trace.json> with platform <platform>, node <node>, container <container>, output to <output_dir>"
+```
+
+All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
 
 3. **Get results:**
    - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations

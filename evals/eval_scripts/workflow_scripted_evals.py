@@ -96,7 +96,7 @@ def _check_findings_exist(output_dir: str) -> tuple[str, str]:
         if not os.path.isfile(path):
             missing.append(f"{subdir}/{name}_findings.md")
     if missing:
-        return "FAIL", f"Missing findings: {', '.join(missing)}"
+        return "FAIL", f"Parallel subagent failed to invoke for: {', '.join(missing)}"
     return "PASS", ""
 
 
@@ -132,6 +132,20 @@ def _check_plot(output_dir: str) -> tuple[str, str]:
         recs = plot_data.get("recommendations", [])
         if not recs:
             return "PASS", "No kernel tuning recommendations — plot correctly skipped"
+
+    cat_data_dir = os.path.join(output_dir, "category_data")
+    if os.path.isdir(cat_data_dir):
+        total_estimates = 0
+        for f in os.listdir(cat_data_dir):
+            if f.endswith("_metrics.json"):
+                with open(os.path.join(cat_data_dir, f)) as fh:
+                    metrics = json.load(fh)
+                total_estimates += len(metrics.get("impact_estimates", []))
+        if total_estimates == 0:
+            return (
+                "PASS",
+                "No kernel tuning recommendations in any metrics — plot correctly skipped",
+            )
 
     return "FAIL", "perf_improvement.png not found"
 

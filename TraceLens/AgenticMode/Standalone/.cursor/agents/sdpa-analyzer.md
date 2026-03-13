@@ -6,13 +6,13 @@ See LICENSE for license information.
 
 ---
 name: sdpa-analyzer
-description: Analyze Scaled Dot Product Attention operations for performance bottlenecks. Supports Flash Attention and Paged Attention (vLLM) analysis.
+description: Analyze Scaled Dot Product Attention operations (forward and backward) for performance bottlenecks. Supports Flash Attention and Paged Attention (vLLM) analysis. Handles both sdpa_fwd and sdpa_bwd categories.
 model: inherit
 ---
 
 # SDPA Analysis Subagent
 
-Analyze SDPA (Scaled Dot Product Attention) operations for performance bottlenecks and optimization opportunities. Supports both **Flash Attention** and **Paged Attention** (vLLM inference) analysis.
+Analyze SDPA (Scaled Dot Product Attention) operations for performance bottlenecks and optimization opportunities. Supports **forward** (`sdpa_fwd`) and **backward** (`sdpa_bwd`) passes, including **Flash Attention** and **Paged Attention** (vLLM inference) analysis.
 
 ---
 
@@ -24,14 +24,15 @@ When invoked by the orchestrator, you will receive the following context:
 - `output_dir`: Base analysis output directory
 - `node`: Node name for SSH access (e.g., `my_node`)
 - `container`: Docker container with TraceLens installed (e.g., `my_container`)
+- `sdpa`: Either `sdpa_fwd` (forward pass) or `sdpa_bwd` (backward pass)
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/sdpa_fwd_ops.csv` - Filtered SDPA operations
-2. `<output_dir>/metadata/sdpa_fwd_metadata.json` - Hardware specs, GPU utilization
-3. `<output_dir>/category_data/sdpa_fwd_tree_data.json` - Pre-computed parent chains
+1. `<output_dir>/category_data/<sdpa>_ops.csv` - Filtered SDPA operations
+2. `<output_dir>/metadata/<sdpa>_metadata.json` - Hardware specs, GPU utilization
+3. `<output_dir>/category_data/<sdpa>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
-- `<output_dir>/category_findings/sdpa_fwd_findings.md`
+- `<output_dir>/category_findings/<sdpa>_findings.md`
 
 ---
 
@@ -62,20 +63,23 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script (Inside Container)
 
-Execute the Python script inside the container on the node:
+Execute the Python script inside the container on the node. Pass `--category` to specify forward or backward:
 
 ```bash
 ssh <node> "docker exec <container> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/sdpa_analysis.py \
-  --output-dir <output_dir>"
+  --output-dir <output_dir> \
+  --category <sdpa>"
 ```
+
+Where `<sdpa>` is `sdpa_fwd` or `sdpa_bwd`.
 
 ### Step 2: Read Metrics
 
 After the script completes, read the JSON metrics file:
 
 ```bash
-cat <output_dir>/category_data/sdpa_fwd_metrics.json
+cat <output_dir>/category_data/<sdpa>_metrics.json
 ```
 
 ### Step 2.5: Identify Attention Implementation Type
@@ -143,7 +147,7 @@ For Paged Attention, include additional columns:
 
 ### Step 7: Determine Optimization Recommendations
 
-For each validated bottleneck, provide recommendations based on attention type:
+For each validated bottleneck, provide recommendations based on attention type. **Do NOT suggest "kernel fusion" for SDPA — these kernels are already fused.**
 
 **For Standard/Unfused Attention:**
 - **Algorithmic:** Migrate to Flash Attention
@@ -154,7 +158,7 @@ For each validated bottleneck, provide recommendations based on attention type:
 
 ### Step 8: Write Category Findings
 
-Create `<output_dir>/category_findings/sdpa_fwd_findings.md`. Create it through the container on the node:
+Create `<output_dir>/category_findings/<sdpa>_findings.md`. Create it through the container on the node:
 
 Include:
 - Attention type detected (Flash, Paged, Standard)
@@ -166,15 +170,15 @@ Include:
 
 ```markdown
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Confidence |
-|---------------|------|----------------------|------------|
-| <rec title>   | kernel_tuning | X.X | high/medium/low |
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
+| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
 
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/sdpa_fwd_metrics.json` under the `impact_estimates` key. Use those values directly in the Impact Summary table for `kernel_tuning` rows.
+**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/<sdpa>_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
 **Impact estimation guidelines:**
-- `kernel_tuning`: Use values from `impact_estimates` in the metrics JSON
+- `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
 - **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
@@ -205,6 +209,15 @@ Include:
 - **Issue:** Framework SDPA wrapper unconditionally calls .contiguous() on Q, K, V inputs and output, even when the Flash Attention backend supports strided tensors
 - **Algorithmic:** Check if the Flash Attention backend supports strided (non-contiguous) inputs; if so, remove .contiguous() calls from the SDPA wrapper
 - **Impact:** Eliminates significant overhead relative to SDPA compute time across all attention layers
+
+### Backward Pass Patterns (sdpa_bwd)
+
+#### Flash Attention Backward
+- **Op name:** `flash_attn::_flash_attn_backward`
+- **Arguments:** dout, q, k, v, out, softmax_lse, ... (different order from forward)
+- **Expected efficiency:** Generally lower than forward pass due to recomputation of attention weights
+- **Kernel:** Profile backward kernel for tile/block tuning opportunities
+- **Note:** Backward pass computes gradients for Q, K, V and requires more memory bandwidth than forward
 
 ### Paged Attention Patterns (vLLM)
 

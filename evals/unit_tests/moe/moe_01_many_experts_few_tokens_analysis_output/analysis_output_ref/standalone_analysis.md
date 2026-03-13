@@ -1,102 +1,122 @@
-# TraceLens Standalone Analysis Report
-
-**Trace:** `moe_01_many_experts_few_tokens.json`
-**Platform:** MI300X
-**Total GPU Time:** 0.28 ms
-**Analysis Date:** 2026-03-09
-
----
+# moe_01_many_experts_few_tokens — MI300X Standalone Analysis
 
 ## Executive Summary
 
-This trace captures a single MoE (Mixture of Experts) fused operation (`vllm::rocm_aiter_fused_moe`) with 64 experts and 16 tokens. The total GPU time is **0.28 ms** with **100% GPU compute utilization** -- no idle time, communication, or memcpy overhead is present. The MoE kernel is already fused end-to-end, but efficiency metrics (TFLOPS, bandwidth) could not be computed due to the custom kernel pattern.
-
----
-
-## GPU Utilization Breakdown
+Standalone performance analysis of synthetic test trace `moe_01_many_experts_few_tokens` on MI300X. The trace contains 2 compute kernel categories and 1 system-level categories.
 
 | Metric | Value |
 |--------|-------|
-| Total Time | 0.28 ms |
-| Computation | 100.0% |
-| Idle | 0.0% |
-| Communication | 0.0% |
-| MemCpy | 0.0% |
-
-GPU utilization is optimal with no idle time detected. No system-level bottlenecks are present.
+| Total Compute Time | 1.27 ms |
+| Computation | 29.1% |
+| Idle Time | 70.9% |
+| Exposed Communication | 0.0000% |
+| Top Bottleneck Category | MoE Fused (0.280 ms) |
 
 ---
 
-## Prioritized Recommendations
+## Compute Kernel Optimizations
 
-### P1: MoE Expert Utilization (Algorithmic)
+### Top Operations
 
-| | |
-|---|---|
-| **Category** | MoE Fused |
-| **Operation** | vllm::rocm_aiter_fused_moe (0.28 ms, 100% of compute) |
-| **Issue** | 64 experts with only 16 tokens leads to potential expert underutilization and routing imbalance, reducing effective parallelism |
-| **Recommendation** | Validate token distribution across experts; review capacity factor and expert capacity limits; assess whether the number of active experts (top-k) is appropriate for the token count |
-| **Estimated Savings** | Not quantifiable (routing data not available in trace) |
-| **Confidence** | Medium |
+| Rank | Category | GPU Time (ms) | % of Compute |
+|------|----------|---------------|--------------|
+| 1 | MoE Fused | 0.280 | 75.7% |
+| 2 | elementwise | 0.090 | 24.3% |
 
-### P2: MoE Kernel Efficiency Assessment
+### 🔴 P1: MoE Fused Optimization
 
-| | |
-|---|---|
-| **Category** | MoE Fused |
-| **Operation** | aiter_fused_moe_kernel_bf16 |
-| **Issue** | Efficiency metrics (TFLOPS achieved, bandwidth utilization, roofline efficiency %) were not computed for this fused MoE kernel |
-| **Recommendation** | Generate a replay artifact for deeper kernel profiling if MoE performance is a concern at scale; verify the kernel is using expected data types (BFloat16) and optimal memory layout |
-| **Estimated Savings** | Not quantifiable (efficiency data unavailable) |
-| **Confidence** | Low |
+**Insight**: MoE Fused operations at 0.0% average efficiency, consuming 0.280 ms (22.1% of compute).
+
+**Action**: Review kernel configurations and consider algorithmic optimizations.
+
+**Impact**: Up to 0.000 ms savings through kernel tuning.
+
+→ *See Detailed Analysis: MoE Fused below*
 
 ---
 
-## System-Level Analysis
+## System-Level Optimizations
 
-### CPU/Idle Time
+> **Note:** System-level analysis is exploratory.
 
-No issues detected. GPU idle time is 0.0%, well below the 15% flagging threshold.
-
----
-
-## Compute Kernel Analysis
-
-### MoE Fused Operations
-
-| Operation | Count | GPU Time (ms) | % of Compute | Efficiency |
-|-----------|-------|---------------|--------------|------------|
-| vllm::rocm_aiter_fused_moe | 1 | 0.28 | 100.0% | N/A |
-
-**Configuration:**
-- Input dims: `((16, 4096), (64, 22016, 4096), (64, 4096, 11008), (16, 2))`
-- 64 experts, 16 tokens
-- BFloat16 precision
-- Single fused kernel: `aiter_fused_moe_kernel_bf16` (280 us)
-
-**Assessment:** The operation is already fully fused. No kernel fusion opportunities identified. The "many experts, few tokens" pattern is the primary area for algorithmic investigation.
+✅ No system-level bottlenecks detected. GPU activity breakdown shows 29.1% computation, with negligible memcpy and communication overhead.
 
 ---
 
-## Validation Summary
+## Detailed Analysis: Compute Kernels
 
-| Check | Status |
-|-------|--------|
-| Time Sanity | PASS |
-| Efficiency Anomalies | PASS |
-| Coverage | PASS |
-| Priority Consistency | PASS |
+### 1. MoE Fused (75.7% of compute)
 
----
+# MoE Analysis Findings
+
+**Status**: SUCCESS
+**Analysis Tier**: Compute Kernel
+**Total Time**: 0.280 ms (22.1% of compute)
+**Operation Count**: 1
+**Average Efficiency**: 0.0%
+
+## Operations Summary
+
+| Operation | Count | Time (ms) | % of Category | Efficiency (%) | Bound |
+|-----------|-------|-----------|---------------|----------------|-------|
+| vllm::rocm_aiter_fused_moe | 1 | 0.280 | 100.0% | N/A | N/A |
+
+## Operation Classification
+
+- **vllm::rocm_aiter_fused_moe**: Fused MoE (end-to-end kernel)
+
+## Bottleneck Analysis
+
+### vllm::rocm_aiter_fused_moe
+- **Time**: 0.280 ms (100.0% of category)
+- **Efficiency**: N/A (no perf model — MoE ops lack direct perf model mapping)
+- **Assessment**: MoE operations are typically already fused; focus on expert routing balance
+
+## Recommendations
+
+### Note: No Efficiency Metrics Available
+- MoE operations in this trace lack a direct performance model mapping
+- Focus analysis on expert routing balance and token distribution
+- Consider profiling expert utilization at the application level
+
+### Algorithmic: Check Expert Routing Balance
+- Verify token distribution across experts is balanced
+- Adjust capacity factor if experts are underutilized
+- Consider auxiliary load-balancing loss
 
 ## Impact Summary
-
 | Recommendation | Type | Estimated Savings (ms) | Confidence |
 |---------------|------|----------------------|------------|
-| MoE expert utilization analysis | algorithmic | Not quantifiable | Medium |
-| MoE kernel efficiency assessment | kernel_profiling | Not quantifiable | Low |
+| Expert load rebalancing | algorithmic | N/A | low |
+
 
 ---
 
-*Report generated by TraceLens AgenticMode Standalone Analysis*
+### 2. elementwise (24.3% of compute)
+
+# Elementwise Analysis Findings
+
+**Status**: SUCCESS
+**Total Time**: 0.090 ms (7.1% of compute)
+**Average Efficiency**: 2.0%
+
+Elementwise operations are minor (7.1% of compute). No significant optimization opportunity.
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Confidence |
+|---------------|------|----------------------|------------|
+
+
+---
+
+## Detailed Analysis: System-Level
+
+## Appendix
+
+### Hardware Reference
+- **Platform**: MI300X
+- **Peak HBM BW**: 5.3 TB/s
+- **Peak MAF (BF16)**: 708 TFLOPS
+- **Peak MAF (FP8)**: 1273 TFLOPS
+
+*Generated: 2026-02-25 13:39:16*

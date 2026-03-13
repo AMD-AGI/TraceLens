@@ -78,16 +78,16 @@ Cross-check numeric values against `gpu_timeline.csv`:
 In `standalone_analysis.md`, find every priority item (lines matching `### ... P1:`, `### ... P2:`, `### ... P3:`, etc.). For each P-item, determine which section it belongs to and verify it has the correct fields:
 
 **Compute Kernel P-items** (under `## Compute Kernel Optimizations`):
-- **Issue**: 1-2 sentences describing the problem
+- **Insight** (or **Issue**): 1-2 sentences describing the problem
 - **Action**: 1-2 sentences describing what to do
 - **Impact**: expected improvement (e.g., "~X.X ms savings..." or "Not quantifiable from trace data")
 
 **System-Level P-items** (under `## System-Level Optimizations`):
-- **Issue**: 1-2 sentences describing the problem
+- **Insight** (or **Issue**): 1-2 sentences describing the problem
 - **Action**: 1-2 sentences describing what to do
 - (No **Impact** field — system-level issues are not quantified)
 
-**PASS** if every P-item has the correct fields for its section. **FAIL** listing which P-items are missing required fields or have unexpected fields.
+**PASS** if every P-item has the correct fields for its section. Either **Insight** or **Issue** is acceptable as the first field — both are valid. **FAIL** listing which P-items are missing required fields or have unexpected fields.
 
 ### workflow_eval_11: Hardware Reference in Appendix
 

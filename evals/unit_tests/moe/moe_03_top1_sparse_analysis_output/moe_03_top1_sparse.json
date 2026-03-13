@@ -1,26 +1,444 @@
 {
   "traceEvents": [
-    {"ph": "M", "pid": 0, "tid": 0, "name": "process_name", "args": {"name": "GPU 0"}},
-    {"ph": "M", "pid": 470, "tid": 0, "name": "process_name", "args": {"name": "python3"}},
-    {"ph": "M", "pid": 470, "tid": 711, "name": "thread_name", "args": {"name": "MainThread"}},
-    {"ph": "M", "pid": 0, "tid": 7, "name": "thread_name", "args": {"name": "stream 7"}},
     {
-      "ph": "X", "cat": "cpu_op", "name": "vllm::rocm_aiter_fused_moe",
-      "pid": 470, "tid": 711, "ts": 1000000.0, "dur": 1150.0,
+      "ph": "M",
+      "pid": 0,
+      "tid": 0,
+      "name": "process_name",
       "args": {
-        "Input Dims": [[512, 7168], [16, 28672, 7168], [16, 7168, 14336], [512, 1]],
-        "Input type": ["BFloat16", "BFloat16", "BFloat16", "Float"],
-        "Input Strides": [[7168, 1], [205520896, 7168, 1], [102760448, 14336, 1], [1, 1]],
-        "Concrete Inputs": ["", "", "", ""]
+        "name": "GPU 0"
       }
     },
-    {"ph": "X", "cat": "cuda_runtime", "name": "cudaLaunchKernel", "pid": 470, "tid": 711, "ts": 1000010.0, "dur": 5.0, "args": {"External id": 100}},
     {
-      "ph": "X", "cat": "kernel", "name": "aiter_fused_moe_kernel_bf16",
-      "pid": 0, "tid": 7, "ts": 1000050.0, "dur": 950.0,
-      "args": {"device": 0, "context": 1, "stream": 7, "grid": [128, 1, 1], "block": [256, 1, 1], "External id": 100}
+      "ph": "M",
+      "pid": 470,
+      "tid": 0,
+      "name": "process_name",
+      "args": {
+        "name": "python3"
+      }
     },
-    {"ph": "s", "id": 100, "pid": 0, "tid": 7, "ts": 1000050.0, "cat": "ac2g", "name": "ac2g"},
-    {"ph": "f", "id": 100, "pid": 0, "tid": 7, "ts": 1000050.0, "cat": "ac2g", "name": "ac2g", "bp": "e"}
+    {
+      "ph": "M",
+      "pid": 470,
+      "tid": 711,
+      "name": "thread_name",
+      "args": {
+        "name": "MainThread"
+      }
+    },
+    {
+      "ph": "M",
+      "pid": 0,
+      "tid": 7,
+      "name": "thread_name",
+      "args": {
+        "name": "stream 7"
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "vllm::rocm_aiter_fused_moe",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1000000.0,
+      "dur": 1150.0,
+      "args": {
+        "Input Dims": [
+          [
+            512,
+            7168
+          ],
+          [
+            16,
+            28672,
+            7168
+          ],
+          [
+            16,
+            7168,
+            14336
+          ],
+          [
+            512,
+            1
+          ]
+        ],
+        "Input type": [
+          "BFloat16",
+          "BFloat16",
+          "BFloat16",
+          "Float"
+        ],
+        "Input Strides": [
+          [
+            7168,
+            1
+          ],
+          [
+            205520896,
+            7168,
+            1
+          ],
+          [
+            102760448,
+            14336,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "Concrete Inputs": [
+          "",
+          "",
+          "",
+          ""
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "cudaLaunchKernel",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1000010.0,
+      "dur": 5.0,
+      "args": {
+        "External id": 100
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "aiter_fused_moe_kernel_bf16",
+      "pid": 0,
+      "tid": 7,
+      "ts": 1000050.0,
+      "dur": 950.0,
+      "args": {
+        "device": 0,
+        "context": 1,
+        "stream": 7,
+        "grid": [
+          128,
+          1,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "External id": 100
+      }
+    },
+    {
+      "ph": "s",
+      "id": 100,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1000050.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 100,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1000050.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aten::mul_",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1001250.0,
+      "dur": 230.0,
+      "args": {
+        "Input Dims": [
+          [
+            256,
+            1024
+          ],
+          [
+            256,
+            1024
+          ]
+        ],
+        "Input type": [
+          "Float",
+          "Float"
+        ],
+        "Input Strides": [
+          [
+            1024,
+            1
+          ],
+          [
+            1024,
+            1
+          ]
+        ],
+        "Concrete Inputs": [
+          "",
+          ""
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "cudaLaunchKernel",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1001260.0,
+      "dur": 5.0,
+      "args": {
+        "External id": 101
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "void at::native::elementwise_kernel<1>",
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001300.0,
+      "dur": 30.0,
+      "args": {
+        "device": 0,
+        "context": 1,
+        "stream": 7,
+        "grid": [
+          64,
+          1,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "External id": 101
+      }
+    },
+    {
+      "ph": "s",
+      "id": 101,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001300.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 101,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001300.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aten::mul_",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1001580.0,
+      "dur": 230.0,
+      "args": {
+        "Input Dims": [
+          [
+            256,
+            1024
+          ],
+          [
+            256,
+            1024
+          ]
+        ],
+        "Input type": [
+          "Float",
+          "Float"
+        ],
+        "Input Strides": [
+          [
+            1024,
+            1
+          ],
+          [
+            1024,
+            1
+          ]
+        ],
+        "Concrete Inputs": [
+          "",
+          ""
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "cudaLaunchKernel",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1001590.0,
+      "dur": 5.0,
+      "args": {
+        "External id": 102
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "void at::native::elementwise_kernel<1>",
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001630.0,
+      "dur": 30.0,
+      "args": {
+        "device": 0,
+        "context": 1,
+        "stream": 7,
+        "grid": [
+          64,
+          1,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "External id": 102
+      }
+    },
+    {
+      "ph": "s",
+      "id": 102,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001630.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 102,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001630.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aten::mul_",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1001910.0,
+      "dur": 230.0,
+      "args": {
+        "Input Dims": [
+          [
+            256,
+            1024
+          ],
+          [
+            256,
+            1024
+          ]
+        ],
+        "Input type": [
+          "Float",
+          "Float"
+        ],
+        "Input Strides": [
+          [
+            1024,
+            1
+          ],
+          [
+            1024,
+            1
+          ]
+        ],
+        "Concrete Inputs": [
+          "",
+          ""
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "cudaLaunchKernel",
+      "pid": 470,
+      "tid": 711,
+      "ts": 1001920.0,
+      "dur": 5.0,
+      "args": {
+        "External id": 103
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "void at::native::elementwise_kernel<1>",
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001960.0,
+      "dur": 30.0,
+      "args": {
+        "device": 0,
+        "context": 1,
+        "stream": 7,
+        "grid": [
+          64,
+          1,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "External id": 103
+      }
+    },
+    {
+      "ph": "s",
+      "id": 103,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001960.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 103,
+      "pid": 0,
+      "tid": 7,
+      "ts": 1001960.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    }
   ]
 }
