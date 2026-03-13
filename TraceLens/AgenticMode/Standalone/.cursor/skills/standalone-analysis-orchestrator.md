@@ -35,12 +35,6 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
  
 ---
 
-## Shell Permissions for Remote Commands
- 
-**All `ssh` commands** (and any shell commands that connect to the node/container) should first be attempted with `required_permissions: ["full_network"]`. If the command fails due to SSH authentication or agent access issues (e.g., "Permission denied", "Connection refused", or the command is rejected/aborted by the sandbox), ask the user for permission to retry with `required_permissions: ["all"]`, explaining that full sandbox access is needed for SSH agent and config access. Once the user approves `"all"` permissions, use `"all"` for all subsequent SSH commands in the session without asking again.
- 
----
-
 ## Workflow Steps
 
 ```
