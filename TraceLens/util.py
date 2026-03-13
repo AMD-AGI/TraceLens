@@ -37,12 +37,19 @@ class DataLoader:
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
             import gzip
+            import time
 
+            t0 = time.time()
             with gzip.open(filename_path, "r") as fin:
                 data = fin.read()  # Keep as bytes for orjson
+            print(f"[timing] load_data: file read (gzip) {time.time() - t0:.3f}s")
         elif filename_path.endswith("json"):
+            import time
+
+            t0 = time.time()
             with open(filename_path, "rb") as fin:  # Read as bytes for orjson
                 data = fin.read()
+            print(f"[timing] load_data: file read (json) {time.time() - t0:.3f}s")
         else:
             raise ValueError("Unknown file type", filename_path)
         if save_preprocessed:
@@ -52,10 +59,15 @@ class DataLoader:
 
         # Use orjson for faster parsing (23% faster than stdlib json)
         # Falls back to json if orjson not available
+        import time
+
+        t0 = time.time()
         try:
             import orjson
 
-            return orjson.loads(data)
+            result = orjson.loads(data)
+            print(f"[timing] load_data: JSON parse {time.time() - t0:.3f}s")
+            return result
         except ImportError:
             logger.warning(
                 "orjson not available, falling back to standard json. "
@@ -63,7 +75,9 @@ class DataLoader:
             )
             if isinstance(data, bytes):
                 data = data.decode("utf-8")
-            return json.loads(data)
+            result = json.loads(data)
+            print(f"[timing] load_data: JSON parse (stdlib) {time.time() - t0:.3f}s")
+            return result
 
 
 class JaxProfileProcessor:
