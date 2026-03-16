@@ -9,12 +9,14 @@ import re
 import argparse
 import pandas as pd
 import glob
-import sys
-from typing import List, Dict, Optional, Union
-import subprocess
+from typing import Dict, List, Optional
 import warnings
 from TraceLens import NcclAnalyser
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.Reporting.reporting_utils import (
+    add_node_span_columns,
+    detect_gpus_per_node,
+    request_install,
+)
 
 DEFAULT_RANK_REGEX = r"rank[\[\-_/]?(?P<rank>\d+)"
 
@@ -97,6 +99,7 @@ def generate_collective_report(
     use_multiprocessing: bool = False,
     max_workers: Optional[int] = None,
     rank_regex: str = DEFAULT_RANK_REGEX,
+    gpus_per_node: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Generate comprehensive NCCL communication analysis reports.
@@ -120,6 +123,10 @@ def generate_collective_report(
                     Default: os.cpu_count(). Override to limit resource usage if needed.
         rank_regex: Regex with a named group ``rank`` (or a single capture group)
                     used to extract the rank id from filenames matched by *trace_glob*.
+        gpus_per_node: Number of GPUs per node.  When set, ``node_id`` and
+                       ``node_span`` columns are added to report DataFrames.
+                       If ``None``, auto-detection is attempted from the first
+                       trace file's ``deviceProperties`` metadata.
 
     Returns:
         Dictionary mapping sheet names to DataFrames
@@ -173,6 +180,21 @@ def generate_collective_report(
                     continue
             list_trace_filepaths.append(expected_file)
 
+    # Validate explicit gpus_per_node
+    if gpus_per_node is not None and gpus_per_node <= 0:
+        raise ValueError(
+            f"--gpus_per_node must be a positive integer, got {gpus_per_node}"
+        )
+
+    # Auto-detect gpus_per_node from trace metadata if not provided
+    if gpus_per_node is None and list_trace_filepaths:
+        gpus_per_node = detect_gpus_per_node(list_trace_filepaths[0])
+        if gpus_per_node is not None:
+            print(
+                f"Auto-detected gpus_per_node={gpus_per_node} from "
+                f"trace deviceProperties."
+            )
+
     # Initialize NCCL analyzer
     nccl_analyser = NcclAnalyser(
         list_trace_filepaths,
@@ -201,6 +223,14 @@ def generate_collective_report(
         df_all2allv = nccl_analyser.build_df_nccl_all2allv(detailed=True)
         if df_all2allv is not None and not df_all2allv.empty:
             report_dfs["nccl_all2allv"] = df_all2allv
+
+    # Add node_id and node_span columns when gpus_per_node is known
+    if gpus_per_node is not None and gpus_per_node > 0:
+        print(f"Adding node_span columns (gpus_per_node={gpus_per_node})...")
+        for name in list(report_dfs):
+            report_dfs[name] = add_node_span_columns(
+                report_dfs[name], gpus_per_node, world_size=world_size
+            )
 
     # Export DataFrames
     if output_csvs_dir:
@@ -296,6 +326,17 @@ def main():
         default=None,
         help="Maximum number of worker processes for parallel loading (requires --use_multiprocessing, default: os.cpu_count())",
     )
+    parser.add_argument(
+        "--gpus_per_node",
+        type=int,
+        default=None,
+        help=(
+            "Number of GPUs per node. When set, adds node_id and node_span "
+            "columns to report sheets, labeling each collective's process "
+            "group as intra_node or inter_node. If omitted, auto-detected "
+            "from trace metadata (deviceProperties)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -336,6 +377,7 @@ def main():
         use_multiprocessing=args.use_multiprocessing,
         max_workers=args.max_workers,
         rank_regex=args.rank_regex,
+        gpus_per_node=args.gpus_per_node,
     )
 
 
