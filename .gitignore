@@ -3,3 +3,9 @@
 **.ipynb_checkpoints/
 **/build/
 **.egg-info/
+
+# Eval unit tests are distributed as a tar.gz archive;
+# the expanded directory is generated at runtime by run_evals.sh
+evals/unit_tests/
+evals/results/
+evals/repeatability_results/
