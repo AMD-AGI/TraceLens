@@ -2,8 +2,8 @@
 set -uo pipefail
 
 # Environment config (edit these for your setup)
-NODE="chi-mi300x-007"
-CONTAINER="modular_eval"
+NODE=""
+CONTAINER=""
 
 # Eval directories
 REPO_ROOT="$(pwd)"
