@@ -640,7 +640,11 @@ def find_steady_state_iterations(
                 ]
             )
     if not decode_only:
-        sub_regions = [t for t in sub_regions if t[2] > 0]
+        sub_regions_tmp = [t for t in sub_regions if t[2]>0]
+        if len(sub_regions_tmp)==0:
+            print("prefilldecode step not found, selecting decode-only region")
+        else:
+            sub_regions = sub_regions_tmp
     best_window = sorted(sub_regions, key=lambda x: x[3], reverse=True)[0]
     print("Selected steady state window:", best_window)
     return iteration_roots[best_window[0] : best_window[1]]
