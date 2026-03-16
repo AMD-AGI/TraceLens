@@ -52,10 +52,14 @@ class DataLoader:
 
         # Use orjson for faster parsing (23% faster than stdlib json)
         # Falls back to json if orjson not available
+        # Explicitly release the raw bytes buffer as soon as parsing is done so
+        # it does not overlap in memory with the fully-built Python dict.
         try:
             import orjson
 
-            return orjson.loads(data)
+            result = orjson.loads(data)
+            del data
+            return result
         except ImportError:
             logger.warning(
                 "orjson not available, falling back to standard json. "
@@ -63,7 +67,9 @@ class DataLoader:
             )
             if isinstance(data, bytes):
                 data = data.decode("utf-8")
-            return json.loads(data)
+            result = json.loads(data)
+            del data
+            return result
 
 
 class JaxProfileProcessor:

@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
+
+
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -138,8 +141,10 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
+        tqdm.write("  [1/3] Loading and parsing trace file...")
         data = DataLoader.load_data(profile_filepath)
         data = data["traceEvents"]
+        tqdm.write(f"  [1/3] Done — {len(data):,} events loaded")
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -147,8 +152,11 @@ class TreePerfAnalyzer:
             else TraceEventUtils.prepare_event_categorizer(data)
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
+        tqdm.write("  [2/3] Indexing events and linking CPU↔GPU...")
         tree = TraceToTree(data, event_to_category=categorizer)
+        tqdm.write("  [2/3] Done")
 
+        tqdm.write("  [3/3] Building call-stack tree...")
         return TreePerfAnalyzer(
             tree,
             jax=jax,
@@ -188,6 +196,7 @@ class TreePerfAnalyzer:
         )
         self.gpu_only = self.check_gpu_only()
         self.tree.build_tree(add_python_func=add_python_func)
+        tqdm.write("  [3/3] Done")
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
@@ -306,18 +315,18 @@ class TreePerfAnalyzer:
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
-        if len(list_kernels) > 0:
+        if list_kernels:
             busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
                 "busy_time"
             ]
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
-            cpu_op_list, filter_func=self.non_data_mov_filter
-        )
+        # Filter non-data-movement kernels from the already-collected list instead
+        # of re-traversing the subtree with a filter function.  non_data_mov_filter
+        # only inspects event["name"], so it is safe to apply after collection.
         list_non_data_mov_kernels = [
-            self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
+            k for k in list_kernels if self.non_data_mov_filter(k)
         ]
         busy_non_data_mov_time = 0
-        if len(list_non_data_mov_kernels) > 0:
+        if list_non_data_mov_kernels:
             busy_non_data_mov_time = self.GPUEventAnalyser(
                 list_non_data_mov_kernels
             ).compute_metrics()["busy_time"]
@@ -745,16 +754,39 @@ class TreePerfAnalyzer:
             key=lambda uid: self.tree.get_UID2event(uid).get("ts", 0),
         )
 
-        for launcher_uid in sorted_launcher_uids:
+        # Phase 3 — compute direct + subtree GPU busy times serially.
+        #
+        # add_gpu_ops_to_tree() already propagated every GPU kernel UID up to
+        # all of its CPU/runtime ancestors via event["gpu_events"].  Subtree
+        # kernel UIDs are therefore an O(1) field lookup — no tree traversal
+        # needed.  This replaces the previous fork-based parallel path (which
+        # suffered from CPython refcount CoW page-dirtying) and the recursive
+        # loop_and_aggregate_kernels() call (O(subtree_size) per launcher).
+        events_by_uid = self.tree.events_by_uid
+        for launcher_uid in tqdm(
+            sorted_launcher_uids,
+            desc="  Launcher metrics",
+            unit="launcher",
+            leave=False,
+            dynamic_ncols=True,
+        ):
             kernels = launcher_to_kernels[launcher_uid]
             event = self.tree.get_UID2event(launcher_uid)
 
-            event["total_direct_kernel_time"] = self.GPUEventAnalyser(
-                kernels
-            ).compute_metrics()["busy_time"]
-            event["total_subtree_kernel_time"] = self._compute_subtree_kernel_time_us(
-                event
+            direct_time = (
+                self.GPUEventAnalyser(kernels).compute_metrics()["busy_time"]
+                if kernels else 0
             )
+
+            subtree_kernel_uids = event.get("gpu_events", [])
+            subtree_kernels = [events_by_uid[uid] for uid in subtree_kernel_uids]
+            subtree_time = (
+                self.GPUEventAnalyser(subtree_kernels).compute_metrics()["busy_time"]
+                if subtree_kernels else 0
+            )
+
+            event["total_direct_kernel_time"] = direct_time
+            event["total_subtree_kernel_time"] = subtree_time
             event["direct_kernel_count"] = len(kernels)
             event["kernel_details"] = [
                 {
