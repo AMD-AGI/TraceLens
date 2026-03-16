@@ -120,7 +120,7 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI:
+Execute TraceLens CLI (`<platform_lower>` is the lowercase platform name (e.g. `mi300x`, `mi355x`)):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
@@ -131,11 +131,10 @@ Execute TraceLens CLI:
   --enable_pseudo_ops
 ```
 
-`<platform_lower>` is the lowercase platform name (e.g. `mi300x`, `mi355x`). Passing `--gpu_arch_json_path` ensures the CSV includes a `Pct Roofline` column with precision-aware roofline efficiency per kernel.
 
 This generates:
 - `perf_report.xlsx` - Excel report with all sheets
-- `perf_report_csvs/` directory with CSV files (including `Pct Roofline`)
+- `perf_report_csvs/` directory with CSV files
 
 ---
 

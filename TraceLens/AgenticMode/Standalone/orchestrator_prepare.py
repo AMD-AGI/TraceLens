@@ -22,56 +22,10 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.arch_utils import list_platforms, load_arch
+from utils.category_utils import CATEGORY_SKILL_MAP, get_enhanced_category
 
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
-
-CATEGORY_SKILL_MAP = {
-    "cpu_idle": "cpu-idle-analysis",
-    "gemm": "gemm-analysis",
-    "moe_fused": "moe-analysis",
-    "sdpa_fwd": "sdpa-analysis",
-    "sdpa_bwd": "sdpa-analysis",
-    "elementwise": "elementwise-analysis",
-    "reduce": "reduce-analysis",
-    "triton": "triton-analysis",
-    "norm": "norm-analysis",
-    "convolution": "convolution-analysis",
-    "other": "generic-op-analysis",
-}
-
-
-def get_enhanced_category(row):
-    """Determine category with special handling for MoE, Norm, Convolution."""
-    op_name = row.get("name", "")
-    category = row.get("op category", "")
-
-    if "moe" in op_name.lower() or "fused_moe" in op_name.lower():
-        return "moe_fused", "MoE Fused"
-    elif any(
-        n in op_name.lower()
-        for n in [
-            "batch_norm",
-            "batchnorm",
-            "layer_norm",
-            "layernorm",
-            "group_norm",
-            "groupnorm",
-            "instance_norm",
-        ]
-    ):
-        return "norm", "Norm"
-    elif "conv" in op_name.lower() and (
-        "aten::" in op_name or "backward" in op_name.lower()
-    ):
-        return "convolution", "Convolution"
-
-    if pd.isna(category) or category == "":
-        return "other", "Other"
-    else:
-        category_name = category.replace(" ", "_").replace("/", "_").lower()
-        display_name = category
-        return category_name, display_name
 
 
 def main():
