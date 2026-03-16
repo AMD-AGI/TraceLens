@@ -44,7 +44,7 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
-        if not hasattr(self.param_details, "B"):
+        if "B" not in self.param_details:
             self.param_details["B"] = 1
 
         if self.parsed_kernel_info is not None:
