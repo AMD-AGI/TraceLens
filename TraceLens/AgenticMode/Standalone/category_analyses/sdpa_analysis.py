@@ -21,7 +21,6 @@ from analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    calculate_average_efficiency,
     compute_impact_estimates,
     write_metrics_json,
     detect_flash_attention,
@@ -34,7 +33,6 @@ from analysis_utils import (
 def get_sdpa_config():
     """Return SDPA-specific configuration."""
     return {
-        "efficiency_method": "prefer_compute",  # SDPA can be compute or memory bound
         "extra_fields": [
             "Input Dims",
             "has_perf_model",
@@ -246,9 +244,6 @@ def main():
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(
-        ops_df, peak_hbm_bw, maf, "prefer_compute"
-    )
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
 
@@ -261,7 +256,6 @@ def main():
         "category": category,
         "status": "OK",
         **time_metrics,
-        "average_efficiency_percent": avg_efficiency,
         "operations": operations,
         "category_specific": category_specific,
         "impact_estimates": impact_estimates,

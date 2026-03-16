@@ -20,9 +20,58 @@ import traceback
 
 import pandas as pd
 
-# Add parent directory to path to import utils
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils.platform_specs import PLATFORM_SPECS, CATEGORY_SKILL_MAP
+from utils.arch_utils import list_platforms, load_arch
+
+from TraceLens.TreePerf import TreePerfAnalyzer
+from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+
+CATEGORY_SKILL_MAP = {
+    "cpu_idle": "cpu-idle-analysis",
+    "gemm": "gemm-analysis",
+    "moe_fused": "moe-analysis",
+    "sdpa_fwd": "sdpa-analysis",
+    "sdpa_bwd": "sdpa-analysis",
+    "elementwise": "elementwise-analysis",
+    "reduce": "reduce-analysis",
+    "triton": "triton-analysis",
+    "norm": "norm-analysis",
+    "convolution": "convolution-analysis",
+    "other": "generic-op-analysis",
+}
+
+
+def get_enhanced_category(row):
+    """Determine category with special handling for MoE, Norm, Convolution."""
+    op_name = row.get("name", "")
+    category = row.get("op category", "")
+
+    if "moe" in op_name.lower() or "fused_moe" in op_name.lower():
+        return "moe_fused", "MoE Fused"
+    elif any(
+        n in op_name.lower()
+        for n in [
+            "batch_norm",
+            "batchnorm",
+            "layer_norm",
+            "layernorm",
+            "group_norm",
+            "groupnorm",
+            "instance_norm",
+        ]
+    ):
+        return "norm", "Norm"
+    elif "conv" in op_name.lower() and (
+        "aten::" in op_name or "backward" in op_name.lower()
+    ):
+        return "convolution", "Convolution"
+
+    if pd.isna(category) or category == "":
+        return "other", "Other"
+    else:
+        category_name = category.replace(" ", "_").replace("/", "_").lower()
+        display_name = category
+        return category_name, display_name
 
 
 def main():
@@ -33,7 +82,7 @@ def main():
     parser.add_argument(
         "--platform",
         required=True,
-        choices=list(PLATFORM_SPECS.keys()),
+        choices=list_platforms(),
         help="AMD platform (MI300X, MI325X, MI350X, MI355X, MI400)",
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
@@ -73,7 +122,7 @@ def main():
         os.makedirs(d, exist_ok=True)
         os.chmod(d, 0o777)
 
-    platform_specs = PLATFORM_SPECS[platform]
+    platform_specs = load_arch(platform)
 
     # ============================================================================
     # STEP 2: Assess GPU Utilization
@@ -153,25 +202,12 @@ def main():
     print("\n[STEP 4] Pre-computing Tree Data for Bottleneck Operations...")
 
     try:
-        from TraceLens.TreePerf import TreePerfAnalyzer
-
-        # Build arch dict for precision-aware roofline (Pct Roofline column)
-        arch = {
-            "name": platform_specs["name"],
-            "mem_bw_gbps": platform_specs["mem_bw_gbps"],
-            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
-        }
-
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
-        print(
-            f"  Arch: {platform_specs['name']} (mem_bw={platform_specs['mem_bw_gbps']} GB/s)"
-        )
         analyzer = TreePerfAnalyzer.from_file(
             trace_path,
             add_python_func=True,
             enable_pseudo_ops=enable_pseudo_ops,
-            arch=arch,
         )
         tree = analyzer.tree
         print(f"  ✓ Trace loaded successfully")
@@ -254,14 +290,9 @@ def main():
         print("\n[STEP 4.5] Pre-computing Multi-Kernel Issue Data...")
 
         try:
-            from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
-
-            # Use GPUEventAnalyser to categorize events (single source of truth
-            # for compute/communication/memcpy classification)
             gpu_analyser = GPUEventAnalyser(tree.events)
             event_lists = gpu_analyser.get_gpu_event_lists()
             mk_gpu_events = event_lists[GPUEventAnalyser.all_gpu_key]
-            mk_comp_events = event_lists[GPUEventAnalyser.computation_key]
             mk_comm_events = event_lists[GPUEventAnalyser.communication_key]
             mk_memcpy_events = event_lists[GPUEventAnalyser.memcpy_key]
 
@@ -419,9 +450,6 @@ def main():
             with open(multi_kernel_data_file, "w") as f:
                 json.dump(multi_kernel_data, f, indent=2)
 
-    except ImportError as e:
-        print(f"  ⚠️  Could not import TraceLens: {e}")
-        print(f"  Skipping tree data and multi-kernel pre-computation")
     except Exception as e:
         print(f"  ⚠️  Error during tree data pre-computation: {e}")
         traceback.print_exc()
@@ -432,41 +460,6 @@ def main():
     print("\n[STEP 5] Filtering and Exporting Category Data...")
 
     unified_df = pd.read_csv(f"{csv_dir}/unified_perf_summary.csv")
-
-    # Create enhanced categories with special detection for MoE, Norm, Convolution
-    def get_enhanced_category(row):
-        """Determine category with special handling for MoE, Norm, Convolution"""
-        op_name = row.get("name", "")
-        category = row.get("op category", "")
-
-        # Check for special categories by operation name
-        if "moe" in op_name.lower() or "fused_moe" in op_name.lower():
-            return "moe_fused", "MoE Fused"
-        elif any(
-            n in op_name.lower()
-            for n in [
-                "batch_norm",
-                "batchnorm",
-                "layer_norm",
-                "layernorm",
-                "group_norm",
-                "groupnorm",
-                "instance_norm",
-            ]
-        ):
-            return "norm", "Norm"
-        elif "conv" in op_name.lower() and (
-            "aten::" in op_name or "backward" in op_name.lower()
-        ):
-            return "convolution", "Convolution"
-
-        # Use existing category
-        if pd.isna(category) or category == "":
-            return "other", "Other"
-        else:
-            category_name = category.replace(" ", "_").replace("/", "_").lower()
-            display_name = category
-            return category_name, display_name
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
