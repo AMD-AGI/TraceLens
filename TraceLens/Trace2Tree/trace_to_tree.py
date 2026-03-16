@@ -6,15 +6,111 @@
 
 from collections import defaultdict
 from typing import Dict, Any, Callable
+from tqdm import tqdm
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
 import re
+import multiprocessing as _multiprocessing
+import os
 
 from abc import ABC, abstractmethod
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ── Pre-compiled patterns ────────────────────────────────────────────────────
+_RE_NN_SUFFIX = re.compile(r"_\d+$")
+
+def _cs_process_group(args: tuple) -> tuple:
+    """Process one (pid,tid) group of events for call-stack tree building.
+
+    ``args`` is a ``(uid_list, compact_events)`` tuple where:
+    - ``uid_list`` contains event UIDs pre-sorted by timestamp for a single
+      (pid,tid) thread.
+    - ``compact_events`` is a dict mapping uid -> dict with keys
+      ``ts``, ``t_end``, ``name``, ``cat`` (the only fields this function reads).
+
+    Compact events are pre-partitioned per group by the caller so each worker
+    receives only its own ~N/K events rather than the full event set.  This
+    avoids the CPython refcount-triggered CoW page dirtying that occurs when
+    forked workers read from a shared events_by_uid dict.
+
+    Returns
+    -------
+    (patches, children_to_add, cpu_root_uids, name_to_uids)
+        patches         – {uid: {key: value, ...}} mutations to apply
+        children_to_add – {parent_uid: [child_uid, ...]}
+        cpu_root_uids   – list of UIDs that are cpu_op roots (timestamp order)
+        name_to_uids    – {name: [uid, ...]}
+    """
+    uid_list, events_by_uid = args
+
+    _TS = "ts"
+    _TE = "t_end"
+    _NAME = "name"
+
+    strip_nn_suffix = True
+
+    patches: dict = {}
+    children_to_add: dict = defaultdict(list)
+    cpu_root_uids: list = []
+    name_to_uids: dict = defaultdict(list)
+
+    # (uid, te, cat, is_nn_module)
+    stack: list = []
+    num_cpu_ops: int = 0
+    nn_module_stack: list = []
+
+    for uid in uid_list:
+        event = events_by_uid[uid]
+        cat = event.get("cat")
+        ts = event[_TS]
+        te = event[_TE]
+        name = event[_NAME]
+        is_nn = cat == "python_function" and name.startswith("nn.Module:")
+
+        name_to_uids[name].append(uid)
+
+        # Pop expired events from the stack
+        while stack:
+            top_uid, top_te, top_cat, top_is_nn = stack[-1]
+            if ts >= top_te:
+                stack.pop()
+                if top_cat == "cpu_op":
+                    num_cpu_ops -= 1
+                if top_is_nn:
+                    nn_module_stack.pop()
+            else:
+                break
+
+        # Skip events that don't fit within the current parent's window
+        if stack and te > stack[-1][1]:
+            continue
+
+        patch: dict = {"tree": True}
+        patch["nn_module_stack"] = list(nn_module_stack) if nn_module_stack else ["root"]
+
+        if stack:
+            parent_uid = stack[-1][0]
+            children_to_add[parent_uid].append(uid)
+            patch["parent"] = parent_uid
+
+        stack.append((uid, te, cat, is_nn))
+
+        if is_nn:
+            nn_name = _RE_NN_SUFFIX.sub("", name) if strip_nn_suffix else name
+            nn_module_stack.append(nn_name)
+
+        if cat == "cpu_op":
+            if num_cpu_ops == 0:
+                patch["cpu_op_root"] = True
+                cpu_root_uids.append(uid)
+            num_cpu_ops += 1
+
+        patches[uid] = patch
+
+    return patches, dict(children_to_add), cpu_root_uids, dict(name_to_uids)
 
 
 class BaseTraceToTree(ABC):
@@ -113,7 +209,7 @@ class BaseTraceToTree(ABC):
                 add_python_func and cat == "python_function"
             )
 
-        print(f"Building CPU op tree with add_python_func={add_python_func}")
+        tqdm.write(f"Building CPU op tree with add_python_func={add_python_func}")
 
         self.add_python_func = add_python_func
         list_events = filter(event_filter, self.events)
@@ -126,7 +222,13 @@ class BaseTraceToTree(ABC):
         dict_pidtid2num_cpu_ops = defaultdict(int)
         dict_pidtid2nn_module_stack = defaultdict(list)
 
-        for event in events_sorted:
+        for event in tqdm(
+            events_sorted,
+            desc="    Call stack",
+            unit="event",
+            leave=False,
+            dynamic_ncols=True,
+        ):
             event["tree"] = True
             self.name2event_uids[
                 event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
@@ -402,7 +504,7 @@ class JaxTraceToTree(BaseTraceToTree):
         self._set_hlo_ops(pb_file_name)
         self._create_linking_key_to_uid_map()
         self._link_cpu_gpu()
-        print(f"Building tree with add_python_func={add_python_func}")
+        tqdm.write(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
         if self.prune_nongpu_paths:
@@ -684,15 +786,17 @@ class TraceToTree:
 
     # TODO base class includes this, remove
     def build_host_call_stack_tree(self, add_python_func=False):
-        # 1. Filter and sort events based on their start timestamps.
-        #    - Include only CPU, CUDA runtime, and optionally Python function events.
-        # 2. Iterate through the sorted events and maintain a stack to track the current call hierarchy.
-        #    - Pop events from the stack if they end before the current event starts to find the parent.
-        #    - Set the parent of the current event as the top of the stack if the stack is not empty.
-        #    - Push the current event onto the stack.
-        #    - For CPU operations:
-        #      - Mark as a root node if it is the first CPU operation in the stack.
-        #      - Increment the count of CPU operations in the stack.
+        # 1. Filter events and group by (pid, tid) thread.
+        # 2. If multiple threads exist, process each group in parallel (spawn pool).
+        #    Each worker is independent — threads never share stack state.
+        # 3. Merge mutation results back into self.events_by_uid serially.
+        # 4. Single-thread traces fall back to the serial per-event loop.
+        tqdm.write(f"Building CPU op tree with add_python_func={add_python_func}")
+        self.add_python_func = add_python_func
+
+        _UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        _TS = TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp
+
         def event_filter(event):
             # PyTorch trace events already carry "cat" from the JSON; read it
             # once and reuse — avoids two event_to_category() call overheads.
@@ -701,121 +805,275 @@ class TraceToTree:
                 add_python_func and cat == "python_function"
             )
 
-        print(f"Building CPU op tree with add_python_func={add_python_func}")
+        # Group filtered event UIDs by (pid, tid) and sort each group by timestamp.
+        # Per-group sort is O(N/K log N/K) vs O(N log N) global — same asymptotically
+        # but produces K independent work units for parallel dispatch.
+        pidtid_buckets: dict = defaultdict(list)
+        for event in filter(event_filter, self.events):
+            pidtid_buckets[(event.get("pid"), event.get("tid"))].append(
+                (event[_TS], event[_UID])
+            )
+        for key in pidtid_buckets:
+            pidtid_buckets[key].sort()
+        sorted_groups = [[uid for _, uid in pairs] for pairs in pidtid_buckets.values()]
+        n_groups = len(sorted_groups)
 
-        self.add_python_func = add_python_func
-        list_events = filter(event_filter, self.events)
+        if n_groups > 1:
+            # ── Parallel path: batched spawn workers ─────────────────────────
+            # Each worker receives a compact event dict (ts, t_end, name, cat
+            # only) for its own group.  Workers run in batches of n_workers so
+            # at most n_workers compact dicts + result sets are live at once.
+            #
+            # Why batched rather than a single Pool.imap over all groups:
+            # pool.imap eagerly submits all tasks when workers are free, so with
+            # n_groups == n_workers all compact dicts are built and held in
+            # memory simultaneously.  Explicit batching bounds peak memory to
+            # n_workers × per-group overhead regardless of n_groups.
+            #
+            # n_workers default = 2: empirically each spawn worker holds ~20 GB
+            # for a 10M-event trace (compact events + patches + name_to_uids);
+            # running 10 concurrently caused ~230 GB RSS + heavy swap.  Two
+            # workers keep total RSS to ~main + 40 GB on the same trace.
+            n_workers = min(n_groups, 2)
 
-        events_sorted = sorted(
-            list_events,
-            key=lambda e: e[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp],
-        )
-        dict_pidtid2stack = defaultdict(list)
-        dict_pidtid2num_cpu_ops = defaultdict(int)
-        dict_pidtid2nn_module_stack = defaultdict(list)
+            # Log group sizes so skewed distributions are visible.
+            group_sizes = [len(g) for g in sorted_groups]
+            tqdm.write(
+                f"  Parallel call-stack: {n_groups} groups, {n_workers} workers, "
+                f"group sizes: {sorted(group_sizes, reverse=True)}"
+            )
 
-        for event in events_sorted:
-            event["tree"] = True
-            self.name2event_uids[
-                event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
-            ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+            _full = self.events_by_uid
 
-            pid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.PID)
-            tid = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TID)
-            stack_key = (pid, tid)
-            stack = dict_pidtid2stack[stack_key]
-            nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
-
-            while (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
-                >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-            ):
-                popped_event = stack.pop()
-                if popped_event.get("cat") == "cpu_op":
-                    dict_pidtid2num_cpu_ops[stack_key] -= 1
-                # Pop from nn_module_stack if this was an nn.Module event
-                if self._is_nn_module_event(popped_event):
-                    nn_module_stack.pop()
-
-            if (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-            ):
-                # TODO add following to logging when logging level is debug
-                # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
-                continue
-
-            # Set nn_module_stack for the current event (copy to avoid reference issues)
-            if nn_module_stack:
-                event["nn_module_stack"] = list(nn_module_stack)
-            else:
-                event["nn_module_stack"] = ["root"]
-
-            if stack:
-                parent = stack[-1]
-                parent.setdefault("children", []).append(
-                    event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
+            def _build_compact(uid_list):
+                return (
+                    uid_list,
+                    {
+                        uid: {
+                            "ts": ev["ts"],
+                            "t_end": ev["t_end"],
+                            "name": ev["name"],
+                            "cat": ev.get("cat"),
+                        }
+                        for uid in uid_list
+                        for ev in (_full[uid],)
+                    },
                 )
-                event["parent"] = parent[TraceLens.util.TraceEventUtils.TraceKeys.UID]
 
-            stack.append(event)
+            all_cpu_roots: list = []
+            ctx = _multiprocessing.get_context("spawn")
+            completed = 0
+            with tqdm(total=n_groups, desc="    Call stack", unit="group", leave=False, dynamic_ncols=True) as pbar:
+                for batch_start in range(0, n_groups, n_workers):
+                    batch = sorted_groups[batch_start : batch_start + n_workers]
+                    batch_args = [_build_compact(uid_list) for uid_list in batch]
+                    with ctx.Pool(len(batch)) as pool:
+                        batch_results = pool.map(_cs_process_group, batch_args)
+                    for patches, children_to_add, cpu_root_uids, name_to_uids in batch_results:
+                        for uid, patch in patches.items():
+                            self.events_by_uid[uid].update(patch)
+                        for parent_uid, child_uids in children_to_add.items():
+                            self.events_by_uid[parent_uid].setdefault("children", []).extend(
+                                child_uids
+                            )
+                        all_cpu_roots.extend(
+                            (self.events_by_uid[uid][_TS], uid) for uid in cpu_root_uids
+                        )
+                        for name, uids in name_to_uids.items():
+                            self.name2event_uids[name].extend(uids)
+                    pbar.update(len(batch))
 
-            # Push onto nn_module_stack if this is an nn.Module event
-            if self._is_nn_module_event(event):
-                name = event["name"]
-                name = re.sub(r"_\d+$", "", name)
-                nn_module_stack.append(name)
+            # Restore global timestamp order for cpu_root_nodes
+            all_cpu_roots.sort()
+            self.cpu_root_nodes = [uid for _, uid in all_cpu_roots]
+            return
 
-            if event.get("cat") == "cpu_op":
-                if dict_pidtid2num_cpu_ops[stack_key] == 0:
-                    event["cpu_op_root"] = True
-                    self.cpu_root_nodes.append(
-                        event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                    )
-                dict_pidtid2num_cpu_ops[stack_key] += 1
+        # ── Serial fallback: single (pid,tid) thread or empty trace ─────────
+        # Pass the full events_by_uid — no fork involved, so no CoW risk.
+        # Wrap uid_list with tqdm for event-level progress.
+        uid_list = sorted_groups[0] if sorted_groups else []
+        tracked = tqdm(
+            uid_list,
+            desc="    Call stack",
+            unit="event",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        patches, children_to_add, cpu_root_uids, name_to_uids = _cs_process_group(
+            (tracked, self.events_by_uid)
+        )
+        tracked.close()
+
+        for uid, patch in patches.items():
+            self.events_by_uid[uid].update(patch)
+        for parent_uid, child_uids in children_to_add.items():
+            self.events_by_uid[parent_uid].setdefault("children", []).extend(child_uids)
+        self.cpu_root_nodes = cpu_root_uids  # already in timestamp order
+        for name, uids in name_to_uids.items():
+            self.name2event_uids[name].extend(uids)
 
     def add_gpu_ops_to_tree(self):
-        for runtime_event in self.events:
-            if self.event_to_category(runtime_event) not in {
-                "cuda_runtime",
-                "cuda_driver",
-            }:
+        import gc
+
+        UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        Args = TraceLens.util.TraceEventUtils.TraceKeys.Args
+        Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
+        gpu_cats = {"kernel", "gpu_memset", "gpu_memcpy"}
+        runtime_cats = {"cuda_runtime", "cuda_driver"}
+        events_by_uid = self.events_by_uid
+
+        # ── Phase A: pre-build correlation-id → GPU-kernel index ──────────────
+        # _get_graph_gpu_events() previously did an O(N_all) linear scan per
+        # graph-launch event, making the overall loop O(N_graph_launches × N_all).
+        # Pre-indexing reduces each lookup to O(1).
+        tqdm.write(
+            f"  add_gpu_ops_to_tree: indexing {len(self.events):,} events for GPU kernels"
+        )
+        corr_to_gpu_events: dict = {}
+        for evt in self.events:
+            if self.event_to_category(evt) in gpu_cats:
+                corr = evt.get(Args, {}).get("correlation")
+                if corr is not None:
+                    bucket = corr_to_gpu_events.get(corr)
+                    if bucket is None:
+                        corr_to_gpu_events[corr] = [evt]
+                    else:
+                        bucket.append(evt)
+
+        # ── Phase B: link each GPU kernel to its immediate runtime parent ──────
+        # Sets gpu_events only on the direct runtime_event; no ancestor walk yet.
+        tqdm.write(
+            f"  add_gpu_ops_to_tree: linking GPU kernels to runtime parents"
+        )
+        linked = 0
+        for runtime_event in tqdm(
+            self.events,
+            desc="  GPU ops → tree",
+            unit="ev",
+            mininterval=2.0,
+        ):
+            if self.event_to_category(runtime_event) not in runtime_cats:
                 continue
             if runtime_event["name"] in {"cudaGraphLaunch", "hipGraphLaunch"}:
-                corresponding_gpu_events = self._get_graph_gpu_events(runtime_event)
+                corr = runtime_event.get(Args, {}).get(self.linking_key)
+                corresponding_gpu_events = (
+                    corr_to_gpu_events.get(corr, []) if corr is not None else []
+                )
             else:
                 gpu_evt = self._find_corresponding_output_event(runtime_event)
                 corresponding_gpu_events = [gpu_evt] if gpu_evt else []
             for gpu_evt in corresponding_gpu_events:
-                runtime_event.setdefault("children", []).append(
-                    gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
-                gpu_evt["parent"] = runtime_event[
-                    TraceLens.util.TraceEventUtils.TraceKeys.UID
-                ]
+                runtime_event.setdefault("children", []).append(gpu_evt[UID])
+                gpu_evt["parent"] = runtime_event[UID]
                 gpu_evt["tree"] = True
-                self.name2event_uids[
-                    gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.Name]
-                ].append(gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID])
-                runtime_event.setdefault("gpu_events", []).append(
-                    gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                )
+                self.name2event_uids[gpu_evt[Name]].append(gpu_evt[UID])
+                runtime_event.setdefault("gpu_events", []).append(gpu_evt[UID])
+                linked += 1
+        tqdm.write(
+            f"  add_gpu_ops_to_tree: {linked:,} GPU kernels linked to runtime parents"
+        )
 
-                parent = self.get_parent_event(runtime_event)
-                while parent:
-                    parent.setdefault("gpu_events", []).append(
-                        gpu_evt[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                    )
-                    parent = self.get_parent_event(parent)
+        # ── Phase C: single bottom-up propagation of gpu_events ───────────────
+        # Each event's gpu_events list is extended to its parent exactly once,
+        # using C-level list.extend() instead of per-element Python append().
+        #
+        # BFS seeds: use self.cpu_root_nodes directly instead of scanning all
+        # self.events for parentless non-GPU events.  This avoids an O(N_all)
+        # pass and — critically — avoids pulling in unrelated stray events
+        # (metadata, flow, ac2g) that were never part of the call-stack tree.
+        #
+        # Visited set: in merged multi-rank traces, overlapping correlation IDs
+        # cause Phase B to add the same GPU event as a child of multiple runtime
+        # events (one per rank).  Without a visited set the BFS enqueues each
+        # duplicate K times (K = number of ranks), making traversal
+        # O(K² × N_gpu) — a definite hang for large merged traces.
+        print('This is where we typically hang')
+        tqdm.write("  add_gpu_ops_to_tree: propagating gpu_events up the tree (BFS)")
+        from collections import deque
+        import time as _time
+
+        tqdm.write(
+            f"  add_gpu_ops_to_tree: BFS seeds = {len(self.cpu_root_nodes):,} cpu_root_nodes"
+        )
+        topo_order: list = []
+        visited: set = set()
+        q: deque = deque(
+            events_by_uid[uid]
+            for uid in self.cpu_root_nodes
+            if uid in events_by_uid
+        )
+        tqdm.write(f"  add_gpu_ops_to_tree: BFS start — queue size = {len(q):,}")
+        
+        _bfs_report_interval = 1_000_000
+        _bfs_next_report = _bfs_report_interval
+        _bfs_t0 = _time.monotonic()
+        bfscount = 0
+        print("Beginning BFS logic and count")
+        while q:
+            ev = q.popleft()
+            ev_uid = ev[UID]
+            if ev_uid in visited:
+                continue
+            visited.add(ev_uid)
+            topo_order.append(ev)
+            for child_uid in ev.get("children", ()):
+                if child_uid not in visited:
+                    child = events_by_uid.get(child_uid)
+                    if child is not None:
+                        q.append(child)
+                        bfscount += 1
+                        #print(f'Child count: {bfscount}')
+            if bfscount >= _bfs_next_report:
+                elapsed = _time.monotonic() - _bfs_t0
+                tqdm.write(
+                    f"  add_gpu_ops_to_tree: BFS {bfscount:,} enqueued, "
+                    f"{len(topo_order):,} visited, q={len(q):,}, {elapsed:.1f}s"
+                )
+                _bfs_next_report += _bfs_report_interval
+
+        tqdm.write(
+            f"  add_gpu_ops_to_tree: propagating over {len(topo_order):,} reachable events"
+        )
+        gc.disable()
+        try:
+            for event in tqdm(
+                reversed(topo_order),
+                desc="  GPU events propagation",
+                total=len(topo_order),
+                unit="ev",
+                mininterval=2.0,
+            ):
+                my_gpu = event.get("gpu_events")
+                if not my_gpu:
+                    continue
+                parent_uid = event.get("parent")
+                if parent_uid is None:
+                    continue
+                parent = events_by_uid.get(parent_uid)
+                if parent is None:
+                    continue
+                parent_gpu = parent.get("gpu_events")
+                if parent_gpu is None:
+                    parent["gpu_events"] = list(my_gpu)
+                else:
+                    parent_gpu.extend(my_gpu)
+        finally:
+            gc.enable()
+            gc.collect()
+
+        tqdm.write(f"  add_gpu_ops_to_tree: done — {linked:,} GPU kernels linked")
 
     # TODO base class includes this, remove
     def label_non_gpu_paths(self):
         # 1. Iterate through non GPU nodes and chck the gpu_events list
         # 2. If the gpu_events list is empty, mark the node as non_gpu_path
-
-        for event in self.events:
+        tqdm.write(f"  label_non_gpu_paths: scanning {len(self.events):,} events")
+        for event in tqdm(
+            self.events,
+            desc="  Label non-GPU paths",
+            unit="ev",
+            mininterval=2.0,
+        ):
             # Skip GPU events
             cat = event.get("cat")
             if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
@@ -823,17 +1081,21 @@ class TraceToTree:
             # Now, we are dealing with non-GPU events
             if "gpu_events" not in event:
                 event["non_gpu_path"] = True
+        tqdm.write("  label_non_gpu_paths: done")
 
     def build_tree(self, add_python_func=False, link_fwd_bwd=True) -> None:
-        print(f"Building tree with add_python_func={add_python_func}")
+        tqdm.write(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
+        tqdm.write("  build_host_call_stack_tree: done")
         self.add_gpu_ops_to_tree()
 
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
 
         if link_fwd_bwd:
+            tqdm.write("  link_all_fwd_bwd_events: starting")
             self.link_all_fwd_bwd_events()
+            tqdm.write("  link_all_fwd_bwd_events: done")
 
     # TODO base class includes this, remove
     def get_UID2event(self, UID):
