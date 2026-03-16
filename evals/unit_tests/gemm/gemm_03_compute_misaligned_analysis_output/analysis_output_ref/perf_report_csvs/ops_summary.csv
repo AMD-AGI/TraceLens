@@ -1,2 +1,0 @@
-name,total_direct_kernel_time_sum,Count,Categories,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
-aten::mm,3672,10,{'GEMM'},3.672,100.0,100.0

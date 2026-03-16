@@ -1,3 +1,0 @@
-name,total_direct_kernel_time_sum,Count,Categories,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
-vllm::rocm_aiter_fused_moe,12000.0,1,{'other'},12.0,99.25558312655087,99.25558312655087
-aten::mul_,90.0,3,{'elementwise'},0.09,0.7444168734491315,100.0

@@ -1,3 +1,0 @@
-op category,Count,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
-other,1,1.8,95.23809523809523,95.23809523809523
-elementwise,3,0.09,4.761904761904762,99.99999999999999
