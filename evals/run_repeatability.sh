@@ -19,6 +19,17 @@ PREFIX="docker exec -w $REPO_ROOT $CONTAINER"
 mkdir -p "$RESULTS_ROOT"
 ssh -n "$NODE" "$PREFIX bash -c 'mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT'"
 
+# Expand unit_tests archive if the directory is missing or stale
+UNIT_TESTS_DIR="$EVALS_DIR/unit_tests"
+UNIT_TESTS_ARCHIVE="$EVALS_DIR/unit_tests.tar.gz"
+if [[ -f "$UNIT_TESTS_ARCHIVE" ]]; then
+    if [[ ! -d "$UNIT_TESTS_DIR" ]] || [[ "$UNIT_TESTS_ARCHIVE" -nt "$UNIT_TESTS_DIR" ]]; then
+        echo "Expanding unit_tests.tar.gz..."
+        tar xzf "$UNIT_TESTS_ARCHIVE" -C "$EVALS_DIR"
+        echo "Done."
+    fi
+fi
+
 echo "========================================="
 echo "  Standalone Analysis Repeatability Test"
 echo "  Repeats: $NUM_REPEATS"
