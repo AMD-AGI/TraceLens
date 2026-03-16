@@ -60,27 +60,30 @@ def verify_subtree_events(capture_events, graph_events):
                 len(capture_events), len(graph_events)
             )
         )
+        return 0
     else:
         # print("=========matching ========")
         for j, i in zip(capture_events, graph_events):
             if "kernel" not in j.get("args", {}).keys():
+                if "hipMemcpy" in j["name"]:
+                    continue
                 warnings.warn(
                     "Kernel name missing in capture event args, "
                     "alignment has not been verified",
                     stacklevel=2,
                 )
-                return
+                continue
             if i["name"] != j.get("args", {}).get("kernel", j["name"]):
                 print(
                     "Mismatch in kernel name: {} vs {}".format(
                         i["name"], j.get("args", {}).get("kernel", j["name"])
                     )
                 )
-                return
+                return 0
     #print(
     #    "Subtree events match successfully with {} events".format(len(capture_events))
     #)
-    return
+    return 1
 
 
 def update_subtree_uids_and_timestamps(
@@ -346,7 +349,6 @@ def merge_capture_trace_into_graph(
     graph_tree = graph_perf_analyzer.tree
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
     ##Use cuda graph APIs to find the root node for capture subtrees
-
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
     capture_map, capture_batch_sizes = load_capture_folder(capture_folder, metadata_json_path)
     for execution_root, graph_roots in execution_graph_root_map:
@@ -393,7 +395,10 @@ def merge_capture_trace_into_graph(
             #        c_root["name"], g_root["name"]
             #     )
             #)
-            verify_subtree_events(capture_filtered_events, graph_filtered_events)
+            verify_success = verify_subtree_events(capture_filtered_events, graph_filtered_events)
+            if verify_success == 0:
+                print("Warning: subtree events verification failed for capture root {} and graph root {}".format(c_root["name"], g_root["name"]))
+                continue
             start_uid = graph_tree.events[-1][UID] + 1
             capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
                 capture_tree,
