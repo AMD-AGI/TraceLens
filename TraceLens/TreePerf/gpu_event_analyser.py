@@ -94,15 +94,25 @@ class GPUEventAnalyser:
         comp_events = []
         comm_events = []
         memcpy_events = []
+        compute_overlapping_uids = False
 
+        points = []
         for event in self.events:
 
             # TODO: ideally we want to get gpu events based on process id
             # That will be done shortly
             category = event.get("cat")
             if category in {"kernel", "gpu_memcpy", "gpu_memset"}:
+
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
+                if "overlapping_uids" not in event:
+                    compute_overlapping_uids = True
+                    points.append(
+                        (event["ts"], 1, event["UID"])
+                    )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
+                    points.append((event["t_end"], 0, event["UID"]))
+                    event["overlapping_uids"] = set()
                 gpu_events.append(event)
 
                 if category == "gpu_memcpy":
@@ -114,6 +124,64 @@ class GPUEventAnalyser:
                         comp_events.append(event)
                 else:
                     raise ValueError(f"Unknown event category: {category}")
+        if compute_overlapping_uids:
+            points.sort(key=lambda x: (x[0], x[1]))
+            active_uids = set()
+            event_map = {event["UID"]: event for event in gpu_events}
+
+            all_events_by_uid = {
+                event["UID"]: event for event in self.events if "UID" in event
+            }
+
+            def _get_cpu_op_uid(event):
+                """Walk up parent chain to find the nearest cpu_op ancestor UID."""
+                current_uid = event.get("parent")
+                while current_uid is not None:
+                    parent = all_events_by_uid.get(current_uid)
+                    if parent is None:
+                        return None
+                    if parent.get("cat") == "cpu_op":
+                        return current_uid
+                    current_uid = parent.get("parent")
+                return None
+
+            uid_to_cpu_op = {
+                event["UID"]: _get_cpu_op_uid(event) for event in gpu_events
+            }
+
+            for _, point_type, uid in points:
+                if point_type == 0:
+                    active_uids.remove(uid)
+                else:
+                    event = event_map[uid]
+                    my_cpu_op = uid_to_cpu_op[uid]
+                    if active_uids:
+                        my_stream = event.get("args", {}).get("stream")
+                        for active_uid in active_uids:
+                            active_event = event_map[active_uid]
+                            active_stream = active_event.get("args", {}).get("stream")
+                            if (
+                                my_stream is not None
+                                and active_stream is not None
+                                and my_stream == active_stream
+                            ):
+                                continue
+                            active_cpu_op = uid_to_cpu_op[active_uid]
+                            if (
+                                my_cpu_op is not None
+                                and active_cpu_op is not None
+                                and my_cpu_op == active_cpu_op
+                            ):
+                                continue
+                            ov_start = max(event["ts"], event_map[active_uid]["ts"])
+                            ov_end = min(event["t_end"], event_map[active_uid]["t_end"])
+                            if (ov_end - ov_start) < 1.0:  # skip sub-microsecond noise
+                                continue
+                            event["overlapping_uids"].add(active_uid)
+                            event_map[active_uid]["overlapping_uids"].add(uid)
+
+                    active_uids.add(uid)
+
         return {
             GPUEventAnalyser.all_gpu_key: gpu_events,
             GPUEventAnalyser.computation_key: comp_events,

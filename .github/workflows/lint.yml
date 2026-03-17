@@ -20,12 +20,15 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.x'  # Specify the Python version you need
+        python-version: '3.10'
+        cache: 'pip'
 
     - name: Install dependencies
       run: |
@@ -33,4 +36,11 @@ jobs:
         pip install black
 
     - name: Run Black
-      run: black --check .
+      # only run black on changed files based on this example:
+      # https://stackoverflow.com/questions/72061054/only-run-black-on-changed-files
+      run: |
+        changed_files=$(git diff --diff-filter=d --name-only $(git merge-base HEAD origin/main) HEAD | grep '\.py$' || true)
+        if [ -n "$changed_files" ]; then
+          echo "$changed_files" | xargs echo "Running black on changed files: "
+          echo "$changed_files" | xargs black --check
+        fi

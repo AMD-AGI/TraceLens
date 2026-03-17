@@ -6,6 +6,7 @@
 
 from . import perf_model
 from collections import defaultdict
+from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
 
 op_to_perf_model_class_map = {
     "aten::mm": perf_model.aten_mm,
@@ -13,6 +14,41 @@ op_to_perf_model_class_map = {
     "aten::_scaled_mm": perf_model.aten_scaled_mm,
     "trtllm::cublas_scaled_mm": perf_model.aten_scaled_mm,
     "bitsandbytes::int8_linear_matmul": perf_model.aten_scaled_mm,
+    "aten::bmm": perf_model.aten_bmm,
+    "tex_ts::te_gemm_ts": perf_model.tex_ts_te_gemm_ts,
+    "aten::baddbmm": perf_model.aten_baddbmm,
+    "vllm::gemm_with_dynamic_quant": perf_model.vllm_gemm_with_dynamic_quant,
+    "FlashAttnFunc": perf_model.flash_attention,
+    "flash_attn::_flash_attn_forward": perf_model.flash_attention,
+    "flash_attn::_flash_attn_backward": perf_model.flash_attention_backward,
+    "flash_attn::_flash_attn_varlen_forward": perf_model.flash_attention_varlen_forward,
+    "flash_attn::_flash_attn_varlen_backward": perf_model.flash_attention_varlen_backward,
+    "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,
+    "aten::_scaled_dot_product_efficient_attention": perf_model.aten__scaled_dot_product_efficient_attention,
+    "aten::_scaled_dot_product_flash_attention": perf_model.aten__scaled_dot_product_flash_attention,
+    "aten::convolution": perf_model.aten_conv,
+    "aten::convolution_backward": perf_model.aten_conv_bwd,
+    "ConvBias_": perf_model.ConvBias_,
+    "ConvBiasReLU_": perf_model.ConvBiasReLU_,
+    "ConvBias_Backward": perf_model.ConvBias_Backward,
+    "ConvBiasReLU_Backward": perf_model.ConvBiasReLU_Backward,
+    "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
+    "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
+    "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
+    "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
+    "aiter::mha_fwd": perf_model.aiter__mha_fwd,
+    "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::mha_bwd": perf_model.aiter__mha_bwd,
+    "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
+    "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
+    "EvoformerAttention": perf_model.evoformer_attention,
+    "LigerSiLUMulFunction": perf_model.liger_silu_mul_function,
+    "primus_turbo::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_impl": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo_cpp_extension::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo::grouped_gemm_variable_k_impl": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo_cpp_extension::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
     # TEv2 pseudo ops
     "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
@@ -20,24 +56,10 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    "aten::bmm": perf_model.aten_bmm,
-    "tex_ts::te_gemm_ts": perf_model.tex_ts_te_gemm_ts,
-    "aten::baddbmm": perf_model.aten_baddbmm,
-    "vllm::gemm_with_dynamic_quant": perf_model.vllm_gemm_with_dynamic_quant,
-    "FlashAttnFunc": perf_model.flash_attention,
-    "flash_attn::_flash_attn_forward": perf_model.flash_attention,
-    "flash_attn::_flash_attn_varlen_forward": perf_model.flash_attention_varlen_forward,
-    "flash_attn::_flash_attn_varlen_backward": perf_model.flash_attention_varlen_backward,
-    "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,
-    "aten::_scaled_dot_product_efficient_attention": perf_model.aten__scaled_dot_product_efficient_attention,
-    "aten::_scaled_dot_product_flash_attention": perf_model.aten__scaled_dot_product_flash_attention,
-    "aten::convolution": perf_model.aten_conv,
-    "aiter::_flash_attn_forward": perf_model.aiter__flash_attn_forward,
-    "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
-    "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
-    "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
-    "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
 }
+
+# Add pseudo-op extension mappings
+op_to_perf_model_class_map.update(get_pseudo_op_mappings())
 
 unary_elemwise_ops = [
     "aten::copy",
@@ -60,18 +82,73 @@ binary_elemwise_ops = [
     "aten::threshold_backward",
 ]
 
+# aten::batch_norm_backward and similar ops do not appear in traces
+# add all variants here for coverage
+# for fwd path, only aten:: ops validated as they are used
+# for bwd path, we see native_ miopen_ and cudnn_ ops, we do not see plain version
+# note that the variants have different inputs! This is handled in the perf model classes
+norm_ops = {
+    "aten::batch_norm": perf_model.BatchNorm,
+    "aten::native_batch_norm": perf_model.BatchNorm,
+    "aten::miopen_batch_norm": perf_model.BatchNorm,
+    "aten::cudnn_batch_norm": perf_model.BatchNorm,
+    "aten::layer_norm": perf_model.LayerNorm,
+    "aten::native_layer_norm": perf_model.LayerNorm,
+    "aten::miopen_layer_norm": perf_model.LayerNorm,
+    "aten::cudnn_layer_norm": perf_model.LayerNorm,
+    "aten::group_norm": perf_model.GroupNorm,
+    "aten::native_group_norm": perf_model.GroupNorm,
+    "aten::miopen_group_norm": perf_model.GroupNorm,
+    "aten::cudnn_group_norm": perf_model.GroupNorm,
+    "aten::instance_norm": perf_model.InstanceNorm,
+    "aten::native_instance_norm": perf_model.InstanceNorm,
+    "aten::miopen_instance_norm": perf_model.InstanceNorm,
+    "aten::cudnn_instance_norm": perf_model.InstanceNorm,
+    "aten::_fused_rms_norm": perf_model.RMSNorm,
+    "aten::batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::native_batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::miopen_batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::cudnn_batch_norm_backward": perf_model.BatchNormBwd,
+    "aten::layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::native_layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::miopen_layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::cudnn_layer_norm_backward": perf_model.LayerNormBwd,
+    "aten::group_norm_backward": perf_model.GroupNormBwd,
+    "aten::native_group_norm_backward": perf_model.GroupNormBwd,
+    "aten::miopen_group_norm_backward": perf_model.GroupNormBwd,
+    "aten::cudnn_group_norm_backward": perf_model.GroupNormBwd,
+    "aten::instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::native_instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::miopen_instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::cudnn_instance_norm_backward": perf_model.InstanceNormBwd,
+    "aten::rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::native_rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::miopen_rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::cudnn_rms_norm_backward": perf_model.RMSNormBwd,
+    "aten::_fused_rms_norm_backward": perf_model.RMSNormBwd,
+}
+
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
+for op_name, op_class in norm_ops.items():
+    op_to_perf_model_class_map[op_name] = op_class
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
+    perf_model.GroupedGemm: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
+    perf_model.Normalization: "Normalization",
 }
+
+# Add pseudo-op extension categories
+dict_base_class2category.update(get_pseudo_op_categories())
+
 dict_cat2names = defaultdict(list)
 for op_name, perf_model_class in op_to_perf_model_class_map.items():
     base_classes = perf_model_class.__bases__
@@ -89,12 +166,17 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
 
 def categorize_torch_op(row):
     """
-    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Categorizes a row based on the 'name' and 'kernel_details' fields.
+
     Args:
-        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+        row (dict): A dictionary with at minimum a 'name' key. May also contain
+            a 'kernel_details' key — a list of dicts each having a 'name' field
+            that holds the underlying GPU kernel name.
+
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'BN_fwd', 'BN_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+        str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused', 'elementwise',
+             'triton', 'reduce', 'multi_tensor_apply', 'record_param_comms', or 'other'.
     """
 
     debug = False
@@ -104,23 +186,21 @@ def categorize_torch_op(row):
         "aten::convolution",
         "aten::miopen_convolution",
         "aten::cudnn_convolution",
+        "ConvBias_",
+        "ConvBiasReLU_",
     ]:
         return "CONV_fwd"
-    elif row["name"] == "aten::convolution_backward":
+    elif row["name"] in [
+        "aten::convolution_backward",
+        "ConvBias_Backward",
+        "ConvBiasReLU_Backward",
+    ]:
         return "CONV_bwd"
-    elif row["name"] in [
-        "aten::batch_norm",
-        "aten::native_batch_norm",
-        "aten::miopen_batch_norm",
-        "aten::cudnn_batch_norm",
-    ]:
-        return "BN_fwd"
-    elif row["name"] in [
-        "aten::native_batch_norm_backward",
-        "aten::miopen_batch_norm_backward",
-        "aten::cudnn_batch_norm_backward",
-    ]:
-        return "BN_bwd"
+    elif row["name"] in norm_ops.keys():
+        if row["name"].endswith("_backward"):
+            return "NORM_bwd"
+        else:
+            return "NORM_fwd"
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
@@ -131,12 +211,19 @@ def categorize_torch_op(row):
         "aten::_scaled_dot_product_flash_attention_backward",
         "aiter::_flash_attn_backward",
         "aiter::wrapper_fmha_v3_bwd",
+        "aiter::mha_bwd",
     ]
     if row["name"] in dict_cat2names["SDPA"]:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
+    elif row["name"] in dict_cat2names.get("MoE_fused", []):
+        return "MoE_fused"
+    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
+        return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
+        return "elementwise"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
@@ -156,6 +243,5 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-
     # if none of the above cases match, return 'other'
     return "other"

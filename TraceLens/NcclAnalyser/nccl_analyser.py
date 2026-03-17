@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 import gzip
 import os
 import json
@@ -20,6 +21,31 @@ def list_to_tuple(obj):
     if isinstance(obj, list):
         return tuple(list_to_tuple(item) for item in obj)
     return obj
+
+
+def _parse_split_sizes(value):
+    """Parse an In/Out split size value into a list of ints.
+
+    Traces store split sizes in varying formats depending on the PyTorch
+    version: as a JSON array (Python list/tuple after loading) or as a
+    string representation ``'[393216, 393216, ...]'``.  This helper
+    normalises both forms into a plain list of ints, returning ``None``
+    when the value is missing or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [int(x) for x in value]
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("["):
+            try:
+                parsed = ast.literal_eval(value)
+                if isinstance(parsed, (list, tuple)):
+                    return [int(x) for x in parsed]
+            except (ValueError, SyntaxError):
+                pass
+    return None
 
 
 def _nccl_filter_event_fn(event):
@@ -538,14 +564,13 @@ class NcclAnalyser:
         return summary_df
 
     def build_df_nccl_all2allv(self, detailed=False, strict_metadata_check=True):
-        # this is diff from implicit sync cat
-        # first, each rank can send and receive different amount of data
-        # as a result they do not respect the implicit sync cat
-        # we cannot calculate comm latency as min dur
-        # thus we cannot calculate algo bw and bus bw
-        # as we discuss and understand the metrics, we can add them
-        # for now we expose raw data and leave the calculations to the user
-        # we will add some basic metrics for now
+        """Build a per-collective-instance DataFrame for all_to_allv.
+
+        Unlike implicit-sync collectives, each rank sends/receives a different
+        amount of data, so ``comm_latency`` / ``algo bw`` / ``bus bw`` do not
+        apply.  Instead we report ``throughput``, ``wall_time``, per-rank
+        duration spread, and ``size_imbalance``.
+        """
 
         if not hasattr(self, "df_per_rank_coll"):
             self.build_df_long()
@@ -636,6 +661,44 @@ class NcclAnalyser:
             row["total data communicated (MB)"] = total_in_size
             row["total nelems communicated"] = total_in_nelems
 
+            # Per-instance bandwidth and imbalance metrics
+            wall_time = latest_end - earliest_start
+            row["wall_time (us)"] = wall_time
+            row["max_rank_dur (us)"] = max(
+                row[f"rank_{r}_dur"] for r in rank_events.index
+            )
+            row["min_rank_dur (us)"] = min(
+                row[f"rank_{r}_dur"] for r in rank_events.index
+            )
+            row["avg_rank_dur (us)"] = sum(
+                row[f"rank_{r}_dur"] for r in rank_events.index
+            ) / len(rank_events.index)
+
+            if wall_time > 0:
+                row["throughput (GB/s)"] = (total_in_size / 1024) / (wall_time / 1e6)
+            else:
+                row["throughput (GB/s)"] = float("nan")
+
+            rank_throughputs = []
+            for r in rank_events.index:
+                r_size = row[f"rank_{r}_In msg size (MB)"]
+                r_dur = row[f"rank_{r}_dur"]
+                if r_size > 0 and r_dur > 0:
+                    rank_throughputs.append((r_size / 1024) / (r_dur / 1e6))
+            if rank_throughputs:
+                row["max_rank_throughput (GB/s)"] = max(rank_throughputs)
+                row["min_rank_throughput (GB/s)"] = min(rank_throughputs)
+            else:
+                row["max_rank_throughput (GB/s)"] = float("nan")
+                row["min_rank_throughput (GB/s)"] = float("nan")
+
+            rank_sizes = [row[f"rank_{r}_In msg size (MB)"] for r in rank_events.index]
+            mean_size = sum(rank_sizes) / len(rank_sizes) if rank_sizes else 0
+            if mean_size > 0:
+                row["size_imbalance"] = max(rank_sizes) / mean_size
+            else:
+                row["size_imbalance"] = float("nan")
+
             rows.append(row)
 
         if len(rows) == 0:
@@ -654,6 +717,14 @@ class NcclAnalyser:
             "stream",
             "total data communicated (MB)",
             "total nelems communicated",
+            "wall_time (us)",
+            "max_rank_dur (us)",
+            "min_rank_dur (us)",
+            "avg_rank_dur (us)",
+            "throughput (GB/s)",
+            "max_rank_throughput (GB/s)",
+            "min_rank_throughput (GB/s)",
+            "size_imbalance",
             "skew in start time",
             "skew in end time",
         ]
@@ -662,3 +733,179 @@ class NcclAnalyser:
         df = df.sort_values(by="total data communicated (MB)", ascending=False)
         self.df_all2allv_detailed = df
         return self.df_all2allv_detailed if detailed else df.drop(columns=per_rank_cols)
+
+    def build_df_summary_nccl_all2allv(
+        self,
+        agg_metrics=["mean", "std", "min", "max"],
+        strict_metadata_check=True,
+    ):
+        """Summary of all_to_allv collectives grouped by (Process Group Name, dtype).
+
+        Unlike implicit-sync collectives, all2allv has variable per-rank message
+        sizes.  We report aggregate throughput and size imbalance rather than
+        algo bw / bus bw.
+        """
+        if not hasattr(self, "df_all2allv_detailed"):
+            result = self.build_df_nccl_all2allv(
+                detailed=True, strict_metadata_check=strict_metadata_check
+            )
+            if result is None:
+                return None
+
+        df = self.df_all2allv_detailed
+        general_cols = [c for c in df.columns if not c.startswith("rank_")]
+        df = df[general_cols]
+
+        if df.empty:
+            return None
+
+        groupby_cols = ["Process Group Name", "dtype"]
+        agg_logic = {
+            "total data communicated (MB)": agg_metrics,
+            "wall_time (us)": agg_metrics + ["sum"],
+            "throughput (GB/s)": agg_metrics,
+            "size_imbalance": ["mean", "max"],
+            "max_rank_dur (us)": ["mean", "max"],
+            "skew in start time": ["mean", "max"],
+            "skew in end time": ["mean", "max"],
+            "collective_id": "count",
+        }
+        metadata_fields = ["Process Group Ranks", "Collective name", "Group size"]
+        for col in metadata_fields:
+            agg_logic[col] = "first"
+
+        agg_result = df.groupby(groupby_cols).agg(agg_logic)
+        agg_result.columns = [
+            f"{col[0]}_{col[1]}" if col[1] != "" else col[0]
+            for col in agg_result.columns
+        ]
+
+        renames = {
+            "collective_id_count": "count",
+            "wall_time (us)_sum": "Total wall_time (us)",
+        }
+        for col in metadata_fields:
+            renames[f"{col}_first"] = col
+        agg_result.rename(columns=renames, inplace=True)
+
+        agg_result["Total wall_time (ms)"] = agg_result["Total wall_time (us)"] / 1000
+
+        summary_df = agg_result.reset_index()
+        summary_df = summary_df.sort_values(by="Total wall_time (ms)", ascending=False)
+
+        return summary_df
+
+    def build_df_all2allv_heatmap(self, strict_metadata_check=True):
+        """Build a (src_rank, dst_rank) -> total bytes sent matrix across all
+        all2allv invocations.  Useful for identifying hot rank pairs in MoE.
+
+        ``In split size[j]`` on rank *i* is treated as the number of elements
+        rank *i* sends to rank *j* (NCCL sendcounts convention).  Bytes are
+        computed immediately per-event using the event's dtype so that mixed
+        dtypes across invocations are handled correctly.
+
+        When *strict_metadata_check* is True (default), events with
+        unparseable split sizes, unrecognised dtypes, or split-size lengths
+        that don't match the event's ``Group size`` are logged and skipped.
+
+        .. note::
+
+           The output can have up to N*N rows (one per observed src/dst
+           pair).  Rows are only present for pairs that appear in the trace
+           with parseable split sizes and known dtypes.  For very large
+           world sizes this can exceed Excel's row limit (1,048,576) or use
+           significant memory.  A warning is emitted when world_size > 256,
+           and the method returns ``None`` when world_size > 1024.
+        """
+        if self.world_size > 1024:
+            self.logger.warning(
+                "Skipping all2allv heatmap: world_size=%d would produce %d "
+                "rows (exceeds Excel row limit). Consider post-processing "
+                "the per-rank long table directly.",
+                self.world_size,
+                self.world_size**2,
+            )
+            return None
+
+        if self.world_size > 256:
+            self.logger.warning(
+                "all2allv heatmap will produce %d rows for world_size=%d. "
+                "This may be slow to write and unwieldy in Excel.",
+                self.world_size**2,
+                self.world_size,
+            )
+
+        if not hasattr(self, "df_per_rank_coll"):
+            self.build_df_long()
+
+        df = self.df_per_rank_coll
+        if df.empty:
+            return None
+
+        pair_data = {}  # (src, dst) -> {"total_bytes": int, "count": int}
+
+        all2allv_df = df[df["Collective name"] == "all_to_allv"]
+        if all2allv_df.empty:
+            return None
+
+        for _, row in all2allv_df.iterrows():
+            split_sizes = _parse_split_sizes(row["In split size"])
+            if split_sizes is None:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: unable to parse "
+                        "In split size=%r",
+                        row.get("rank", "unknown"),
+                        row["In split size"],
+                    )
+                continue
+
+            group_size = row.get("Group size")
+            if group_size is not None and len(split_sizes) != group_size:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: "
+                        "len(In split size)=%d != Group size=%d",
+                        row.get("rank", "unknown"),
+                        len(split_sizes),
+                        group_size,
+                    )
+                continue
+
+            dtype = row["dtype"]
+            bytes_per_elem = self.dtype2bytes.get(dtype)
+            if bytes_per_elem is None:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: unrecognised " "dtype %r",
+                        row.get("rank", "unknown"),
+                        dtype,
+                    )
+                continue
+
+            src_rank = row["rank"]
+            for dst_rank, nelems in enumerate(split_sizes):
+                key = (src_rank, dst_rank)
+                if key not in pair_data:
+                    pair_data[key] = {"total_bytes": 0, "count": 0}
+                pair_data[key]["total_bytes"] += int(nelems) * bytes_per_elem
+                pair_data[key]["count"] += 1
+
+        if not pair_data:
+            return None
+
+        rows = []
+        for (src, dst), vals in sorted(pair_data.items()):
+            total_mb = vals["total_bytes"] / (1024**2)
+            count = vals["count"]
+            rows.append(
+                {
+                    "src_rank": src,
+                    "dst_rank": dst,
+                    "total_sent_MB": total_mb,
+                    "avg_sent_MB": total_mb / count if count > 0 else 0.0,
+                    "count": count,
+                }
+            )
+
+        return pd.DataFrame(rows)

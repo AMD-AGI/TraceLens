@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 from math import prod
 import math
 import sys
@@ -14,70 +15,7 @@ import warnings
 
 from .kernel_name_parser import gemm_name_parser
 
-
-def name2bpe(name):
-    """
-    This function maps a data type name to the number of bytes per element.
-    Args:
-        name (str): The name of the data type.
-    Returns:
-        int: The number of bytes per element.
-    """
-    dict_bpe2dtype = {
-        8: ["double", "long int"],
-        4: ["float", "scalar"],
-        2: ["c10::half", "c10::bfloat16"],
-        1: [
-            "c10::float8_e4m3fnuz",
-            "c10::float8_e4m3fn",
-            "c10::float8_e5m2",
-            "unsigned char",
-            "signed char",
-            "fp8",
-        ],
-    }
-    dict_dtype2bpe = {
-        dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes
-    }
-    return dict_dtype2bpe.get(name.lower(), None)
-
-
-def simulation_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a simulation data type.
-    Args:
-        dtype (str): The name of the pytorch data type.
-    Returns:
-        str: The name of the PyTorch data type.
-    """
-    dict_dtype2simulation = {
-        "fp32": "float",
-        "fp64": "double",
-        "fp16": "c10::half",
-        "bf16": "c10::bfloat16",
-        "fp8": "c10::float8_e4m3fnuz",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
-
-
-def torch_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a simulation data type.
-    Args:
-        dtype (str): The name of the PyTorch data type.
-    Returns:
-        str: The name of the simulation data type.
-    """
-    dict_dtype2simulation = {
-        "float": "fp32",
-        "double": "fp64",
-        "c10::half": "fp16",
-        "c10::bfloat16": "bf16",
-        "c10::float8_e4m3fnuz": "fp8",
-        "unsigned char": "fp8",
-        "fp8": "fp8",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
+from .utils import name2bpe, simulation_dtype_map, torch_dtype_map
 
 
 # 1. GEMM
@@ -95,6 +33,7 @@ class GEMM:
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
+        kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
         elif "kernel_details" in event and len(event["kernel_details"]) > 0:
@@ -105,7 +44,7 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
-        if not hasattr(self.param_details, "B"):
+        if "B" not in self.param_details:
             self.param_details["B"] = 1
 
         if self.parsed_kernel_info is not None:
@@ -1169,15 +1108,496 @@ class aten_conv(CONV):
         return super().bytes_bwd(self.bpe)
 
 
-class aten_conv_bwd(aten_conv):
-    def __init__(self, event):
-        super().__init__(event)
+class aten_conv_bwd(CONV):
+    @staticmethod
+    def get_param_details(event):
+        # convolution_backward signature:
+        # 0: grad_output tensor
+        # 1: input tensor
+        # 2: weight tensor
+        # 3: bias_sizes (optional)
+        # 4: stride
+        # 5: padding
+        # 6: dilation
+        # 7: transposed (boolean)
+        # 8: output_padding
+        # 9: groups
+        # 10: output_mask (which gradients to compute)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # For backward, input shape is at index 1, weight at index 2
+        input_shape = tuple(input_dims[1])
+        ndims = len(input_shape) - 2
+        filter_shape = tuple(input_dims[2])
+
+        # Check if bias gradient is computed (from output_mask)
+        bias = len(input_dims) > 3 and input_dims[3] and len(input_dims[3]) > 0
+
+        stride_arg = concrete_inputs[4]
+        stride = (
+            aten_conv.str_to_tuple(stride_arg) if stride_arg != "" else (1,) * ndims
+        )
+        padding_arg = concrete_inputs[5]
+        padding = (
+            aten_conv.str_to_tuple(padding_arg) if padding_arg != "" else (0,) * ndims
+        )
+        dilation_arg = concrete_inputs[6]
+        dilation = (
+            aten_conv.str_to_tuple(dilation_arg) if dilation_arg != "" else (1,) * ndims
+        )
+        transposed_conv = eval(concrete_inputs[7])
+        output_padding_arg = concrete_inputs[8]
+        output_padding = (
+            aten_conv.str_to_tuple(output_padding_arg)
+            if output_padding_arg != ""
+            else (0,) * ndims
+        )
+        groups = int(concrete_inputs[9])
+
+        # broadcast if length 1 tuple
+        stride, padding, dilation, output_padding = [
+            param * ndims if len(param) == 1 else param
+            for param in [stride, padding, dilation, output_padding]
+        ]
+
+        dtype_input_weight = tuple(event["args"]["Input type"][1:3])
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][1])
+            weight_stride = tuple(event["args"]["Input Strides"][2])
+        except KeyError:
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
 
     def flops(self):
-        return self.flops_bwd()
+        return super().flops_bwd()
 
-    def bytes(self, bytes_per_element):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+
+class ConvBias_(CONV):
+    """
+    Fused Convolution + Bias operation
+    This is a vendor-specific fused operation (e.g., from MIOpen or cuDNN)
+    """
+
+    # Cache to store forward pass parameters for backward pass lookup
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None, python_path=None):
+        # Call parent init first
+        super().__init__(event, arch, python_path)
+
+        # Cache forward pass parameters for backward pass using sequence number
+        seq_num = event["args"].get("Sequence number")
+        if seq_num is not None:
+            ConvBias_.fwd_pass_cache[seq_num] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        # ConvBias_ signature (based on trace analysis):
+        # 0: input tensor
+        # 1: weight tensor
+        # 2: bias tensor
+        # 3: stride (scalar in concrete inputs)
+        # 4: padding (scalar in concrete inputs)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # Get input and weight shapes
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2  # first two dimensions are batch and channel
+        filter_shape = tuple(input_dims[1])
+
+        # Bias is present (it's a ConvBias operation)
+        bias = True
+
+        # Parse stride and padding from concrete inputs
+        # Concrete inputs appear to be ["", "", "", "stride_val", "padding_val"]
+        stride_arg = concrete_inputs[3] if len(concrete_inputs) > 3 else ""
+        stride = (int(stride_arg),) * ndims if stride_arg != "" else (1,) * ndims
+
+        padding_arg = concrete_inputs[4] if len(concrete_inputs) > 4 else ""
+        padding = (int(padding_arg),) * ndims if padding_arg != "" else (0,) * ndims
+
+        # Default dilation and output_padding
+        dilation = (1,) * ndims
+        output_padding = (0,) * ndims
+        transposed_conv = False
+        groups = 1  # Assume groups=1 unless specified
+
+        dtype_input_weight = tuple(event["args"]["Input type"][:2])
+        # Check no mixed precision
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][0])
+            weight_stride = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
+
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
+
+class ConvBias_Backward(CONV):
+    """
+    Backward pass for fused Convolution + Bias operation
+    Uses cached forward pass parameters via sequence number linkage.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Try to get forward pass parameters using sequence number
+        seq_num = event["args"].get("Sequence number")
+
+        if seq_num is not None and seq_num in ConvBias_.fwd_pass_cache:
+            # Found forward pass! Use its parameters
+            fwd_params = ConvBias_.fwd_pass_cache[seq_num]
+
+            # For backward pass, we need to swap input/output shapes
+            # Forward: input -> output
+            # Backward: grad_output -> grad_input (and compute grad_weight, grad_bias)
+            return {
+                "convNd": fwd_params["convNd"],
+                "input_shape": fwd_params["input_shape"],
+                "filter_shape": fwd_params["filter_shape"],
+                "dtype_input_weight": fwd_params["dtype_input_weight"],
+                "input_stride": fwd_params["input_stride"],
+                "weight_stride": fwd_params["weight_stride"],
+                "bias": fwd_params["bias"],
+                "stride": fwd_params["stride"],
+                "padding": fwd_params["padding"],
+                "dilation": fwd_params["dilation"],
+                "transposed_conv": fwd_params["transposed_conv"],
+                "output_padding": fwd_params["output_padding"],
+                "groups": fwd_params["groups"],
+            }
+        else:
+            # Fallback: forward pass not found in cache
+            # This can happen if events are processed out of order
+            input_dims = event["args"]["Input Dims"]
+
+            if len(input_dims) < 1:
+                warnings.warn(
+                    f"ConvBias_Backward: No forward pass found (seq_num={seq_num}) and "
+                    f"insufficient trace data. FLOPS will be None."
+                )
+            else:
+                warnings.warn(
+                    f"ConvBias_Backward: Forward pass not found in cache for sequence number {seq_num}. "
+                    f"FLOPS calculation requires forward pass parameters. Ensure ConvBias_ forward "
+                    f"operations are processed before their backward counterparts."
+                )
+
+            # Return minimal info that will cause FLOPS to be None
+            return {
+                "convNd": None,
+                "input_shape": None,
+                "filter_shape": None,
+                "dtype_input_weight": tuple(event["args"].get("Input type", [None])[:1])
+                + (None,),
+                "input_stride": None,
+                "weight_stride": None,
+                "bias": True,
+                "stride": None,
+                "padding": None,
+                "dilation": None,
+                "transposed_conv": False,
+                "output_padding": None,
+                "groups": 1,
+            }
+
+    def flops(self):
+        # Use backward FLOPS calculation from CONV base class
+        if self.param_details["input_shape"] is None:
+            return None
+        return super().flops_bwd()
+
+    def bytes(self):
+        # Use backward bytes calculation from CONV base class
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+
+class ConvBiasReLU_(CONV):
+    """
+    Fused Convolution + Bias + ReLU operation
+    This is a vendor-specific fused operation (e.g., from MIOpen or cuDNN)
+    """
+
+    # Cache to store forward pass parameters for backward pass lookup
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None, python_path=None):
+        # Call parent init first
+        super().__init__(event, arch, python_path)
+
+        # Cache forward pass parameters for backward pass using sequence number
+        seq_num = event["args"].get("Sequence number")
+        if seq_num is not None:
+            ConvBiasReLU_.fwd_pass_cache[seq_num] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        # ConvBiasReLU_ has the same signature as ConvBias_
+        # 0: input tensor
+        # 1: weight tensor
+        # 2: bias tensor
+        # 3: stride (scalar in concrete inputs)
+        # 4: padding (scalar in concrete inputs)
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        # Get input and weight shapes
+        input_shape = tuple(input_dims[0])
+        ndims = len(input_shape) - 2
+        filter_shape = tuple(input_dims[1])
+
+        # Bias is present
+        bias = True
+
+        # Parse stride and padding from concrete inputs
+        stride_arg = concrete_inputs[3] if len(concrete_inputs) > 3 else ""
+        stride = (int(stride_arg),) * ndims if stride_arg != "" else (1,) * ndims
+
+        padding_arg = concrete_inputs[4] if len(concrete_inputs) > 4 else ""
+        padding = (int(padding_arg),) * ndims if padding_arg != "" else (0,) * ndims
+
+        # Default dilation and output_padding
+        dilation = (1,) * ndims
+        output_padding = (0,) * ndims
+        transposed_conv = False
+        groups = 1
+
+        dtype_input_weight = tuple(event["args"]["Input type"][:2])
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+
+        try:
+            input_stride = tuple(event["args"]["Input Strides"][0])
+            weight_stride = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            input_stride = weight_stride = None
+
+        if len(input_shape) == 3:
+            convNd = "conv1d"
+        elif len(input_shape) == 4:
+            convNd = "conv2d"
+        elif len(input_shape) == 5:
+            convNd = "conv3d"
+        else:
+            raise ValueError(f"Unknown convolution dimension: {len(input_shape)}")
+
+        return {
+            "convNd": convNd,
+            "input_shape": input_shape,
+            "filter_shape": filter_shape,
+            "dtype_input_weight": dtype_input_weight,
+            "input_stride": input_stride,
+            "weight_stride": weight_stride,
+            "bias": bias,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "transposed_conv": transposed_conv,
+            "output_padding": output_padding,
+            "groups": groups,
+        }
+
+    def bytes(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes(self.bpe)
+
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        self.bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(self.bpe)
+
+
+class ConvBiasReLU_Backward(CONV):
+    """
+    Backward pass for fused Convolution + Bias + ReLU operation
+    Uses cached forward pass parameters via sequence number linkage.
+    ReLU backward: gradient is masked where forward output was negative.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Try to get forward pass parameters using sequence number
+        seq_num = event["args"].get("Sequence number")
+
+        if seq_num is not None and seq_num in ConvBiasReLU_.fwd_pass_cache:
+            # Found forward pass! Use its parameters
+            fwd_params = ConvBiasReLU_.fwd_pass_cache[seq_num]
+
+            return {
+                "convNd": fwd_params["convNd"],
+                "input_shape": fwd_params["input_shape"],
+                "filter_shape": fwd_params["filter_shape"],
+                "dtype_input_weight": fwd_params["dtype_input_weight"],
+                "input_stride": fwd_params["input_stride"],
+                "weight_stride": fwd_params["weight_stride"],
+                "bias": fwd_params["bias"],
+                "stride": fwd_params["stride"],
+                "padding": fwd_params["padding"],
+                "dilation": fwd_params["dilation"],
+                "transposed_conv": fwd_params["transposed_conv"],
+                "output_padding": fwd_params["output_padding"],
+                "groups": fwd_params["groups"],
+            }
+        else:
+            # Fallback: forward pass not found in cache
+            input_dims = event["args"]["Input Dims"]
+
+            if len(input_dims) < 1:
+                warnings.warn(
+                    f"ConvBiasReLU_Backward: No forward pass found (seq_num={seq_num}) and "
+                    f"insufficient trace data. FLOPS will be None."
+                )
+            else:
+                warnings.warn(
+                    f"ConvBiasReLU_Backward: Forward pass not found in cache for sequence number {seq_num}. "
+                    f"FLOPS calculation requires forward pass parameters. Ensure ConvBiasReLU_ forward "
+                    f"operations are processed before their backward counterparts."
+                )
+
+            return {
+                "convNd": None,
+                "input_shape": None,
+                "filter_shape": None,
+                "dtype_input_weight": tuple(event["args"].get("Input type", [None])[:1])
+                + (None,),
+                "input_stride": None,
+                "weight_stride": None,
+                "bias": True,
+                "stride": None,
+                "padding": None,
+                "dilation": None,
+                "transposed_conv": False,
+                "output_padding": None,
+                "groups": 1,
+            }
+
+    def flops(self):
+        # Use backward FLOPS calculation from CONV base class
+        # ReLU backward is essentially element-wise masking (negligible FLOPS compared to conv)
+        if self.param_details["input_shape"] is None:
+            return None
+        return super().flops_bwd()
+
+    def bytes(self):
+        # Use backward bytes calculation from CONV base class
+        # ReLU backward requires reading the forward output mask
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
 
 
 # 3. Softmax
@@ -1649,7 +2069,7 @@ class SDPA:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
             bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = True if type(self).__name__ == "flash_attention" else False
+            fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
             simulated_time = SDPA.get_simulation_time_bwd_func(
                 self.arch,
                 dtype,
@@ -1760,15 +2180,65 @@ class flash_attention(SDPA):
         }
 
 
-class flash_attention_backward(flash_attention):
+class flash_attention_backward(SDPA):
+    """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
-    def __init__(self, event):
-        super().__init__(event)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.d_h = (
+            self.d_h_qk
+        )  # head dimension for simulation (used by get_simulation_time_bwd_func)
+
+    @staticmethod
+    def get_param_details(event):
+        # Argument order: dout (0), q (1), k (2), v (3), out, softmax_lse, ...
+        input_dims = event["args"]["Input Dims"]
+        q_idx, k_idx, v_idx = 1, 2, 3
+        q_shape, k_shape, v_shape = (
+            input_dims[q_idx],
+            input_dims[k_idx],
+            input_dims[v_idx],
+        )
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+
+        concrete = event["args"].get("Concrete Inputs", [])
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+        strides = event["args"]["Input Strides"]
+        q_stride, k_stride, v_stride = (
+            tuple(strides[q_idx]),
+            tuple(strides[k_idx]),
+            tuple(strides[v_idx]),
+        )
+        dropout = float(concrete[8]) if len(concrete) > 8 and concrete[8] else 0.0
+        causal = eval(concrete[10]) if len(concrete) > 10 and concrete[10] else True
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "q_stride": q_stride,
+            "k_stride": k_stride,
+            "v_stride": v_stride,
+            "dropout": dropout,
+            "causal": causal,
+            "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
+        }
 
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element):
+    def bytes(self, bytes_per_element=None):
+        if bytes_per_element is None:
+            bytes_per_element = name2bpe(self.param_details["dtype_A_B"][0])
         return self.bytes_bwd(bytes_per_element)
 
 
@@ -2363,6 +2833,240 @@ class aiter__fmha_v3_backward(SDPA):
         return self.bytes_bwd(bytes_per_element)
 
 
+def _parse_aiter_mha_fwd_args(event):
+    """Shared parser for aiter::mha_fwd and aiter::fmha_v3_fwd.
+
+    Both ops share the same argument layout:
+      q[0], k[1], v[2] — raw shape (B, N, H, d_h) in bnhd order;
+      bhnd_idx=(0,2,1,3) extracts B, H, N, d_h from the bnhd tuple.
+      dropout_p[3], softmax_scale[4], is_causal[5].
+    """
+    input_dims = event["args"]["Input Dims"]
+    concrete_inputs = event["args"]["Concrete Inputs"]
+    q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+    bhnd_idx = 0, 2, 1, 3
+    sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+    B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+        sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+    )
+    dropout_p = 0.0
+    if concrete_inputs[3] not in ("", "None"):
+        try:
+            dropout_p = float(concrete_inputs[3])
+        except (ValueError, TypeError):
+            pass
+    is_causal = (
+        concrete_inputs[5].lower() == "true"
+        if concrete_inputs[5] not in ("", "None")
+        else False
+    )
+    return {
+        "B": B,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_KV,
+        "H_KV": H_KV,
+        "d_h_qk": d_h_qk,
+        "d_h_v": d_h_v,
+        "dropout": dropout_p,
+        "causal": is_causal,
+        "flash_impl": True,
+    }
+
+
+class aiter__mha_fwd(SDPA):
+    # aiter::mha_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Raw tensor shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_mha_fwd_args(event)
+
+
+class aiter__fmha_v3_fwd(SDPA):
+    # aiter::fmha_v3_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Same argument layout as aiter::mha_fwd — raw shape (B, N, H, d_h) in bnhd order.
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_mha_fwd_args(event)
+
+
+class aiter__mha_bwd(SDPA):
+    # aiter::mha_bwd(dout, q, k, v, out, softmax_lse, dropout_p, softmax_scale, is_causal, ...)
+    # q[1], k[2], v[3] — raw shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if concrete_inputs[6] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[6])
+            except (ValueError, TypeError):
+                pass
+        is_causal = (
+            concrete_inputs[8].lower() == "true"
+            if concrete_inputs[8] not in ("", "None")
+            else False
+        )
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
+class vllm_unified_attention_with_output(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        annotation = str(event.get("annotation"))
+        if annotation == "NA":
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
+        requests = annotation.replace("(", "_").replace(")", "_").split("_")
+        if len(requests) < 8:
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
+        input_dims = event["args"]["Input Dims"]
+
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        B = 1
+        N_Q, H_Q, d_h_qk = q_shape
+        N_KV, H_KV, d_h_v = k_shape
+        dropout_p = 0.0
+        is_causal = False
+
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+            "sum_ctx_tokens": int(requests[3]),
+            "sum_ctx_squared_tokens": int(requests[4]),
+            "sum_gen_tokens": int(requests[8]),
+        }
+
+    def flops(self):
+        # prefill part
+        if self.param_details["sum_ctx_tokens"] == 0:
+            raise NotImplementedError(
+                "Roofline for pure generation phase is not defined"
+            )
+        ctx_flops_qk = self.H_Q * (
+            2 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk
+        )
+        ctx_flops_pv = self.H_Q * (
+            2 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_v
+        )
+        # Generation tokens
+        ## ToDo: Add seqlen for KV
+        gen_flops_qk = self.H_Q * (
+            2 * self.param_details["sum_gen_tokens"] * self.d_h_qk
+        )
+        gen_flops_pv = self.H_Q * (
+            2 * self.param_details["sum_gen_tokens"] * self.d_h_v
+        )
+
+        return ctx_flops_qk + ctx_flops_pv + gen_flops_qk + gen_flops_pv
+
+    def bytes_func_vllm(
+        self, B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
+    ):
+        ## Prefill
+        elems_q_read = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_qk
+        elems_k_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_qk
+        elems_v_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_v
+        elems_out_write = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_v
+        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        # Decode - this will not be used as needs additional information from vLLM engine
+
+        # elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
+        # elems_k_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_qk
+        # elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
+        # elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
+        # total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        return total_elems_moved * bytes_per_element
+
+    # TODO make bytes_per_element based on profile info
+    def bytes(self, bytes_per_element=2):
+
+        return self.bytes_func_vllm(
+            self.B,
+            self.N_Q,
+            self.H_Q,
+            self.N_KV,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+            bytes_per_element,
+        )
+
+
+class evoformer_attention(SDPA):
+    # EvoformerAttention(Q, K, V, res_mask, pair_bias)
+    # Q, K, V: [Batch, N_seq, N_res, Head, Dim] — N_seq is an MSA/template depth
+    # dimension that is folded into the effective batch.  Attention is computed
+    # over N_res for every (Batch, N_seq) slice; always non-causal.
+    # res_mask  [Batch, N_seq, 1, 1, N_res] and
+    # pair_bias [Batch, 1,     Head, N_res, N_res] are extra reads not counted
+    # in the standard SDPA bytes formula.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"].get("Input type", [])
+        # Q is input 0: [Batch, N_seq, N_res, Head, Dim]
+        q_shape = input_dims[0]
+        B, N_seq, N_res, Head, Dim = q_shape
+        dtype = input_types[0] if input_types else None
+        return {
+            "B": B * N_seq,
+            "N_Q": N_res,
+            "H_Q": Head,
+            "N_KV": N_res,
+            "H_KV": Head,
+            "d_h_qk": Dim,
+            "d_h_v": Dim,
+            "causal": False,
+            "flash_impl": False,
+            "dtype_A_B": [dtype],
+        }
+
+
 class UnaryElementwise:
 
     def __init__(self, event, arch=None, python_path=None):
@@ -2539,6 +3243,32 @@ class aten_binary_elementwise(BinaryElementwise):
         }
 
 
+class liger_silu_mul_function(BinaryElementwise):
+    # LigerSiLUMulFunction(a, b)  — from linkedin/Liger-Kernel (swiglu.py)
+    # Fused Triton kernel: output = SiLU(a) * b
+    # a, b: same shape; output has the same shape and dtype.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+        input_strides = event["args"]["Input Strides"]
+        a_shape = tuple(input_dims[0])
+        b_shape = tuple(input_dims[1])
+        dtype_a = input_types[0]
+        dtype_b = input_types[1]
+        stride_a = tuple(input_strides[0])
+        stride_b = tuple(input_strides[1])
+        return {
+            "shape_in1": a_shape,
+            "shape_in2": b_shape,
+            "dtype_in1_in2_out": (dtype_a, dtype_b, None),
+            "stride_input1": stride_a,
+            "stride_input2": stride_b,
+            "stride_output": None,
+        }
+
+
 class GroupedGemm:
     """
     Grouped General Matrix Multiplication (GEMM).
@@ -2636,6 +3366,247 @@ class GroupedGemm:
     def bytes_bwd(self):
         return self.bytes_bwd_func(
             self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
+        )
+
+
+def _collect_2d_shapes(obj):
+    """Recursively extract all (rows, cols) int pairs from nested lists/tuples."""
+    shapes = []
+    if isinstance(obj, (list, tuple)):
+        if len(obj) == 2 and all(isinstance(v, int) and v > 0 for v in obj):
+            shapes.append((obj[0], obj[1]))
+        else:
+            for item in obj:
+                shapes.extend(_collect_2d_shapes(item))
+    return shapes
+
+
+class primus_turbo_grouped_gemm(GroupedGemm):
+    """
+    Primus Turbo fixed-K grouped GEMM: X(M,K) @ W(G,K,N) -> Y(M,N).
+
+    All groups share the same K and N, matching GroupedGemm's canonical layout.
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [G,K,N]] or [[M,K], [G,N,K]]
+      - Zipped:         [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]]
+
+    Inherits flops(), bytes(), flops_bwd(), bytes_bwd() from GroupedGemm.
+
+    Mapped op names:
+      primus_turbo::grouped_gemm
+      primus_turbo::grouped_gemm_impl
+      primus_turbo_cpp_extension::grouped_gemm
+    """
+
+    @staticmethod
+    def _extract_impl_dims(input_dims):
+        """
+        Parse compact _impl trace format: [[M,K], [G,K,N]] or [[M,K], [G,N,K]].
+        Returns (M, K, N, G), or None if the format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) >= 2
+            and len(b_shape) == 3
+            and all(isinstance(v, int) and v > 0 for v in a_shape[:2])
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        G = int(b_shape[0])
+        # Some traces store grouped W as [G,K,N]; others use [G,N,K].
+        if b_shape[1] == K:
+            N = int(b_shape[2])
+        elif b_shape[2] == K:
+            N = int(b_shape[1])
+        else:
+            return None
+        return M, K, N, G
+
+    @staticmethod
+    def _extract_zipped_dims(input_dims):
+        """
+        Parse zipped trace format: [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]].
+        Requires uniform K and N across all groups.
+        Returns (M_total, K, N, G), or None if the format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        K = lhs[0][1]
+        N = rhs[0][1]
+        if not all(a[1] == K and b[0] == K and b[1] == N for a, b in zip(lhs, rhs)):
+            return None
+        M_total = sum(a[0] for a in lhs)
+        G = len(lhs)
+        return M_total, K, N, G
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        dims = primus_turbo_grouped_gemm._extract_impl_dims(input_dims)
+        if dims is None:
+            dims = primus_turbo_grouped_gemm._extract_zipped_dims(input_dims)
+        if dims is None:
+            raise ValueError(
+                f"primus_turbo::grouped_gemm could not parse Input Dims: {input_dims}"
+            )
+        M, K, N, G = dims
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        return {"M": M, "K": K, "N": N, "G": G, "bpe_in": bpe_in, "bpe_out": bpe_out}
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+
+class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
+    """
+    Primus Turbo variable-K grouped GEMM: each group i computes X_i(M_i,K_i) @ W_i(K_i,N_i).
+
+    Because K (and potentially N) differs per group, GroupedGemm's single-tensor bytes
+    formula (M*K + G*K*N) does not apply. flops() and bytes() are overridden to sum
+    per-group contributions using GroupedGemm.flops_func / GroupedGemm.bytes_func(G=1).
+
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [M,N]]  (aggregate view; treated as one group)
+      - Zipped:         [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]]
+
+    Mapped op names:
+      primus_turbo::grouped_gemm_variable_k
+      primus_turbo::grouped_gemm_variable_k_impl
+      primus_turbo_cpp_extension::grouped_gemm_variable_k
+    """
+
+    @staticmethod
+    def _extract_impl_pairs(input_dims):
+        """
+        Parse compact variable-K _impl trace format: [[M,K], [M,N]].
+        The trace gives aggregate totals; treated as a single effective group.
+        Returns a list with one ((M,K),(K,N)) pair, or None if format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) == 2
+            and len(b_shape) == 2
+            and all(isinstance(v, int) and v > 0 for v in a_shape)
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        N = int(b_shape[1])
+        return [((M, K), (K, N))]
+
+    @staticmethod
+    def _extract_zipped_pairs(input_dims):
+        """
+        Parse zipped trace format with variable K: [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]].
+        Returns list of ((M_i,K_i),(K_i,N_i)) pairs, or None if format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        if not all(a[1] == b[0] for a, b in zip(lhs, rhs)):
+            return None
+        return list(zip(lhs, rhs))
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        group_pairs = primus_turbo_grouped_gemm_variable_k._extract_impl_pairs(
+            input_dims
+        )
+        if group_pairs is None:
+            group_pairs = primus_turbo_grouped_gemm_variable_k._extract_zipped_pairs(
+                input_dims
+            )
+        if not group_pairs:
+            raise ValueError(
+                "primus_turbo::grouped_gemm_variable_k could not parse"
+                f" Input Dims: {input_dims}"
+            )
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        first_a, first_b = group_pairs[0]
+        return {
+            # M/K/N/G are approximate aggregates; overridden flops/bytes use group_pairs.
+            "M": sum(a[0] for a, _ in group_pairs),
+            "K": first_a[1],
+            "N": first_b[1],
+            "G": len(group_pairs),
+            "bpe_in": bpe_in,
+            "bpe_out": bpe_out,
+            "group_pairs": group_pairs,
+        }
+
+    def flops(self):
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            total += GroupedGemm.flops_func(M=a_shape[0], K=a_shape[1], N=b_shape[1])
+        return total
+
+    def bytes(self):
+        bpe_in, bpe_out = self.bpe_in, self.bpe_out
+        if bpe_in is None or bpe_out is None:
+            return None
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            # Each group has its own weight matrix (G_i=1), so reads X_i + W_i, writes Y_i.
+            total += GroupedGemm.bytes_func(
+                M=a_shape[0],
+                K=a_shape[1],
+                N=b_shape[1],
+                G=1,
+                bpe_in=bpe_in,
+                bpe_out=bpe_out,
+            )
+        return total
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
         )
 
 
@@ -2908,3 +3879,712 @@ class jax_conv:
             self.bias,
             bytes_per_element=self.bytes_per_element,
         )
+
+
+# parser helper
+def parse_list(input: str, dtype):
+    return [dtype(x) for x in ast.literal_eval(input)]
+
+
+class Normalization:
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_elems = prod(self.param_details["op_shape"])
+        self.dtype_in_out = self.param_details["dtype_in_out"]
+        self.stride_input = self.param_details["stride_input"]
+        self.stride_output = self.param_details["stride_output"]
+        self.num_channels = self.param_details["num_channels"]
+        # only layernorm can disable this but leaving it out totally breaks the NORM tab
+        self.has_bias = self.param_details["has_bias"]
+        self.is_training = self.param_details["is_training"]
+        self.is_affine = self.param_details["is_affine"]
+        self.output_mask = self.param_details.get("output_mask", "[False]")
+
+        self.bpe_in = name2bpe(self.dtype_in_out[0])
+        if self.dtype_in_out[1] is not None:
+            self.bpe_out = name2bpe(self.dtype_in_out[1])
+        else:
+            # same as input
+            self.bpe_out = self.bpe_in
+
+    # Many of the norm implementations need the same flops and bytes calculations
+    # and really only use different dimensions for channels
+    #            training=True                       training=False
+    #          (use batch stats)                  (use running stats)
+    #
+    #            affine=False                          affine=False
+    #             (no γ, β)                             (no γ, β)
+    # ────────────────────────────────────────────────────────────────────────────
+    #  FORWARD:                              FORWARD:
+    #  ✓ Compute mean/var                    ✗ No mean/var compute
+    #  ✓ Update running stats                  (use frozen running)
+    #  ✗ No γ/β transform                    ✗ No γ/β transform
+    #
+    #  BACKWARD:                             BACKWARD:
+    #  ✓ grad_input                          N/A
+    #  ✗ No grad_weight/grad_bias
+    # ────────────────────────────────────────────────────────────────────────────
+    #               affine=True                           affine=True
+    #               (has γ, β)                            (has γ, β)
+    #
+    #  FORWARD:                              FORWARD:
+    #  ✓ Compute mean/var                    ✗ No mean/var compute
+    #  ✓ Update running stats                  (use frozen running)
+    #  ✓ Apply γ/β transform                 ✓ Apply γ/β transform
+    #
+    #  BACKWARD:                             BACKWARD:
+    #  ✓ grad_input                          N/A
+    #  ✓ grad_weight (for γ)
+    #  ✓ grad_bias (for β)
+    # ────────────────────────────────────────────────────────────────────────────
+    # example implementations:
+    # FWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L75
+    # BWD:   https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L405
+    # STATS: https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L177
+    @staticmethod
+    def flops_func(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+    ):
+        # at inference time we generate alpha and beta from the averages and gamma and bias if applicable
+        # then multiply alpha and add beta to each element.
+
+        # processing with bias/weight is done even if is_affine is false and has_bias is false using 0/1
+        # https://github.com/pytorch/pytorch/blob/520b3b55002e0cee5f0097593d4c156febb037dd/aten/src/ATen/native/cpu/batch_norm_kernel.cpp#L32
+        param_compute = (
+            num_channels * 3
+        )  # (1/std * mean, multiply by alpha, subtract from bias)
+        if is_training:
+            # compute mean / std
+            # sum to get mean, subtract mean from each elem and add them,
+            # could potentially be log_n for sum-reduce but is not
+            param_compute += num_elems * 3
+
+        # compute 1/std = inverse(sqrt(running_var + eps))
+        # for non-training this is called in native_batch_norm etc and for training this is computed once and saved for several uses
+        param_compute += num_channels * 3
+
+        actual_compute = 2 * num_elems
+        return param_compute + actual_compute
+
+    def flops(self):
+        return self.flops_func(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+        )
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for elementwise)."""
+        return "vector"
+
+    @staticmethod
+    def bytes_func(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+        bpe_in: int,
+        bpe_out: int,
+    ):
+        # assume that activations only read and written once for the forward pass and cached for stats
+        # assume weights, bias, mean, variance also only read once
+        num_weight_tensors = 2  # mean and variance are always needed
+        if is_affine:
+            num_weight_tensors += 1
+            if has_bias:
+                num_weight_tensors += 1
+
+        if is_training:
+            # updating the running stats
+            # assuming all activations cached
+            # but mean and variance needs to be written
+            num_weight_tensors += 2
+
+        activation_bytes = num_elems * bpe_in + num_elems * bpe_out
+        weight_bytes = num_weight_tensors * num_channels * bpe_in
+        return activation_bytes + weight_bytes
+
+    def bytes(self):
+        return self.bytes_func(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+        )
+
+    # BWD call
+    # for each channel
+    # read invstd if train else compute it
+    # sum = reduce-sum on all inputs and grad output
+    # dotp = subtract mean from x, multiply by dy
+    # if train:
+    # k = dotp * invstd^2 / N # scalar
+    # mean = sum / N # scalar
+    # dx =  ((x - mean) * k)
+    # grad_in = (grad_out - grad_mean - variance) * invstd * w
+    # if affine save w and sum
+    @staticmethod
+    def flops_func_bwd(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+        output_mask,
+    ):
+        elems_per_channel = num_elems / num_channels
+        flops_per_channel = 3 if not is_training else 0  # invstd
+        flops_per_channel += 4 * elems_per_channel  # calc dotp
+        if output_mask[0]:
+            if is_training:
+                flops_per_channel += 5 * elems_per_channel
+        else:
+            #  dx_ptr[j] = dy_ptr[j] * invstd * w;
+            flops_per_channel += 2 * elems_per_channel
+        return num_channels * flops_per_channel
+
+    def flops_bwd(self):
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
+
+    @staticmethod
+    def bytes_func_bwd(
+        has_bias: bool,
+        is_affine: bool,
+        is_training: bool,
+        num_elems: int,
+        num_channels: int,
+        bpe_in: int,
+        bpe_out: int,
+        output_mask,
+    ):
+        # assumes everything read once and cached
+        # assumes grad_out is bpe_out, everything else is bpe_in
+        # read grad_out and the input once, invstd if it is saved
+
+        # read grad_out and input (if mask is true and is_training), write grad_in
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (
+            2 if output_mask[0] and is_training else 1
+        )
+        if is_training:
+            bytes += num_channels * bpe_in  # invstd
+        # read weight if affine
+        if is_affine:
+            # bias is never read
+            bytes += num_channels * bpe_in
+            # write grad_weight and grad_bias if affine and training
+            if is_training:
+                bytes += num_channels * bpe_in * (2 if has_bias else 1)
+        return bytes
+
+    def bytes_bwd(self):
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
+
+# There are separate calls for fwd and bwd calls, so we need separate classes
+class BatchNorm(Normalization):
+    """
+    Batch Normalization
+    Forward pass is almost identical to a unary op
+    but flops is a multiply-add and bytes also loads scale and bias
+    https://arxiv.org/abs/1502.03167
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = bool(event["args"]["Concrete Inputs"][5])
+        dtype_out = None
+        stride_output = None
+        # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
+        # https://github.com/pytorch/pytorch/blob/ff649d49c213c46b3883d8778717157406126743/aten/src/ATen/native/miopen/BatchNorm_miopen.cpp#L92C8-L92C21
+        num_channels = args_input_dims[0][1]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+
+class BatchNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        # miopen_batch_norm_backward and cudnn_batch_norm_backward have different paramters
+        # https://github.com/pytorch/pytorch/blob/313f45cc476a53a4440fdec3faa63992942992f2/aten/src/ATen/functorch/BatchRulesNorm.cpp#L834
+        args_input_dims = event["args"]["Input Dims"]
+        # than native_batch_norm_backward!
+        input_index = 1
+        is_affine_index = 2
+        has_output = args_input_dims[0] is not None
+        if (
+            event["name"] == "aten::cudnn_batch_norm_backward"
+            or event["name"] == "aten::miopen_batch_norm_backward"
+        ):
+            input_index = 0
+            has_output = True
+            is_training = False  # by assertion
+        else:
+            is_training = bool(event["args"]["Concrete Inputs"][7])
+        op_shape = tuple(args_input_dims[input_index])
+        # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
+        num_channels = op_shape[1]
+        dtype_in = event["args"]["Input type"][input_index]
+        stride_input = tuple(event["args"]["Input Strides"][input_index])
+        output_mask = [has_output]
+        is_affine = args_input_dims[is_affine_index] is not None
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+            "output_mask": output_mask,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
+
+    def bytes(self):
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
+
+class LayerNorm(Normalization):
+    """
+    Layer Normalization
+    Forward pass is almost identical to a unary op
+    but flops is a multiply-add and bytes also loads scale and bias
+    https://arxiv.org/abs/1607.06450
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
+        # could use ast or json.reads but this is simpler
+        num_channels = prod(parse_list(concrete_inputs[1], int))
+        has_bias = args_input_dims[3] is not None
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = True
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": has_bias,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+
+class LayerNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[1])
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        # concrete_inputs[1] is a string containg [a, b, c, d]... where a,b,c,d are ints
+        # could use ast or json.reads but this is simpler
+        num_channels = prod(parse_list(concrete_inputs[2], int))
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        output_mask = parse_list(event["args"]["Concrete Inputs"][7], bool)
+        is_affine = output_mask[1]
+        has_bias = output_mask[2]
+        is_training = True
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": has_bias,
+            "is_affine": is_affine,
+            "is_training": is_training,
+            "output_mask": output_mask,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
+
+    def bytes(self):
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
+
+class GroupNorm(Normalization):
+    # Group Normalization
+    # https://arxiv.org/pdf/1803.08494
+    # Group normalization divides the channels into groups and computes
+    # within each group the mean and variance for normalization.
+    # Very similar to LayerNorm and InstanceNorm except there is pooling between elements in a group
+    # Group norm with 1 group is the same as Layer Norm
+    # Group norm with groups = num_channels is the same as Instance Norm
+
+    # flops calculation for group norm is the same as for the others
+    # bytes calculation is the same just reducing the effictive number of channels by num_groups
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        # concrete_inputs[1] = num_groups
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        is_training = True
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[1],
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+
+class GroupNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        # concrete_inputs[1] = num_groups
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[1])
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        is_affine = args_input_dims[5] is not None
+        is_training = True
+        dtype_out = None
+        stride_output = None
+        output_mask = parse_list(event["args"]["Concrete Inputs"][9], bool)
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[1] / int(concrete_inputs[8]),
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+            "output_mask": output_mask,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.output_mask,
+        )
+
+    def bytes(self):
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            self.output_mask,
+        )
+
+
+class InstanceNorm(Normalization):
+    # Instance Normalization
+    # https://arxiv.org/pdf/1607.08022
+    # Instance norm actually calls batch norm after a reshape in many cases
+    # https://github.com/pytorch/pytorch/blob/1457786f7445fb0e72794aa98c0ebaa3bc24ced5/aten/src/ATen/native/Normalization.cpp#L758
+    # but directly using the batch norm implementation will show the wrong input shape
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        # The "use_input_stats" argument means that we need to calculate stats from the batch,
+        # effectively the same as how we use training in other cases
+        # layernorm actually calls batchnorm and sets is_training to use_input_stats
+        is_training = bool(concrete_inputs[5])
+        dtype_out = None
+        stride_output = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": op_shape[1],  # exactly 1 batch dim in source
+            "has_bias": True,
+            "is_affine": is_affine,
+            "is_training": is_training,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+
+class InstanceNormBwd(Normalization):
+    # instance_norm_backward does not appear in the traces and does not even exist in
+    # https://github.com/pytorch/pytorch/blob/1457786f7445fb0e72794aa98c0ebaa3bc24ced5/aten/src/ATen/native/Normalization.cpp
+    @staticmethod
+    def get_param_details(event):
+        raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
+
+    def flops(self):
+        raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
+
+    def bytes(self):
+        raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
+
+
+class RMSNorm(Normalization):
+    # RMS Normalization
+    # https://arxiv.org/abs/1910.07467
+    # implementation is very different from the others
+    # https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        is_affine = args_input_dims[2] is not None
+        dtype_out = None
+        stride_output = None
+        num_channels = prod(parse_list(concrete_inputs[1], int))
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": is_affine,
+            "is_training": False,
+        }
+
+    # RMS norm is different enough from everything else that we are not using the base implementation
+    # flops is prod(dims that are not part of normalized_shape) * (2 * num_channels + 2) to compute rsqt
+    # multiply rsqt by each elem, then if weight is not null multiply weight by each elem
+    # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    def flops(self):
+        non_normalized_elems = self.num_elems / self.num_channels
+        flops = non_normalized_elems * (2 * self.num_channels + 2)  # compute rsqt
+        flops += self.num_elems * (
+            2 if self.is_affine else 1
+        )  # apply weight if affine, apply rms in any case
+        return flops
+
+    def bytes(self):
+        # assume caching works, read input, write output, read weight if affine
+        return (
+            self.num_elems * self.bpe_in
+            + self.num_elems * self.bpe_out
+            + (self.num_channels * self.bpe_in if self.is_affine else 0)
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            f"Backward pass for {self.__class__.__name__} is not defined."
+        )
+
+
+class RMSNormBwd(Normalization):
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        op_shape = tuple(args_input_dims[1])
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        is_affine = args_input_dims[4] is not None
+        dtype_out = None
+        stride_output = None
+        num_channels = prod(parse_list(concrete_inputs[2], int))
+        output_mask = parse_list(event["args"]["Concrete Inputs"][5], bool)
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": is_affine,
+            "is_training": False,
+            "output_mask": output_mask,
+        }
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self):
+        return self.bytes_bwd()
+
+    def flops_bwd(self):
+        non_normalized_elems = self.num_elems / self.num_channels
+        # if weights not null, multiply by grad_out
+        flops = 0 if not self.is_affine else self.num_elems
+        # compute x_hat = input * rstd
+        flops += self.num_elems
+
+        if self.output_mask[0]:
+            # compute grad in
+            # compute dot product along normalized shape, then use it to compute grad_in
+            flops += 2 * self.num_elems  # compute dot product
+            flops += 4 * self.num_elems  # compute grad_in using dot product
+        if self.output_mask[1] and self.is_affine:
+            # compute weights grad
+            flops += (
+                self.num_elems
+            )  # compute grad_weight by multiplying grad_out and x_hat
+            if non_normalized_elems > 1:
+                flops += (
+                    self.num_elems
+                )  # accumulates num_channels elements from all inputs
+        return flops
+
+    def bytes_bwd(self):
+        # read grad_out, input, weight if not null, write grad_in, grad_weight if not null
+        bytes = (
+            self.num_elems * self.bpe_out + self.num_elems * self.bpe_in * 2
+        )  # grad_out and input
+        if self.is_affine:
+            bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
+        return bytes

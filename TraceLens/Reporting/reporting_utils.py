@@ -4,10 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
+import logging
+import re
+from typing import Dict, List, Optional, Union
+
 import pandas as pd
 from pathlib import Path
 import sys
 import subprocess
+
+logger = logging.getLogger(__name__)
 
 
 def export_data_df(
@@ -91,3 +98,131 @@ def request_install(package_name):
     else:
         print(f"Skipping installation of '{package_name}' and exiting.")
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Node-span utilities for multi-node collective analysis
+# ---------------------------------------------------------------------------
+
+
+def _parse_pg_ranks(value: Union[str, List[int], tuple]) -> List[int]:
+    """Extract a list of integer rank ids from a Process Group Ranks value.
+
+    Handles lists, tuples, and the string representations commonly found in
+    PyTorch trace JSON (e.g. ``"[0, 1, 2, 3]"``).
+    """
+    if isinstance(value, (list, tuple)):
+        return [int(x) for x in value]
+    if isinstance(value, str):
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, (list, tuple)):
+                return [int(x) for x in parsed]
+        except Exception:
+            pass
+        return [int(s) for s in re.findall(r"\d+", value)]
+    return []
+
+
+def _rank_to_node_map(world_size: int, gpus_per_node: int) -> Dict[int, int]:
+    """Build a rank -> node_id mapping: ``node_id = rank // gpus_per_node``."""
+    return {r: r // gpus_per_node for r in range(world_size)}
+
+
+def _node_span_for_pg(
+    pg_ranks_value, rank_to_node: Dict[int, int], gpus_per_node: int
+) -> str:
+    """Return ``'intra_node'``, ``'inter_node'``, or ``'unknown'``."""
+    ranks = _parse_pg_ranks(pg_ranks_value)
+    if not ranks:
+        return "unknown"
+    nodes = {rank_to_node.get(r, r // gpus_per_node) for r in ranks}
+    return "intra_node" if len(nodes) == 1 else "inter_node"
+
+
+def add_node_span_columns(
+    df: pd.DataFrame,
+    gpus_per_node: int,
+    world_size: Optional[int] = None,
+) -> pd.DataFrame:
+    """Add ``node_id`` and ``node_span`` columns to a DataFrame.
+
+    * ``node_id``: derived from a ``rank`` column (``rank // gpus_per_node``).
+    * ``node_span``: ``'intra_node'`` or ``'inter_node'``, derived from
+      ``Process Group Ranks`` membership.
+
+    The DataFrame is returned unchanged (no copy) if the required source
+    columns are missing.
+
+    Args:
+        df: DataFrame produced by NcclAnalyser (must have ``rank`` and/or
+            ``Process Group Ranks`` columns).
+        gpus_per_node: Number of GPUs (ranks) per physical node.
+        world_size: Total number of ranks.  Used to build the rank-to-node
+            map; inferred from the ``rank`` column if not provided.
+    """
+    if df is None or df.empty:
+        return df
+
+    if gpus_per_node <= 0:
+        raise ValueError(
+            f"gpus_per_node must be a positive integer, got {gpus_per_node}"
+        )
+
+    has_rank = "rank" in df.columns
+    has_pg_ranks = "Process Group Ranks" in df.columns
+    if not has_rank and not has_pg_ranks:
+        return df
+
+    if world_size is None:
+        if has_rank:
+            world_size = int(df["rank"].max()) + 1
+        elif has_pg_ranks:
+            all_ranks: set = set()
+            for v in df["Process Group Ranks"].dropna().unique():
+                all_ranks.update(_parse_pg_ranks(v))
+            world_size = max(all_ranks) + 1 if all_ranks else None
+
+    if world_size is None:
+        logger.warning(
+            "Cannot infer world_size for node_span labeling; " "skipping node columns."
+        )
+        return df
+
+    r2n = _rank_to_node_map(world_size, gpus_per_node)
+    df = df.copy()
+
+    if has_rank:
+        df["node_id"] = df["rank"].map(r2n)
+
+    if has_pg_ranks:
+        pg_series = df["Process Group Ranks"]
+        unique_pgs = pg_series.unique()
+        pg_to_span = {v: _node_span_for_pg(v, r2n, gpus_per_node) for v in unique_pgs}
+        df["node_span"] = pg_series.map(pg_to_span)
+
+    return df
+
+
+def detect_gpus_per_node(trace_filepath: str) -> Optional[int]:
+    """Try to read ``gpus_per_node`` from a trace file's ``deviceProperties``.
+
+    PyTorch profiler traces include a top-level ``deviceProperties`` list whose
+    length equals the number of locally visible GPUs on the node that produced
+    the trace.  Returns ``None`` if detection fails (e.g. non-PyTorch traces,
+    CPU-only traces, or missing metadata).
+
+    Note: this loads the full trace file to parse JSON metadata.  The same file
+    will be loaded again by NcclAnalyser, so this adds one redundant read of
+    a single trace (~5 s for a typical 30 MB gzipped trace).
+    """
+    try:
+        from TraceLens.util import DataLoader
+
+        data = DataLoader.load_data(trace_filepath)
+        device_props = data.get("deviceProperties")
+        if isinstance(device_props, list) and len(device_props) > 0:
+            return len(device_props)
+    except Exception as exc:
+        logger.warning("Could not auto-detect gpus_per_node: %s", exc)
+    return None

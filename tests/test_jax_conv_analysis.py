@@ -142,8 +142,8 @@ def test_df_kernel_launchers():
         perf_analyzer.get_df_kernel_launchers_summary_by_category(df_kernel_launchers)
     )
 
-    assert df_kernel_launchers.shape == (25, 11)
-    assert df_kernel_launchers_summary.shape == (5, 7)
+    assert df_kernel_launchers.shape == (25, 12)
+    assert df_kernel_launchers_summary.shape == (5, 8)
     assert df_kernel_launchers_summary_by_category.shape == (2, 6)
 
 
@@ -213,10 +213,10 @@ def test_conv_event_metrics():
 def test_conv_perf_metrics():
 
     df = perf_analyzer.build_df_perf_metrics(conv_events)
-    assert df.shape == (10, 20)
+    assert df.shape == (10, 23)
 
     df_conv = df[df["perf model"].str.contains("jax_conv")]
     df_metrics = perf_analyzer.summarize_df_perf_metrics(
         df_conv, agg_metrics=["mean", "std"]
     )
-    assert df_metrics.shape == (2, 20)
+    assert df_metrics.shape == (2, 23)

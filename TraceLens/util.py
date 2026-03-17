@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import glob
+from collections import defaultdict
 
 try:
     from enum import StrEnum
@@ -19,7 +20,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
-from typing import List, Dict, Callable, Iterable
+from typing import List, Dict, Callable, Iterable, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,10 @@ class JaxProfileProcessor:
         custom_call_target = re.search(
             r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*", line
         )
+        replica_groups = re.search(
+            r"replica_groups=(?P<replica_string>(?:\{(?:\{[0-9]+(?:,[0-9]+)*\}(?:,\{[0-9]+(?:,[0-9]+)*\})*)\}|\[[0-9]+(?:,[0-9]+)*\]<=\[[0-9]+(?:,[0-9]+)*\])(?:T\([0-9,]+\)\s+dimensions=\{[0-9,]*\})?)",
+            line,
+        )
         line = line.split(" ")
         key = line[0]
         dict_line["output"] = line[2]
@@ -186,6 +191,9 @@ class JaxProfileProcessor:
                             raise Exception("Input operand type mismatch", line)
                         dict_line["type"] = gemm_type
                         dict_line["computation"] = "gemm"
+        if replica_groups is not None:
+            dict_line["replica_groups"] = replica_groups["replica_string"]
+
         return (key, dict_line)
 
     @staticmethod
@@ -428,12 +436,16 @@ class TraceEventUtils:
             itertools.groupby(events, lambda event: event.get(field, defaultKey))
         )
 
+    # Splits metadata and non-metadata events
     # Merges metadata events into a dictionary hierarchy per process
     # Process
     # None: {process_name, process_sort_index}
     # Thread_id: {thread_name, thread_sort_index} for each Thread_id
+    # non metadata is just a list of events
     @staticmethod
-    def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
+    def split_event_list(
+        events: List[dict],
+    ) -> Tuple[Dict[str, Dict[str, str]], Dict[str, str]]:
         def get_metadata_val(x: dict) -> str:
             arg_labels = {
                 TraceEventUtils.MetadataFields.ProcessName: TraceEventUtils.ArgNames.Name,
@@ -445,53 +457,32 @@ class TraceEventUtils:
             key = x[TraceEventUtils.TraceKeys.Name]
             return (key, x[TraceEventUtils.TraceKeys.Args][arg_labels[key]])
 
-        metadata_fields = itertools.takewhile(
-            lambda x: x[TraceEventUtils.TraceKeys.Phase]
-            == TraceEventUtils.TracePhases.Metadata,
-            events,
-        )
-        by_process = itertools.groupby(
-            metadata_fields, lambda event: event[TraceEventUtils.TraceKeys.PID]
-        )
-        # TID is not required for process-specific tags, so use null thread id for them
-        fully_processed = map(
-            lambda kv: (
-                kv[0],
-                itertools.groupby(
-                    kv[1], lambda event: event.get(TraceEventUtils.TraceKeys.TID)
-                ),
-            ),
-            by_process,
-        )
-        return dict(
-            map(
-                lambda kv: (
-                    kv[0],
-                    dict(
-                        map(
-                            lambda kv1: (
-                                kv1[0],
-                                dict(
-                                    map(lambda event: (get_metadata_val(event)), kv1[1])
-                                ),
-                            ),
-                            kv[1],
-                        )
-                    ),
-                ),
-                fully_processed,
-            )
-        )
+        # Use defaultdict to avoid sorting and groupby complexity
+        metadata = defaultdict(lambda: defaultdict(dict))
+        rest = list[dict]()
+
+        for event in events:
+            if (
+                event[TraceEventUtils.TraceKeys.Phase]
+                != TraceEventUtils.TracePhases.Metadata
+            ):
+                rest.append(event)
+            else:
+                pid = event[TraceEventUtils.TraceKeys.PID]
+                tid = event.get(TraceEventUtils.TraceKeys.TID)
+                metadata_key, metadata_value = get_metadata_val(event)
+                metadata[pid][tid][metadata_key] = metadata_value
+
+        # Convert defaultdicts to regular dicts for return
+        return ({pid: dict(tid_dict) for pid, tid_dict in metadata.items()}, rest)
 
     @staticmethod
-    def non_metadata_events(events: List[dict]) -> List[dict]:
-        return list(
-            itertools.dropwhile(
-                lambda e: e[TraceEventUtils.TraceKeys.Phase]
-                == TraceEventUtils.TracePhases.Metadata,
-                events,
-            )
-        )
+    def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
+        return TraceEventUtils.split_event_list(events)[0]
+
+    @staticmethod
+    def non_metadata_events(events: List[dict]) -> List[Dict[str, Dict[str, str]]]:
+        return TraceEventUtils.split_event_list(events)[1]
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
@@ -728,3 +719,40 @@ class RocprofParser:
             "agents": tool_data.get("agents", []),
             "command": metadata.get("command", []),
         }
+
+
+class PftraceParser:
+    """Parser for Perfetto-style trace JSON (traceEvents format)."""
+
+    @staticmethod
+    def load_pftrace_data(filepath: str) -> dict:
+        """
+        Load and validate Perfetto-style trace JSON (.json or .json.gz).
+
+        Args:
+            filepath: Path to trace file (must end with .json or .json.gz).
+
+        Returns:
+            Dict with at least "traceEvents" key (list of events).
+
+        Raises:
+            ValueError: If file is not .json/.json.gz or missing traceEvents.
+        """
+        if not filepath.endswith(".json") and not filepath.endswith(".json.gz"):
+            raise ValueError(
+                "PftraceParser expects .json or .json.gz input; "
+                f"got {filepath}. For .pftrace, convert to JSON first (e.g. traceconv json input.pftrace output.json)."
+            )
+        data = DataLoader.load_data(filepath)
+        if "traceEvents" not in data:
+            raise ValueError(
+                "Not a valid Perfetto-style trace: missing 'traceEvents' key"
+            )
+        if not isinstance(data["traceEvents"], list):
+            raise ValueError("'traceEvents' must be a list")
+        return data
+
+    @staticmethod
+    def get_events(pftrace_data: dict) -> List[dict]:
+        """Return the traceEvents list from loaded pftrace data."""
+        return pftrace_data.get("traceEvents", [])
