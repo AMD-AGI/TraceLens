@@ -155,9 +155,9 @@ Before running the benchmark, ask the user whether they want to profile a target
 
 Ask:
 
-> "Would you like to profile a **targeted window** (recommended — smaller traces, captures steady-state decode) or the **entire benchmark** run?"
+> "Would you like to profile a **targeted steady-state window** (recommended — smaller traces, captures steady-state decode) or the **entire benchmark** run?"
 
-##### Option A: Targeted window (delay + max iterations)
+##### Option A: Targeted steady-state window (delay + max iterations)
 
 Compute recommended `delay_iterations` and `max_iterations` from the YAML config values. Read `OSL`, `CONC`, and `RANDOM_RANGE_RATIO` from the `envs` section (default `RANDOM_RANGE_RATIO` to `1.0` if absent).
 
@@ -207,12 +207,12 @@ ssh <node> "sed -i 's|\$EXTRA_VLLM_ARGS > \$SERVER_LOG|\$EXTRA_VLLM_ARGS \"\${PR
 
 Without this, the `PROFILER_ARGS` array is built but never actually passed to the vLLM server.
 
-**3. Increase `num_prompts` so the benchmark runs long enough for the profiling window.**
+**3. MANDATORY: Increase `num_prompts` in `benchmark_lib.sh` so the benchmark runs long enough for the profiling window.**
 
-By default, when profiling is enabled, `benchmark_lib.sh` caps `num_prompts` to `max_concurrency` (i.e. `CONC`). With delay + max iterations the benchmark needs many more prompts to reach and complete the profiling window. Override to `CONC * 10`:
+**This patch is always required when using delay + max iterations.** The `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally overrides** `num_prompts` when `PROFILE=1` — this happens *after* parsing the `--num-prompts` argument, so it stomps whatever value the calling script (e.g. `vllm_mi300x.sh`) passes. Do NOT skip this patch even if the calling script already sets a larger `--num-prompts`. Without this fix, the benchmark finishes before the delay window is reached, and no steady-state trace is captured.
 
 ```bash
-ssh <node> "sed -i 's/num_prompts=\"\$max_concurrency\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
+ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
   <magpie_repo>/InferenceMAX/benchmarks/benchmark_lib.sh"
 ```
 
@@ -337,7 +337,7 @@ Then construct and print the following command for the user to run manually (do 
 
 ```
 python <TraceLens_repo>/TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
-    --capture_folder <workspace>/torch_trace \
+    --capture_folder <workspace>/torch_trace/capture_traces \
     --profile_json_path <workspace>/torch_trace/trace_split/<split_trace>.json.gz \
     --output_csvs_dir <workspace>/torch_trace/analysis_output \
     --group_by_parent_module --enable_pseudo_ops
@@ -407,7 +407,11 @@ ssh <node> "cd <repo> && source ~/miniconda3/etc/profile.d/conda.sh && conda act
 
 In the Python config dataclass, `TorchProfilerConfig.enabled` defaults to `True`. But many example YAML files explicitly set it to `false`. Always check the actual YAML the user points to.
 
-### 8. The `hf_cache_path` field avoids re-downloading models
+### 8. `benchmark_lib.sh` unconditionally overrides `num_prompts` when profiling
+
+When `PROFILE=1`, the `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally** sets `num_prompts="$((max_concurrency * 1))"` *after* parsing all `--num-prompts` arguments. This means even if the calling benchmark script (e.g. `vllm_mi300x.sh`) explicitly passes `--num-prompts $(( $CONC * 10 ))`, that value gets overwritten. When using `delay_iterations` + `max_iterations` for steady-state profiling, you **must** patch `benchmark_lib.sh` to increase this multiplier, otherwise the benchmark ends before the profiling window starts and no trace is captured.
+
+### 9. The `hf_cache_path` field avoids re-downloading models
 
 If the node has a shared HuggingFace cache, set `hf_cache_path` in the config to avoid multi-hour model downloads. This path is mounted into the container.
 
