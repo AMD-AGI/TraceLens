@@ -38,8 +38,10 @@ def get_pseudo_op_mappings():
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         ## Misc ops
+        "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
+        "vllm::rocm_aiter_triton_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
     }
 
@@ -59,7 +61,9 @@ def get_pseudo_op_categories():
         moe_perf_model_extensions.UnfusedMoE_Up: "MoE_unfused",
         moe_perf_model_extensions.UnfusedMoE_Down: "MoE_unfused",
         attention_perf_model_extensions.InferenceAttention: "InferenceAttention",
+        attention_perf_model_extensions.GDNAttention: "GDNAttention",
         perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
+        perf_model_extensions.batched_gemm_a16wfp4: "GEMM",
         attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
         perf_model_extensions.per_group_quant: "BinaryElementwise"
     }
