@@ -76,6 +76,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 | `--agg_metrics` | `mean median min max` | Aggregations to compute in summaries. Allowed: `mean`, `median`, `min`, `max` (space-separated). |
 | `--use_multiprocessing` | `False` | Enable parallel trace loading using multiprocessing. Can provide speedup (system-dependent) but uses more CPU resources. |
 | `--max_workers` | `os.cpu_count()` | Maximum number of worker processes for parallel loading (requires `--use_multiprocessing`). Override to limit resource usage if needed. |
+| `--all2allv_heatmap` | `False` | Add an `nccl_all2allv_heatmap` sheet with per rank-pair send volumes across all all2allv invocations. Useful for diagnosing MoE/expert-parallel routing imbalance. |
 | `--gpus_per_node` | _auto-detected_ | Number of GPUs per node. When known, `node_id` and `node_span` columns are added to report sheets, labeling each collective's process group as `intra_node` or `inter_node`. Auto-detected from trace `deviceProperties` if omitted. |
 
 
@@ -89,10 +90,12 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 | `nccl_summary_long` | Aggregated NCCL operation stats per (rank, process group, collective, dtype, size). Includes counts and duration aggregates (sum/mean/std/min/max). |
 | `nccl_long` | Per-event, per-rank NCCL records with timestamps, durations, stream, message sizes, and other attributes. Useful for drilling into specific slow ops. |
 | `nccl_implicit_sync` | Per-collective implicit synchronization breakdown. Includes per-rank wait_time columns indicating time lost to implicit sync, plus timing/skew and bandwidth metrics. |
+| `nccl_summary_all2allv` | Aggregated all2allv metrics by (Process Group, dtype). Includes throughput, wall time, size imbalance, and timing skew. Unlike implicit-sync collectives, all2allv uses aggregate throughput rather than algo/bus bandwidth since per-rank data sizes vary. |
 | `nccl_all2allv` | Detailed All2AllV analysis: variable send/recv sizes and splits per rank, with timing and skew columns per rank. |
+| `nccl_all2allv_heatmap` | *(when `--all2allv_heatmap` is set)* Per rank-pair total send volumes across all all2allv invocations. Useful for identifying hot pairs in MoE/expert-parallel routing. |
 
 _Notes:_
-- Summary sheets (`nccl_summary_*`) are **always** produced; detailed per-event sheets (`nccl_long`, `nccl_implicit_sync`, `nccl_all2allv`) appear when `--detailed_analysis` is set.
+- Summary sheets (`nccl_summary_*`, `nccl_summary_all2allv`) are **always** produced when the corresponding collective type exists in the trace; detailed per-event sheets (`nccl_long`, `nccl_implicit_sync`, `nccl_all2allv`) appear when `--detailed_analysis` is set.
 - When `gpus_per_node` is known (auto-detected or set via `--gpus_per_node`), sheets that contain `rank` and/or `Process Group Ranks` columns gain `node_id` and `node_span` columns (fully aggregated summary sheets without these columns remain unchanged). `node_span` is `intra_node` when all ranks in the process group reside on the same node, or `inter_node` otherwise. You can filter or pivot on these columns in Excel to compare intra- vs inter-node communication.
 - Column sets can evolve; the above reflects the provided example workbook.
 ---
@@ -108,6 +111,28 @@ _Notes:_
 
 **Lowest Common Directory (pattern mode)**  
 When using `--trace_pattern`, the tool expands the pattern by replacing `*` with `0..world_size-1`, then computes the **lowest common ancestor directory** of those paths to pick a default output location.
+
+---
+
+## Interpreting all2allv Metrics
+
+**Why different metrics from other collectives?**
+
+All2allv sends variable amounts of data per rank — there is no single "message size" or uniform workload. The standard NCCL `algo bw` and `bus bw` formulas assume ring/tree algorithms with equal data on every rank, so they don't apply.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `throughput (GB/s)` | Total data moved / wall-clock time of the collective. Compare against theoretical link bandwidth to gauge efficiency. |
+| `wall_time (us)` | End-to-end time from first rank entering to last rank finishing. High values + low throughput = bottleneck. |
+| `size_imbalance` | Ratio of max rank's data to mean. 1.0 = balanced. Values >> 1.0 indicate some ranks carry disproportionate load — common in MoE when some experts are "hotter" than others. |
+| `max_rank_dur / min_rank_dur` | Spread in per-rank kernel time. Large spread + high imbalance = consider rebalancing expert routing or token dropping. |
+| `skew in start time` | How far apart ranks enter the collective. High skew means some ranks are blocked by prior compute. |
+
+**Actionable guidance:**
+- If `throughput` is much lower than link bandwidth and `size_imbalance` ≈ 1.0 → likely a software/driver overhead issue.
+- If `throughput` is low and `size_imbalance` >> 1.0 → expert routing imbalance; the busiest rank gates the collective.
+- If `skew in start time` is large → ranks are entering the collective at very different times, indicating upstream compute imbalance.
+- Use the heatmap sheet (`--all2allv_heatmap`) to identify which rank pairs carry the most traffic.
 
 ---
 
