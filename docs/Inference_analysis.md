@@ -135,7 +135,7 @@ Output: A tracefile containing {num-steps} contiguous execution steps where clos
 Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher and SGLang v0.5.9). This is recommended if the user wants to perform analysis on isolated execution step.
 
 ```python
-python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
+python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --store-single-iteration
 ```
 
 Output: Single trace file per execution step.
@@ -143,7 +143,7 @@ Output: Single trace file per execution step.
 Option 3: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher and SGLang v0.5.9; using the patchfile is recommended).
 
 ```python
-python examples/custom_workflows/split_vllm_trace_annotation.py trace.json.gz -o ./output --iterations 10:20
+python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --iterations 10:20
 ```
 
 ### Step 4: Generate Performance Report
