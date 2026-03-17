@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 import gzip
 import os
 import json
@@ -38,8 +39,6 @@ def _parse_split_sizes(value):
     if isinstance(value, str):
         value = value.strip()
         if value.startswith("["):
-            import ast
-
             try:
                 parsed = ast.literal_eval(value)
                 if isinstance(parsed, (list, tuple)):
@@ -565,14 +564,13 @@ class NcclAnalyser:
         return summary_df
 
     def build_df_nccl_all2allv(self, detailed=False, strict_metadata_check=True):
-        # this is diff from implicit sync cat
-        # first, each rank can send and receive different amount of data
-        # as a result they do not respect the implicit sync cat
-        # we cannot calculate comm latency as min dur
-        # thus we cannot calculate algo bw and bus bw
-        # as we discuss and understand the metrics, we can add them
-        # for now we expose raw data and leave the calculations to the user
-        # we will add some basic metrics for now
+        """Build a per-collective-instance DataFrame for all_to_allv.
+
+        Unlike implicit-sync collectives, each rank sends/receives a different
+        amount of data, so ``comm_latency`` / ``algo bw`` / ``bus bw`` do not
+        apply.  Instead we report ``throughput``, ``wall_time``, per-rank
+        duration spread, and ``size_imbalance``.
+        """
 
         if not hasattr(self, "df_per_rank_coll"):
             self.build_df_long()
