@@ -61,7 +61,6 @@ def get_pseudo_op_categories():
         moe_perf_model_extensions.UnfusedMoE_Up: "MoE_unfused",
         moe_perf_model_extensions.UnfusedMoE_Down: "MoE_unfused",
         attention_perf_model_extensions.InferenceAttention: "InferenceAttention",
-        attention_perf_model_extensions.GDNAttention: "GDNAttention",
         perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
         perf_model_extensions.batched_gemm_a16wfp4: "GEMM",
         attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
