@@ -21,7 +21,6 @@ from analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    calculate_average_efficiency,
     compute_impact_estimates,
     write_metrics_json,
     classify_other_operation,
@@ -31,7 +30,6 @@ from analysis_utils import (
 def get_other_config():
     """Return other-specific configuration."""
     return {
-        "efficiency_method": "prefer_memory",  # Most "other" ops are memory-bound
         "extra_fields": [],
         "operation_classifier": classify_other_op,
     }
@@ -116,9 +114,6 @@ def main():
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(
-        ops_df, peak_hbm_bw, maf, "prefer_memory"
-    )
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
 
@@ -131,7 +126,6 @@ def main():
         "category": category,
         "status": "OK",
         **time_metrics,
-        "average_efficiency_percent": avg_efficiency,
         "operations": operations,
         "category_specific": category_specific,
         "impact_estimates": impact_estimates,

@@ -120,15 +120,17 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI:
+Execute TraceLens CLI (`<platform_lower>` is the lowercase platform name (e.g. `mi300x`, `mi355x`)):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
+  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform_lower>.json \
   --enable_pseudo_ops
 ```
+
 
 This generates:
 - `perf_report.xlsx` - Excel report with all sheets
@@ -551,7 +553,7 @@ Validate the report before sharing the priority recommendations on the chat and 
 
 ### 10.1 Validate Report Structure (Retry up to 2x)
 
-After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
+After writing `standalone_analysis.md`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
 
 **Validation procedure:**
 

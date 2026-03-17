@@ -21,7 +21,6 @@ from analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    calculate_average_efficiency,
     write_metrics_json,
 )
 
@@ -29,7 +28,6 @@ from analysis_utils import (
 def get_triton_config():
     """Return Triton-specific configuration."""
     return {
-        "efficiency_method": "auto",  # Triton can be compute or memory bound
         "extra_fields": ["FLOPS/Byte"],
         "operation_classifier": classify_triton_operation,
     }
@@ -96,7 +94,6 @@ def main():
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    avg_efficiency = calculate_average_efficiency(ops_df, peak_hbm_bw, maf, "auto")
     operations = build_operation_metrics(ops_df, metadata, config)
     category_specific = extract_category_specific(ops_df, metadata)
 
@@ -104,7 +101,6 @@ def main():
         "category": "triton",
         "status": "OK",
         **time_metrics,
-        "average_efficiency_percent": avg_efficiency,
         "operations": operations,
         "category_specific": category_specific,
         "impact_estimates": [],
