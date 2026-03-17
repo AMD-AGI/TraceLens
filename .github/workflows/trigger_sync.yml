@@ -1,0 +1,17 @@
+name: Notify private repo of changes to public repo
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sync in private repo
+        run: |
+          gh api repos/AMD-AGI/TraceLens-internal/dispatches \
+            -f event_type=public-sync \
+            -f "client_payload[sha]=${{ github.sha }}"
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
