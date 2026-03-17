@@ -100,6 +100,7 @@ def generate_collective_report(
     max_workers: Optional[int] = None,
     rank_regex: str = DEFAULT_RANK_REGEX,
     gpus_per_node: Optional[int] = None,
+    all2allv_heatmap: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     """
     Generate comprehensive NCCL communication analysis reports.
@@ -127,6 +128,9 @@ def generate_collective_report(
                        ``node_span`` columns are added to report DataFrames.
                        If ``None``, auto-detection is attempted from the first
                        trace file's ``deviceProperties`` metadata.
+        all2allv_heatmap: When True, add an nccl_all2allv_heatmap sheet with
+                         per rank-pair send volumes across all all2allv
+                         invocations.
 
     Returns:
         Dictionary mapping sheet names to DataFrames
@@ -212,6 +216,19 @@ def generate_collective_report(
         nccl_analyser.build_df_summary_nccl_implicit_sync_cat(agg_metrics=agg_metrics)
     )
     report_dfs["nccl_summary_long"] = nccl_analyser.build_df_summary_long()
+
+    print("Generating all2allv summary...")
+    df_summary_all2allv = nccl_analyser.build_df_summary_nccl_all2allv(
+        agg_metrics=agg_metrics
+    )
+    if df_summary_all2allv is not None and not df_summary_all2allv.empty:
+        report_dfs["nccl_summary_all2allv"] = df_summary_all2allv
+
+    if all2allv_heatmap:
+        print("Generating all2allv heatmap...")
+        df_heatmap = nccl_analyser.build_df_all2allv_heatmap()
+        if df_heatmap is not None and not df_heatmap.empty:
+            report_dfs["nccl_all2allv_heatmap"] = df_heatmap
 
     # Add detailed per-rank information if requested
     if detailed_analysis:
@@ -337,6 +354,11 @@ def main():
             "from trace metadata (deviceProperties)."
         ),
     )
+    parser.add_argument(
+        "--all2allv_heatmap",
+        action="store_true",
+        help="Add an nccl_all2allv_heatmap sheet with per rank-pair send volumes.",
+    )
 
     args = parser.parse_args()
 
@@ -378,6 +400,7 @@ def main():
         max_workers=args.max_workers,
         rank_regex=args.rank_regex,
         gpus_per_node=args.gpus_per_node,
+        all2allv_heatmap=args.all2allv_heatmap,
     )
 
 
