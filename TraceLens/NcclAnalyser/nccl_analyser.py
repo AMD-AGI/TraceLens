@@ -804,9 +804,15 @@ class NcclAnalyser:
         computed immediately per-event using the event's dtype so that mixed
         dtypes across invocations are handled correctly.
 
+        When *strict_metadata_check* is True (default), events with
+        unparseable split sizes, unrecognised dtypes, or split-size lengths
+        that don't match the event's ``Group size`` are logged and skipped.
+
         .. note::
 
-           The output has N*N rows (one per src/dst pair).  For very large
+           The output can have up to N*N rows (one per observed src/dst
+           pair).  Rows are only present for pairs that appear in the trace
+           with parseable split sizes and known dtypes.  For very large
            world sizes this can exceed Excel's row limit (1,048,576) or use
            significant memory.  A warning is emitted when world_size > 256,
            and the method returns ``None`` when world_size > 1024.
@@ -845,11 +851,36 @@ class NcclAnalyser:
         for _, row in all2allv_df.iterrows():
             split_sizes = _parse_split_sizes(row["In split size"])
             if split_sizes is None:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: unable to parse "
+                        "In split size=%r",
+                        row.get("rank", "unknown"),
+                        row["In split size"],
+                    )
+                continue
+
+            group_size = row.get("Group size")
+            if group_size is not None and len(split_sizes) != group_size:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: "
+                        "len(In split size)=%d != Group size=%d",
+                        row.get("rank", "unknown"),
+                        len(split_sizes),
+                        group_size,
+                    )
                 continue
 
             dtype = row["dtype"]
             bytes_per_elem = self.dtype2bytes.get(dtype)
             if bytes_per_elem is None:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: unrecognised " "dtype %r",
+                        row.get("rank", "unknown"),
+                        dtype,
+                    )
                 continue
 
             src_rank = row["rank"]
