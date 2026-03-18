@@ -3269,6 +3269,146 @@ class liger_silu_mul_function(BinaryElementwise):
         }
 
 
+class Reduce:
+    """
+    Base class for single-GPU reduce operations (sum, mean, max, min, norm, etc.).
+    Models reduction over one or more dimensions of a tensor.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_input_elems = self.param_details["num_input_elems"]
+        self.num_output_elems = self.param_details["num_output_elems"]
+        self.dtype_in_out = self.param_details["dtype_in_out"]
+        self.bpe_in = name2bpe(self.dtype_in_out[0])
+        if self.dtype_in_out[1] is not None:
+            self.bpe_out = name2bpe(self.dtype_in_out[1])
+        else:
+            self.bpe_out = self.bpe_in
+
+    @staticmethod
+    def flops_func(num_input_elems, num_output_elems, reduce_type="sum"):
+        # Each input element is read and combined: ~1 op per input element.
+        # Sum/mean: N-1 adds (and 1 div for mean) over reduced dimension(s).
+        # Max/min: N-1 comparisons. Norm: N muls + N-1 adds + 1 sqrt.
+        # Use num_input_elems as the dominant term for roofline modeling.
+        return num_input_elems
+
+    def flops(self):
+        return self.flops_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            self.param_details.get("reduce_type", "sum"),
+        )
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for reduce)."""
+        return "vector"
+
+    @staticmethod
+    def bytes_func(num_input_elems, num_output_elems, bpe_in, bpe_out):
+        if None in {bpe_in, bpe_out}:
+            return None
+        return num_input_elems * bpe_in + num_output_elems * bpe_out
+
+    def bytes(self):
+        return self.bytes_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            self.bpe_in,
+            self.bpe_out,
+        )
+
+
+class aten_reduce(Reduce):
+    """
+    Single-GPU reduce ops: sum, mean, max, min, norm, etc.
+    Parses PyTorch trace event args (Input Dims, Concrete Inputs for dim/keepdim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        args_input_dims = args.get("Input Dims", [])
+        if not args_input_dims or args_input_dims[0] is None:
+            return {
+                "num_input_elems": 0,
+                "num_output_elems": 0,
+                "dtype_in_out": (None, None),
+            }
+        input_shape = tuple(args_input_dims[0])
+        num_input_elems = prod(input_shape)
+        name = event.get("name", "")
+
+        input_types = args.get("Input type", [])
+        dtype_in = input_types[0] if input_types else None
+        dtype_out = args.get("Output type", [None])
+        if isinstance(dtype_out, list) and dtype_out:
+            dtype_out = dtype_out[0]
+        else:
+            dtype_out = None
+
+        # Infer output shape from dim and keepdim if available
+        concrete = args.get("Concrete Inputs", [])
+        dim = None
+        keepdim = False
+        if len(concrete) >= 2:
+            # Typical order: (input, dim?, keepdim?, ...)
+            try:
+                dim_arg = concrete[1]
+                if dim_arg is not None:
+                    if isinstance(dim_arg, (list, tuple)):
+                        dim = [int(d) for d in dim_arg]
+                    else:
+                        dim = [int(dim_arg)]
+            except (TypeError, ValueError):
+                pass
+            if len(concrete) >= 3 and concrete[2] is not None:
+                keepdim = bool(concrete[2])
+
+        # cumsum/cumprod preserve shape
+        if "cumsum" in name or "cumprod" in name:
+            num_output_elems = num_input_elems
+        elif dim is not None and len(dim) > 0:
+            # Normalize dim to positive indices
+            ndim = len(input_shape)
+            dim = [d if d >= 0 else ndim + d for d in dim]
+            out_shape = list(input_shape)
+            for d in sorted(dim, reverse=True):
+                if 0 <= d < len(out_shape):
+                    if keepdim:
+                        out_shape[d] = 1
+                    else:
+                        out_shape.pop(d)
+            num_output_elems = prod(out_shape) if out_shape else 1
+        else:
+            # Reduce over all dimensions: scalar or single element
+            num_output_elems = 1
+
+        reduce_type = "sum"
+        if "mean" in name:
+            reduce_type = "mean"
+        elif "max" in name or "min" in name:
+            reduce_type = "max"
+        elif "norm" in name:
+            reduce_type = "norm"
+
+        return {
+            "num_input_elems": num_input_elems,
+            "num_output_elems": num_output_elems,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "reduce_type": reduce_type,
+        }
+
+
 class GroupedGemm:
     """
     Grouped General Matrix Multiplication (GEMM).
