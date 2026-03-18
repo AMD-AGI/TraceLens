@@ -3327,6 +3327,36 @@ class Reduce:
             self.bpe_out,
         )
 
+    @staticmethod
+    def flops_bwd_func(num_input_elems, num_output_elems, reduce_type="sum"):
+        # Backward: grad_output is broadcast/copied to grad_input (sum/mean),
+        # or scattered for max/min. Dominant work is writing grad_input.
+        return num_input_elems
+
+    def flops_bwd(self):
+        return self.flops_bwd_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            self.param_details.get("reduce_type", "sum"),
+        )
+
+    @staticmethod
+    def bytes_bwd_func(num_input_elems, num_output_elems, bpe_in, bpe_out):
+        # Read grad_output, write grad_input (broadcast or scatter).
+        if None in {bpe_in, bpe_out}:
+            return None
+        return num_output_elems * bpe_out + num_input_elems * bpe_in
+
+    def bytes_bwd(self, bytes_per_element=None):
+        bpe_in = bytes_per_element if bytes_per_element is not None else self.bpe_in
+        bpe_out = bytes_per_element if bytes_per_element is not None else self.bpe_out
+        return self.bytes_bwd_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            bpe_in,
+            bpe_out,
+        )
+
 
 class aten_reduce(Reduce):
     """
