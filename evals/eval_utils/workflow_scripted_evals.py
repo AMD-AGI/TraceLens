@@ -11,6 +11,7 @@ import os
 import sys
 
 CSV_COLUMNS = ["index", "category", "issue_summary", "result", "details"]
+_REQUIRED_MODEL_KEYS = {"model", "architecture", "scale", "precision"}
 
 
 def _load_manifest(output_dir: str) -> dict | None:
@@ -59,6 +60,24 @@ def _check_metadata_files(output_dir: str) -> tuple[str, str]:
             missing.append(os.path.basename(mf))
     if missing:
         return "FAIL", f"Missing metadata files: {', '.join(missing)}"
+    return "PASS", ""
+
+
+def _check_model_info(output_dir: str) -> tuple[str, str]:
+    path = os.path.join(output_dir, "metadata", "model_info.json")
+    if not os.path.isfile(path):
+        return "FAIL", "metadata/model_info.json not found"
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        return "FAIL", f"Invalid JSON: {e}"
+    missing = _REQUIRED_MODEL_KEYS - data.keys()
+    if missing:
+        return "FAIL", f"Missing keys: {', '.join(missing)}"
+    empty = [k for k in _REQUIRED_MODEL_KEYS if not str(data[k]).strip()]
+    if empty:
+        return "FAIL", f"Empty values: {', '.join(empty)}"
     return "PASS", ""
 
 
@@ -153,6 +172,7 @@ def _check_plot(output_dir: str) -> tuple[str, str]:
 EVAL_REGISTRY = [
     ("Directory structure created", _check_directories),
     ("Metadata files exist on disk", _check_metadata_files),
+    ("Model info JSON exists and valid", _check_model_info),
     ("Unified perf. report exists", _check_unified_perf_report),
     ("Tree data files exist on disk", _check_tree_data_files),
     ("Categorical findings .md files exist", _check_findings_exist),

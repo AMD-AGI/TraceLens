@@ -26,14 +26,15 @@ Read ALL of these before evaluating:
 - `<output_dir>/standalone_analysis.md`
 - `<output_dir>/perf_report_csvs/gpu_timeline.csv`
 - `<output_dir>/category_data/category_manifest.json`
+- `<output_dir>/metadata/model_info.json`
 - All `<output_dir>/category_findings/*_findings.md`
 - All `<output_dir>/system_findings/*_findings.md`
 
 ## Evals
 
-Evaluate ALL 5 checks below. Write ALL 5 rows to the results CSV. If a file listed above does not exist, skip it gracefully (do not FAIL solely because an optional system findings file is absent).
+Evaluate ALL 6 checks below. Write ALL 6 rows to the results CSV. If a file listed above does not exist, skip it gracefully (do not FAIL solely because an optional system findings file is absent).
 
-### workflow_eval_8: Report Template Rendering
+### workflow_eval_9: Report Template Rendering
 
 **Category:** Workflow
 **Issue Summary:** Report Template Rendering
@@ -51,7 +52,7 @@ Also verify the Executive Summary contains a markdown table (lines with `|`).
 
 **PASS** if all headers found. **FAIL** with list of missing headers.
 
-### workflow_eval_9: Executive Summary has metrics table
+### workflow_eval_10: Executive Summary has metrics table
 
 **Category:** Workflow
 **Issue Summary:** Executive Summary has metrics table
@@ -70,7 +71,7 @@ Cross-check numeric values against `gpu_timeline.csv`:
 
 **PASS** if all rows present and values align. **FAIL** with specifics.
 
-### workflow_eval_10: Issue Template rendering
+### workflow_eval_11: Issue Template rendering
 
 **Category:** Workflow
 **Issue Summary:** Issue Template rendering
@@ -89,7 +90,7 @@ In `standalone_analysis.md`, find every priority item (lines matching `### ... P
 
 **PASS** if every P-item has the correct fields for its section. Either **Insight** or **Issue** is acceptable as the first field — both are valid. **FAIL** listing which P-items are missing required fields or have unexpected fields.
 
-### workflow_eval_11: Hardware Reference in Appendix
+### workflow_eval_12: Hardware Reference in Appendix
 
 **Category:** Workflow
 **Issue Summary:** Hardware Reference in Appendix
@@ -102,7 +103,7 @@ In `standalone_analysis.md`, find the `## Appendix` section. Verify it contains:
 
 **PASS** if all present. **FAIL** with what's missing.
 
-### workflow_eval_12: Sub-agent findings structure and Impact Summary types
+### workflow_eval_13: Sub-agent findings structure and Impact Summary types
 
 **Category:** Workflow
 **Issue Summary:** Sub-agent findings structure and Impact Summary types
@@ -121,10 +122,21 @@ Read `category_manifest.json` to get categories by tier. For each **compute_kern
 
 **PASS** if all findings have the required structure and valid Impact Summary types. **FAIL** listing which categories have missing structure or invalid Impact Summary rows (e.g. `algorithmic` or `system` type entries in compute findings, or data rows in system findings).
 
+### workflow_eval_14: Model identification in report
+
+**Category:** Workflow
+**Issue Summary:** Model identification in report
+
+Read `metadata/model_info.json` and `standalone_analysis.md`.
+
+The `## Appendix` section must contain a **Model Architecture** subsection with all four fields from `model_info.json`: model, architecture, scale, precision.
+
+**PASS** if the Appendix contains all four fields. **FAIL** with specifics on which fields are missing.
+
 ## Output
 
-Write a CSV to the specified `results_path` with exactly these 5 columns and 5 data rows:
+Write a CSV to the specified `results_path` with exactly these 5 columns and 6 data rows:
 
 `index,category,issue_summary,result,details`
 
-Use `workflow_eval_8` through `workflow_eval_12` as the `index` values. Do not add any other columns.
+Use `workflow_eval_9` through `workflow_eval_14` as the `index` values. Do not add any other columns.
