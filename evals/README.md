@@ -29,9 +29,8 @@ pip install -e .
 
 ### 3. Install Cursor CLI
 
-The eval scripts invoke the Cursor agent via the `agent` CLI command. 
+The eval scripts invoke the Cursor agent via the `agent` CLI command. All scripts are designed to run **directly on the node** (not the head node). The `agent` CLI must be installed on the node.
 
-Install on the head node:
 ```bash
 curl https://cursor.com/install -fsS | bash
 ```
@@ -41,17 +40,65 @@ Verify with `agent --version`
 
 The `agent` invocations require setting the default model to **Claude Opus 4.6**.
 
-## Running Evals
+## Running Scripts
 
-### Full Automated Run
+All scripts run **on the node** from the repo root. They use `docker exec` to run Python scripts inside the container, while `agent` commands run directly on the node. The `CONTAINER` environment variable is required for all scripts.
 
-From the repo root:
+### Full Eval Run (single pass)
 
 ```bash
-bash evals/run_evals.sh
+CONTAINER=my_container bash evals/eval_scripts/run_evals.sh
 ```
 
-Before running, edit the two variables at the top of `run_evals.sh` to match your environment.
+Runs standalone analysis on each test case, then runs workflow + quality evals, and merges results. Output goes to `evals/results/`.
+
+### Repeatability Study (serial)
+
+```bash
+CONTAINER=my_container bash evals/eval_scripts/run_repeatability.sh
+```
+
+Runs each test case `NUM_REPEATS` times (default: 5) serially. Results go to `evals/repeatability_results/`.
+
+### Repeatability Study (parallel)
+
+Recommended for repeatability testing. Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit.
+
+```bash
+CONTAINER=my_container bash evals/eval_scripts/run_repeatability_parallel.sh
+```
+
+Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONTAINER` | (required) | Docker container name |
+| `MAX_PARALLEL` | 3 | Max concurrent jobs |
+| `NUM_REPEATS` | 5 | Repeats per test case |
+| `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
+
+Full example:
+
+```bash
+MAX_PARALLEL=5 NUM_REPEATS=3 CONTAINER=my_container \
+    bash evals/eval_scripts/run_repeatability_parallel.sh
+```
+
+Use a `screen` session to prevent disconnects during long runs. Each job cleans its output directory before starting to prevent stale results.
+
+### Generate Golden References
+
+Generates `analysis_output_ref/` for test cases listed in `unit_test_traces.csv`. Runs standalone analysis, copies the output as the reference, and strips intermediate files (keeps only `standalone_analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
+
+```bash
+CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
+```
+
+Or with more parallelism:
+
+```bash
+MAX_PARALLEL=5 CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
+```
 
 ### Individual Manual Runs
 
@@ -82,10 +129,10 @@ agent --force "Run the quality eval skill on <output_dir> with reference <refere
 
 ### 1. Create the test case directory
 
-Each test case lives in `evals/<id>/` and must contain:
+Each test case lives under `evals/unit_tests/<category>/` and must contain:
 
-- `trace.json.jz` -- the profiling trace to analyze.
-- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `standalone_analysis.md` and `perf_report_csvs/`.
+- The profiling trace JSON file.
+- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `standalone_analysis.md` and `perf_report_csvs/`. Generate this with `generate_golden_refs.sh`.
 
 ### 2. Add a row to `unit_test_traces.csv`
 
@@ -93,75 +140,70 @@ The CSV has the following columns:
 
 | Column | Description |
 |---|---|
-| `id` | Unique test case ID (e.g. `GEMM_0`) |
-| `sub_category` | Category label (e.g. `GEMM`) |
-| `trace_path` | Relative path to the trace JSON (e.g. `evals/GEMM_0/trace.json`) |
-| `reference_dir` | Relative path to the reference output (e.g. `evals/GEMM_0/analysis_output_ref`) |
+| `id` | Unique test case ID (e.g. `gemm_01_compute_few_tiles`) |
+| `sub_category` | Category label (e.g. `gemm`) |
+| `trace_path` | Relative path to the trace JSON |
+| `reference_dir` | Relative path to the reference output (`analysis_output_ref`) |
 | `platform` | Hardware platform (e.g. `MI300X`) |
 
 Example row:
 
 ```
-GEMM_1,GEMM,evals/GEMM_1/trace.json.jz,evals/GEMM_1/analysis_output_ref,MI300X
+gemm_01_compute_few_tiles,gemm,evals/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/gemm_01_compute_few_tiles.json,evals/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/analysis_output_ref,MI300X
 ```
 
 ## Eval Pipeline Summary
 
-### Shell Script (`run_evals.sh`)
+### Shell Scripts
 
-For each test case in `unit_test_traces.csv`, the script runs three phases:
+For each test case in `unit_test_traces.csv`, the scripts run two phases:
 
-1. **Phase 1 -- Standalone Analysis (serial):** Invokes the Standalone Analysis agent on the trace file. Output is written to `<trace_dir>/analysis_output/`.
-2. **Phase 2 -- Workflow + Quality Evals (parallel):** Launches two `agent` sub-processes concurrently:
-   - Workflow eval -- validates the analysis output structure and formatting.
-   - Quality eval -- compares the analysis output against the reference.
-3. **Phase 3 -- Merge Results:** Runs `eval_scripts/merge_results.py` to combine per-eval CSVs into a single `eval_summary.csv` for the test case.
+1. **Phase 1 -- Standalone Analysis:** Invokes the Standalone Analysis agent on the trace file. Output is written to `analysis_output/`. Agent output is logged as stream JSON (`.ndjson`).
+2. **Phase 2 -- Workflow + Quality Evals (4 parallel tasks):** Launches four tasks concurrently:
+   - Scripted workflow evals (via `docker exec`)
+   - LLM workflow evals (via `agent`)
+   - Scripted quality evals (via `docker exec`)
+   - LLM quality evals (via `agent`)
+3. **Merge Results:** Runs `eval_utils/merge_results.py` to combine per-eval CSVs into a single `eval_summary.csv`.
 
 ### Eval Skills
 
 Two Cursor agent skills in `.cursor/skills/` define the eval logic:
 
 **workflow-eval** -- 12 evals total:
-- Evals 1-7 (scripted): directory structure, required files, plot output. Run via `eval_scripts/workflow_scripted_evals.py`.
+- Evals 1-7 (scripted): directory structure, required files, plot output. Run via `eval_utils/workflow_scripted_evals.py`.
 - Evals 8-12 (LLM-based): report template rendering, executive summary metrics, issue template formatting, hardware reference in appendix, sub-agent findings structure, and Impact Summary type validation (only `kernel_tuning` for compute, zero rows for system).
 
 **quality-eval** -- 3 evals total:
-- Eval 1 (scripted): CSV value alignment between generated and reference outputs. Run via `eval_scripts/quality_scripted_evals.py`.
+- Eval 1 (scripted): CSV value alignment between generated and reference outputs. Run via `eval_utils/quality_scripted_evals.py`.
 - Evals 2-3 (LLM-based): semantic comparison of compute issue titles and content (performance numbers, shapes, efficiency, pre-computed kernel_tuning gains) against the reference report. System-level P-items are skipped (no Impact field to compare).
 
 ## Results
 
-Results are written to `evals/results/<id>/` and include:
+Results are written to `evals/results/<id>/` (single run) or `evals/repeatability_results/<id>/run_<n>/` (repeatability) and include:
 
-- `analysis.log` -- stdout/stderr from the standalone analysis run.
-- `workflow_eval.log` / `workflow_eval_results.csv` -- workflow eval output.
-- `quality_eval.log` / `quality_eval_results.csv` -- quality eval output.
+- `analysis_stream.ndjson` -- stream JSON output from the standalone analysis agent.
+- `workflow_scripted_eval.log` / `workflow_scripted_results.csv` -- scripted workflow eval output.
+- `workflow_llm_eval.ndjson` / `workflow_llm_results.csv` -- LLM workflow eval output.
+- `quality_scripted_eval.log` / `quality_scripted_results.csv` -- scripted quality eval output.
+- `quality_llm_eval.ndjson` / `quality_llm_results.csv` -- LLM quality eval output.
 - `eval_summary.csv` -- merged results for the test case.
 
-The aggregated summary across all test cases is at `evals/results/eval_summary.csv`.
+### Aggregating Repeatability Results
 
-## Repeatability Study
-
-Because the pipeline uses LLMs, outputs are non-deterministic. The repeatability study runs each test case multiple times (default: 5) and aggregates pass rates across runs to surface flaky or inconsistent behavior. This **should be run** (ideally on a 'screen' to prevent disconnects) before merging changes to the agent. 
+After repeatability runs complete, aggregate and analyze:
 
 ```bash
-cd TraceLens-internal
-bash evals/run_repeatability.sh
+python evals/eval_utils/aggregate_repeatability.py
 ```
 
-After the runs complete, analyze and aggregate the results by prompting Cursor:
-
-```bash
-python evals/utils/aggregate_repeatability.py
-```
-
-This produces three CSVs in `evals/utils/output/`:
+This produces three CSVs in `evals/eval_utils/output/`:
 
 - `pass_rate_summary.csv` -- per-trace, per-eval pass rates across all runs
 - `aggregated_results.csv` -- full eval results for every run
 - `stream_diagnostics.csv` -- per-run metadata (outcome, token usage, last step reached, whether the report was written)
 
-**What to look for using Cursor:**
+**What to look for:**
 
 - **Overall pass rate** should not regress compared to the baseline on `main`.
 - **Per-eval consistency** -- an eval that passes in 3/5 runs indicates flaky behavior that needs investigation.
