@@ -78,7 +78,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     eval_pids=()
 
     echo "    -> Scripted workflow evals"
-    $DEXEC python3 "$EVALS_DIR/eval_scripts/workflow_scripted_evals.py" \
+    $DEXEC python3 "$EVALS_DIR/eval_utils/workflow_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" \
         --results "$CASE_RESULTS/workflow_scripted_results.csv" \
         > "$CASE_RESULTS/workflow_scripted_eval.log" 2>&1 &
@@ -93,7 +93,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     eval_pids+=($!)
 
     echo "    -> Scripted quality evals"
-    $DEXEC python3 "$EVALS_DIR/eval_scripts/quality_scripted_evals.py" \
+    $DEXEC python3 "$EVALS_DIR/eval_utils/quality_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" --reference-dir "$reference_dir" \
         --results "$CASE_RESULTS/quality_scripted_results.csv" \
         > "$CASE_RESULTS/quality_scripted_eval.log" 2>&1 &
@@ -113,7 +113,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     echo "  [$id] Evals complete."
 
     # Aggregate Results
-    $DEXEC python3 "$EVALS_DIR/eval_scripts/merge_results.py" \
+    $DEXEC python3 "$EVALS_DIR/eval_utils/merge_results.py" \
         --results-dir "$CASE_RESULTS" \
         --output "$CASE_RESULTS/eval_summary.csv" || true
     echo "  [$id] Summary written to $CASE_RESULTS/eval_summary.csv"

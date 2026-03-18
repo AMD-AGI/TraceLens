@@ -47,7 +47,7 @@ All scripts run **on the node** from the repo root. They use `docker exec` to ru
 ### Full Eval Run (single pass)
 
 ```bash
-CONTAINER=my_container bash evals/run_evals.sh
+CONTAINER=my_container bash evals/eval_scripts/run_evals.sh
 ```
 
 Runs standalone analysis on each test case, then runs workflow + quality evals, and merges results. Output goes to `evals/results/`.
@@ -55,35 +55,50 @@ Runs standalone analysis on each test case, then runs workflow + quality evals, 
 ### Repeatability Study (serial)
 
 ```bash
-CONTAINER=my_container bash evals/run_repeatability.sh
+CONTAINER=my_container bash evals/eval_scripts/run_repeatability.sh
 ```
 
-Runs each test case `NUM_REPEATS` times (default: 5) serially and writes results to `evals/repeatability_results/`. Use when you want a simple serial run.
+Runs each test case `NUM_REPEATS` times (default: 5) serially. Results go to `evals/repeatability_results/`.
 
 ### Repeatability Study (parallel)
 
-```bash
-CONTAINER=my_container bash evals/run_repeatability_parallel.sh
-```
-
-Same as the serial version but dispatches all `(test_case, repeat)` combinations concurrently through a job pool. `MAX_PARALLEL` controls how many jobs run at once (default: 3). **This is the recommended way to run repeatability tests** as it provides significant speedup.
-
-All configuration is via environment variables:
+Recommended for repeatability testing. Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit.
 
 ```bash
-MAX_PARALLEL=5 NUM_REPEATS=3 SLEEP_BETWEEN=20 CONTAINER=my_container \
-    bash evals/run_repeatability_parallel.sh
+CONTAINER=my_container bash evals/eval_scripts/run_repeatability_parallel.sh
 ```
 
-Use a `screen` session to prevent disconnects during long runs.
+Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONTAINER` | (required) | Docker container name |
+| `MAX_PARALLEL` | 3 | Max concurrent jobs |
+| `NUM_REPEATS` | 5 | Repeats per test case |
+| `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
+
+Full example:
+
+```bash
+MAX_PARALLEL=5 NUM_REPEATS=3 CONTAINER=my_container \
+    bash evals/eval_scripts/run_repeatability_parallel.sh
+```
+
+Use a `screen` session to prevent disconnects during long runs. Each job cleans its output directory before starting to prevent stale results.
 
 ### Generate Golden References
 
+Generates `analysis_output_ref/` for test cases listed in `unit_test_traces.csv`. Runs standalone analysis, copies the output as the reference, and strips intermediate files (keeps only `standalone_analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
+
 ```bash
-CONTAINER=my_container bash evals/generate_golden_refs.sh
+CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
 ```
 
-Generates reference outputs for test cases that don't have an `analysis_output_ref/` directory yet. Runs standalone analysis, copies the output as the reference, and strips intermediate files.
+Or with more parallelism:
+
+```bash
+MAX_PARALLEL=5 CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
+```
 
 ### Individual Manual Runs
 
@@ -149,18 +164,18 @@ For each test case in `unit_test_traces.csv`, the scripts run two phases:
    - LLM workflow evals (via `agent`)
    - Scripted quality evals (via `docker exec`)
    - LLM quality evals (via `agent`)
-3. **Merge Results:** Runs `eval_scripts/merge_results.py` to combine per-eval CSVs into a single `eval_summary.csv`.
+3. **Merge Results:** Runs `eval_utils/merge_results.py` to combine per-eval CSVs into a single `eval_summary.csv`.
 
 ### Eval Skills
 
 Two Cursor agent skills in `.cursor/skills/` define the eval logic:
 
 **workflow-eval** -- 12 evals total:
-- Evals 1-7 (scripted): directory structure, required files, plot output. Run via `eval_scripts/workflow_scripted_evals.py`.
+- Evals 1-7 (scripted): directory structure, required files, plot output. Run via `eval_utils/workflow_scripted_evals.py`.
 - Evals 8-12 (LLM-based): report template rendering, executive summary metrics, issue template formatting, hardware reference in appendix, sub-agent findings structure, and Impact Summary type validation (only `kernel_tuning` for compute, zero rows for system).
 
 **quality-eval** -- 3 evals total:
-- Eval 1 (scripted): CSV value alignment between generated and reference outputs. Run via `eval_scripts/quality_scripted_evals.py`.
+- Eval 1 (scripted): CSV value alignment between generated and reference outputs. Run via `eval_utils/quality_scripted_evals.py`.
 - Evals 2-3 (LLM-based): semantic comparison of compute issue titles and content (performance numbers, shapes, efficiency, pre-computed kernel_tuning gains) against the reference report. System-level P-items are skipped (no Impact field to compare).
 
 ## Results
@@ -179,10 +194,10 @@ Results are written to `evals/results/<id>/` (single run) or `evals/repeatabilit
 After repeatability runs complete, aggregate and analyze:
 
 ```bash
-python evals/utils/aggregate_repeatability.py
+python evals/eval_utils/aggregate_repeatability.py
 ```
 
-This produces three CSVs in `evals/utils/output/`:
+This produces three CSVs in `evals/eval_utils/output/`:
 
 - `pass_rate_summary.csv` -- per-trace, per-eval pass rates across all runs
 - `aggregated_results.csv` -- full eval results for every run

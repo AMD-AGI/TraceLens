@@ -87,7 +87,7 @@ run_single_job() {
     log_status "  $tag [$(ts)] Phase 2: evals starting"
     local eval_pids=()
 
-    $DEXEC python3 "$EVALS_DIR/eval_scripts/workflow_scripted_evals.py" \
+    $DEXEC python3 "$EVALS_DIR/eval_utils/workflow_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" \
         --results "$CASE_RESULTS/workflow_scripted_results.csv" \
         > "$CASE_RESULTS/workflow_scripted_eval.log" 2>&1 &
@@ -100,7 +100,7 @@ run_single_job() {
     ) < /dev/null > "$CASE_RESULTS/workflow_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
 
-    $DEXEC python3 "$EVALS_DIR/eval_scripts/quality_scripted_evals.py" \
+    $DEXEC python3 "$EVALS_DIR/eval_utils/quality_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" --reference-dir "$reference_dir" \
         --results "$CASE_RESULTS/quality_scripted_results.csv" \
         > "$CASE_RESULTS/quality_scripted_eval.log" 2>&1 &
@@ -120,7 +120,7 @@ run_single_job() {
     log_status "  $tag [$(ts)] Phase 2 complete."
 
     # -- Merge results -------------------------------------------------------
-    $DEXEC python3 "$EVALS_DIR/eval_scripts/merge_results.py" \
+    $DEXEC python3 "$EVALS_DIR/eval_utils/merge_results.py" \
         --results-dir "$CASE_RESULTS" \
         --output "$CASE_RESULTS/eval_summary.csv" || true
     log_status "  $tag Summary -> $CASE_RESULTS/eval_summary.csv"
