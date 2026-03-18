@@ -25,6 +25,7 @@ DTYPE_TO_BYTES = {
     "c10::BFloat16": 2,
     "c10::Float8_e4m3fn": 1,
     "c10::Float8_e4m3fnuz": 1,
+    "c10::Float4_e2m1fn_x2": 0.5,
     "c10::Half": 2,
     "c10::Float": 4,
 }
@@ -455,7 +456,6 @@ class UnfusedMoE_Up:
         E_active = num_experts * (1 - ((num_experts - topk) / num_experts) ** M)
 
         gating_factor = 2 if gated else 1
-
         input_bytes = M * K * input_bpe
         weight_bytes = E_active * gating_factor * K * N * weight_bpe
         output_bytes = M * N * output_bpe
@@ -862,7 +862,6 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
 
         input_dtype = args["Input type"][0]
         weight_dtype = args["Input type"][1]
-
         return {
             "num_tokens": num_tokens,
             "hidden_dim": hidden_dim,
@@ -1079,7 +1078,6 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
 
         input_dtype = args["Input type"][0]
         weight_dtype = args["Input type"][1]
-
         return {
             "num_tokens": num_tokens,
             "hidden_dim": hidden_dim,
