@@ -84,15 +84,15 @@ class FusedMoE:
         return total_flops
     
     @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk, gated, 
+    def bytes_func(num_tokens, hidden_dim, inter_dim, num_experts, topk, gated, 
                    input_bpe, weight_bpe, output_bpe):
         """
         Calculate bytes moved for fused MoE forward pass.
         
         For fused MoE, only count:
         - Input: M×K
-        - FC1 weights: topk × N×K (×2 if gated)
-        - FC2 weights: topk × N×K
+        - FC1 weights: E_active × N×K (×2 if gated)
+        - FC2 weights: E_active × N×K
         - Output: M×K
         
         Ignores intermediate activations and scales (fused operation).
@@ -101,6 +101,7 @@ class FusedMoE:
             num_tokens (int): Number of input tokens (M)
             hidden_dim (int): Hidden dimension size (K)
             inter_dim (int): Intermediate dimension size (N)
+            num_experts (int): Total number of experts (E)
             topk (int): Number of experts per token
             gated (bool): Whether gated activation is used
             input_bpe (int): Bytes per element for input
@@ -117,9 +118,12 @@ class FusedMoE:
         K = hidden_dim
         N = inter_dim
         
+        # Uniform routing estimate of unique active experts across M tokens
+        E_active = num_experts * (1 - ((num_experts - topk) / num_experts) ** M)
+        
         input_bytes = M * K * input_bpe
-        fc1_weight_bytes = topk * N * K * weight_bpe * (2 if gated else 1)
-        fc2_weight_bytes = topk * N * K * weight_bpe
+        fc1_weight_bytes = E_active * N * K * weight_bpe * (2 if gated else 1)
+        fc2_weight_bytes = E_active * N * K * weight_bpe
         output_bytes = M * K * output_bpe
         
         total_bytes = input_bytes + fc1_weight_bytes + fc2_weight_bytes + output_bytes
@@ -214,6 +218,7 @@ class moe_aiter_fused_1stage(FusedMoE):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             self.param_details['gated'],
             input_bpe,
@@ -336,6 +341,7 @@ class moe_aiter_fused_blockscale(FusedMoE):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             self.param_details['gated'],
             input_bpe,
@@ -393,19 +399,20 @@ class UnfusedMoE_Up:
         return up_flops
 
     @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk, gated,
+    def bytes_func(num_tokens, hidden_dim, inter_dim, num_experts, topk, gated,
                    input_bpe, weight_bpe, output_bpe):
         """
         Calculate bytes moved for unfused MoE up projection.
         
         For unfused up projection:
-        - Read: M×K (input) + topk×gating_factor×K×N (weights)
+        - Read: M×K (input) + E_active×gating_factor×K×N (weights)
         - Write: M×N (intermediate output)
         
         Args:
             num_tokens (int): Number of input tokens (M)
             hidden_dim (int): Hidden dimension size (K)
             inter_dim (int): Intermediate dimension size (N)
+            num_experts (int): Total number of experts (E)
             topk (int): Number of experts per token
             gated (bool): Whether gated activation is used
             input_bpe (int): Bytes per element for input
@@ -422,11 +429,13 @@ class UnfusedMoE_Up:
         M = num_tokens
         K = hidden_dim
         N = inter_dim
+        # Uniform routing estimate of unique active experts across M tokens
+        E_active = num_experts * (1 - ((num_experts - topk) / num_experts) ** M)
         
         gating_factor = 2 if gated else 1
         
         input_bytes = M * K * input_bpe
-        weight_bytes = topk * gating_factor * K * N * weight_bpe
+        weight_bytes = E_active * gating_factor * K * N * weight_bpe
         output_bytes = M * N * output_bpe
         
         total_bytes = input_bytes + weight_bytes + output_bytes
@@ -469,19 +478,20 @@ class UnfusedMoE_Down:
         return down_flops
 
     @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk,
+    def bytes_func(num_tokens, hidden_dim, inter_dim, num_experts, topk,
                    input_bpe, weight_bpe, output_bpe):
         """
         Calculate bytes moved for unfused MoE down projection.
         
         For unfused down projection:
-        - Read: M×N (intermediate input) + topk×N×K (weights)
+        - Read: M×N (intermediate input) + E_active×N×K (weights)
         - Write: M×K (output)
         
         Args:
             num_tokens (int): Number of input tokens (M)
             hidden_dim (int): Hidden dimension size (K)
             inter_dim (int): Intermediate dimension size (N)
+            num_experts (int): Total number of experts (E)
             topk (int): Number of experts per token
             input_bpe (int): Bytes per element for input
             weight_bpe (int): Bytes per element for weights
@@ -496,9 +506,11 @@ class UnfusedMoE_Down:
         M = num_tokens
         K = hidden_dim
         N = inter_dim
+        # Uniform routing estimate of unique active experts across M tokens
+        E_active = num_experts * (1 - ((num_experts - topk) / num_experts) ** M)
         
         input_bytes = M * N * input_bpe
-        weight_bytes = topk * N * K * weight_bpe
+        weight_bytes = E_active * N * K * weight_bpe
         output_bytes = M * K * output_bpe
         
         total_bytes = input_bytes + weight_bytes + output_bytes
@@ -622,6 +634,7 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             self.param_details['gated'],
             input_bpe,
@@ -753,6 +766,7 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             input_bpe,
             weight_bpe,
@@ -855,6 +869,7 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             self.param_details['gated'],
             input_bpe,
@@ -955,6 +970,7 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             input_bpe,
             weight_bpe,
@@ -1061,6 +1077,7 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             self.param_details['gated'],
             input_bpe,
@@ -1149,6 +1166,7 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
             self.param_details['num_tokens'],
             self.param_details['hidden_dim'],
             self.param_details['inter_dim'],
+            self.param_details['num_experts'],
             self.param_details['topk'],
             input_bpe,
             weight_bpe,
