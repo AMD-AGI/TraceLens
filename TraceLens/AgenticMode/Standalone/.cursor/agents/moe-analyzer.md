@@ -144,7 +144,7 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 ## Additional Notes
 - Quantized MoE detected: [yes/no, with data types]
 - Fused vs unfused: [summary of operation types]
-- **Byte estimation accuracy:** The bytes metric uses a uniform expert routing assumption to estimate weight memory traffic (E_active). This makes TB/s, FLOPS/Byte, and efficiency % average-case approximations. FLOPS are exact.
+- **Byte estimation accuracy:** The bytes metric uses a uniform expert routing assumption to estimate weight memory traffi. This makes TB/s and FLOPS/Byte as average-case approximations. FLOPS are exact.
 
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
