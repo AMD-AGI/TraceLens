@@ -1,2 +1,0 @@
-name,total_direct_kernel_time_sum,Count,Categories,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
-aten::add,4210.193359375,10,{'elementwise'},4.210193359375,100.0,100.0
