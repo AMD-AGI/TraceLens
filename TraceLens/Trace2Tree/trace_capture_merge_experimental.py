@@ -67,7 +67,7 @@ def verify_subtree_events(capture_events, graph_events):
         # print("=========matching ========")
         for j, i in zip(capture_events, graph_events):
             if "kernel" not in j.get("args", {}).keys():
-                if "hipMemcpy" in j["name"]:
+                if "Memcpy" in j["name"] or "Memset" in j["name"]:
                     continue
                 warnings.warn(
                     "Kernel name missing in capture event args, "
@@ -188,6 +188,12 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     Uses LRU eviction with at most ``_CAPTURE_TREE_CACHE_MAX_SIZE`` entries.
     Callers must deep-copy any events they intend to mutate so the cached tree
     stays clean for subsequent look-ups.
+
+    Returns:
+        (capture_tree, capture_roots, capture_root_data) where
+        *capture_root_data* is a list of ``(capture_events, filtered_uids)``
+        tuples — one per capture root — pre-computed from
+        :func:`get_subtree_events`.
     """
     if key in _capture_tree_cache:
         _capture_tree_cache.move_to_end(key)
@@ -199,12 +205,23 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     capture_tree = capture_perf_analyzer.tree
     capture_roots = find_capture_roots(capture_tree)
 
-    _capture_tree_cache[key] = (capture_tree, capture_roots)
+    capture_root_data = []
+    for c_root in capture_roots:
+        capture_events, capture_filtered_events = get_subtree_events(
+            capture_tree,
+            c_root,
+            cat_filter=["cuda_runtime", "cuda_driver"],
+            name_filter=["Launch", "Memcpy", "Memset"],
+        )
+        filtered_uids = {e[UID] for e in capture_filtered_events}
+        capture_root_data.append((capture_events, filtered_uids))
+
+    _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
     if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
         evicted_key, _ = _capture_tree_cache.popitem(last=False)
         print("Evicted capture tree cache entry (key={})".format(evicted_key))
 
-    return capture_tree, capture_roots
+    return capture_tree, capture_roots, capture_root_data
 
 
 def find_capture_roots(capture_tree):
@@ -399,7 +416,7 @@ def merge_capture_trace_into_graph(
             mode="FULL"
         key = "{}_{}".format(closest_batch_size, mode)
         filepath = capture_map[key]
-        capture_tree, capture_roots = _get_cached_capture_tree(
+        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath, TreePerfAnalyzer
         )
     
@@ -408,18 +425,10 @@ def merge_capture_trace_into_graph(
                 len(capture_roots), len(graph_roots)
             )
         )
-        for c_root, g_root in zip(capture_roots, graph_roots):
-            capture_events, capture_filtered_events = get_subtree_events(
-                capture_tree,
-                c_root,
-                cat_filter=["cuda_runtime", "cuda_driver"],
-                name_filter=[
-                    "Launch",
-                    "Memcpy",
-                ],
-            )
-            filtered_uids = {e[UID] for e in capture_filtered_events}
-            capture_events = copy.deepcopy(capture_events)
+        for (c_root, g_root), (cached_events, filtered_uids) in zip(
+            zip(capture_roots, graph_roots), capture_root_data
+        ):
+            capture_events = copy.deepcopy(cached_events)
             capture_filtered_events = [
                 e for e in capture_events if e[UID] in filtered_uids
             ]
