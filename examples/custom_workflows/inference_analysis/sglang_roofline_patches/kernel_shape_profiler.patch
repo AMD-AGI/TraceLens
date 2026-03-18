@@ -1,9 +1,9 @@
 diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
 new file mode 100644
-index 000000000..cbc546df4
+index 000000000..340884240
 --- /dev/null
 +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
-@@ -0,0 +1,728 @@
+@@ -0,0 +1,732 @@
 +"""
 +Automatic tensor shape metadata for Triton / FlashInfer / aiter kernels
 +in PyTorch profiler traces.
@@ -354,8 +354,16 @@ index 000000000..cbc546df4
 +                return original_fn(*args, **kwargs)
 +
 +            _stash_non_tensor_args(op_name, nt_vals)
-+            torch_op(*tensor_args)
-+            return _pop_return_value(op_name)
++            try:
++                torch_op(*tensor_args)
++                return _pop_return_value(op_name)
++            except Exception:
++                # Dispatch failed (e.g. device/type mismatch, None for
++                # non-optional Tensor, schema arity error).  Clean up
++                # thread-local stash and fall back to the original call.
++                _pop_non_tensor_args(op_name)
++                _pop_return_value(op_name)
++                return original_fn(*args, **kwargs)
 +
 +        return dispatch_wrapper
 +
@@ -427,7 +435,6 @@ index 000000000..cbc546df4
 +                pass
 +    return patches
 +
-+
 +# ---------------------------------------------------------------------------
 +# Lightweight wrappers for functions that can't use torch.library
 +# ---------------------------------------------------------------------------
@@ -462,7 +469,6 @@ index 000000000..cbc546df4
 +
 +    return wrapper
 +
-+
 +# ---------------------------------------------------------------------------
 +# Kernel-launch detection heuristics
 +# ---------------------------------------------------------------------------
@@ -473,7 +479,6 @@ index 000000000..cbc546df4
 +    "torch.ops.",   # Custom C++/CUDA op dispatch
 +    "sgl_kernel.",  # sgl-kernel extension entry points
 +)
-+
 +
 +def _source_launches_kernel(fn: Callable) -> bool:
 +    """Return True if *fn* source contains known kernel-launch patterns."""
@@ -612,7 +617,6 @@ index 000000000..cbc546df4
 +                 len(results),
 +                 ", ".join(_AUTO_DISCOVER_PREFIXES))
 +    return results
-+
 +
 +# ---------------------------------------------------------------------------
 +# Public API
