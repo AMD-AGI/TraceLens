@@ -384,6 +384,9 @@ def merge_capture_trace_into_graph(
     capture_map, capture_batch_sizes = load_capture_folder(capture_folder, metadata_json_path)
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
+        if len(graph_roots) == 0:
+            print("No graph roots found for execution root {}".format(execution_root["name"]))
+            continue
         batch_size = find_execution_details(execution_root)
         closest_batch_size = find_closest_batch_size(int(batch_size), capture_batch_sizes)
         if closest_batch_size is None:
