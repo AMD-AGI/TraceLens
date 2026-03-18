@@ -1,9 +1,9 @@
 diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
 new file mode 100644
-index 000000000..16df52980
+index 000000000..cbc546df4
 --- /dev/null
 +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
-@@ -0,0 +1,764 @@
+@@ -0,0 +1,728 @@
 +"""
 +Automatic tensor shape metadata for Triton / FlashInfer / aiter kernels
 +in PyTorch profiler traces.
@@ -38,7 +38,6 @@ index 000000000..16df52980
 +import inspect
 +import logging
 +import pkgutil
-+import re
 +import sys
 +import threading
 +from typing import Any, Callable, List, Optional, Tuple
@@ -141,8 +140,8 @@ index 000000000..16df52980
 +#
 +# In addition to the explicit registry above, ``enable()`` scans every
 +# already-loaded module whose name starts with one of these prefixes and
-+# wraps every public function that accepts at least one ``torch.Tensor``
-+# argument (and has no ``*args`` / ``**kwargs``).
++# wraps only functions likely to launch kernels.  Discovery is filtered by
++# signature/source heuristics to avoid wrapping unrelated utility code.
 +# ---------------------------------------------------------------------------
 +_AUTO_DISCOVER_PREFIXES: Tuple[str, ...] = (
 +    "flashinfer.",
@@ -464,11 +463,55 @@ index 000000000..16df52980
 +    return wrapper
 +
 +
++# ---------------------------------------------------------------------------
++# Kernel-launch detection heuristics
++# ---------------------------------------------------------------------------
++
++# Substrings that strongly indicate a function launches a GPU kernel.
++_KERNEL_SOURCE_INDICATORS = (
++    "[grid",        # Triton launch pattern: kernel[grid](...)
++    "torch.ops.",   # Custom C++/CUDA op dispatch
++    "sgl_kernel.",  # sgl-kernel extension entry points
++)
++
++
++def _source_launches_kernel(fn: Callable) -> bool:
++    """Return True if *fn* source contains known kernel-launch patterns."""
++    try:
++        source = inspect.getsource(fn)
++    except (OSError, TypeError):
++        return False
++    return any(marker in source for marker in _KERNEL_SOURCE_INDICATORS)
++
++
++def _is_likely_kernel_launcher(fn: Callable, sig: inspect.Signature) -> bool:
++    """
++    Decide whether *fn* is likely to launch a GPU kernel.
++
++    Priority:
++    1) Tensor annotation exists -> include.
++    2) Non-tensor annotations only -> exclude.
++    3) No annotations -> fallback to source pattern matching.
++    """
++    has_any_annotation = False
++    for param in sig.parameters.values():
++        if param.annotation is inspect._empty:
++            continue
++        has_any_annotation = True
++        stype = _infer_schema_type(param)
++        if stype is not None and "Tensor" in stype:
++            return True
++
++    if has_any_annotation:
++        return False
++
++    return _source_launches_kernel(fn)
++
++
 +def _force_import_submodules(prefix: str) -> None:
 +    """
-+    Recursively import every submodule under *prefix* so that they
-+    appear in ``sys.modules`` and can be discovered by
-+    ``_discover_kernel_entry_points``.
++    Recursively import submodules under *prefix* so they appear in
++    ``sys.modules`` before auto-discovery runs.
 +
 +    *prefix* should be a top-level package name without a trailing dot
 +    (e.g. ``"sglang.srt"``).
@@ -477,11 +520,12 @@ index 000000000..16df52980
 +        pkg = importlib.import_module(prefix)
 +    except ImportError:
 +        return
-+    # pkgutil.walk_packages needs __path__ (i.e. a package, not a plain module)
++
 +    pkg_path = getattr(pkg, "__path__", None)
 +    if pkg_path is None:
 +        return
-+    for importer, mod_name, _is_pkg in pkgutil.walk_packages(
++
++    for _importer, mod_name, _is_pkg in pkgutil.walk_packages(
 +        pkg_path, prefix=prefix + "."
 +    ):
 +        if mod_name in sys.modules:
@@ -489,120 +533,28 @@ index 000000000..16df52980
 +        try:
 +            importlib.import_module(mod_name)
 +        except Exception:
-+            # Some submodules may fail to import (missing optional deps,
-+            # C extensions, etc.) — that's fine, skip them.
++            # Optional modules may fail to import depending on environment.
 +            pass
-+
-+
-+# ---------------------------------------------------------------------------
-+# Source-level heuristic: does a function launch a GPU kernel?
-+# ---------------------------------------------------------------------------
-+
-+# Non-Triton kernel launch patterns.
-+#
-+# ``torch.ops.<ext>`` calls are deliberately EXCLUDED from auto-discovery:
-+# custom ops registered via ``torch.library`` already produce ``cpu_op``
-+# profiler events with ``Input Dims`` metadata.  Wrapping them again
-+# creates redundant events and inflates trace size.
-+#
-+# ``torch._C.*`` (PyTorch internals) is excluded via negative lookbehind.
-+_EXT_LAUNCH_RE = re.compile(
-+    r"\b_custom_ar\."         # custom allreduce extension
-+    r"|(?<!\.)_C\."           # vLLM-style C extension (not torch._C.)
-+)
-+
-+# Triton kernel launch: `kernel[grid](...)` produces `](` in source.
-+# This pattern alone is too loose (matches `dict[key](...)` etc.), so
-+# it is only used when the function's module also contains Triton JIT
-+# objects — proof that the module actually defines or imports kernels.
-+_TRITON_LAUNCH_RE = re.compile(r"\]\s*\(")
-+
-+
-+def _module_has_triton_jit_objects(mod) -> bool:
-+    """Return True if *mod* has any Triton JIT kernel objects in its globals."""
-+    try:
-+        for v in vars(mod).values():
-+            if type(v).__name__ in ("JITFunction", "Autotuner", "Heuristics"):
-+                return True
-+    except TypeError:
-+        pass
-+    return False
-+
-+
-+# Cache so each module is inspected at most once.
-+_triton_module_cache: dict = {}
-+
-+
-+def _launches_kernel(fn: Callable) -> bool:
-+    """
-+    Heuristic: return True if *fn*'s source code contains a pattern
-+    that indicates it launches a GPU kernel.
-+
-+    Two checks:
-+    1. Non-Triton: ``torch.ops.<custom>.*``, ``_C.*``, ``_custom_ar.*``
-+       in the function source.
-+    2. Triton: ``](`` in the function source **and** the function's
-+       module contains at least one Triton JIT object (``JITFunction``,
-+       ``Autotuner``, ``Heuristics``).
-+
-+    Returns False when source is unavailable — better to miss a
-+    function than to wrap a non-kernel utility.
-+    """
-+    try:
-+        source = inspect.getsource(fn)
-+    except (OSError, TypeError):
-+        return False
-+
-+    if _EXT_LAUNCH_RE.search(source):
-+        return True
-+
-+    if _TRITON_LAUNCH_RE.search(source):
-+        fn_mod_name = getattr(fn, "__module__", "") or ""
-+        if fn_mod_name not in _triton_module_cache:
-+            mod = sys.modules.get(fn_mod_name)
-+            _triton_module_cache[fn_mod_name] = (
-+                mod is not None and _module_has_triton_jit_objects(mod)
-+            )
-+        return _triton_module_cache[fn_mod_name]
-+
-+    return False
 +
 +
 +def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
 +    """
-+    Scan ``sys.modules`` for modules whose name starts with one of
-+    ``_AUTO_DISCOVER_PREFIXES`` and collect **kernel launcher functions**:
-+    regular Python functions whose source code contains a GPU kernel
-+    launch pattern (Triton ``kernel[grid](...)``, ``torch.ops.<ext>.*``,
-+    or C-extension calls).
-+
-+    ``@triton.jit`` kernel objects are **excluded** — replacing them in
-+    module globals breaks the Triton compiler's global resolution when
-+    one JIT kernel calls another (e.g. ``remap_xcd``).
-+
-+    Only functions *defined* within a target namespace are included
-+    (checked via ``__module__``).
-+
-+    Before scanning, all submodules under each prefix are force-imported
-+    so that deeply nested modules are present in ``sys.modules``.
++    Scan already-loaded ``sys.modules`` for modules whose name starts
++    with one of ``_AUTO_DISCOVER_PREFIXES`` and collect only functions
++    likely to launch GPU kernels.
 +
 +    Returns a list of ``(module_path, function_name)`` pairs.
 +    """
-+    # Force-import all submodules under each prefix so deeply nested
-+    # modules are available in sys.modules.
++    # Force-import submodules under each discovery prefix first so deeper
++    # kernels become visible in sys.modules.
 +    for prefix in _AUTO_DISCOVER_PREFIXES:
 +        _force_import_submodules(prefix.rstrip("."))
 +
 +    results: List[Tuple[str, str]] = []
 +    seen_ids: set = set()
 +
-+    # Exclude the profiler's own module to avoid wrapping ourselves.
-+    _self_module = __name__
-+
 +    for mod_name, mod in list(sys.modules.items()):
 +        if mod is None:
-+            continue
-+        if mod_name == _self_module:
 +            continue
 +        if not any(mod_name.startswith(p) for p in _AUTO_DISCOVER_PREFIXES):
 +            continue
@@ -616,6 +568,10 @@ index 000000000..16df52980
 +            obj = mod_dict[attr_name]
 +
 +            # Only wrap regular Python functions.
++            # @triton.jit objects (JITFunction / Autotuner) must NOT be
++            # wrapped — replacing them in module globals breaks the
++            # Triton compiler's global resolution for device-side calls
++            # between JIT kernels (e.g. remap_xcd, _rmsmorm_op, etc.).
 +            if not inspect.isfunction(obj):
 +                continue
 +
@@ -639,13 +595,20 @@ index 000000000..16df52980
 +            if not sig.parameters:
 +                continue
 +
-+            # Only include functions that actually launch a GPU kernel
-+            if not _launches_kernel(obj):
++            # Skip signatures we cannot map to a torch schema.
++            if any(
++                p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
++                for p in sig.parameters.values()
++            ):
++                continue
++
++            # Core filter: only keep likely kernel launchers.
++            if not _is_likely_kernel_launcher(obj, sig):
 +                continue
 +
 +            results.append((mod_name, attr_name))
 +
-+    logger.debug("Auto-discovered %d kernel launchers from %s",
++    logger.debug("Auto-discovered %d kernel candidates from %s",
 +                 len(results),
 +                 ", ".join(_AUTO_DISCOVER_PREFIXES))
 +    return results
@@ -667,14 +630,14 @@ index 000000000..16df52980
 +        _patches.clear()
 +        _wrapped_ids: set = set()  # track function ids to avoid double-wrapping
 +
-+        # Merge explicit registry with auto-discovered functions.
++        # Merge explicit registry with filtered auto-discovered functions.
 +        # Duplicates are harmless — _wrapped_ids prevents double-wrapping.
 +        all_entry_points = (
-+            list(_KERNEL_ENTRY_POINTS)+
++            list(_KERNEL_ENTRY_POINTS)
++            +
 +            _discover_kernel_entry_points()
 +        )
-+
-+                
++             
 +        for module_path, attr_name in all_entry_points:
 +            resolved = _resolve_target(module_path, attr_name)
 +            if resolved is None:
@@ -738,6 +701,7 @@ index 000000000..16df52980
 +                setattr(container, name, wrapper)
 +                _patches.append((container, name, original_fn))
 +
++        n_discovered = len(all_entry_points) - len(_KERNEL_ENTRY_POINTS)
 +        _enabled = True
 +        logger.info(
 +            "kernel_shape_profiler enabled: %d references patched across "
@@ -745,7 +709,7 @@ index 000000000..16df52980
 +            len(_patches),
 +            len(all_entry_points),
 +            len(_KERNEL_ENTRY_POINTS),
-+            len(all_entry_points) - len(_KERNEL_ENTRY_POINTS),
++            n_discovered,
 +        )
 +
 +
