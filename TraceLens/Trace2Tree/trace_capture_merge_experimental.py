@@ -16,6 +16,8 @@ model suitable for performance analysis.
 """
 
 import sys
+import copy
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
@@ -60,27 +62,30 @@ def verify_subtree_events(capture_events, graph_events):
                 len(capture_events), len(graph_events)
             )
         )
+        return 0
     else:
         # print("=========matching ========")
         for j, i in zip(capture_events, graph_events):
             if "kernel" not in j.get("args", {}).keys():
+                if "hipMemcpy" in j["name"]:
+                    continue
                 warnings.warn(
                     "Kernel name missing in capture event args, "
                     "alignment has not been verified",
                     stacklevel=2,
                 )
-                return
+                continue
             if i["name"] != j.get("args", {}).get("kernel", j["name"]):
                 print(
                     "Mismatch in kernel name: {} vs {}".format(
                         i["name"], j.get("args", {}).get("kernel", j["name"])
                     )
                 )
-                return
+                return 0
     #print(
     #    "Subtree events match successfully with {} events".format(len(capture_events))
     #)
-    return
+    return 1
 
 
 def update_subtree_uids_and_timestamps(
@@ -172,6 +177,35 @@ def make_connections(graph_tree, graph_filtered_events, capture_filtered_events)
         else:
             event.pop("non_gpu_path", None)
     return graph_tree
+
+_CAPTURE_TREE_CACHE_MAX_SIZE = 8
+_capture_tree_cache: OrderedDict = OrderedDict()
+
+
+def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
+    """Load a capture tree, returning a cached copy when *key* has been seen.
+
+    Uses LRU eviction with at most ``_CAPTURE_TREE_CACHE_MAX_SIZE`` entries.
+    Callers must deep-copy any events they intend to mutate so the cached tree
+    stays clean for subsequent look-ups.
+    """
+    if key in _capture_tree_cache:
+        _capture_tree_cache.move_to_end(key)
+        print("Cache hit for capture tree (key={})".format(key))
+        return _capture_tree_cache[key]
+
+    print("Loading capture trace: {} (key={})".format(filepath, key))
+    capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
+    capture_tree = capture_perf_analyzer.tree
+    capture_roots = find_capture_roots(capture_tree)
+
+    _capture_tree_cache[key] = (capture_tree, capture_roots)
+    if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
+        evicted_key, _ = _capture_tree_cache.popitem(last=False)
+        print("Evicted capture tree cache entry (key={})".format(evicted_key))
+
+    return capture_tree, capture_roots
+
 
 def find_capture_roots(capture_tree):
     """Find capture roots by pairing StreamBeginCapture / StreamEndCapture events."""
@@ -346,7 +380,6 @@ def merge_capture_trace_into_graph(
     graph_tree = graph_perf_analyzer.tree
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
     ##Use cuda graph APIs to find the root node for capture subtrees
-
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
     capture_map, capture_batch_sizes = load_capture_folder(capture_folder, metadata_json_path)
     for execution_root, graph_roots in execution_graph_root_map:
@@ -363,12 +396,9 @@ def merge_capture_trace_into_graph(
             mode="FULL"
         key = "{}_{}".format(closest_batch_size, mode)
         filepath = capture_map[key]
-        print("Loading capture trace: {} (key={})".format(filepath, key))
-        capture_perf_analyzer = TreePerfAnalyzer.from_file(
-            filepath, add_python_func=True
+        capture_tree, capture_roots = _get_cached_capture_tree(
+            key, filepath, TreePerfAnalyzer
         )
-        capture_tree = capture_perf_analyzer.tree
-        capture_roots = find_capture_roots(capture_tree)
     
         print(
             "Found {} capture roots and {} graph roots".format(
@@ -385,6 +415,11 @@ def merge_capture_trace_into_graph(
                     "Memcpy",
                 ],
             )
+            filtered_uids = {e[UID] for e in capture_filtered_events}
+            capture_events = copy.deepcopy(capture_events)
+            capture_filtered_events = [
+                e for e in capture_events if e[UID] in filtered_uids
+            ]
             graph_events, graph_filtered_events = get_subtree_events(
                 graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
             )
@@ -393,7 +428,10 @@ def merge_capture_trace_into_graph(
             #        c_root["name"], g_root["name"]
             #     )
             #)
-            verify_subtree_events(capture_filtered_events, graph_filtered_events)
+            verify_success = verify_subtree_events(capture_filtered_events, graph_filtered_events)
+            if verify_success == 0:
+                print("Warning: subtree events verification failed for capture root {} and graph root {}".format(c_root["name"], g_root["name"]))
+                continue
             start_uid = graph_tree.events[-1][UID] + 1
             capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
                 capture_tree,

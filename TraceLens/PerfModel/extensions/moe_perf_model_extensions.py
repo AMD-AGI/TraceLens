@@ -977,3 +977,193 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
         return "matrix"
+
+
+class moe_aiter_ck_stage1(UnfusedMoE_Up):
+    """
+    Performance model for AITER CK-based unfused MoE stage1 (up projection).
+    Handles aiter::ck_moe_stage1 launches (ck_moe_stage1_fwd).
+
+    Unlike moe_cktile2stages_gemm1_ck, this op receives both w1 and w2 tensors,
+    allowing direct extraction of hidden_dim and inter_dim from weight shapes.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        """
+        Extract MoE dimensions and data types from event args.
+
+        Expected Input Dims format (from aiter::ck_moe_stage1):
+        [[tokens, hidden_dim], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
+         [sorted_ids], [sorted_expert_ids], [num_valid_ids],
+         [tokens, topk, inter_dim], ...]
+
+        Expected Input type format:
+        [dtype_input, dtype_w1, dtype_w2, ...]
+        """
+        args = event.get('args', {})
+
+        kernel_input_shape = args['Input Dims']
+        input_shape = kernel_input_shape[0]
+        w1_shape = kernel_input_shape[1]
+        w2_shape = kernel_input_shape[2]
+        out_shape = kernel_input_shape[6]
+
+        num_tokens = input_shape[0]
+        hidden_dim = input_shape[1]
+
+        E, hidden_dim_w2, inter_dim = w2_shape
+
+        # Account for INT4 weight packing: w1's K dim may be compressed
+        int4_war = hidden_dim_w2 // w1_shape[-1]
+        inter_dim *= int4_war
+
+        num_experts = E
+        topk = out_shape[1]
+
+        gated = (w1_shape[1] == 2 * inter_dim)
+
+        input_dtype = args['Input type'][0]
+        weight_dtype = args['Input type'][1]
+
+        return {
+            'num_tokens': num_tokens,
+            'hidden_dim': hidden_dim,
+            'inter_dim': inter_dim,
+            'num_experts': num_experts,
+            'topk': topk,
+            'gated': gated,
+            'input_dtype': input_dtype,
+            'weight_dtype': weight_dtype,
+        }
+
+    def flops(self):
+        return self.flops_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            self.param_details['gated']
+        )
+
+    def bytes(self):
+        input_bpe = DTYPE_TO_BYTES.get(self.param_details['input_dtype'], 2)
+        weight_bpe = DTYPE_TO_BYTES.get(self.param_details['weight_dtype'], 1)
+        output_bpe = input_bpe
+
+        return self.bytes_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            self.param_details['gated'],
+            input_bpe,
+            weight_bpe,
+            output_bpe
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class moe_aiter_ck_stage2(UnfusedMoE_Down):
+    """
+    Performance model for AITER CK-based unfused MoE stage2 (down projection).
+    Handles aiter::ck_moe_stage2 launches (ck_moe_stage2_fwd).
+
+    Unlike moe_cktile2stages_gemm2_ck, this op receives w1, w2 and output tensors
+    at different arg positions: inter_states[0], w1[1], w2[2], ..., out[6].
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        """
+        Extract MoE dimensions and data types from event args.
+
+        Expected Input Dims format (from aiter::ck_moe_stage2):
+        [[tokens, topk, inter_dim], [E, N, K], [E, hidden_dim, inter_dim_packed],
+         [sorted_ids], [sorted_expert_ids], [num_valid_ids],
+         [tokens, hidden_dim], ...]
+
+        Expected Input type format:
+        [dtype_inter_states, dtype_w1, dtype_w2, ...]
+        """
+        args = event.get('args', {})
+
+        kernel_input_shape = args['Input Dims']
+        input_shape = kernel_input_shape[0]
+        w2_shape = kernel_input_shape[2]
+
+        num_tokens, topk, inter_dim = input_shape
+        num_experts, hidden_dim, _ = w2_shape
+
+        input_dtype = args['Input type'][0]
+        weight_dtype = args['Input type'][2]
+
+        return {
+            'num_tokens': num_tokens,
+            'hidden_dim': hidden_dim,
+            'inter_dim': inter_dim,
+            'num_experts': num_experts,
+            'topk': topk,
+            'input_dtype': input_dtype,
+            'weight_dtype': weight_dtype,
+        }
+
+    def flops(self):
+        return self.flops_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+        )
+
+    def bytes(self):
+        input_bpe = DTYPE_TO_BYTES.get(self.param_details['input_dtype'], 2)
+        weight_bpe = DTYPE_TO_BYTES.get(self.param_details['weight_dtype'], 1)
+        output_bpe = input_bpe
+
+        return self.bytes_func(
+            self.param_details['num_tokens'],
+            self.param_details['hidden_dim'],
+            self.param_details['inter_dim'],
+            self.param_details['topk'],
+            input_bpe,
+            weight_bpe,
+            output_bpe
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"

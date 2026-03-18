@@ -14,6 +14,50 @@ from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise
 from math import prod
 
 class gemm_a8w8_blockscale(GEMM):
+    """
+    Performance model for AITER's gemm_a8w8_blockscale kernel.
+
+    Computes: Y[M, N] = dequant(X[M, K]) @ dequant(W[N, K]).T
+    where X and W are INT8 tensors with per-block FP32 scale factors.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_a8w8_blockscale.py
+
+    Kernel mechanics:
+        The kernel tiles the K dimension into blocks of size BLOCK_SIZE_K.
+        Within each block, INT8 values from X and W are multiplied to produce
+        INT32 partial products, then rescaled by (x_scale * w_scale) for that
+        block before accumulating into FP32. 
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K  (inherited from GEMM base class)
+
+        We count only the matrix-multiply FLOPs (multiply-accumulate). The
+        per-block scale multiplications (x_scale[m, k_block] * w_scale[k_block, n_block])
+        are O(M * N * K / block_size) -- orders of magnitude fewer than the
+        matmul FLOPs -- and are ignored for roofline purposes.
+
+    Roofline calculation -- Bytes:
+        bytes_A      = M * K * bpe(X)          # X is INT8  -> 1 byte
+        bytes_B      = N * K * bpe(W)          # W is INT8  -> 1 byte
+        bytes_output = M * N * bpe(output)     # output is BF16 -> 2 bytes
+        Total        = bytes_A + bytes_B + bytes_output
+
+        Scale tensors (x_scale, w_scale) are omitted from the byte count.
+        Their sizes -- x_scale: (M, ceil(K/block_k)) and w_scale:
+        (ceil(N/block_n), ceil(K/block_k)) -- are negligible relative to the
+        main operands since block sizes are typically 128-256.
+
+    Compute precision:
+        INT8 inputs -> FP8 peak TFLOPS/s used for the roofline ceiling
+        (maps through the first element of dtype_A_B via torch_dtype_map).
+
+    Expected Input Dims from trace:
+        [[M, K], [N, K], [x_scale_shape], [w_scale_shape], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, dtype_x_scale, dtype_w_scale, ...]
+    """
     @staticmethod
     def get_param_details(event):
         return {
@@ -74,6 +118,79 @@ class vllm_rocm_unquantized_gemm(GEMM):
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+class batched_gemm_a16wfp4(GEMM):
+    """
+    Performance model for AITER's batched_gemm_a16wfp4_ kernel.
+
+    Computes: Y[b] = X[b] @ W[b].T  for each batch b
+    where X is BF16/FP16 with shape (B, M, K), and W is FP4 E2M1 packed
+    as uint8 with shape (B, N, K//2), two FP4 values per byte.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/batched/batched_gemm_a16wfp4.py
+
+    Kernel mechanics:
+        The kernel pre-quantizes BF16 activations to MXFP4 on-the-fly and
+        performs batched matrix multiplication using FP4 tensor cores.
+        Weights are stored in FP4 E2M1 format with E8M0 per-group scales
+        (one scale per 32 K-dimension elements).  Optional split-K with a
+        separate reduction kernel is used for small-M shapes.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = B * 2 * M * N * K  (batched GEMM, per-batch inherited from
+        GEMM base class and scaled by B)
+
+        Only matrix-multiply FLOPs are counted.  Per-block scaling
+        (w_scales) and split-K reduction FLOPs are ignored as they are
+        orders of magnitude smaller than the matmul.
+
+    Roofline calculation -- Bytes:
+        bytes_X      = B * M * K   * bpe(X)      # X is BF16  -> 2 bytes
+        bytes_W      = B * N * K/2 * 1            # W is FP4 packed (0.5 B/elem)
+        bytes_output = B * M * N   * bpe(output)  # output is BF16 -> 2 bytes
+
+    Compute precision:
+        Mapped from the first input dtype (activation dtype, typically
+        BF16) via torch_dtype_map.
+
+    Expected Input Dims from trace:
+        [[B, M, K], [B, N, K//2], [B, N, K//32], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w_packed, dtype_w_scales, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": event["args"]["Input Dims"][0][0],
+            "M": event["args"]["Input Dims"][0][1],
+            "N": event["args"]["Input Dims"][1][1],
+            "K": event["args"]["Input Dims"][0][2],
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], "c10::bfloat16"),
+        }
+
+    def flops(self):
+        return self.B * super().flops()
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = 0.5  # FP4: 4 bits = 0.5 bytes per element
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        per_batch = super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+        return None if per_batch is None else self.B * per_batch
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        return torch_dtype_map("mxfp4")
 class per_group_quant(BinaryElementwise):
     """
     Performance model for aiter::dynamic_per_token_scaled_quant.

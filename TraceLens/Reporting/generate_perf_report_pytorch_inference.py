@@ -246,7 +246,7 @@ def classify_graph_capture_trace(input_folder: str):
     trace_files = sorted(
         os.path.join(input_folder, f)
         for f in os.listdir(input_folder)
-        if f.startswith("graph_capture_rank_0")
+        if f.endswith(".json") or f.endswith(".json.gz")
     )
 
     if not trace_files:

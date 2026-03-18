@@ -36,8 +36,9 @@ See LICENSE for license information.
    <a id="cpu-idle-time-analysis"></a> and <a id="multi-kernel-issues"></a> before the subsection
    headings so in-report links work in all renderers. Always include the Detailed Analysis:
    System-Level section with full metrics even when no actionable issues exist.
-10. No redundancy: Information appears in ONE place only.
-11. Recommendations: Max ~10 lines PER recommendation. Use category-specific Action text
+10. Model and appendix: Read `metadata/model_info.json`. For the report title and any **&lt;Model&gt;** placeholder used for display: use `model_info["model"]` when it is not "Cannot be inferred from trace"; otherwise use **"Workload"**. Fill the Appendix **Model Architecture** section with the raw `model`, `architecture`, `scale`, and `precision` values from that file (they may be "Cannot be inferred from trace").
+11. No redundancy: Information appears in ONE place only.
+12. Recommendations: Max ~10 lines PER recommendation. Use category-specific Action text
     (SDPA: tile/block, backend; GEMM: fusion, tile, library; elementwise: fuse with adjacent;
     do not suggest kernel fusion for SDPA).
 -->
@@ -203,6 +204,12 @@ For each category, include total time, % of compute, average efficiency (if from
 ---
 
 ## Appendix
+
+### Model Architecture
+- **Model**: <model>
+- **Architecture**: <architecture>
+- **Scale**: <scale>
+- **Precision**: <precision>
 
 ### Hardware Reference
 - **Platform**: <platform>

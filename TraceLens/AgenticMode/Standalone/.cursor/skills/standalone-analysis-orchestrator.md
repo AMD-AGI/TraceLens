@@ -41,6 +41,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 0. Query User Inputs (Platform, Trace Path, Environment Setup)
 1. Generate Performance Report
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+5.5. Model Identification (subagent) → metadata/model_info.json
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
@@ -165,6 +166,14 @@ This script performs:
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
 - `category_findings/` - Directory for compute kernel analysis outputs
+
+---
+
+## Step 5.5: Model Identification (Subagent)
+
+Launch a Task subagent (generalPurpose) with the full contents of `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` and context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
+
+Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
 
 ---
 

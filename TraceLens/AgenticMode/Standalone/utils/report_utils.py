@@ -7,11 +7,33 @@
 """Report aggregation utilities for TraceLens AgenticMode.
 
 Provides functions for reading and aggregating findings from system-level
-and compute kernel subagents for final report assembly.
+and compute kernel subagents, and for extracting model-identification data
+for the standalone report pipeline.
 """
 
 import json
 import os
+import pandas as pd
+
+
+def extract_condensed_op_info(output_dir: str) -> bool:
+    """Extract name, Input type, Input Dims to metadata/condensed_op_info.csv.
+
+    Reads perf_report_csvs/unified_perf_summary.csv and writes the three columns
+    for the condensed op info subagent. Returns True on success.
+    """
+    _CONDENSED_OP_INFO_COLUMNS = ("name", "Input type", "Input Dims")
+    csv_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+    if not os.path.isfile(csv_path):
+        return False
+    try:
+        df = pd.read_csv(csv_path, usecols=list(_CONDENSED_OP_INFO_COLUMNS))
+    except (ValueError, KeyError):
+        return False
+    out_path = os.path.join(output_dir, "metadata", "condensed_op_info.csv")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df.to_csv(out_path, index=False)
+    return True
 
 
 def load_manifest_categories(output_dir):
