@@ -144,6 +144,7 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 ## Additional Notes
 - Quantized MoE detected: [yes/no, with data types]
 - Fused vs unfused: [summary of operation types]
+- **Byte estimation accuracy:** The bytes metric uses a uniform expert routing assumption to estimate weight memory traffic (E_active). This makes TB/s, FLOPS/Byte, and efficiency % average-case approximations. FLOPS are exact.
 
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
@@ -196,6 +197,7 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the peak, with the precision-specific peak MAF
 3. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
+5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**.When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
 
 ---
 
