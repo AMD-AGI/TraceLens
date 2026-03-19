@@ -4638,8 +4638,17 @@ class te_fused_attn(SDPA):
         N_KV = k_shape[0]
         H_KV = k_shape[2]
 
+        if k_shape[1] != B or v_shape[1] != B:
+            raise ValueError(
+                f"FusedAttnFunc: batch mismatch Q={B}, K={k_shape[1]}, V={v_shape[1]}"
+            )
+        if k_shape[2] != v_shape[2]:
+            raise ValueError(
+                f"FusedAttnFunc: KV head mismatch K={k_shape[2]}, V={v_shape[2]}"
+            )
+
         dropout_p = 0.0
-        is_causal = True
+        is_causal = False
         if len(concrete_inputs) > 14 and concrete_inputs[14] not in ("", "None"):
             try:
                 dropout_p = float(concrete_inputs[14])

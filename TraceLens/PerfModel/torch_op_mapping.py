@@ -56,7 +56,7 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
-    # TE FusedAttn → SDPA (causal attention via TransformerEngine)
+    # TE FusedAttn → SDPA (fused attention via TransformerEngine)
     "FusedAttnFunc": perf_model.te_fused_attn,
 }
 

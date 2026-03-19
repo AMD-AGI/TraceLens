@@ -40,11 +40,11 @@ _V_SHAPE = [8192, 8, 32, 64]
 
 
 def _fused_attn_event(q=None, k=None, v=None, dropout_p="0.1", is_causal="True"):
-    q = q or _Q_SHAPE
-    k = k or _K_SHAPE
-    v = v or _V_SHAPE
+    q = q or list(_Q_SHAPE)
+    k = k or list(_K_SHAPE)
+    v = v or list(_V_SHAPE)
     # TE FusedAttnFunc: scalars at [0..8], then Q/K/V at [9..11]
-    dims = [[]] * 9 + [q, k, v] + [[]] * 9
+    dims = [[] for _ in range(9)] + [q, k, v] + [[] for _ in range(9)]
     types = (
         ["Scalar", "Scalar", "Scalar", "int", "int", "", "", "", ""]
         + ["c10::BFloat16"] * 3
@@ -99,6 +99,16 @@ def test_fused_attn_flops_non_causal():
     model = te_fused_attn(event)
     B, H, S, d_h = 8, 32, 8192, 64
     expected = 2 * (2 * B * H * S * S * d_h)  # no causal scaling, full QK + PV
+    assert model.flops() == expected
+
+
+def test_fused_attn_missing_is_causal_defaults_false():
+    """When Concrete Inputs is too short, is_causal defaults to False (non-causal)."""
+    event = _fused_attn_event()
+    event["args"]["Concrete Inputs"] = [""] * 10  # no [14] or [15]
+    model = te_fused_attn(event)
+    B, H, S, d_h = 8, 32, 8192, 64
+    expected = 2 * (2 * B * H * S * S * d_h)  # non-causal
     assert model.flops() == expected
 
 
