@@ -68,6 +68,8 @@ op_to_perf_model_class_map = {
     "FusedRoPEFunc": perf_model.fused_rope_fwd,
     # CrossEntropy (fused softmax + nll loss)
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
+    # TE FusedAttn → SDPA (causal attention via TransformerEngine)
+    "FusedAttnFunc": perf_model.te_fused_attn,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
 }
@@ -247,6 +249,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] == "FusedAttnFuncBackward":
+        return "SDPA_bwd"
     elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
         "MambaSplitConv1dScanCombinedFn",
     ]:

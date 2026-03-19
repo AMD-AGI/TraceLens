@@ -4590,6 +4590,78 @@ class RMSNormBwd(Normalization):
         return bytes
 
 
+# 10. TransformerEngine FusedAttn
+
+
+class te_fused_attn(SDPA):
+    """
+    TransformerEngine FusedAttnFunc: fused multi-head attention.
+
+    In the trace (sbhd format):
+      Q, K, V are 4D tensors (first 3 consecutive 4D shapes in Input Dims)
+      Shape: [seq_len, batch_size, num_heads, head_dim]
+      Concrete Inputs[14] = dropout_p
+      Concrete Inputs[15] = is_causal
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+
+        q_idx = None
+        for i, dim in enumerate(input_dims):
+            if isinstance(dim, (list, tuple)) and len(dim) == 4:
+                if (
+                    i + 2 < len(input_dims)
+                    and isinstance(input_dims[i + 1], (list, tuple))
+                    and len(input_dims[i + 1]) == 4
+                    and isinstance(input_dims[i + 2], (list, tuple))
+                    and len(input_dims[i + 2]) == 4
+                ):
+                    q_idx = i
+                    break
+        if q_idx is None:
+            raise ValueError(
+                f"FusedAttnFunc: could not find Q/K/V 4D tensors in Input Dims: {input_dims}"
+            )
+
+        q_shape = input_dims[q_idx]
+        k_shape = input_dims[q_idx + 1]
+        v_shape = input_dims[q_idx + 2]
+
+        # TE sbhd: [seq_len, batch, heads, head_dim]
+        B = q_shape[1]
+        N_Q = q_shape[0]
+        H_Q = q_shape[2]
+        d_h = q_shape[3]
+        N_KV = k_shape[0]
+        H_KV = k_shape[2]
+
+        dropout_p = 0.0
+        is_causal = True
+        if len(concrete_inputs) > 14 and concrete_inputs[14] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[14])
+            except (ValueError, TypeError):
+                pass
+        if len(concrete_inputs) > 15 and concrete_inputs[15] not in ("", "None"):
+            is_causal = concrete_inputs[15].lower() == "true"
+
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h,
+            "d_h_v": d_h,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+
 # ==============================================================================
 # MoE Communication – MoEDispatch / MoECombine (token routing)
 # ==============================================================================
