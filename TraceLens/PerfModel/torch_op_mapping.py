@@ -68,7 +68,7 @@ op_to_perf_model_class_map = {
     "FusedRoPEFunc": perf_model.fused_rope_fwd,
     # CrossEntropy (fused softmax + nll loss)
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
-    # TE FusedAttn → SDPA (causal attention via TransformerEngine)
+    # TE FusedAttn → SDPA (fused attention via TransformerEngine)
     "FusedAttnFunc": perf_model.te_fused_attn,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
