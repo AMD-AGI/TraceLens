@@ -19,9 +19,7 @@ _ARCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arch")
 def list_platforms():
     """Return available platform names derived from arch/*.json filenames."""
     return sorted(
-        f.removesuffix(".json")
-        for f in os.listdir(_ARCH_DIR)
-        if f.endswith(".json")
+        f.removesuffix(".json") for f in os.listdir(_ARCH_DIR) if f.endswith(".json")
     )
 
 

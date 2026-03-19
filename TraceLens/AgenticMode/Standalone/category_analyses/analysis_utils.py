@@ -331,7 +331,6 @@ def build_operation_metrics(
     return operations
 
 
-
 def compute_impact_estimates(
     operations: List[dict],
     category: str,
