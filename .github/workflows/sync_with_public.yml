@@ -51,9 +51,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
-          RESPONSE=$(gh api repos/${{ github.repository }}/pulls \
-            -f title="Sync from public TraceLens repo" \
+          gh api repos/${{ github.repository }}/pulls \
+            -f title="[Auto] Sync from public TraceLens repo" \
             -f body="Automated sync from public TraceLens repo: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
             -f head="$BRANCH" \
-            -f base="main")
-          echo "$RESPONSE" | jq -r '.html_url'
+            -f base="main"
