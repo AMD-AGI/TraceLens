@@ -115,7 +115,6 @@ For each validated bottleneck, provide recommendations in both categories:
 **Kernel Optimization Focus:**
 - Normalization ops use native PyTorch kernels, not optimized BLAS
 - If significantly below baseline, investigate kernel issues
-- Generate replay artifact for kernel team optimization
 
 ### Step 7: Write Category Findings
 
@@ -146,7 +145,7 @@ The findings file **must** end with an Impact Summary section:
 - **Symptoms:** Normalization at <20% while elementwise at >70%
 - **Issue:** Normalization kernel may be suboptimal
 - **Algorithmic:** Try LayerNorm or GroupNorm alternatives
-- **Kernel:** Generate replay artifact for kernel investigation
+- **Kernel:** Profile kernel if efficiency is below expected threshold
 
 ### CNN-Heavy Workloads
 - **Symptoms:** BatchNorm is 10-50% of compute

@@ -19,7 +19,7 @@ _ARCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arch")
 def list_platforms():
     """Return available platform names derived from arch/*.json filenames."""
     return sorted(
-        f.removesuffix(".json").upper()
+        f.removesuffix(".json")
         for f in os.listdir(_ARCH_DIR)
         if f.endswith(".json")
     )
@@ -27,6 +27,6 @@ def list_platforms():
 
 def load_arch(platform: str) -> dict:
     """Read and return the arch JSON dict for the given platform."""
-    path = os.path.join(_ARCH_DIR, f"{platform.lower()}.json")
+    path = os.path.join(_ARCH_DIR, f"{platform}.json")
     with open(path) as f:
         return json.load(f)

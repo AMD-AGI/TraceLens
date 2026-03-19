@@ -120,7 +120,6 @@ For each validated bottleneck, provide recommendations in both categories:
 **Kernel Optimization Focus:**
 - If baseline ops (add, mul, copy) have low efficiency, investigate kernel issues
 - Compare to baseline bandwidth to identify anomalies
-- Generate replay artifact for ops with unexpectedly low HBM bandwidth
 - Check for memory access pattern issues
 
 ### Step 7: Write Category Findings

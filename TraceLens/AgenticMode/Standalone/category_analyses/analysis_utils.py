@@ -215,6 +215,7 @@ def calculate_efficiency(
         "flops_per_byte": None,
         "compute_spec": None,
         "resolved_peak_maf": None,
+        "resolved_peak_hbm_bw": None,
         "warning": None,
         "is_anomaly": False,
     }
@@ -242,6 +243,7 @@ def calculate_efficiency(
     else:
         peak_maf = peak_maf_or_maf_dict
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
+    result["resolved_peak_hbm_bw"] = round(peak_hbm_bw, 2) if peak_hbm_bw else None
 
     if flops_byte:
         balance_point = peak_maf / peak_hbm_bw

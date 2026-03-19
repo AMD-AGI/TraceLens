@@ -126,7 +126,6 @@ For each validated bottleneck, provide recommendations in both categories:
 - Look for fusion opportunities with adjacent operations in the tree
 
 **Kernel Optimization Focus:**
-- Generate replay artifact for high-time operations with low efficiency
 - Flag operations where the kernel name suggests a suboptimal implementation
 - Note operations that may benefit from kernel tuning
 
@@ -147,7 +146,7 @@ Sub-categories: W graph, V miscellaneous.
 ## Key Findings
 
 ### 1. <Operation Name>
-- **Time:** X ms (Y% of compute)
+- **Time:** X ms (Y% of compute/memory)
 - **Efficiency:** Z%
 - **Called from:** [parent chain context]
 - **What it does:** [LLM inference from name + kernel details + tree context]
@@ -176,6 +175,11 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 - Synchronization overhead is covered in the CPU/Idle system findings
 ```
 
+**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
+- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
+- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
+Do not look up peaks independently from the metadata dict.
+
 **Note:** `kernel_tuning` impact estimates are pre-computed in the corresponding `category_data/<category>_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
 **Impact estimation guidelines:**
@@ -201,7 +205,7 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 - **Examples:** Custom layers, embedding operations, index operations, scatter/gather, topk
 - **Approach:** Use tree data to understand purpose, then recommend based on what the op actually does
 - **Algorithmic:** Check if a fused or library-optimized version exists
-- **Kernel:** Generate replay artifact if efficiency is low
+- **Kernel:** Profile kernel if efficiency is below expected threshold
 
 ### Potential Miscategorization
 - **Symptoms:** Operation name or kernel details suggest it belongs to another category

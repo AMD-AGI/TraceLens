@@ -115,7 +115,7 @@ For each validated bottleneck, provide recommendations in both categories:
 - Always check `compute_spec` before recommending quantization — do NOT suggest "lower precision" if the operation is already at the narrowest practical precision (FP4)
 
 **Kernel Optimization Focus:**
-- For memory-bound ops not reaching peak HBM BW: kernel is leaving bandwidth on the table — generate replay artifact for kernel team
+- For memory-bound ops not reaching peak HBM BW: kernel is leaving bandwidth on the table — prioritize memory access optimization
 - For compute-bound ops not reaching peak MAF: kernel has room for better utilization — flag for tile size or wave occupancy tuning
 - Note the specific gap: achieved vs peak for the relevant metric (TFLOPS or TB/s)
 
@@ -136,7 +136,9 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute)
-- **Efficiency:** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
+- **Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
+- **Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
+- *Use the template matching `bound_type` and delete the other.*
 - **Issue:** [Brief description including bound type]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
@@ -152,7 +154,10 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
 
-**Peak TFLOPS reference:** When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON. This is the precision-specific peak for the operation's data type (e.g., FP4 peak differs from FP8 or BF16). Do not look up peaks independently from the metadata dict.
+**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
+- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
+- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
+Do not look up peaks independently from the metadata dict.
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/moe_fused_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
@@ -194,7 +199,7 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 ## Key Principles
 
 1. **Roofline analysis drives recommendations** - Classify each operation as compute-bound or memory-bound and measure efficiency against the appropriate ceiling
-2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the peak, with the precision-specific peak MAF
+2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the appropriate peak (MAF for compute-bound, HBM BW for memory-bound)
 3. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
 5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**.When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
@@ -206,7 +211,7 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 | Efficiency | Assessment | Action |
 |------------|------------|--------|
 | >70% | Good | Limited optimization potential |
-| <70% | Needs investigation | Priority for kernel optimization, generate replay artifact |
+| <70% | Needs investigation | Priority for kernel optimization |
 
 ---
 
@@ -237,4 +242,4 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 | Occupancy | Requires hardware counters | "Kernel running slower than expected" |
 | Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
 
-**Key principle**: This analysis identifies bottlenecks and generates reproducers. Root cause diagnosis requires profiling tools on replay artifacts. Do NOT speculate about load imbalance, routing balance, or token distribution — these are not observable from kernel-level trace data.
+**Key principle**: This analysis identifies bottlenecks. Root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution — these are not observable from kernel-level trace data.

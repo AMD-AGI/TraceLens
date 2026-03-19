@@ -105,7 +105,7 @@ Check `category_specific` for implementation type:
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak TFLOPS (but consider sequence length and workload type)
+- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound — consider sequence length and workload type)
 
 **Special considerations for Paged Attention:**
 - Decode-only workloads naturally have lower efficiency (5-15%)
@@ -151,7 +151,8 @@ For each validated bottleneck, provide recommendations based on attention type. 
 
 **For Standard/Unfused Attention:**
 - **Algorithmic:** Migrate to Flash Attention
-- **Kernel:** Generate replay artifact if already using Flash Attention
+- **Kernel (compute-bound):** Profile for tile size and wave occupancy tuning
+- **Kernel (memory-bound):** Optimize memory access patterns; check bandwidth utilization
 
 **For Paged Attention (vLLM):**
 - See "Paged Attention Recommendations" section below
@@ -174,6 +175,11 @@ Include:
 |---------------|------|----------------------|-------------------------------|------------|
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
+
+**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
+- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
+- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
+Do not look up peaks independently from the metadata dict.
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/<sdpa>_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
@@ -201,7 +207,7 @@ Include:
 #### Flash Attention Already Used
 - **Good sign:** Model is already optimized
 - **Check efficiency:** Should be 40-70% for long sequences (>2048)
-- **Kernel:** Generate replay artifact if below expected
+- **Kernel:** Profile kernel if efficiency is below expected threshold
 
 #### Contiguous Copy Overhead in SDPA Wrapper
 - **Symptoms:** Multiple aten::copy_ ops with same shape as SDPA Q/K/V inputs, appearing immediately before and after the Flash Attention call

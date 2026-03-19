@@ -18,24 +18,37 @@ TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered perf
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens
+cd TraceLens-internal
 ```
 
-### 2. Install TraceLens inside your container
+### 2. Install TraceLens
 
-SSH into your node and exec into the container:
+**Local (no container):**
+
+```bash
+pip install -e .
+```
+
+**Cluster with container:**
+
+SSH into your node, exec into the container, and install:
 
 ```bash
 ssh <node>
 docker exec -it <container> bash
-```
-
-Install TraceLens:
-
-```bash
 cd /path/to/TraceLens-internal
 pip install -e .
 ```
+
+### 3. Install the Cursor CLI (Optional)
+
+The `agent` CLI is required for headless (non-interactive) runs:
+
+```bash
+curl https://cursor.com/install -fsS | bash
+```
+
+This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step.
 
 ---
 
@@ -53,18 +66,37 @@ pip install -e .
 2. **Provide when prompted:**
    - Trace file path
    - Platform (MI300X/MI325X/MI350X/MI355X/MI400)
-   - Node name
-   - Container name
+   - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
+   - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
+   - Node name / container name / venv name
    - Output directory (optional)
 
 ### To run via CLI (headless):
 
-Use the Cursor `agent` CLI to run the orchestrator non-interactively:
+Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
+
+**Cluster + container — default (training and eager inference non-vLLM/SGLang):**
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
 agent --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, node <node>, container <container>, output to <output_dir>"
+    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+```
+
+**Cluster + container — inference (vLLM/SGLang eager mode):**
+
+```bash
+cd TraceLens/AgenticMode/Standalone
+agent --print --force --trust \
+    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
+```
+
+**Cluster + container — inference (vLLM/SGLang graph replay + capture):**
+
+```bash
+cd TraceLens/AgenticMode/Standalone
+agent --print --force --trust \
+    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
@@ -143,15 +175,15 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ### Workflow Steps
 
 ```
-0.   Query User Inputs (Platform, Trace Path, Node, Container)
-1.   Generate Performance Report (perf_report.xlsx + CSVs)
+0.   Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
+1.   Generate Performance Report (branches on analysis mode: training vs inference)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+5.5. Model Identification (subagent) → metadata/model_info.json
 6.   System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7.   Compute Kernel Subagents (PARALLEL) → category_findings/
 8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
 9.   Aggregate Results: System-Level + Compute Kernel Recommendations
-10.  Generate Replay Artifacts (optional)
-11.  Generate Final Report (standalone_analysis.md)
+10.  Generate Final Report (standalone_analysis.md)
 ```
 
 ### Sub-Agents
@@ -178,31 +210,34 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
 
 
+## Supported Analysis Modes
+
+The orchestrator supports two analysis modes, selected during Step 0:
+
+| Mode | Script | Use Case |
+|------|--------|----------|
+| **Default (training and eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training traces, eager inference traces |
+| **Inference (vLLM/SGLang)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang traces in eager mode or graph replay + capture mode |
+
+For inference mode, the orchestrator also asks for the execution mode:
+- **Eager mode** — only the trace file is needed
+- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree
+
+## Execution Environments
+
+The orchestrator supports three execution environments. During Step 0, you are asked whether you are running locally or on a cluster, and the orchestrator builds the appropriate command prefixes automatically.
+
+| Environment | When to use | What happens |
+|-------------|-------------|--------------|
+| **Local** | TraceLens is installed on the machine running Cursor | Commands run directly (no SSH, no Docker) |
+| **Local + venv** | TraceLens is installed in a virtual environment on the local machine | Commands are prefixed with `source <venv>/bin/activate` |
+| **Cluster (no container)** | TraceLens is installed natively on a remote node | Commands are wrapped with `ssh <node>` |
+| **Cluster + venv** | TraceLens is installed in a venv on a remote node | Commands are wrapped with `ssh <node> "source <venv>/bin/activate && ..."` |
+| **Cluster + container** | TraceLens is installed inside a Docker container on a remote node | Commands are wrapped with `ssh <node> "docker exec <container> ..."` 
+
 ## Extending Capability
 
-The orchestrator's default workflow assumes a single eager-mode trace with standard perf report generation. For cases we're you'd like to add in custom preferences, you can override specific steps by providing instructions in the initial prompt. The normal analysis flow continues after the override.
-
-**Example: Graph execution trace with capture-phase augmentation**
-
-```
-Run standalone analysis on <path_to_graph_trace.json>
-
-This trace requires augmentation with capture-phase traces. Use this command for
-perf report generation instead:
-
-python TraceLens/Reporting/generate_perf_report_pytorch_vllm_graph.py \
-  --capture_folder <path_to_capture_folder> \
-  --graph_json_path <path_to_graph_trace.json> \
-  --output_xlsx_path <output>.xlsx \
-  --group_by_parent_module \
-  --enable_pseudo_op
-
-Once you change to this command, proceed with the normal flow.
-Do not flag idle time as an issue because that is intentional.
-Do not flag collectives as the main problem since that is a known problem.
-```
-
-This pattern generalizes: any step can be overridden or contextualized by adding instructions to the invocation prompt.
+Any step in the workflow can be overridden or contextualized by adding instructions to the initial prompt. The normal analysis flow continues after the override.
 
 ## Best Practices for Evolving the Agent
 
