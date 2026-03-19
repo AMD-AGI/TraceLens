@@ -521,6 +521,8 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+            if self.detect_recompute:
+                metrics_event["is_recompute"] = event.get("is_recompute", False)
             rows.append(metrics_event)
 
         self._show_warnings(
@@ -639,6 +641,8 @@ class TreePerfAnalyzer:
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
         groupby_cols = ["name"] + param_cols
+        if "is_recompute" in df_perf_metrics.columns:
+            groupby_cols.append("is_recompute")
         if (
             include_overlapping_kernels
             and "overlapping_kernel_names" in df_perf_metrics.columns
