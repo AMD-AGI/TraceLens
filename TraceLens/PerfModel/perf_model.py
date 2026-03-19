@@ -4634,13 +4634,18 @@ class te_fused_attn(SDPA):
         B = q_shape[1]
         N_Q = q_shape[0]
         H_Q = q_shape[2]
-        d_h = q_shape[3]
+        d_h_qk = q_shape[3]
+        d_h_v = v_shape[3]
         N_KV = k_shape[0]
         H_KV = k_shape[2]
 
         if k_shape[1] != B or v_shape[1] != B:
             raise ValueError(
                 f"FusedAttnFunc: batch mismatch Q={B}, K={k_shape[1]}, V={v_shape[1]}"
+            )
+        if k_shape[3] != d_h_qk:
+            raise ValueError(
+                f"FusedAttnFunc: QK head-dim mismatch Q={d_h_qk}, K={k_shape[3]}"
             )
         if k_shape[2] != v_shape[2]:
             raise ValueError(
@@ -4663,8 +4668,8 @@ class te_fused_attn(SDPA):
             "H_Q": H_Q,
             "N_KV": N_KV,
             "H_KV": H_KV,
-            "d_h_qk": d_h,
-            "d_h_v": d_h,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": True,

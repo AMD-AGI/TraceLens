@@ -206,6 +206,7 @@ def categorize_torch_op(row):
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
+        "FusedAttnFuncBackward",
         "flash_attn::_flash_attn_backward",
         "flash_attn::_flash_attn_varlen_backward",
         "aten::_scaled_dot_product_cudnn_attention_backward",
@@ -215,7 +216,7 @@ def categorize_torch_op(row):
         "aiter::wrapper_fmha_v3_bwd",
         "aiter::mha_bwd",
     ]
-    if row["name"] in dict_cat2names["SDPA"]:
+    if row["name"] in dict_cat2names["SDPA"] or row["name"] in sdpa_bwd_names:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
             return "SDPA_bwd"
         else:
@@ -224,8 +225,6 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
-    elif row["name"] == "FusedAttnFuncBackward":
-        return "SDPA_bwd"
     elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
         return "elementwise"
     elif row["name"].startswith("triton"):
