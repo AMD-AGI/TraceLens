@@ -541,7 +541,7 @@ def generate_perf_report_pytorch(
             warnings.warn(f"There are hipgraph launches (Count: {len(graph_launch_events)}) in this trace, but a graph capture folder not provided, the analysis might be limited", UserWarning)
     
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd"])
+    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd","sglang_profiler::tilelang_kernel_tilelang_sparse_fwd"])
     
     if extension_file:
         apply_extension(perf_analyzer, extension_file)

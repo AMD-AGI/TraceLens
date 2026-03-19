@@ -618,9 +618,10 @@ def find_steady_state_iterations(
             "warning: no steady state region found, discarding initial and final iterations and selecting middle region"
         )
     sub_regions = []
+    divider = min(int(num_steps/2),10)
     for s, e in regions:
         if (e - s) > num_steps:
-            for s1 in range(s, e, num_steps // 10):
+            for s1 in range(s, e, num_steps // divider):
                 region = iter_details[s1 : s1 + num_steps]
                 sub_regions.append(
                     [
