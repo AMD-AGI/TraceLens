@@ -56,6 +56,11 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # TE fused ops (forward — full GEMM perf model with GFLOPS + TB/s)
+    "_Linear": perf_model.te_linear,
+    "_LayerNormLinear": perf_model.te_layer_norm_linear,
+    # TE standalone LayerNorm (TB/s only, no significant GFLOPS)
+    "LayerNormFn": perf_model.te_layer_norm_fn,
 }
 
 # Add pseudo-op extension mappings
@@ -196,8 +201,10 @@ def categorize_torch_op(row):
         "ConvBiasReLU_Backward",
     ]:
         return "CONV_bwd"
-    elif row["name"] in norm_ops.keys():
-        if row["name"].endswith("_backward"):
+    elif row["name"] in norm_ops.keys() or row["name"] in dict_cat2names.get(
+        "Normalization", []
+    ):
+        if row["name"].endswith("_backward") or row["name"].endswith("Backward"):
             return "NORM_bwd"
         else:
             return "NORM_fwd"
@@ -222,6 +229,10 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in ["_LinearBackward", "_LayerNormLinearBackward"]:
+        return "GEMM"
+    elif row["name"] == "LayerNormFnBackward":
+        return "NORM_bwd"
     elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
         return "elementwise"
     elif row["name"].startswith("triton"):

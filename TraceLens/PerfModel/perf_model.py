@@ -4588,3 +4588,159 @@ class RMSNormBwd(Normalization):
         if self.is_affine:
             bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes
+
+
+# 9. TransformerEngine fused ops
+# TE's _Linear and _LayerNormLinear fuse a GEMM (and optionally a LayerNorm)
+# into a single op. The dominant compute is the GEMM.
+
+
+class te_linear(GEMM):
+    """
+    TransformerEngine _Linear: Y = X @ W^T
+
+    In the trace:
+      Input[0] = W  with shape [out_features, in_features]
+      Input[1] = X  with shape [..., in_features]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        W_shape = input_dims[0]  # [N, K]
+        X_shape = input_dims[1]  # [..., K]
+        N = W_shape[0]
+        K = W_shape[1]
+        M = prod(X_shape[:-1])
+
+        input_types = event["args"]["Input type"]
+        dtype_A_B = (input_types[1], input_types[0])  # (X dtype, W dtype)
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][1])
+            stride_B = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_in = name2bpe(dtype_A_B[0])
+        self.bpe_out = 2  # TE output is always bf16/fp16
+        return super().bytes(
+            bpe_mat1=self.bpe_in,
+            bpe_mat2=self.bpe_in,
+            bpe_bias=self.bpe_in,
+            bpe_output=self.bpe_out,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Use pseudo-ops for backward GFLOPS decomposition.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Use pseudo-ops for backward GFLOPS decomposition.")
+
+
+class te_layer_norm_linear(GEMM):
+    """
+    TransformerEngine _LayerNormLinear: Y = LayerNorm(X) @ W^T
+
+    In the trace:
+      Input[0] = X      with shape [..., in_features]
+      Input[1] = gamma  with shape [in_features]
+      Input[2] = beta   with shape [in_features] (may be empty)
+      Input[3] = W      with shape [out_features, in_features]
+
+    GFLOPS accounts for the GEMM only; the LayerNorm contribution is negligible.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        X_shape = input_dims[0]  # [..., K]
+        W_shape = input_dims[3]  # [N, K]
+        N = W_shape[0]
+        K = W_shape[1]
+        M = prod(X_shape[:-1])
+
+        input_types = event["args"]["Input type"]
+        dtype_A_B = (input_types[0], input_types[3])  # (X dtype, W dtype)
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][3])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_in = name2bpe(dtype_A_B[0])
+        self.bpe_out = 2  # TE output is always bf16/fp16
+        return super().bytes(
+            bpe_mat1=self.bpe_in,
+            bpe_mat2=self.bpe_in,
+            bpe_bias=self.bpe_in,
+            bpe_output=self.bpe_out,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Use pseudo-ops for backward GFLOPS decomposition.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Use pseudo-ops for backward GFLOPS decomposition.")
+
+
+class te_layer_norm_fn(Normalization):
+    """
+    TransformerEngine LayerNormFn: standalone LayerNorm (no fused GEMM).
+    TB/s only — no significant FLOPS.
+
+    In the trace:
+      Input[0] = X      with shape [..., hidden]
+      Input[1] = gamma  with shape [hidden]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(input_dims[0])
+        gamma_shape = input_dims[1]
+        num_channels = prod(gamma_shape)
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        has_bias = (
+            len(input_dims) > 2 and input_dims[2] is not None and len(input_dims[2]) > 0
+        )
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": has_bias,
+            "is_affine": True,
+            "is_training": True,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError(f"Backward pass for te_layer_norm_fn is not defined.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(f"Backward pass for te_layer_norm_fn is not defined.")
