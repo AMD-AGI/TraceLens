@@ -48,11 +48,12 @@ jobs:
 
       - name: Create PR
         if: steps.merge.outputs.has_changes == 'true'
-        run: |
-          gh pr create \
-            --title "Sync from public TraceLens repo" \
-            --body "Automated sync from public TraceLens repo: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
-            --head "$BRANCH" \
-            --base main
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RESPONSE=$(gh api repos/${{ github.repository }}/pulls \
+            -f title="Sync from public TraceLens repo" \
+            -f body="Automated sync from public TraceLens repo: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
+            -f head="$BRANCH" \
+            -f base="main")
+          echo "$RESPONSE" | jq -r '.html_url'
