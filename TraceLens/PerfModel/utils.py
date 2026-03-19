@@ -72,5 +72,7 @@ def torch_dtype_map(dtype):
         "fp8": "fp8",
         "fp4": "fp4",
         "mxfp4": "fp4",
+        "c10::float4_e2m1fn_x2": "fp4",
+        "c10::float8_e4m3fn": "fp8",
     }
     return dict_dtype2simulation.get(dtype.lower(), None)
