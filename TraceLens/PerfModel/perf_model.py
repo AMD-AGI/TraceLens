@@ -4633,12 +4633,14 @@ class te_linear(GEMM):
 
     def bytes(self):
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_in = name2bpe(dtype_A_B[0])
+        bpe_act = name2bpe(dtype_A_B[0])
+        bpe_wt = name2bpe(dtype_A_B[1])
+        self.bpe_in = bpe_act
         self.bpe_out = 2  # TE output is always bf16/fp16
         return super().bytes(
-            bpe_mat1=self.bpe_in,
-            bpe_mat2=self.bpe_in,
-            bpe_bias=self.bpe_in,
+            bpe_mat1=bpe_act,
+            bpe_mat2=bpe_wt,
+            bpe_bias=bpe_act,
             bpe_output=self.bpe_out,
         )
 
@@ -4691,12 +4693,14 @@ class te_layer_norm_linear(GEMM):
 
     def bytes(self):
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_in = name2bpe(dtype_A_B[0])
+        bpe_act = name2bpe(dtype_A_B[0])
+        bpe_wt = name2bpe(dtype_A_B[1])
+        self.bpe_in = bpe_act
         self.bpe_out = 2  # TE output is always bf16/fp16
         return super().bytes(
-            bpe_mat1=self.bpe_in,
-            bpe_mat2=self.bpe_in,
-            bpe_bias=self.bpe_in,
+            bpe_mat1=bpe_act,
+            bpe_mat2=bpe_wt,
+            bpe_bias=bpe_act,
             bpe_output=self.bpe_out,
         )
 

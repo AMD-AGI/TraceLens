@@ -165,6 +165,37 @@ def test_te_linear_bytes():
     assert model.bytes() == expected
 
 
+def test_te_linear_bytes_mixed_precision():
+    """FP8 weights (1 byte) with BF16 activations (2 bytes)."""
+    event = _linear_event(
+        W_shape=[4096, 4096],
+        X_shape=[4096, 4, 4096],
+        dtype="c10::BFloat16",
+    )
+    event["args"]["Input type"][0] = "c10::Float8_e4m3fnuz"  # W dtype = FP8
+    model = te_linear(event)
+    M, N, K = 16384, 4096, 4096
+    bpe_act, bpe_wt, bpe_out = 2, 1, 2  # bf16 activation, fp8 weight, bf16 output
+    expected = M * K * bpe_act + K * N * bpe_wt + M * N * bpe_out
+    assert model.bytes() == expected
+
+
+def test_te_layer_norm_linear_bytes_mixed_precision():
+    """FP8 weights (1 byte) with BF16 activations (2 bytes)."""
+    event = _layer_norm_linear_event(
+        X_shape=[4096, 4, 4096],
+        gamma_shape=[4096],
+        W_shape=[6144, 4096],
+        dtype="c10::BFloat16",
+    )
+    event["args"]["Input type"][3] = "c10::Float8_e4m3fnuz"  # W dtype = FP8
+    model = te_layer_norm_linear(event)
+    M, N, K = 16384, 6144, 4096
+    bpe_act, bpe_wt, bpe_out = 2, 1, 2
+    expected = M * K * bpe_act + K * N * bpe_wt + M * N * bpe_out
+    assert model.bytes() == expected
+
+
 def test_te_linear_asymmetric():
     """_Linear with W=[1024, 2048], X=[2048, 4, 2048]: M=8192, N=1024, K=2048."""
     event = _linear_event(W_shape=[1024, 2048], X_shape=[2048, 4, 2048])
