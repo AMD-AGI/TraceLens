@@ -532,33 +532,33 @@ def extract_phases_and_save(
                     "phase": phase_details,
                 }
             )
+        if len(decode_steps) > 0:
+            iter_details = [
+                get_iter_details_from_name(r["name"], prefix) for r in decode_steps
+            ]
+            phase_details = find_phase_from_window(iter_details)
+            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
+                decode_steps, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
+            )
+            name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
-        iter_details = [
-            get_iter_details_from_name(r["name"], prefix) for r in decode_steps
-        ]
-        phase_details = find_phase_from_window(iter_details)
-        iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
-            decode_steps, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
-        )
-        name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
+            out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
+            with gzip.open(out_path, "wb") as f:
+                f.write(json.dumps(iter_trace).encode("utf-8"))
 
-        out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
-        with gzip.open(out_path, "wb") as f:
-            f.write(json.dumps(iter_trace).encode("utf-8"))
-
-        print(f"  {prefix}: {len(iter_trace['traceEvents'])} events -> {out_path}")
-        extraction_summary.append(
-            {
-                "idx": 0,
-                "output_path": out_path,
-                "event_count": len(iter_trace["traceEvents"]),
-                "num_gpu_events": num_gpu_events,
-                "gpu_duration": gpu_dur,
-                "gpu_busy_duration": gpu_busy,
-                "steps": iter_details,
-                "phase": phase_details,
-            }
-        )
+            print(f"  {prefix}: {len(iter_trace['traceEvents'])} events -> {out_path}")
+            extraction_summary.append(
+                {
+                    "idx": 0,
+                    "output_path": out_path,
+                    "event_count": len(iter_trace["traceEvents"]),
+                    "num_gpu_events": num_gpu_events,
+                    "gpu_duration": gpu_dur,
+                    "gpu_busy_duration": gpu_busy,
+                    "steps": iter_details,
+                    "phase": phase_details,
+                }
+            )
     return extraction_summary
 
 
