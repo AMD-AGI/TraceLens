@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import pytest
+
 from TraceLens.PerfModel.perf_model import te_fused_attn
 from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
@@ -124,3 +126,24 @@ def test_fused_attn_gqa():
     assert model.B == 4
     assert model.N_Q == 4096
     assert model.d_h_qk == 128
+
+
+def test_fused_attn_d_h_v_from_v_shape():
+    """d_h_v is derived from V's head dim, not Q's."""
+    q = [4096, 4, 32, 128]
+    k = [4096, 4, 8, 128]
+    v = [4096, 4, 8, 96]
+    event = _fused_attn_event(q=q, k=k, v=v, is_causal="False")
+    model = te_fused_attn(event)
+    assert model.d_h_qk == 128
+    assert model.d_h_v == 96
+
+
+def test_fused_attn_qk_head_dim_mismatch_raises():
+    """Mismatched Q and K head dims should raise ValueError."""
+    q = [4096, 4, 32, 128]
+    k = [4096, 4, 8, 64]
+    v = [4096, 4, 8, 64]
+    event = _fused_attn_event(q=q, k=k, v=v)
+    with pytest.raises(ValueError, match="QK head-dim mismatch"):
+        te_fused_attn(event)
