@@ -4714,7 +4714,8 @@ class te_layer_norm_linear(GEMM):
 class te_layer_norm_fn(Normalization):
     """
     TransformerEngine LayerNormFn: standalone LayerNorm (no fused GEMM).
-    TB/s only — no significant FLOPS.
+    Memory-bound; reports both FLOPS (via inherited Normalization.flops())
+    and TB/s.
 
     In the trace:
       Input[0] = X      with shape [..., hidden]
