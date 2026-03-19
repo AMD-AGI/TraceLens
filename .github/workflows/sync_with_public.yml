@@ -7,6 +7,10 @@ on:
   repository_dispatch:
     types: [public-sync]
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
