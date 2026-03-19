@@ -37,12 +37,15 @@ def get_pseudo_op_mappings():
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
+        "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd_586": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_aiter_triton_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
+        "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
+        "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_464": perf_model_extensions.batched_gemm_a8w8,
     }
 
     return pseudo_op_mappings
@@ -64,7 +67,9 @@ def get_pseudo_op_categories():
         perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
         perf_model_extensions.batched_gemm_a16wfp4: "GEMM",
         attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
-        perf_model_extensions.per_group_quant: "BinaryElementwise"
+        perf_model_extensions.per_group_quant: "BinaryElementwise",
+        perf_model_extensions.gemm_a16w16_atomic_: "GEMM",
+        perf_model_extensions.batched_gemm_a8w8: "GEMM",
     }
     
     return pseudo_op_categories

@@ -208,3 +208,16 @@ class mha_varlen_fwd(InferenceAttention):
 
 class mla_decode_fwd(InferenceAttention):
     pass
+
+
+class mla_tilelang_sparse_fwd(InferenceAttention):
+
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        concrete = event.get("Concrete Inputs", [])
+        if len(concrete) < 4:
+            params["d_h_v"] = 512
+        else:
+            params["d_h_v"] = int(concrete[4])
+        return params

@@ -191,6 +191,138 @@ class batched_gemm_a16wfp4(GEMM):
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         return torch_dtype_map("mxfp4")
+class batched_gemm_a8w8(GEMM):
+    """
+    Performance model for AITER's batched_gemm_a8w8 kernel.
+
+    Computes: Y[b] = X[b] @ W[b].T  for each batch b
+    where X is BF16/FP16 with shape (B, M, K), quantized to INT8 on-the-fly
+    using per-token grouped quantization, and WQ is pre-quantized INT8 with
+    shape (B, N, K) and per-batch-element scaling.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/batched/
+            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py
+
+    Kernel mechanics:
+        The kernel tiles M, N, K with configurable block sizes.  X is
+        dynamically quantized to INT8 per group (group_size elements along K)
+        inside the kernel.  WQ is read as pre-quantized INT8 and rescaled by
+        a per-batch w_scale factor.  Accumulation is in FP32, output cast to
+        BF16/FP16.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = B * 2 * M * N * K
+
+    Roofline calculation -- Bytes:
+        bytes_X      = B * M * K * bpe(X)       # X is BF16/FP16 -> 2 bytes
+        bytes_W      = B * N * K * bpe(WQ)      # WQ is INT8     -> 1 byte
+        bytes_output = B * M * N * bpe(output)  # output is BF16 -> 2 bytes
+
+        Scale tensors (w_scale) are negligible and omitted.
+
+    Compute precision:
+        INT8 matmul -> mapped via torch_dtype_map on WQ's dtype.
+
+    Expected Input Dims from trace:
+        [[B, M, K] or [M, B, K], [B, N, K], [w_scale_shape], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_wq, dtype_w_scale, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        x_shape = event["args"]["Input Dims"][0]
+        wq_shape = event["args"]["Input Dims"][1]
+        B = wq_shape[0]
+        N = wq_shape[1]
+        K = x_shape[2]
+        M = x_shape[1] if x_shape[0] == B else x_shape[0]
+        return {
+            "B": B,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], "c10::bfloat16"),
+        }
+
+    def flops(self):
+        return self.B * super().flops()
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        per_batch = super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+        return None if per_batch is None else self.B * per_batch
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["dtype_A_B"][1])
+
+class gemm_a16w16_atomic_(GEMM):
+    """
+    Performance model for AITER's gemm_a16w16_atomic_ kernel.
+
+    Computes: Y[M, N] = X[M, K] @ W[N, K].T using atomic split-K reduction.
+    Both X and W are BF16/FP16 tensors.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_a16w16_atomic.py
+
+    Kernel mechanics:
+        The kernel tiles M, N, K with configurable block sizes and uses an
+        optional split-K strategy (NUM_KSPLIT > 1) where partial results
+        are accumulated via atomic additions on the output tensor.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K  (inherited from GEMM base class)
+
+    Roofline calculation -- Bytes:
+        bytes_A      = M * K * bpe(X)       # X is BF16/FP16 -> 2 bytes
+        bytes_B      = N * K * bpe(W)       # W is BF16/FP16 -> 2 bytes
+        bytes_output = M * N * bpe(output)  # output is BF16/FP16 -> 2 bytes
+        Total        = bytes_A + bytes_B + bytes_output
+
+    Expected Input Dims from trace:
+        [[M, K], [N, K], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": 1,
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1],
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], event["args"]["Input type"][3] if len(event["args"]["Input type"]) > 3 else "c10::bfloat16"),
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+
+
 class per_group_quant(BinaryElementwise):
     """
     Performance model for aiter::dynamic_per_token_scaled_quant.

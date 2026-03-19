@@ -458,8 +458,7 @@ class UnfusedMoE_Up:
         gating_factor = 2 if gated else 1
         input_bytes = M * K * input_bpe
         weight_bytes = E_active * gating_factor * K * N * weight_bpe
-        output_bytes = M * N * output_bpe
-
+        output_bytes = M * N * topk * output_bpe
         total_bytes = input_bytes + weight_bytes + output_bytes
 
         return total_bytes
