@@ -35,9 +35,8 @@ jobs:
 
           # Keep private repo's workflow files unchanged during merge
           git config merge.ours.driver true
-          echo '.github/workflows/** merge=ours' >> .gitattributes
+          echo '.github/workflows/** merge=ours' >> .git/info/attributes
           git merge upstream/main --no-edit --strategy-option theirs
-          git checkout HEAD -- .gitattributes
 
           git push origin "$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
