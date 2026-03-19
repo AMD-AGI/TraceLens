@@ -26,7 +26,7 @@ jobs:
           git fetch upstream main
           git fetch origin main
 
-          git checkout main
+          git checkout --track origin/main
 
           if git diff --quiet main..upstream/main; then
             echo "No changes to sync."
