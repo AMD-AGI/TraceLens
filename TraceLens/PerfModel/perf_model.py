@@ -4647,6 +4647,10 @@ class te_fused_attn(SDPA):
             raise ValueError(
                 f"FusedAttnFunc: QK head-dim mismatch Q={d_h_qk}, K={k_shape[3]}"
             )
+        if k_shape[0] != v_shape[0]:
+            raise ValueError(
+                f"FusedAttnFunc: KV seq-len mismatch K={k_shape[0]}, V={v_shape[0]}"
+            )
         if k_shape[2] != v_shape[2]:
             raise ValueError(
                 f"FusedAttnFunc: KV head mismatch K={k_shape[2]}, V={v_shape[2]}"
