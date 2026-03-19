@@ -182,7 +182,8 @@ def categorize_torch_op(row):
     Returns:
         str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
              'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused',
-             'SSM_fwd', 'SSM_bwd',
+             'SSM_fwd', 'SSM_bwd', 'MoE_comm_fwd', 'MoE_comm_bwd',
+             'RoPE_fwd', 'RoPE_bwd', 'CrossEntropy_fwd', 'CrossEntropy_bwd',
              'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
              'record_param_comms', or 'other'.
     """
