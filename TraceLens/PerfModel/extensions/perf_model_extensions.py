@@ -8,684 +8,388 @@
 Performance models for pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+import re
+from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise
+from math import prod
 
-
-# ==============================================================================
-# MoE Performance Models
-# ==============================================================================
-
-class FusedMoE:
+class gemm_a8w8_blockscale(GEMM):
     """
-    Base class for Fused MoE operations.
+    Performance model for AITER's gemm_a8w8_blockscale kernel.
 
-    Fused MoE operations combine the entire MoE computation (up/gate projection,
-    activation, and down projection) into a single kernel launch.
+    Computes: Y[M, N] = dequant(X[M, K]) @ dequant(W[N, K]).T
+    where X and W are INT8 tensors with per-block FP32 scale factors.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_a8w8_blockscale.py
+
+    Kernel mechanics:
+        The kernel tiles the K dimension into blocks of size BLOCK_SIZE_K.
+        Within each block, INT8 values from X and W are multiplied to produce
+        INT32 partial products, then rescaled by (x_scale * w_scale) for that
+        block before accumulating into FP32. 
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K  (inherited from GEMM base class)
+
+        We count only the matrix-multiply FLOPs (multiply-accumulate). The
+        per-block scale multiplications (x_scale[m, k_block] * w_scale[k_block, n_block])
+        are O(M * N * K / block_size) -- orders of magnitude fewer than the
+        matmul FLOPs -- and are ignored for roofline purposes.
+
+    Roofline calculation -- Bytes:
+        bytes_A      = M * K * bpe(X)          # X is INT8  -> 1 byte
+        bytes_B      = N * K * bpe(W)          # W is INT8  -> 1 byte
+        bytes_output = M * N * bpe(output)     # output is BF16 -> 2 bytes
+        Total        = bytes_A + bytes_B + bytes_output
+
+        Scale tensors (x_scale, w_scale) are omitted from the byte count.
+        Their sizes -- x_scale: (M, ceil(K/block_k)) and w_scale:
+        (ceil(N/block_n), ceil(K/block_k)) -- are negligible relative to the
+        main operands since block sizes are typically 128-256.
+
+    Compute precision:
+        INT8 inputs -> FP8 peak TFLOPS/s used for the roofline ceiling
+        (maps through the first element of dtype_A_B via torch_dtype_map).
+
+    Expected Input Dims from trace:
+        [[M, K], [N, K], [x_scale_shape], [w_scale_shape], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, dtype_x_scale, dtype_w_scale, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": 1,
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1],
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1],"c10::bfloat16"),
+        }
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2]) # dummy since bias is not used
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+
+class vllm_rocm_unquantized_gemm(GEMM):
+    """
+    Performance model for vllm::rocm_unquantized_gemm.
+    Dispatches to aiter triton gemm (gemm_a16w16) or skinny GEMM (wvSplitK/LLMM1)
+    depending on shape heuristics; falls back to torch.nn.functional.linear.
+
+    Computes: output[M, N] = x[M, K] @ weight[N, K].T + bias[N]
+
+    Expected Input Dims format (from vllm::rocm_unquantized_gemm):
+    [[M, K], [N, K], [N]]  (x, weight, bias)
+
+    Expected Input type format:
+    [dtype_x, dtype_weight, dtype_bias]
+    """
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1],
+            "bias": True,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], event["args"]["Input type"][2]),
+        }
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2]) 
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+class batched_gemm_a16wfp4(GEMM):
+    """
+    Performance model for AITER's batched_gemm_a16wfp4_ kernel.
+
+    Computes: Y[b] = X[b] @ W[b].T  for each batch b
+    where X is BF16/FP16 with shape (B, M, K), and W is FP4 E2M1 packed
+    as uint8 with shape (B, N, K//2), two FP4 values per byte.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/batched/batched_gemm_a16wfp4.py
+
+    Kernel mechanics:
+        The kernel pre-quantizes BF16 activations to MXFP4 on-the-fly and
+        performs batched matrix multiplication using FP4 tensor cores.
+        Weights are stored in FP4 E2M1 format with E8M0 per-group scales
+        (one scale per 32 K-dimension elements).  Optional split-K with a
+        separate reduction kernel is used for small-M shapes.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = B * 2 * M * N * K  (batched GEMM, per-batch inherited from
+        GEMM base class and scaled by B)
+
+        Only matrix-multiply FLOPs are counted.  Per-block scaling
+        (w_scales) and split-K reduction FLOPs are ignored as they are
+        orders of magnitude smaller than the matmul.
+
+    Roofline calculation -- Bytes:
+        bytes_X      = B * M * K   * bpe(X)      # X is BF16  -> 2 bytes
+        bytes_W      = B * N * K/2 * 1            # W is FP4 packed (0.5 B/elem)
+        bytes_output = B * M * N   * bpe(output)  # output is BF16 -> 2 bytes
+
+    Compute precision:
+        Mapped from the first input dtype (activation dtype, typically
+        BF16) via torch_dtype_map.
+
+    Expected Input Dims from trace:
+        [[B, M, K], [B, N, K//2], [B, N, K//32], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w_packed, dtype_w_scales, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": event["args"]["Input Dims"][0][0],
+            "M": event["args"]["Input Dims"][0][1],
+            "N": event["args"]["Input Dims"][1][1],
+            "K": event["args"]["Input Dims"][0][2],
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], "c10::bfloat16"),
+        }
+
+    def flops(self):
+        return self.B * super().flops()
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = 0.5  # FP4: 4 bits = 0.5 bytes per element
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        per_batch = super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+        return None if per_batch is None else self.B * per_batch
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        return torch_dtype_map("mxfp4")
+class batched_gemm_a8w8(GEMM):
+    """
+    Performance model for AITER's batched_gemm_a8w8 kernel.
+
+    Computes: Y[b] = X[b] @ W[b].T  for each batch b
+    where X is BF16/FP16 with shape (B, M, K), quantized to INT8 on-the-fly
+    using per-token grouped quantization, and WQ is pre-quantized INT8 with
+    shape (B, N, K) and per-batch-element scaling.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/batched/
+            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py
+
+    Kernel mechanics:
+        The kernel tiles M, N, K with configurable block sizes.  X is
+        dynamically quantized to INT8 per group (group_size elements along K)
+        inside the kernel.  WQ is read as pre-quantized INT8 and rescaled by
+        a per-batch w_scale factor.  Accumulation is in FP32, output cast to
+        BF16/FP16.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = B * 2 * M * N * K
+
+    Roofline calculation -- Bytes:
+        bytes_X      = B * M * K * bpe(X)       # X is BF16/FP16 -> 2 bytes
+        bytes_W      = B * N * K * bpe(WQ)      # WQ is INT8     -> 1 byte
+        bytes_output = B * M * N * bpe(output)  # output is BF16 -> 2 bytes
+
+        Scale tensors (w_scale) are negligible and omitted.
+
+    Compute precision:
+        INT8 matmul -> mapped via torch_dtype_map on WQ's dtype.
+
+    Expected Input Dims from trace:
+        [[B, M, K] or [M, B, K], [B, N, K], [w_scale_shape], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_wq, dtype_w_scale, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        x_shape = event["args"]["Input Dims"][0]
+        wq_shape = event["args"]["Input Dims"][1]
+        B = wq_shape[0]
+        N = wq_shape[1]
+        K = x_shape[2]
+        M = x_shape[1] if x_shape[0] == B else x_shape[0]
+        return {
+            "B": B,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], "c10::bfloat16"),
+        }
+
+    def flops(self):
+        return self.B * super().flops()
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        per_batch = super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+        return None if per_batch is None else self.B * per_batch
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["dtype_A_B"][1])
+
+class gemm_a16w16_atomic_(GEMM):
+    """
+    Performance model for AITER's gemm_a16w16_atomic_ kernel.
+
+    Computes: Y[M, N] = X[M, K] @ W[N, K].T using atomic split-K reduction.
+    Both X and W are BF16/FP16 tensors.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_a16w16_atomic.py
+
+    Kernel mechanics:
+        The kernel tiles M, N, K with configurable block sizes and uses an
+        optional split-K strategy (NUM_KSPLIT > 1) where partial results
+        are accumulated via atomic additions on the output tensor.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K  (inherited from GEMM base class)
+
+    Roofline calculation -- Bytes:
+        bytes_A      = M * K * bpe(X)       # X is BF16/FP16 -> 2 bytes
+        bytes_B      = N * K * bpe(W)       # W is BF16/FP16 -> 2 bytes
+        bytes_output = M * N * bpe(output)  # output is BF16/FP16 -> 2 bytes
+        Total        = bytes_A + bytes_B + bytes_output
+
+    Expected Input Dims from trace:
+        [[M, K], [N, K], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, ...]
+    """
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": 1,
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1],
+            "bias": False,
+            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], event["args"]["Input type"][3] if len(event["args"]["Input type"]) > 3 else "c10::bfloat16"),
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+
+
+class per_group_quant(BinaryElementwise):
+    """
+    Performance model for aiter::dynamic_per_token_scaled_quant.
+    Performs dynamic per-token quantization: each row of the input is
+    quantized independently with its own scale factor.
+
+    AITER signature: dynamic_per_token_scaled_quant(out, input, scales,
+        scale_ub=None, shuffle_scale=False, num_rows=None, num_rows_factor=1)
+
+    Expected Input Dims format (from aiter::dynamic_per_token_scaled_quant):
+    [[out_shape], [input_shape], [scales_shape], ...]
+
+    Expected Input type format:
+    [dtype_out, dtype_input, dtype_scales, ...]
     """
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
-
-    @staticmethod
-    def flops_func(num_tokens, hidden_dim, inter_dim, topk, gated):
-        """
-        Calculate FLOPs for MoE forward pass.
-        
-        Args:
-            num_tokens (int): Number of input tokens (M)
-            hidden_dim (int): Hidden dimension size (K)
-            inter_dim (int): Intermediate dimension size (N)
-            topk (int): Number of experts per token
-            gated (bool): Whether gated activation is used (e.g., SwiGLU)
-        
-        Returns:
-            int: Total FLOPs for the MoE operation
-        """
-        M = num_tokens
-        K = hidden_dim
-        N = inter_dim
-        
-        # FC1: M×K @ K×N for each of topk experts (×2 if gated)
-        fc1_flops = 2 * M * K * N * topk * (2 if gated else 1)
-        
-        # Activation FLOPs (ignored, activation-dependent?)
-        activation_flops = 0
-        
-        # FC2: M×N @ N×K for each of topk experts
-        fc2_flops = 2 * M * K * N * topk
-        
-        # Aggregation: weighted sum of expert outputs
-        # For each output element: multiply by weight (topk ops) + sum (topk-1 ops)
-        aggregation_flops = M * K * (2 * topk - 1)
-        
-        total_flops = fc1_flops + activation_flops + fc2_flops + aggregation_flops
-        
-        return total_flops
-    
-    @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk, gated, 
-                   input_bpe, weight_bpe, output_bpe):
-        """
-        Calculate bytes moved for fused MoE forward pass.
-        
-        For fused MoE, only count:
-        - Input: M×K
-        - FC1 weights: topk × N×K (×2 if gated)
-        - FC2 weights: topk × N×K
-        - Output: M×K
-        
-        Ignores intermediate activations and scales (fused operation).
-        
-        Args:
-            num_tokens (int): Number of input tokens (M)
-            hidden_dim (int): Hidden dimension size (K)
-            inter_dim (int): Intermediate dimension size (N)
-            topk (int): Number of experts per token
-            gated (bool): Whether gated activation is used
-            input_bpe (int): Bytes per element for input
-            weight_bpe (int): Bytes per element for weights
-            output_bpe (int): Bytes per element for output
-        
-        Returns:
-            int: Total bytes moved
-        """
-        if None in {input_bpe, weight_bpe, output_bpe}:
-            return None
-        
-        M = num_tokens
-        K = hidden_dim
-        N = inter_dim
-        
-        input_bytes = M * K * input_bpe
-        fc1_weight_bytes = topk * N * K * weight_bpe * (2 if gated else 1)
-        fc2_weight_bytes = topk * N * K * weight_bpe
-        output_bytes = M * K * output_bpe
-        
-        total_bytes = input_bytes + fc1_weight_bytes + fc2_weight_bytes + output_bytes
-        
-        return total_bytes
-
-
-class moe_aiter_fused_1stage(FusedMoE):
-    """
-    Performance model for only AITER-based fused MoE operation. Handles AITER fused_moe_1stage launches.
-
-    TO DO: Expand support for other AITER MoE kernels.
-    """
-    
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
+        self.nelems_in1 = prod(self.param_details["shape_in1"])
+        self.nelems_in2 = prod(self.param_details["shape_in2"])
+        self.nelems_out = prod(self.param_details["shape_out"])
+        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
+        self.stride_input1 = self.param_details["stride_input1"]
+        self.stride_input2 = self.param_details["stride_input2"]
+        self.stride_output = self.param_details["stride_output"]
 
-    @staticmethod
-    def get_param_details(event):
-        """
-        Extract MoE dimensions and data types from event args.
-        
-        Expected Input Dims format (from vllm::rocm_aiter_fused_moe):
-        [[tokens, hidden_dim], [experts, inter_dim×(gated+1), hidden_dim], 
-         [experts, hidden_dim, inter_dim], [tokens, topk], ...]
-        
-        Expected Input type format:
-        [dtype_input, dtype_w1, dtype_w2, dtype_topk_weights, ...]
-        """
-
-        args = event.get('args', {})
-        
-        kernel_input_shape = args['Input Dims']
-        input_shape = kernel_input_shape[0]
-        w1_shape = kernel_input_shape[1]
-        w2_shape = kernel_input_shape[2]
-        topk_weights_shape = kernel_input_shape[3]
-        
-        num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
-        inter_dim = w2_shape[2]
-        num_experts = w1_shape[0]
-        topk = topk_weights_shape[1]
-        
-        # Check if MoE is using gated activation (SwiGLU)
-        gated = (w1_shape[1] == 2 * inter_dim)
-        
-        input_dtype = args['Input type'][0]
-        weight_dtype = args['Input type'][1]
-        
-        return {
-            'num_tokens': num_tokens,
-            'hidden_dim': hidden_dim,
-            'inter_dim': inter_dim,
-            'num_experts': num_experts,
-            'topk': topk,
-            'gated': gated,
-            'input_dtype': input_dtype,
-            'weight_dtype': weight_dtype,
-        }
-    
-    def flops(self):
-        """Calculate FLOPs using the static flops_func."""
-
-        return self.flops_func(
-            self.param_details['num_tokens'],
-            self.param_details['hidden_dim'],
-            self.param_details['inter_dim'],
-            self.param_details['topk'],
-            self.param_details['gated']
-        )
-
-    
-    def bytes(self):
-        """Calculate bytes moved using the static bytes_func."""
-
-        # Map dtype strings to byte sizes
-        dtype_to_bytes = {
-            'Float8_e4m3fn': 1,
-            'Float8_e4m3fnuz': 1,
-            'Float8_e5m2': 1,
-            'Float8_e5m2fnuz': 1,
-            'BFloat16': 2,
-            'Float16': 2,
-            'Half': 2,
-            'Float32': 4,
-            'Float': 4,
-            'c10::BFloat16': 2,
-            'c10::Float8_e4m3fn': 1,
-            'c10::Float8_e4m3fnuz': 1,
-            'c10::Half': 2,
-            'c10::Float': 4,
-        }
-        
-        input_bpe = dtype_to_bytes.get(self.param_details['input_dtype'], 2)  # Default to 2
-        weight_bpe = dtype_to_bytes.get(self.param_details['weight_dtype'], 1)  # Default to 1 (FP8)
-        output_bpe = input_bpe  # Output typically same as input
-        
-        return self.bytes_func(
-            self.param_details['num_tokens'],
-            self.param_details['hidden_dim'],
-            self.param_details['inter_dim'],
-            self.param_details['topk'],
-            self.param_details['gated'],
-            input_bpe,
-            weight_bpe,
-            output_bpe
-        )
-    
-    def flops_bwd(self):
-        """Backward pass FLOPs (not implemented for inference-only MoE)."""
-        raise NotImplementedError("Backward pass for fused MoE is not defined.")
-    
-    def bytes_bwd(self):
-        """Backward pass bytes (not implemented for inference-only MoE)."""
-        raise NotImplementedError("Backward pass for fused MoE is not defined.")
-    
-    def get_compute_precision(self):
-        """Return the compute precision for this operation."""
-        dtype = self.param_details.get("input_dtype")
-        return torch_dtype_map(dtype) if dtype else None
-    
-    def get_maf_type(self):
-        """Return the MAF type for this operation (matrix for MoE)."""
-        return "matrix"
-
-
-class UnfusedMoE_Up:
-    """
-    Base class for Unfused MoE up projection operations.
-    
-    Handles the first stage of unfused MoE which performs:
-    - Up projection: [tokens, hidden_dim] → [tokens, inter_dim]
-    - Optionally gated (e.g., SwiGLU): both up and gate projections
-        """
-
-    @staticmethod
-    def flops_func(num_tokens, hidden_dim, inter_dim, topk, gated):
-        """
-        Calculate FLOPs for unfused MoE up projection.
-        
-        Args:
-            num_tokens (int): Number of input tokens (M)
-            hidden_dim (int): Hidden dimension size (K)
-            inter_dim (int): Intermediate dimension size (N)
-            topk (int): Number of experts per token
-            gated (bool): Whether gated activation is used (e.g., SwiGLU)
-        
-        Returns:
-            int: Total FLOPs for up projection stage
-        """
-
-        M = num_tokens
-        K = hidden_dim
-        N = inter_dim
-        
-        # Up projection: M×K @ K×N for each of topk experts. If gated (e.g., SwiGLU), multiply by 2 for up+gate projections
-        gating_factor = 2 if gated else 1
-        up_flops = 2 * M * K * N * topk * gating_factor
-        
-        return up_flops
-
-    @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk, gated,
-                   input_bpe, weight_bpe, output_bpe):
-        """
-        Calculate bytes moved for unfused MoE up projection.
-        
-        For unfused up projection:
-        - Read: M×K (input) + topk×gating_factor×K×N (weights)
-        - Write: M×N (intermediate output)
-        
-        Args:
-            num_tokens (int): Number of input tokens (M)
-            hidden_dim (int): Hidden dimension size (K)
-            inter_dim (int): Intermediate dimension size (N)
-            topk (int): Number of experts per token
-            gated (bool): Whether gated activation is used
-            input_bpe (int): Bytes per element for input
-            weight_bpe (int): Bytes per element for weights
-            output_bpe (int): Bytes per element for output
-        
-        Returns:
-            int: Total bytes moved
-        """
-
-        if None in {input_bpe, weight_bpe, output_bpe}:
-            return None
-        
-        M = num_tokens
-        K = hidden_dim
-        N = inter_dim
-        
-        gating_factor = 2 if gated else 1
-        
-        input_bytes = M * K * input_bpe
-        weight_bytes = topk * gating_factor * K * N * weight_bpe
-        output_bytes = M * N * output_bpe
-        
-        total_bytes = input_bytes + weight_bytes + output_bytes
-        
-        return total_bytes
-
-
-class UnfusedMoE_Down:
-    """
-    Base class for Unfused MoE down projection operations.
-    
-    Handles the second stage of unfused MoE which performs:
-    - Down projection: [tokens, inter_dim] → [tokens, hidden_dim]
-    
-    This base class only provides static calculation functions.
-    Child classes implement get_param_details() to extract parameters from events.
-    """
-
-    @staticmethod
-    def flops_func(num_tokens, hidden_dim, inter_dim, topk):
-        """
-        Calculate FLOPs for unfused MoE down projection.
-        
-        Args:
-            num_tokens (int): Number of input tokens (M)
-            hidden_dim (int): Hidden dimension size (K)
-            inter_dim (int): Intermediate dimension size (N)
-            topk (int): Number of experts per token
-        
-        Returns:
-            int: Total FLOPs for down projection stage
-        """
-        M = num_tokens
-        K = hidden_dim
-        N = inter_dim
-        
-        # Down projection: M×N @ N×K for each of topk experts
-        down_flops = 2 * M * N * K * topk
-        
-        return down_flops
-
-    @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk,
-                   input_bpe, weight_bpe, output_bpe):
-        """
-        Calculate bytes moved for unfused MoE down projection.
-        
-        For unfused down projection:
-        - Read: M×N (intermediate input) + topk×N×K (weights)
-        - Write: M×K (output)
-        
-        Args:
-            num_tokens (int): Number of input tokens (M)
-            hidden_dim (int): Hidden dimension size (K)
-            inter_dim (int): Intermediate dimension size (N)
-            topk (int): Number of experts per token
-            input_bpe (int): Bytes per element for input
-            weight_bpe (int): Bytes per element for weights
-            output_bpe (int): Bytes per element for output
-        
-        Returns:
-            int: Total bytes moved
-        """
-        if None in {input_bpe, weight_bpe, output_bpe}:
-            return None
-        
-        M = num_tokens
-        K = hidden_dim
-        N = inter_dim
-        
-        input_bytes = M * N * input_bpe
-        weight_bytes = topk * N * K * weight_bpe
-        output_bytes = M * K * output_bpe
-        
-        total_bytes = input_bytes + weight_bytes + output_bytes
-        
-        return total_bytes
-
-
-class moe_triton_unfused_up(UnfusedMoE_Up):
-    """
-    Performance model for Triton-based unfused MoE up projection stage (Applicable to GPTOSS)
-    
-    Handles the first stage of unfused MoE which performs:
-    - Up projection: [tokens, hidden_dim] → [tokens, inter_dim]
-    - Optionally gated (e.g., SwiGLU): both up and gate projections
-
-    LIMITATION: Perf. model assumes that the inter_dim is equal to the hidden_dim. (Not available in Trace)
-    """
-    
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.param_details = self.get_param_details(event)
-
-    @staticmethod
-    def get_param_details(event):
-        """
-        Extract MoE up projection parameters from event args.
-        
-        Expected args structure (from moe_unfused_pseudo_ops.py):
-        - Input Dims: [[tokens, hidden_dim], [tokens, num_experts], ...]
-        - MoE GEMM type: 'up'
-        - MoE GEMM gated: True/False
-        - MoE topk: Number of active experts per token
-        
-        Raises:
-            KeyError: If required args keys are missing
-            ValueError: If extracted values are invalid
-        """
-        args = event.get('args', {})
-        
-        # Extract Input Dims
-        input_dims = args['Input Dims']
-        if len(input_dims) < 2:
-            raise ValueError(
-                f"Expected at least 2 Input Dims for unfused MoE, got {len(input_dims)}"
-            )
-        
-        input_shape = input_dims[0]  # [tokens, hidden_dim]
-        router_shape = input_dims[1]  # [tokens, num_experts]
-        
-        num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
-        num_experts = router_shape[1]
-        
-        # Extract topk (REQUIRED)
-        if 'MoE topk' not in args:
-            raise KeyError(f"'MoE topk' not found in event args")
-        topk = args['MoE topk']
-        
-        # Extract gated flag (REQUIRED)
-        if 'MoE GEMM gated' not in args:
-            raise KeyError(f"'MoE GEMM gated' not found in event args")
-        gated = args['MoE GEMM gated']
-        
-        # LIMITATION: inter_dim is not present in the trace (GPTOSS default used)
-        inter_dim = hidden_dim
-        
-        # Detect weight dtype from kernel name (may be quantized)
-        weight_dtype_actual = None
-        if "kernel_details" in event and event["kernel_details"]:
-            kernel_name = event["kernel_details"][0].get("name", "")
-            if "mxfp4" in kernel_name.lower() or "fp4" in kernel_name.lower():
-                weight_dtype_actual = "FP4"
-            elif "fp8" in kernel_name.lower() or "e4m3" in kernel_name.lower():
-                weight_dtype_actual = "FP8"
+        dtype_in1, dtype_in2, dtype_out = self.dtype_in1_in2_out
+        self.bpe_in1 = name2bpe(dtype_in1)
+        self.bpe_in2 = name2bpe(dtype_in2)
+        if dtype_out is not None:
+            self.bpe_out = name2bpe(dtype_out)
         else:
-            raise ValueError(f"Kernel details not found in event")
-        
-        # Extract data types
-        input_types = args.get('Input type', [])
-        if len(input_types) < 2:
-            raise ValueError(f"Expected at least 2 Input types, got {len(input_types)}")
-        
-        input_dtype = input_types[0]
-        
-        return {
-            'num_tokens': num_tokens,
-            'hidden_dim': hidden_dim,
-            'inter_dim': inter_dim,
-            'num_experts': num_experts,
-            'topk': topk,
-            'gated': gated,
-            'input_dtype': input_dtype,
-            'weight_dtype': weight_dtype_actual,
-        }
-    
-    def flops(self):
-        """Calculate FLOPs for up projection."""
-        return self.flops_func(
-            self.param_details['num_tokens'],
-            self.param_details['hidden_dim'],
-            self.param_details['inter_dim'],
-            self.param_details['topk'],
-            self.param_details['gated']
-        )
-    
-    def bytes(self):
-        """Calculate bytes moved for up projection."""
-        # Map dtype strings to byte sizes
-        dtype_to_bytes = {
-            'Float8_e4m3fn': 1,
-            'Float8_e4m3fnuz': 1,
-            'Float8_e5m2': 1,
-            'Float8_e5m2fnuz': 1,
-            'FP8': 1,
-            'FP4': 0.5,
-            'BFloat16': 2,
-            'Float16': 2,
-            'Half': 2,
-            'Float32': 4,
-            'Float': 4,
-            'c10::BFloat16': 2,
-            'c10::Float8_e4m3fn': 1,
-            'c10::Float8_e4m3fnuz': 1,
-            'c10::Half': 2,
-            'c10::Float': 4,
-        }
-        
-        input_dtype = self.param_details['input_dtype']
-        weight_dtype = self.param_details['weight_dtype']
-        
-        if input_dtype not in dtype_to_bytes:
-            raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in dtype_to_bytes:
-            raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
-        
-        input_bpe = dtype_to_bytes[input_dtype]
-        weight_bpe = dtype_to_bytes[weight_dtype]
-        output_bpe = input_bpe  # Output same dtype as input
-        
-        return self.bytes_func(
-            self.param_details['num_tokens'],
-            self.param_details['hidden_dim'],
-            self.param_details['inter_dim'],
-            self.param_details['topk'],
-            self.param_details['gated'],
-            input_bpe,
-            weight_bpe,
-            output_bpe
-        )
-    
-    def flops_bwd(self):
-        """Backward pass FLOPs (not implemented for inference-only MoE)."""
-        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
-    
-    def bytes_bwd(self):
-        """Backward pass bytes (not implemented for inference-only MoE)."""
-        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
-    
-    def get_compute_precision(self):
-        """Return the compute precision for this operation."""
-        dtype = self.param_details.get("weight_dtype")
-        return torch_dtype_map(dtype) if dtype else None
-    
-    def get_maf_type(self):
-        """Return the MAF type for this operation (matrix for MoE)."""
-        return "matrix"
-
-
-class moe_triton_unfused_down(UnfusedMoE_Down):
-    """
-    Performance model for Triton-based unfused MoE down projection stage (Applicable to GPTOSS)
-    
-    Handles the second stage of unfused MoE which performs:
-    - Down projection: [tokens, inter_dim] → [tokens, hidden_dim]
-
-    LIMITATION: Perf. model assumes that the inter_dim is equal to the hidden_dim. (Not available in Trace)
-    """
-    
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.param_details = self.get_param_details(event)
-
+            self.bpe_out = None
     @staticmethod
     def get_param_details(event):
-        """
-        Extract MoE down projection parameters from event args.
-        
-        Same structure as moe_2stage_up but gated is always False for down projection.
-        """
-        args = event.get('args', {})
-        
-        # Extract Input Dims
-        input_dims = args['Input Dims']
-        if len(input_dims) < 2:
-            raise ValueError(
-                f"Expected at least 2 Input Dims for unfused MoE, got {len(input_dims)}"
-            )
-        
-        input_shape = input_dims[0]  # [tokens, hidden_dim]
-        router_shape = input_dims[1]  # [tokens, num_experts]
-        
-        num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
-        num_experts = router_shape[1]
-        
-        # Extract topk (REQUIRED)
-        if 'MoE topk' not in args:
-            raise KeyError(f"'MoE topk' not found in event args")
-        topk = args['MoE topk']
-        
-        # Extract gated flag (REQUIRED) - typically False for down projection
-        if 'MoE GEMM gated' not in args:
-            raise KeyError(f"'MoE GEMM gated' not found in event args")
-        gated = args['MoE GEMM gated']
-        
-        # LIMITATION: inter_dim is not present in the trace (GPTOSS default used)
-        inter_dim = hidden_dim
-        
-        # Detect weight dtype from kernel name
-        weight_dtype_actual = None
-        if "kernel_details" in event and event["kernel_details"]:
-            kernel_name = event["kernel_details"][0].get("name", "")
-            if "mxfp4" in kernel_name.lower() or "fp4" in kernel_name.lower():
-                weight_dtype_actual = "FP4"
-            elif "fp8" in kernel_name.lower() or "e4m3" in kernel_name.lower():
-                weight_dtype_actual = "FP8"
-        else:
-            raise ValueError(f"Kernel details not found in event")
-        
-        # Extract data types
-        input_types = args.get('Input type', [])
-        if len(input_types) < 2:
-            raise ValueError(f"Expected at least 2 Input types, got {len(input_types)}")
-        
-        input_dtype = input_types[0]
-        
+        args_input_dims = event["args"]["Input Dims"]
+        shape_in1 = tuple(args_input_dims[1])
+        shape_in2 = tuple(args_input_dims[2]) 
+        shape_out = tuple(args_input_dims[0])
+        dtype_in1 = event["args"]["Input type"][1]
+        dtype_in2 = event["args"]["Input type"][2]
+        dtype_out = event["args"]["Input type"][0]
+        stride_output = tuple(event["args"]["Input Strides"][0])
+        stride_input1 = tuple(event["args"]["Input Strides"][1])
+        stride_input2 = tuple(event["args"]["Input Strides"][2])
         return {
-            'num_tokens': num_tokens,
-            'hidden_dim': hidden_dim,
-            'inter_dim': inter_dim,
-            'num_experts': num_experts,
-            'topk': topk,
-            'gated': gated,
-            'input_dtype': input_dtype,
-            'weight_dtype': weight_dtype_actual,
+            "shape_in1": shape_in1,
+            "shape_in2": shape_in2,
+            "shape_out": shape_out,
+            "dtype_in1_in2_out": (dtype_in1, dtype_in2, dtype_out),
+            "stride_input1": stride_input1,
+            "stride_input2": stride_input2,
+            "stride_output": stride_output,
         }
-    
-    def flops(self):
-        """Calculate FLOPs for down projection."""
-        return self.flops_func(
-            self.param_details['num_tokens'],
-            self.param_details['hidden_dim'],
-            self.param_details['inter_dim'],
-            self.param_details['topk']
-        )
-    
     def bytes(self):
-        """Calculate bytes moved for down projection."""
-        # Map dtype strings to byte sizes
-        dtype_to_bytes = {
-            'Float8_e4m3fn': 1,
-            'Float8_e4m3fnuz': 1,
-            'Float8_e5m2': 1,
-            'Float8_e5m2fnuz': 1,
-            'FP8': 1,
-            'FP4': 0.5,
-            'BFloat16': 2,
-            'Float16': 2,
-            'Half': 2,
-            'Float32': 4,
-            'Float': 4,
-            'c10::BFloat16': 2,
-            'c10::Float8_e4m3fn': 1,
-            'c10::Float8_e4m3fnuz': 1,
-            'c10::Half': 2,
-            'c10::Float': 4,
-        }
-        
-        input_dtype = self.param_details['input_dtype']
-        weight_dtype = self.param_details['weight_dtype']
-        
-        if input_dtype not in dtype_to_bytes:
-            raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in dtype_to_bytes:
-            raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
-        
-        input_bpe = dtype_to_bytes[input_dtype]
-        weight_bpe = dtype_to_bytes[weight_dtype]
-        output_bpe = input_bpe  # Output same dtype as input
-        
-        return self.bytes_func(
-            self.param_details['num_tokens'],
-            self.param_details['hidden_dim'],
-            self.param_details['inter_dim'],
-            self.param_details['topk'],
-            input_bpe,
-            weight_bpe,
-            output_bpe
-        )
-    
-    def flops_bwd(self):
-        """Backward pass FLOPs (not implemented for inference-only MoE)."""
-        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
-    
-    def bytes_bwd(self):
-        """Backward pass bytes (not implemented for inference-only MoE)."""
-        raise NotImplementedError("Backward pass for unfused MoE is not defined.")
+        bytes= prod(self.param_details["shape_out"]) * name2bpe(self.param_details["dtype_in1_in2_out"][2])
+        bytes+= prod(self.param_details["shape_in1"]) * name2bpe(self.param_details["dtype_in1_in2_out"][0])
+        bytes+= prod(self.param_details["shape_in2"]) * name2bpe(self.param_details["dtype_in1_in2_out"][1])
+        return bytes
+
+    def flops(self):
+        return self.nelems_out * 2.59375 # Based on the rocprof counter values
     
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
-        dtype = self.param_details.get("weight_dtype")
+        # Use first input dtype as the compute precision
+        dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
-    
-    def get_maf_type(self):
-        """Return the MAF type for this operation (matrix for MoE)."""
-        return "matrix"

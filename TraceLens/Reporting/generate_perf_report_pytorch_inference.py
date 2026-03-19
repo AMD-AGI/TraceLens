@@ -11,14 +11,274 @@ import os
 import subprocess
 import sys
 import warnings
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
+
+from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
+import collections
+import gzip
+import re
+import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 
+import TraceLens
+
+def perf_report_sanity_check(
+    events,
+    df_gpu_timeline,
+    df_kernel_launchers,
+    df_unified_perf,
+    include_nccl=False,
+):
+    """
+    Sanity checks on the performance report DataFrames.
+
+    1) Total kernel time accounted by df_kernel_launchers and df_unified_perf
+       should each be >= the computation_time reported in df_gpu_timeline.
+    2) Total GPU events in tree events should equal the number of kernels
+       accounted by df_kernel_launchers and df_unified_perf.
+    """
+    use_time = "busy_time" if include_nccl else "computation_time"
+        
+    computation_time_us = (
+        df_gpu_timeline.loc[
+            df_gpu_timeline["type"] == use_time, "time ms"
+        ].values[0]
+        * 1e3
+    )
+
+    # --- Check 1: kernel time coverage ---
+    kl_time_col = (
+        "total_direct_kernel_time_sum"
+        if "total_direct_kernel_time_sum" in df_kernel_launchers.columns
+        else "total_direct_kernel_time"
+    )
+    up_time_col = (
+        "Kernel Time (µs)_sum"
+        if "Kernel Time (µs)_sum" in df_unified_perf.columns
+        else "Kernel Time (µs)"
+    )
+
+    kl_total_us = df_kernel_launchers[kl_time_col].sum()
+    up_total_us = df_unified_perf[up_time_col].sum()
+
+    print(f"\n{'='*60}")
+    print("Perf Report Sanity Check")
+    print(f"{'='*60}")
+    print(f"  {use_time} (gpu_timeline):     {computation_time_us:.2f} µs")
+    print(f"  Kernel time (kernel_launchers):       {kl_total_us:.2f} µs")
+    print(f"  Kernel time (unified_perf):           {up_total_us:.2f} µs")
+
+    kl_pass = kl_total_us >= computation_time_us
+    up_pass = up_total_us >= computation_time_us
+    print(f"  kernel_launchers >= computation_time: {'PASS' if kl_pass else 'FAIL'}")
+    print(f"  unified_perf     >= computation_time: {'PASS' if up_pass else 'FAIL'}")
+
+    # --- Check 2: per-kernel-name count verification ---
+    # Build {kernel_name: count} from tree events (ground truth)
+    tree_kernel_counts = dict(collections.Counter(
+        e["name"] for e in events
+        if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"} and ("nccl" not in e.get("name", "").lower() or include_nccl)
+    ))
+
+    def _extract_kernel_counts(df, label):
+        """Extract {kernel_name: count} from a DataFrame's kernel_details column."""
+        if "kernel_details_summary" in df.columns:
+            col = "kernel_details_summary"
+        elif "kernel_details" in df.columns:
+            col = "kernel_details"
+        else:
+            print(f"  WARNING: no kernel_details column in {label}")
+            return {}
+        counts = collections.Counter()
+        for kd in df[col]:
+            if isinstance(kd, list):
+                for d in kd:
+                    counts[d["name"]] += d.get("count", 1)
+        return dict(counts)
+
+    def _print_per_kernel_check(tree_counts, df_counts, label):
+        """Compare per-kernel counts and print mismatches."""
+        df_total = sum(df_counts.values())
+        tree_total = sum(tree_counts.values())
+        total_pass = tree_total == df_total
+        print(f"\n  --- {label} ---")
+        print(f"  Total GPU events in tree:  {tree_total}")
+        print(f"  Kernels accounted:         {df_total}")
+        print(f"  Total count match:         {'PASS' if total_pass else 'FAIL'}")
+
+        all_names = sorted(set(tree_counts) | set(df_counts))
+        mismatches = []
+        for name in all_names:
+            t = tree_counts.get(name, 0)
+            d = df_counts.get(name, 0)
+            if t != d:
+                mismatches.append((name, t, d))
+
+        if mismatches:
+            print(f"  Per-kernel mismatches ({len(mismatches)}):")
+            for name, t, d in mismatches:
+                trunc = name[:80] + "..." if len(name) > 80 else name
+                print(f"    {trunc}")
+                print(f"      tree={t}  {label}={d}  diff={t - d}")
+        else:
+            print(f"  Per-kernel detail check:   PASS (all match)")
+
+        return df_total, total_pass, mismatches
+
+    # Build {kernel_name: count} from each source
+    kl_kernel_counts = _extract_kernel_counts(df_kernel_launchers, "kernel_launchers")
+    up_kernel_counts = _extract_kernel_counts(df_unified_perf, "unified_perf")
+
+    total_gpu_events = sum(tree_kernel_counts.values())
+
+    kl_kernel_count, kl_count_pass, kl_mismatches = _print_per_kernel_check(
+        tree_kernel_counts, kl_kernel_counts, "kernel_launchers"
+    )
+    up_kernel_count, up_count_pass, up_mismatches = _print_per_kernel_check(
+        tree_kernel_counts, up_kernel_counts, "unified_perf"
+    )
+
+    print(f"{'='*60}\n")
+
+    return {
+        "computation_time_us": computation_time_us,
+        "kl_total_us": kl_total_us,
+        "up_total_us": up_total_us,
+        "kl_time_pass": kl_pass,
+        "up_time_pass": up_pass,
+        "total_gpu_events": total_gpu_events,
+        "kl_kernel_count": kl_kernel_count,
+        "up_kernel_count": up_kernel_count,
+        "kl_count_pass": kl_count_pass,
+        "up_count_pass": up_count_pass,
+        "tree_kernel_counts": dict(tree_kernel_counts),
+        "kl_kernel_counts": dict(kl_kernel_counts),
+        "up_kernel_counts": dict(up_kernel_counts),
+        "kl_mismatches": kl_mismatches,
+        "up_mismatches": up_mismatches,
+    }
+
+
+def classify_graph_capture_trace(input_folder: str):
+    """
+    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Supports .json, .json.gz, and .zip (containing a .json).
+    """
+    execution_details_path = os.path.join(input_folder, "execution_details.json")
+    if os.path.isfile(execution_details_path):
+        print(f"Execution details already exist at {execution_details_path}. Skipping classification.")
+        return
+    ## vLLM specific dummy run pattern
+    dummy_run_pattern = re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run")
+    ## SGLang specific dummy run pattern
+    ##dummy_run_pattern = re.compile(r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph")
+    annotation_pattern = re.compile(r"capture_(\d+)_(.*)")
+    def load_trace(path: str) -> dict:
+        if path.endswith(".zip"):
+            with zipfile.ZipFile(path, "r") as zf:
+                json_files = [f for f in zf.namelist() if f.endswith(".json")]
+                if not json_files:
+                    raise ValueError(f"No .json file found inside {path}")
+                with zf.open(json_files[0]) as f:
+                    return json.load(f)
+        if path.endswith(".json.gz"):
+            with gzip.open(path, "rt") as f:
+                return json.load(f)
+        with open(path, "r") as f:
+            return json.load(f)
+
+    def find_dummy_run_roots(events):
+        roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]
+        roots.sort(key=lambda x: x.get("ts", 0))
+        return roots
+
+    def find_annotation_roots(events):
+        roots = [
+            e for e in events
+            if e.get("cat") == "user_annotation"
+            and annotation_pattern.match(e.get("name", ""))
+        ]
+        roots.sort(key=lambda x: x.get("ts", 0))
+        return roots
+
+    def parse_annotation(name: str):
+        m = annotation_pattern.match(name)
+        if not m:
+            raise ValueError(f"Annotation name does not match expected pattern: {name}")
+        return int(m.group(1)), m.group(2)
+
+    def count_stream_begin_captures(events):
+        return sum(
+            1 for e in events
+            if "StreamBeginCapture" in e.get("name", "")
+            and e.get("cat") == "cuda_runtime"
+        )
+
+    def infer_batch_size_from_cpu_ops(events):
+        first_dims = []
+        for e in events:
+            if e.get("cat") != "cpu_op":
+                continue
+            input_dims = e.get("args", {}).get("Input Dims")
+            if not input_dims:
+                continue
+            for dim_list in input_dims:
+                if isinstance(dim_list, list) and dim_list:
+                    if isinstance(dim_list[0], int):
+                        first_dims.append(dim_list[0])
+        if not first_dims:
+            return None
+        return collections.Counter(first_dims).most_common(1)[0][0]
+
+    def infer_mode_from_captures(num_captures: int):
+        return "FULL" if num_captures <= 1 else "PIECEWISE"
+
+    if not os.path.isdir(input_folder):
+        print(f"Error: {input_folder} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    trace_files = sorted(
+        os.path.join(input_folder, f)
+        for f in os.listdir(input_folder)
+        if f.endswith(".json") or f.endswith(".json.gz")
+    )
+
+    if not trace_files:
+        print(f"No files starting with 'graph_capture_rank_0' found in {input_folder}")
+        sys.exit(0)
+
+    print(f"Found {len(trace_files)} graph-capture trace file(s) in {input_folder}\n")
+
+    results = []
+    for filepath in trace_files:
+        trace_json = load_trace(filepath)
+        events = trace_json.get("traceEvents", [])
+        dummy_roots = find_dummy_run_roots(events)
+        annotation_roots = find_annotation_roots(events)
+        basename = os.path.basename(filepath)
+
+        if annotation_roots and len(annotation_roots) == len(dummy_roots):
+            batch_size, mode = parse_annotation(annotation_roots[0]["name"])
+            print(f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}")
+            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            continue
+
+        num_captures = count_stream_begin_captures(events)
+        mode = infer_mode_from_captures(num_captures)
+        batch_size = infer_batch_size_from_cpu_ops(events)
+        print(f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}")
+    
+        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+    with open(f"{input_folder}/execution_details.json", "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\nResults written to {input_folder}/execution_details.json")
+    return
 
 def get_dfs_short_kernels(
     perf_analyzer, short_kernel_threshold_us=10, histogram_bins=100, topk=None
@@ -225,6 +485,7 @@ def add_truncated_kernel_details(
 
 def generate_perf_report_pytorch(
     profile_json_path: str,
+    augmented_tree: TraceToTree = None,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
     # include unlinked kernels in gpu timeline
@@ -255,18 +516,32 @@ def generate_perf_report_pytorch(
     else:
         gpu_arch_json = None
     add_python_func=True if group_by_parent_module else False
-    perf_analyzer = TreePerfAnalyzer.from_file(
-        profile_filepath=profile_json_path,
-        arch=gpu_arch_json,
-        python_path=python_path,
-        include_unlinked_kernels=include_unlinked_kernels,
-        add_python_func=add_python_func,
-        enable_pseudo_ops=enable_pseudo_ops,
-    )
-    
+    if augmented_tree is not None:
+        perf_analyzer = TreePerfAnalyzer(
+            tree=augmented_tree,
+            arch=gpu_arch_json,
+            python_path=python_path,
+            include_unlinked_kernels=include_unlinked_kernels,
+            add_python_func=add_python_func,
+            enable_pseudo_ops=enable_pseudo_ops,
+            rebuild_tree=False,
+        )
+    else:
+        perf_analyzer = TreePerfAnalyzer.from_file(
+            profile_filepath=profile_json_path,
+            arch=gpu_arch_json,
+            python_path=python_path,
+            include_unlinked_kernels=include_unlinked_kernels,
+            add_python_func=add_python_func,
+            enable_pseudo_ops=enable_pseudo_ops,
+        )
 
+        graph_launch_events = [event for event in perf_analyzer.tree.events if "graphlaunch" in event.get("name", "").lower()]
+        if len(graph_launch_events) > 0:
+            warnings.warn(f"There are hipgraph launches (Count: {len(graph_launch_events)}) in this trace, but a graph capture folder not provided, the analysis might be limited", UserWarning)
+    
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd"])
+    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd","sglang_profiler::tilelang_kernel_tilelang_sparse_fwd"])
     
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -276,7 +551,6 @@ def generate_perf_report_pytorch(
         print(
             "Detected GPU-only trace. Skipping CPU-dependent analysis and generating only GPU timeline and kernel summary."
         )
-
     agg_metrics = ["mean", "median", "std", "min", "max"]
 
     # Generate base DataFrames
@@ -322,7 +596,6 @@ def generate_perf_report_pytorch(
         )
         # Dictionary to hold the op-specific DataFrames
         perf_metrics_dfs = {}
-
         for op_cat, op_names in perf_analyzer.dict_cat2names.items():
             # Filter events belonging to the current category
             op_events = [
@@ -421,7 +694,7 @@ def generate_perf_report_pytorch(
             dict_name2df["ops_unique_args"] = df_kernel_launchers_unique_args
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
-        df_unified_perf = perf_analyzer.build_df_unified_perf_table()
+        df_unified_perf = perf_analyzer.build_df_unified_perf_table(include_nccl=collective_analysis)
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
                 df_unified_perf, agg_metrics=agg_metrics, include_pct=True
@@ -436,6 +709,8 @@ def generate_perf_report_pytorch(
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)
+        perf_report_sanity_check(perf_analyzer.tree.events, df_gpu_timeline, df_kernel_launchers, df_unified_perf, include_nccl=collective_analysis)
+
     # Kernel summary: aggregate per-kernel durations and counts
     if kernel_summary:
         try:
@@ -580,7 +855,7 @@ def generate_perf_report_pytorch(
             for sheet_name, df in dict_name2df.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"DataFrames successfully written to {output_xlsx_path}")
-
+    
     return dict_name2df
 
 
@@ -625,7 +900,7 @@ def main():
         "--disable_coll_analysis",
         action="store_false",
         dest="collective_analysis",
-        default=True,
+        default=False,
         help="Disable collective analysis section in the report. Enabled by default.",
     )
     parser.add_argument(
@@ -705,9 +980,24 @@ def main():
         help="Path to the GPU architecture JSON file",
     )
 
+    parser.add_argument(
+        "--capture_folder",
+        type=str,
+        required=False,
+        help="Path to the capture trace folder",
+    )
+
+
     args = parser.parse_args()
+    if args.capture_folder:
+        classify_graph_capture_trace(args.capture_folder)
+        metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
+        graph_tree= merge_capture_trace_into_graph(args.capture_folder, metadata_json_path, args.profile_json_path)
+    else:
+        graph_tree=None
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
+        augmented_tree=graph_tree,
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
         include_unlinked_kernels=args.include_unlinked_kernels,

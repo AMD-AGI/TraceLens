@@ -16,9 +16,7 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
-        # 'openpyxl',
-        # 'tensorboard-plugin-profile==2.19.0',
-        # 'tensorflow',
+        "orjson"
     ],
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open("README.md").read(),
@@ -34,6 +32,7 @@ setup(
         "console_scripts": [
             "TraceLens_generate_perf_report_jax = TraceLens.Reporting.generate_perf_report_jax:main",
             "TraceLens_generate_perf_report_pytorch = TraceLens.Reporting.generate_perf_report_pytorch:main",
+            "TraceLens_generate_perf_report_pytorch_inference = TraceLens.Reporting.generate_perf_report_pytorch_inference:main",
             "TraceLens_generate_perf_report_rocprof = TraceLens.Reporting.generate_perf_report_rocprof:main",
             "TraceLens_compare_perf_reports_pytorch = TraceLens.Reporting.compare_perf_reports_pytorch:main",
             "TraceLens_generate_multi_rank_collective_report_pytorch = TraceLens.Reporting.generate_multi_rank_collective_report_pytorch:main",
@@ -41,6 +40,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_compare_traces_jax_llama = TraceLens.Reporting.compare_traces_jax_llama:main",
+            "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
         ],
     },
 )

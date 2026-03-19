@@ -3,7 +3,3 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-
-from .xla_parser import XLACollectiveParser
-
-__all__ = ["XLACollectiveParser"]
