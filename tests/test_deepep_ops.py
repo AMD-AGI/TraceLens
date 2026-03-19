@@ -220,3 +220,14 @@ def test_deepep_all_inherit_epcomm():
         deepep_combine_backward,
     ):
         assert issubclass(cls, EPComm)
+
+
+def test_deepep_dispatch_flops_bwd_zero():
+    model = deepep_dispatch(_dispatch_event())
+    assert model.flops_bwd() == 0
+
+
+def test_deepep_dispatch_bytes_bwd():
+    num_tokens, hidden = 16384, 2048
+    model = deepep_dispatch(_dispatch_event(num_tokens=num_tokens, hidden=hidden))
+    assert model.bytes_bwd() == model.bytes()

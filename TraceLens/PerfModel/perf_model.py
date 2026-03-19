@@ -4889,7 +4889,7 @@ class EPComm:
     perf report with a named category (EP_Communication) and a bandwidth metric
     (TB/s) instead of disappearing into "other".  The relevant performance
     metric for these ops is TB/s, not TFLOPS/s or roofline efficiency — callers
-    should interpret GFLOPS = 0 / TFLOPS/s = nan as expected, not as missing
+    should interpret GFLOPS = 0 / TFLOPS/s = 0 as expected, not as missing
     data.  A more natural home would be alongside NcclAnalyser (which handles
     NCCL collectives), but DeepEP uses intra-node shared memory (not NCCL) and
     there is no existing EP-specific comm analysis infrastructure to extend.
@@ -4927,10 +4927,16 @@ class EPComm:
     def flops(self):
         return 0
 
+    def flops_bwd(self):
+        return 0
+
     def bytes(self):
         if self.num_tokens is None or self.hidden_dim is None or self.bpe is None:
             return None
         return self.num_tokens * self.hidden_dim * self.bpe
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
 
     def get_maf_type(self):
         return None
