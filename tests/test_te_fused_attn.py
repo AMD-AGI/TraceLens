@@ -147,3 +147,13 @@ def test_fused_attn_qk_head_dim_mismatch_raises():
     event = _fused_attn_event(q=q, k=k, v=v)
     with pytest.raises(ValueError, match="QK head-dim mismatch"):
         te_fused_attn(event)
+
+
+def test_fused_attn_kv_seq_len_mismatch_raises():
+    """Mismatched K and V sequence lengths should raise ValueError."""
+    q = [4096, 4, 32, 128]
+    k = [4096, 4, 8, 128]
+    v = [2048, 4, 8, 128]
+    event = _fused_attn_event(q=q, k=k, v=v)
+    with pytest.raises(ValueError, match="KV seq-len mismatch"):
+        te_fused_attn(event)
