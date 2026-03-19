@@ -30,11 +30,11 @@ index 559997280..ce1e7359b 100644
                      )
                  ),
              )
-+            
++
 +            # Enable shape metadata for Triton & FlashInfer kernels
 +            if record_shapes:
 +                kernel_shape_profiler.enable()
-+            
++
              self.torch_profiler.start()
              self.profile_in_progress = True
  
