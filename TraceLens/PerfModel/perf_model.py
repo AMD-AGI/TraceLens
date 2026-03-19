@@ -3283,10 +3283,22 @@ class Reduce:
         self.num_input_elems = self.param_details["num_input_elems"]
         self.num_output_elems = self.param_details["num_output_elems"]
         self.dtype_in_out = self.param_details["dtype_in_out"]
-        self.bpe_in = name2bpe(self.dtype_in_out[0])
-        if self.dtype_in_out[1] is not None:
-            self.bpe_out = name2bpe(self.dtype_in_out[1])
+
+        # Safely convert dtypes to bytes-per-element, allowing unknown/missing dtypes.
+        dtype_in = self.dtype_in_out[0] if self.dtype_in_out else None
+        if isinstance(dtype_in, str) and dtype_in:
+            self.bpe_in = name2bpe(dtype_in)
         else:
+            self.bpe_in = None
+
+        dtype_out = self.dtype_in_out[1] if self.dtype_in_out else None
+        if dtype_out is not None:
+            if isinstance(dtype_out, str) and dtype_out:
+                self.bpe_out = name2bpe(dtype_out)
+            else:
+                self.bpe_out = None
+        else:
+            # If output dtype is unknown, default to input BPE (may be None).
             self.bpe_out = self.bpe_in
 
     @staticmethod
@@ -3390,19 +3402,38 @@ class aten_reduce(Reduce):
         concrete = args.get("Concrete Inputs", [])
         dim = None
         keepdim = False
+        # concrete[0] is expected to be the input tensor; parse the rest heuristically
         if len(concrete) >= 2:
-            # Typical order: (input, dim?, keepdim?, ...)
-            try:
-                dim_arg = concrete[1]
-                if dim_arg is not None:
-                    if isinstance(dim_arg, (list, tuple)):
-                        dim = [int(d) for d in dim_arg]
-                    else:
-                        dim = [int(dim_arg)]
-            except (TypeError, ValueError):
-                pass
-            if len(concrete) >= 3 and concrete[2] is not None:
-                keepdim = bool(concrete[2])
+            # Slice off the input tensor; remaining are scalar/config args
+            scalar_args = concrete[1:]
+
+            # Heuristic for keepdim: use the last boolean argument
+            keepdim_idx = None
+            for idx in range(len(scalar_args) - 1, -1, -1):
+                val = scalar_args[idx]
+                if isinstance(val, bool):
+                    keepdim = val
+                    keepdim_idx = idx
+                    break
+
+            # Heuristic for dim: prefer the last int or list/tuple of ints, excluding keepdim_idx
+            for idx in range(len(scalar_args) - 1, -1, -1):
+                if keepdim_idx is not None and idx == keepdim_idx:
+                    continue
+                val = scalar_args[idx]
+                if val is None:
+                    continue
+                try:
+                    if isinstance(val, (list, tuple)):
+                        dim_list = [int(d) for d in val]
+                        dim = dim_list
+                        break
+                    elif isinstance(val, int):
+                        dim = [int(val)]
+                        break
+                except (TypeError, ValueError):
+                    # Not a valid dimension specification; ignore
+                    continue
 
         # cumsum/cumprod preserve shape
         if "cumsum" in name or "cumprod" in name:
@@ -3426,8 +3457,10 @@ class aten_reduce(Reduce):
         reduce_type = "sum"
         if "mean" in name:
             reduce_type = "mean"
-        elif "max" in name or "min" in name:
+        elif "max" in name:
             reduce_type = "max"
+        elif "min" in name:
+            reduce_type = "min"
         elif "norm" in name:
             reduce_type = "norm"
 
