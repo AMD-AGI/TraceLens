@@ -71,7 +71,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      5. **MI400**
 
 3. **Analysis Mode** → `<analysis_mode>`
-   - Ask: "What type of analysis are you performing?"
+   - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
    - Options:
      1. **Default (training and eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
      2. **Inference analysis (vLLM/SGLang)** (`<analysis_mode>` = `inference`) — uses `TraceLens_generate_perf_report_pytorch_inference`
