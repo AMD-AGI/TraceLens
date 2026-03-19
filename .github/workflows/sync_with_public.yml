@@ -7,11 +7,6 @@ on:
   repository_dispatch:
     types: [public-sync]
 
-permissions:
-  contents: write
-  pull-requests: write
-  workflows: write
-
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -37,7 +32,12 @@ jobs:
 
           BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
           git checkout -b "$BRANCH"
+
+          # Keep private repo's workflow files unchanged during merge
+          git config merge.ours.driver true
+          echo '.github/workflows/** merge=ours' >> .gitattributes
           git merge upstream/main --no-edit --strategy-option theirs
+          git checkout HEAD -- .gitattributes
 
           git push origin "$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
