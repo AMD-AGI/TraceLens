@@ -95,7 +95,7 @@ Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak TFLOPS
+- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
 
 ### Step 4: Generate Markdown Tables
 
@@ -123,11 +123,9 @@ For each validated bottleneck, provide recommendations in both categories:
 - Check if torch.compile can batch operations automatically
 
 **Kernel Optimization Focus:**
-- Generate replay artifact for kernel team to tune tile sizes
+- **Compute-bound:** Tune tile sizes, improve wave occupancy
+- **Memory-bound:** Optimize memory access patterns, check for bandwidth bottlenecks
 - Flag suboptimal GEMM kernel selections
-- Note inefficient memory access patterns
-- Identify wave occupancy issues for compute-bound GEMMs
-- Check for memory bandwidth bottlenecks
 
 ### Step 6: Write Category Findings
 
@@ -146,7 +144,9 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute)
-- **Efficiency:** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
+- **Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
+- **Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
+- *Use the template matching `bound_type` and delete the other.*
 - **Issue:** [Brief description]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
@@ -161,7 +161,10 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
 
-**Peak TFLOPS reference:** When citing peak TFLOPS for a bottleneck, use `operations[i].efficiency.resolved_peak_maf` from the metrics JSON. This is the precision-specific peak for the operation's data type (e.g., 654 for FP16, 708 for BF16). Do not look up peaks independently from the metadata dict.
+**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
+- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
+- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
+Do not look up peaks independently from the metadata dict.
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
@@ -198,7 +201,7 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
 2. **Count matters** - High invocation counts indicate batching opportunities
-3. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF
+3. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
 4. **Be specific** - Include M/N/K shapes, batch sizes, data types
 5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 
@@ -209,7 +212,7 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 | Efficiency | Assessment | Action |
 |------------|------------|--------|
 | >70% | Good | Limited optimization potential |
-| <70% | Needs investigation | Priority for kernel optimization, generate replay artifact |
+| <70% | Needs investigation | Priority for kernel optimization |
 
 ---
 
@@ -233,4 +236,4 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 | Occupancy | Requires hardware counters | "Kernel running slower than expected" |
 | Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
 
-**Key principle**: This analysis identifies bottlenecks and generates reproducers. Root cause diagnosis requires profiling tools on replay artifacts.
+**Key principle**: This analysis identifies bottlenecks. Root cause diagnosis requires profiling tools with hardware counters.
