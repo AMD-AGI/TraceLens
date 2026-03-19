@@ -56,6 +56,8 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # TE FusedAttn → SDPA (causal attention via TransformerEngine)
+    "FusedAttnFunc": perf_model.te_fused_attn,
 }
 
 # Add pseudo-op extension mappings
@@ -222,6 +224,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] == "FusedAttnFuncBackward":
+        return "SDPA_bwd"
     elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
         return "elementwise"
     elif row["name"].startswith("triton"):
