@@ -56,6 +56,8 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # TE FusedAttn → SDPA (fused attention via TransformerEngine)
+    "FusedAttnFunc": perf_model.te_fused_attn,
 }
 
 # Add pseudo-op extension mappings
@@ -204,6 +206,7 @@ def categorize_torch_op(row):
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
+        "FusedAttnFuncBackward",
         "flash_attn::_flash_attn_backward",
         "flash_attn::_flash_attn_varlen_backward",
         "aten::_scaled_dot_product_cudnn_attention_backward",
@@ -213,7 +216,7 @@ def categorize_torch_op(row):
         "aiter::wrapper_fmha_v3_bwd",
         "aiter::mha_bwd",
     ]
-    if row["name"] in dict_cat2names["SDPA"]:
+    if row["name"] in dict_cat2names["SDPA"] or row["name"] in sdpa_bwd_names:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
             return "SDPA_bwd"
         else:
