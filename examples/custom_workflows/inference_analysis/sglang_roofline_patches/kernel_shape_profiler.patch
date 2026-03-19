@@ -1,9 +1,9 @@
 diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
 new file mode 100644
-index 000000000..45452d683
+index 000000000..340884240
 --- /dev/null
 +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,732 @@
 +"""
 +Automatic tensor shape metadata for Triton / FlashInfer / aiter kernels
 +in PyTorch profiler traces.
@@ -37,6 +37,7 @@ index 000000000..45452d683
 +import importlib
 +import inspect
 +import logging
++import pkgutil
 +import sys
 +import threading
 +from typing import Any, Callable, List, Optional, Tuple
@@ -133,6 +134,20 @@ index 000000000..45452d683
 +    # ── FlashInfer MoE (cutedsl) ──
 +    ("flashinfer.moe", "moe_gemm_fp8_nt_groupwise"),
 +]
++
++# ---------------------------------------------------------------------------
++# Auto-discovery prefixes.
++#
++# In addition to the explicit registry above, ``enable()`` scans every
++# already-loaded module whose name starts with one of these prefixes and
++# wraps only functions likely to launch kernels.  Discovery is filtered by
++# signature/source heuristics to avoid wrapping unrelated utility code.
++# ---------------------------------------------------------------------------
++_AUTO_DISCOVER_PREFIXES: Tuple[str, ...] = (
++    "flashinfer.",
++    "sglang.srt.",
++    "aiter.ops.",
++)
 +
 +
 +# ---------------------------------------------------------------------------
@@ -332,9 +347,23 @@ index 000000000..45452d683
 +                elif pname in non_tensor_param_names:
 +                    nt_vals[pname] = val
 +
++            # If every tensor arg is None (all Optional[Tensor] and not
++            # provided), torch dispatch will fail with "no tensor arguments".
++            # Fall back to calling the original function directly.
++            if not any(isinstance(t, torch.Tensor) for t in tensor_args):
++                return original_fn(*args, **kwargs)
++
 +            _stash_non_tensor_args(op_name, nt_vals)
-+            torch_op(*tensor_args)
-+            return _pop_return_value(op_name)
++            try:
++                torch_op(*tensor_args)
++                return _pop_return_value(op_name)
++            except Exception:
++                # Dispatch failed (e.g. device/type mismatch, None for
++                # non-optional Tensor, schema arity error).  Clean up
++                # thread-local stash and fall back to the original call.
++                _pop_non_tensor_args(op_name)
++                _pop_return_value(op_name)
++                return original_fn(*args, **kwargs)
 +
 +        return dispatch_wrapper
 +
@@ -406,6 +435,188 @@ index 000000000..45452d683
 +                pass
 +    return patches
 +
++# ---------------------------------------------------------------------------
++# Lightweight wrappers for functions that can't use torch.library
++# ---------------------------------------------------------------------------
++
++def _make_record_function_wrapper(
++    qualified_name: str,
++    original_fn: Callable,
++) -> Callable:
++    """
++    Create a wrapper that uses ``torch.profiler.record_function`` to emit
++    a ``cpu_op`` event with tensor shapes embedded in the event name.
++
++    Used for functions where we can't build a ``torch.library`` schema
++    (e.g. no type annotations, ``*args``/``**kwargs``, etc.).
++    """
++
++    @functools.wraps(original_fn)
++    def wrapper(*args, **kwargs):
++        shape_parts: List[str] = []
++        for i, arg in enumerate(args):
++            if isinstance(arg, torch.Tensor):
++                shape_parts.append(f"arg{i}:{list(arg.shape)}")
++        for k, v in kwargs.items():
++            if isinstance(v, torch.Tensor):
++                shape_parts.append(f"{k}:{list(v.shape)}")
++        if shape_parts:
++            event_name = f"{qualified_name}({', '.join(shape_parts)})"
++        else:
++            event_name = qualified_name
++        with torch.profiler.record_function(event_name):
++            return original_fn(*args, **kwargs)
++
++    return wrapper
++
++# ---------------------------------------------------------------------------
++# Kernel-launch detection heuristics
++# ---------------------------------------------------------------------------
++
++# Substrings that strongly indicate a function launches a GPU kernel.
++_KERNEL_SOURCE_INDICATORS = (
++    "[grid",        # Triton launch pattern: kernel[grid](...)
++    "torch.ops.",   # Custom C++/CUDA op dispatch
++    "sgl_kernel.",  # sgl-kernel extension entry points
++)
++
++def _source_launches_kernel(fn: Callable) -> bool:
++    """Return True if *fn* source contains known kernel-launch patterns."""
++    try:
++        source = inspect.getsource(fn)
++    except (OSError, TypeError):
++        return False
++    return any(marker in source for marker in _KERNEL_SOURCE_INDICATORS)
++
++
++def _is_likely_kernel_launcher(fn: Callable, sig: inspect.Signature) -> bool:
++    """
++    Decide whether *fn* is likely to launch a GPU kernel.
++
++    Priority:
++    1) Tensor annotation exists -> include.
++    2) Non-tensor annotations only -> exclude.
++    3) No annotations -> fallback to source pattern matching.
++    """
++    has_any_annotation = False
++    for param in sig.parameters.values():
++        if param.annotation is inspect._empty:
++            continue
++        has_any_annotation = True
++        stype = _infer_schema_type(param)
++        if stype is not None and "Tensor" in stype:
++            return True
++
++    if has_any_annotation:
++        return False
++
++    return _source_launches_kernel(fn)
++
++
++def _force_import_submodules(prefix: str) -> None:
++    """
++    Recursively import submodules under *prefix* so they appear in
++    ``sys.modules`` before auto-discovery runs.
++
++    *prefix* should be a top-level package name without a trailing dot
++    (e.g. ``"sglang.srt"``).
++    """
++    try:
++        pkg = importlib.import_module(prefix)
++    except ImportError:
++        return
++
++    pkg_path = getattr(pkg, "__path__", None)
++    if pkg_path is None:
++        return
++
++    for _importer, mod_name, _is_pkg in pkgutil.walk_packages(
++        pkg_path, prefix=prefix + "."
++    ):
++        if mod_name in sys.modules:
++            continue
++        try:
++            importlib.import_module(mod_name)
++        except Exception:
++            # Optional modules may fail to import depending on environment.
++            pass
++
++
++def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
++    """
++    Scan already-loaded ``sys.modules`` for modules whose name starts
++    with one of ``_AUTO_DISCOVER_PREFIXES`` and collect only functions
++    likely to launch GPU kernels.
++
++    Returns a list of ``(module_path, function_name)`` pairs.
++    """
++    # Force-import submodules under each discovery prefix first so deeper
++    # kernels become visible in sys.modules.
++    for prefix in _AUTO_DISCOVER_PREFIXES:
++        _force_import_submodules(prefix.rstrip("."))
++
++    results: List[Tuple[str, str]] = []
++    seen_ids: set = set()
++
++    for mod_name, mod in list(sys.modules.items()):
++        if mod is None:
++            continue
++        if not any(mod_name.startswith(p) for p in _AUTO_DISCOVER_PREFIXES):
++            continue
++        try:
++            mod_dict = vars(mod)
++        except TypeError:
++            continue
++        for attr_name in list(mod_dict.keys()):
++            if attr_name.startswith("__"):
++                continue
++            obj = mod_dict[attr_name]
++
++            # Only wrap regular Python functions.
++            # @triton.jit objects (JITFunction / Autotuner) must NOT be
++            # wrapped — replacing them in module globals breaks the
++            # Triton compiler's global resolution for device-side calls
++            # between JIT kernels (e.g. remap_xcd, _rmsmorm_op, etc.).
++            if not inspect.isfunction(obj):
++                continue
++
++            # Only include functions *defined* within a target namespace
++            fn_module = getattr(obj, "__module__", "") or ""
++            if not any(
++                fn_module.startswith(p) for p in _AUTO_DISCOVER_PREFIXES
++            ):
++                continue
++
++            obj_id = id(obj)
++            if obj_id in seen_ids:
++                continue
++            seen_ids.add(obj_id)
++
++            # Require at least one parameter
++            try:
++                sig = inspect.signature(obj)
++            except (ValueError, TypeError):
++                continue
++            if not sig.parameters:
++                continue
++
++            # Skip signatures we cannot map to a torch schema.
++            if any(
++                p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
++                for p in sig.parameters.values()
++            ):
++                continue
++
++            # Core filter: only keep likely kernel launchers.
++            if not _is_likely_kernel_launcher(obj, sig):
++                continue
++
++            results.append((mod_name, attr_name))
++
++    logger.debug("Auto-discovered %d kernel candidates from %s",
++                 len(results),
++                 ", ".join(_AUTO_DISCOVER_PREFIXES))
++    return results
 +
 +# ---------------------------------------------------------------------------
 +# Public API
@@ -423,7 +634,15 @@ index 000000000..45452d683
 +        _patches.clear()
 +        _wrapped_ids: set = set()  # track function ids to avoid double-wrapping
 +
-+        for module_path, attr_name in _KERNEL_ENTRY_POINTS:
++        # Merge explicit registry with filtered auto-discovered functions.
++        # Duplicates are harmless — _wrapped_ids prevents double-wrapping.
++        all_entry_points = (
++            list(_KERNEL_ENTRY_POINTS)
++            +
++            _discover_kernel_entry_points()
++        )
++             
++        for module_path, attr_name in all_entry_points:
 +            resolved = _resolve_target(module_path, attr_name)
 +            if resolved is None:
 +                continue
@@ -438,60 +657,63 @@ index 000000000..45452d683
 +                continue
 +            _wrapped_ids.add(fn_id)
 +
++            qualified_name = f"{module_path}.{name}"
++
++            # ── Regular functions ──
 +            try:
 +                sig = inspect.signature(original_fn)
 +            except (ValueError, TypeError):
 +                logger.debug(
-+                    "Cannot inspect signature of %s.%s — skipping",
-+                    module_path, attr_name,
++                    "Cannot inspect signature of %s — skipping",
++                    qualified_name,
 +                )
 +                continue
 +
 +            base = f"{module_path.split('.')[-1]}_{name}"
 +            schema_info = _build_schema_from_sig(sig, skip_self=is_method)
-+            if schema_info is None:
-+                logger.debug(
-+                    "No tensor annotations for %s.%s — skipping",
-+                    module_path, attr_name,
-+                )
-+                continue
 +
-+            schema_str, t_names, nt_names = schema_info
-+            op_name = _next_op_name(base)
-+            wrapper = _register_op(
-+                op_name, schema_str, original_fn,
-+                t_names, nt_names, sig, skip_self=is_method,
-+            )
++            wrapper = None
++            if schema_info is not None:
++                # Full tensor annotations → use torch.library custom op
++                schema_str, t_names, nt_names = schema_info
++                op_name = _next_op_name(base)
++                wrapper = _register_op(
++                    op_name, schema_str, original_fn,
++                    t_names, nt_names, sig, skip_self=is_method,
++                )
++                if wrapper is not None:
++                    logger.debug("Registered %s as custom op %s",
++                                 qualified_name, op_name)
++
 +            if wrapper is None:
-+                logger.debug(
-+                    "Failed to register %s.%s — skipping",
-+                    module_path, attr_name,
++                # Fallback: no annotations or schema registration failed
++                # → use record_function wrapper (shapes in event name)
++                wrapper = _make_record_function_wrapper(
++                    qualified_name, original_fn,
 +                )
-+                continue
-+
-+            logger.debug("Registered %s.%s as %s",
-+                         module_path, attr_name, op_name)
++                logger.debug("Registered %s via record_function",
++                             qualified_name)
 +
 +            # --- Apply patches ---
 +            if is_plain_function:
-+                # Scan ALL modules for references to original_fn and replace.
 +                ref_patches = _patch_all_references(original_fn, wrapper)
 +                _patches.extend(ref_patches)
 +                if not ref_patches:
-+                    # Fallback: at least patch the definition module
 +                    setattr(container, name, wrapper)
 +                    _patches.append((container, name, original_fn))
 +            else:
-+                # Method on class — just patch the class attribute
 +                setattr(container, name, wrapper)
 +                _patches.append((container, name, original_fn))
 +
++        n_discovered = len(all_entry_points) - len(_KERNEL_ENTRY_POINTS)
 +        _enabled = True
 +        logger.info(
 +            "kernel_shape_profiler enabled: %d references patched across "
-+            "%d entry points",
++            "%d entry points (%d explicit + %d auto-discovered)",
 +            len(_patches),
++            len(all_entry_points),
 +            len(_KERNEL_ENTRY_POINTS),
++            n_discovered,
 +        )
 +
 +

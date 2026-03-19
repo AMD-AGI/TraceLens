@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/utils/profile_utils.py b/python/sglang/srt/utils/profile_utils.py
-index 1f44af979..9c582493a 100644
+index 1f44af979..539fd8ca8 100644
 --- a/python/sglang/srt/utils/profile_utils.py
 +++ b/python/sglang/srt/utils/profile_utils.py
 @@ -12,6 +12,7 @@ from sglang.srt.managers.io_struct import ProfileReqOutput
@@ -10,14 +10,17 @@ index 1f44af979..9c582493a 100644
  
  _is_npu = is_npu()
  if _is_npu:
-@@ -283,10 +284,17 @@ class _ProfilerTorch(_ProfilerConcreteBase):
+@@ -281,12 +282,20 @@ class _ProfilerTorch(_ProfilerConcreteBase):
+                 else torch_npu.profiler.tensorboard_trace_handler(self.output_dir)
+             ),
          )
-         self.torch_profiler.start()
- 
++
 +        # Enable shape metadata for Triton & FlashInfer kernels
 +        if self.record_shapes:
 +            kernel_shape_profiler.enable()
 +
+         self.torch_profiler.start()
+ 
      def stop(self):
          Path(self.output_dir).mkdir(parents=True, exist_ok=True)
  

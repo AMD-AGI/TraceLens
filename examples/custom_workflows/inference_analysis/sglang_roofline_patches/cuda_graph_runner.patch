@@ -1,17 +1,17 @@
 diff --git a/python/sglang/srt/model_executor/cuda_graph_runner.py b/python/sglang/srt/model_executor/cuda_graph_runner.py
-index f1ea1de9d..96cd4864f 100644
+index b0b2ede6d..74eb17569 100644
 --- a/python/sglang/srt/model_executor/cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/cuda_graph_runner.py
-@@ -75,7 +75,7 @@ from sglang.srt.utils import (
+@@ -74,7 +74,7 @@ from sglang.srt.utils import (
  )
  from sglang.srt.utils.patch_torch import monkey_patch_torch_compile
  from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 -
-+from sglang.srt.utils.kernel_shape_profiler import enable, disable
++from sglang.srt.utils.kernel_shape_profiler import enable, disable, is_enabled
  try:
      from kt_kernel import KTMoEWrapper
  
-@@ -258,7 +258,7 @@ class CudaGraphRunner:
+@@ -254,7 +254,7 @@ class CudaGraphRunner:
          self.speculative_algorithm = model_runner.server_args.speculative_algorithm
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
@@ -20,7 +20,7 @@ index f1ea1de9d..96cd4864f 100644
          self.tp_size = model_runner.server_args.tp_size
          self.dp_size = model_runner.server_args.dp_size
          self.pp_size = model_runner.server_args.pp_size
-@@ -450,10 +450,33 @@ class CudaGraphRunner:
+@@ -446,9 +446,31 @@ class CudaGraphRunner:
          )
  
      def _init_profile_context_and_memory_record(self):
@@ -50,11 +50,9 @@ index f1ea1de9d..96cd4864f 100644
 +            profile_memory=True,
 +            on_trace_ready=on_trace_ready,
          )
-+        enable()
          torch.cuda.memory._record_memory_history()
          return profile_context
- 
-@@ -472,11 +495,13 @@ class CudaGraphRunner:
+@@ -468,11 +490,13 @@ class CudaGraphRunner:
              + "\n\nMemory Usage is saved to cuda_graph_runner_memory_usage.pickle\n"
          )
          logger.info(log_message)
@@ -68,7 +66,7 @@ index f1ea1de9d..96cd4864f 100644
  
          def _capture_one_stream(stream_idx: Optional[int] = None):
              avail_mem = get_available_gpu_memory(
-@@ -534,7 +559,7 @@ class CudaGraphRunner:
+@@ -530,7 +554,7 @@ class CudaGraphRunner:
                          _capture_one_stream(i)
  
          if self.enable_profile_cuda_graph:
@@ -77,20 +75,18 @@ index f1ea1de9d..96cd4864f 100644
  
      def _capture_graph(self, graph, pool, stream, run_once_fn):
          memory_saver_adapter = TorchMemorySaverAdapter.create(
-@@ -730,14 +755,22 @@ class CudaGraphRunner:
+@@ -726,14 +750,27 @@ class CudaGraphRunner:
              self.device_module.synchronize()
              self.model_runner.tp_group.barrier()
              run_once()
 +            if self.enable_profile_cuda_graph:
++                # Activate kernel shape profiler AFTER warmup runs so that all
++                # lazily-imported modules (e.g. tilelang_kernel) are in sys.modules
++                # and auto-discovery can find them.
++                if not is_enabled():
++                    enable()
 +                self._profiler.step()
- 
--        if get_global_graph_memory_pool() is None:
--            set_global_graph_memory_pool(self.device_module.graph_pool_handle())
--        # Set graph pool id globally to be able to use symmetric memory
--        set_graph_pool_id(get_global_graph_memory_pool())
--        out = self._capture_graph(
--            graph, get_global_graph_memory_pool(), stream, run_once
--        )
++
 +        with torch.profiler.record_function(
 +            f"capture_{num_tokens}_{self.capture_forward_mode.name}"
 +        ):
@@ -101,7 +97,14 @@ index f1ea1de9d..96cd4864f 100644
 +            out = self._capture_graph(
 +                graph, get_global_graph_memory_pool(), stream, run_once
 +            )
-+
+ 
+-        if get_global_graph_memory_pool() is None:
+-            set_global_graph_memory_pool(self.device_module.graph_pool_handle())
+-        # Set graph pool id globally to be able to use symmetric memory
+-        set_graph_pool_id(get_global_graph_memory_pool())
+-        out = self._capture_graph(
+-            graph, get_global_graph_memory_pool(), stream, run_once
+-        )
 +        if self.enable_profile_cuda_graph:
 +            self._profiler.step()
  
