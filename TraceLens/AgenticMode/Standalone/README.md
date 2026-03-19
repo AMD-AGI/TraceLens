@@ -18,24 +18,37 @@ TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered perf
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens
+cd TraceLens-internal
 ```
 
-### 2. Install TraceLens inside your container
+### 2. Install TraceLens
 
-SSH into your node and exec into the container:
+**Local (no container):**
+
+```bash
+pip install -e .
+```
+
+**Cluster with container:**
+
+SSH into your node, exec into the container, and install:
 
 ```bash
 ssh <node>
 docker exec -it <container> bash
-```
-
-Install TraceLens:
-
-```bash
 cd /path/to/TraceLens-internal
 pip install -e .
 ```
+
+### 3. Install the Cursor CLI (Optional)
+
+The `agent` CLI is required for headless (non-interactive) runs:
+
+```bash
+curl https://cursor.com/install -fsS | bash
+```
+
+This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step.
 
 ---
 
@@ -55,14 +68,14 @@ pip install -e .
    - Platform (MI300X/MI325X/MI350X/MI355X/MI400)
    - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
-   - Node name / container name
+   - Node name / container name / venv name
    - Output directory (optional)
 
 ### To run via CLI (headless):
 
-Use the Cursor `agent` CLI to run the orchestrator non-interactively:
+Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
 
-**Default (training and eager inference non-vLLM/SGLang):**
+**Cluster + container — default (training and eager inference non-vLLM/SGLang):**
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
@@ -70,7 +83,7 @@ agent --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
-**Inference (vLLM/SGLang eager mode):**
+**Cluster + container — inference (vLLM/SGLang eager mode):**
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
@@ -78,7 +91,7 @@ agent --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
-**Inference (vLLM/SGLang graph replay + capture):**
+**Cluster + container — inference (vLLM/SGLang graph replay + capture):**
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
@@ -209,6 +222,18 @@ The orchestrator supports two analysis modes, selected during Step 0:
 For inference mode, the orchestrator also asks for the execution mode:
 - **Eager mode** — only the trace file is needed
 - **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree
+
+## Execution Environments
+
+The orchestrator supports three execution environments. During Step 0, you are asked whether you are running locally or on a cluster, and the orchestrator builds the appropriate command prefixes automatically.
+
+| Environment | When to use | What happens |
+|-------------|-------------|--------------|
+| **Local** | TraceLens is installed on the machine running Cursor | Commands run directly (no SSH, no Docker) |
+| **Local + venv** | TraceLens is installed in a virtual environment on the local machine | Commands are prefixed with `source <venv>/bin/activate` |
+| **Cluster (no container)** | TraceLens is installed natively on a remote node | Commands are wrapped with `ssh <node>` |
+| **Cluster + venv** | TraceLens is installed in a venv on a remote node | Commands are wrapped with `ssh <node> "source <venv>/bin/activate && ..."` |
+| **Cluster + container** | TraceLens is installed inside a Docker container on a remote node | Commands are wrapped with `ssh <node> "docker exec <container> ..."` 
 
 ## Extending Capability
 
