@@ -1,6 +1,8 @@
 name: Sync from upstream
 
 on:
+  push:
+    branches: [receive_sync]  # TEMPORARY: remove before merging to main
   workflow_dispatch:
   repository_dispatch:
     types: [public-sync]
