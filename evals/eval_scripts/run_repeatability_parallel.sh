@@ -4,7 +4,7 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MAX_PARALLEL="${MAX_PARALLEL:-3}"
+MAX_PARALLEL="${MAX_PARALLEL:-5}"
 NUM_REPEATS="${NUM_REPEATS:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"

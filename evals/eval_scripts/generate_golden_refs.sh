@@ -5,7 +5,7 @@ set -uo pipefail
 # Configuration (run from repo root on the node)
 # ---------------------------------------------------------------------------
 CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
-MAX_PARALLEL="${MAX_PARALLEL:-3}"
+MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
 REPO_ROOT="$(pwd)"
@@ -79,7 +79,8 @@ generate_single_ref() {
         return 1
     fi
 
-    # Copy output as reference
+    # Copy output as reference (remove old ref first, then copy contents directly)
+    rm -rf "$REF_DIR"
     cp -r "$OUTPUT_DIR" "$REF_DIR"
 
     # Remove unwanted files from reference dir (keep only standalone_analysis.md + perf_report_csvs/)
@@ -87,12 +88,13 @@ generate_single_ref() {
            "$REF_DIR/category_findings" \
            "$REF_DIR/system_findings" \
            "$REF_DIR/metadata" \
+           "$REF_DIR/cache" \
            "$REF_DIR/perf_improvement.png" \
            "$REF_DIR/perf_improvement_base64.txt" \
            "$REF_DIR/plot_data.json"
 
-    # Remove intermediate analysis output and log
-    rm -rf "$OUTPUT_DIR"
+    # Remove intermediate analysis output (docker-owned files need container cleanup)
+    $DEXEC rm -rf "$OUTPUT_DIR"
     rm -f "$CASE_DIR/analysis_stream.ndjson"
 
     log_status "  $tag [$(ts)] Reference saved to $reference_dir (cleaned)"
