@@ -59,6 +59,15 @@ op_to_perf_model_class_map = {
     # CK grouped GEMM (same layout as primus_turbo grouped GEMM)
     "primus_turbo_cpp_extension::ck_grouped_gemm": perf_model.primus_turbo_grouped_gemm,
     "primus_turbo_cpp_extension::ck_grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    # MoE dispatch/combine (communication — bytes only, flops = 0)
+    "MoEDispatch": perf_model.moe_dispatch,
+    "MoECombine": perf_model.moe_combine,
+    # Causal Conv1D (SSM / Mamba depthwise conv)
+    "DaoAILab::_causal_conv1d_fwd_cpp": perf_model.causal_conv1d_fwd,
+    # RoPE (elementwise rotation)
+    "FusedRoPEFunc": perf_model.fused_rope_fwd,
+    # CrossEntropy (fused softmax + nll loss)
+    "CrossEntropyFunction": perf_model.cross_entropy_fwd,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
 }
@@ -149,6 +158,10 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.MoEComm: "MoE_comm",
+    perf_model.CausalConv1d: "SSM",
+    perf_model.FusedRoPE: "RoPE",
+    perf_model.CrossEntropy: "CrossEntropy",
     perf_model.MambaSSD: "SSM",
 }
 
@@ -186,6 +199,9 @@ def categorize_torch_op(row):
              'RoPE_fwd', 'RoPE_bwd', 'CrossEntropy_fwd', 'CrossEntropy_bwd',
              'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
              'record_param_comms', or 'other'.
+
+    Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
+    are categorization-only (timing without GFLOPS or TB/s).
     """
 
     debug = False
@@ -233,7 +249,6 @@ def categorize_torch_op(row):
         return "MoE_unfused"
     elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
         "MambaSplitConv1dScanCombinedFn",
-        "DaoAILab::_causal_conv1d_fwd_cpp",
     ]:
         return "SSM_fwd"
     elif row["name"] in [
