@@ -4634,7 +4634,20 @@ class MambaSSD:
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
-        self.bpe = name2bpe(dtype) if dtype else 2
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+        self.bpe_dt_bias = self._param_bpe(input_types, 3, 4)
+        self.bpe_A = self._param_bpe(input_types, 4, 4)
+        self.bpe_D = self._param_bpe(input_types, 5, self.bpe)
+
+    @staticmethod
+    def _param_bpe(input_types, slot, default):
+        """Derive bytes-per-element for a parameter slot, falling back to default."""
+        if len(input_types) > slot and input_types[slot]:
+            bpe = name2bpe(input_types[slot])
+            return bpe if bpe is not None else default
+        return default
 
     @staticmethod
     def get_param_details(event):
@@ -4657,7 +4670,15 @@ class MambaSSD:
         G = int(concrete[16]) if len(concrete) > 16 and concrete[16] else 1
 
         d_inner = H * P
-        N = (combined_dim - 2 * d_inner - H) // (2 * G)
+        numerator = combined_dim - 2 * d_inner - H
+        denom = 2 * G
+        if numerator <= 0 or numerator % denom != 0:
+            raise ValueError(
+                f"Cannot derive d_state: combined_dim={combined_dim}, "
+                f"H={H}, P={P}, G={G}, d_inner={d_inner}, "
+                f"numerator={numerator}, denom={denom}"
+            )
+        N = numerator // denom
 
         return {
             "B": B,
@@ -4705,10 +4726,16 @@ class MambaSSD:
         read_input = B * T * combined_dim * self.bpe
         read_conv_w = conv_channels * d_conv * self.bpe
         read_conv_b = conv_channels * self.bpe
-        read_params = H * 4 * 3  # dt_bias + A + D (float32)
+        read_params = H * self.bpe_dt_bias + H * self.bpe_A + H * self.bpe_D
         write_output = B * T * d_inner * self.bpe
 
         return read_input + read_conv_w + read_conv_b + read_params + write_output
+
+    def flops_bwd(self):
+        return self.flops()
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
 
     def get_maf_type(self):
         return "matrix"

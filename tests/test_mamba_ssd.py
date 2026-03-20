@@ -251,11 +251,17 @@ def test_bytes_mamba_370m():
     combined_dim = 2 * d_inner + 2 * G * N + H  # 4384
     bpe = 2  # bf16
 
+    bpe_dt_bias = 4  # float32 (slot 3)
+    bpe_A = 4  # float32 (slot 4)
+    bpe_D = 2  # bf16 (slot 5)
+
     expected = (
         B * T * combined_dim * bpe  # read zxbcdt
         + conv_channels * d_conv * bpe  # read conv weight
         + conv_channels * bpe  # read conv bias
-        + H * 4 * 3  # dt_bias + A + D (float32)
+        + H * bpe_dt_bias
+        + H * bpe_A
+        + H * bpe_D  # per-slot param bytes
         + B * T * d_inner * bpe  # write output
     )
 
@@ -288,3 +294,33 @@ def test_ssd_matmuls_dominate_conv():
     flops_conv = 2 * B * conv_channels * T * d_conv
     flops_total = model.flops()
     assert flops_conv < flops_total * 0.05  # conv < 5% of total
+
+
+# ---------------------------------------------------------------------------
+# Backward methods
+# ---------------------------------------------------------------------------
+
+
+def test_flops_bwd_equals_fwd():
+    model = mamba_ssd_fwd(_mamba_event())
+    assert model.flops_bwd() == model.flops()
+
+
+def test_bytes_bwd_equals_fwd():
+    model = mamba_ssd_fwd(_mamba_event())
+    assert model.bytes_bwd() == model.bytes()
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_combined_dim_raises():
+    """Tampered combined_dim that doesn't satisfy divisibility should raise."""
+    import pytest
+
+    event = _mamba_event()
+    event["args"]["Input Dims"][0][2] += 1  # break divisibility
+    with pytest.raises(ValueError, match="Cannot derive d_state"):
+        mamba_ssd_fwd(event)
