@@ -59,7 +59,7 @@ op_to_perf_model_class_map = {
     # TE fused ops (forward — full GEMM perf model with GFLOPS + TB/s)
     "_Linear": perf_model.te_linear,
     "_LayerNormLinear": perf_model.te_layer_norm_linear,
-    # TE standalone LayerNorm (TB/s only, no significant GFLOPS)
+    # TE standalone LayerNorm (memory-bound; reports both FLOPS and TB/s)
     "LayerNormFn": perf_model.te_layer_norm_fn,
 }
 

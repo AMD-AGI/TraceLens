@@ -268,4 +268,11 @@ def test_te_layer_norm_fn_instantiates():
 def test_te_layer_norm_fn_bytes():
     event = _layer_norm_fn_event(X_shape=[2048, 4, 2048], gamma_shape=[2048])
     model = te_layer_norm_fn(event)
-    assert model.bytes() > 0
+    num_elems = 2048 * 4 * 2048
+    num_channels = 2048
+    bpe = 2  # bf16
+    # is_affine=True, is_training=True, has_bias=False
+    # num_weight_tensors = 2 (mean+var) + 1 (gamma) + 2 (training) = 5
+    activation_bytes = num_elems * bpe + num_elems * bpe
+    weight_bytes = 5 * num_channels * bpe
+    assert model.bytes() == activation_bytes + weight_bytes
