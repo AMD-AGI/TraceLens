@@ -259,6 +259,7 @@ def generate_perf_report_pytorch(
     detect_recompute: bool = False,
     # first occurrence time column in ops_unique_args
     include_first_occurrence_time: bool = False,
+    group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
@@ -384,7 +385,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                    df_ops_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops = add_truncated_kernel_details(
                     df_ops,
@@ -422,7 +423,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_fwd, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                    df_ops_fwd_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_fwd = add_truncated_kernel_details(
                     df_ops_fwd,
@@ -457,7 +458,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
                 df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                    df_ops_bwd_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_bwd = add_truncated_kernel_details(
                     df_ops_bwd,
