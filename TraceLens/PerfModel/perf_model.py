@@ -4683,7 +4683,8 @@ class CausalConv1d:
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
-        self.bpe = name2bpe(dtype) if dtype else 2
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
 
     @staticmethod
     def get_param_details(event):
@@ -4716,6 +4717,8 @@ class CausalConv1d:
         return 2 * p["batch"] * p["channels"] * p["seq_len"] * p["kernel_size"]
 
     def bytes(self):
+        if self.bpe is None:
+            return None
         p = self.param_details
         input_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
         weight_bytes = p["channels"] * p["kernel_size"] * self.bpe
@@ -4761,7 +4764,8 @@ class FusedRoPE:
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
-        self.bpe = name2bpe(dtype) if dtype else 2
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
 
     @staticmethod
     def get_param_details(event):
@@ -4779,6 +4783,8 @@ class FusedRoPE:
         return 3 * self.param_details["num_elements"]
 
     def bytes(self):
+        if self.bpe is None:
+            return None
         n = self.param_details["num_elements"]
         return 2 * n * self.bpe
 
@@ -4786,7 +4792,9 @@ class FusedRoPE:
         return "vector"
 
     def get_compute_precision(self):
-        return None
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
 
 
 class fused_rope_fwd(FusedRoPE):
@@ -4818,7 +4826,8 @@ class CrossEntropy:
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
-        self.bpe = name2bpe(dtype) if dtype else 2
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
 
     @staticmethod
     def get_param_details(event):
@@ -4837,6 +4846,8 @@ class CrossEntropy:
         return 5 * p["batch"] * p["vocab_size"]
 
     def bytes(self):
+        if self.bpe is None:
+            return None
         p = self.param_details
         logits_bytes = prod(p["logits_shape"]) * self.bpe
         target_bpe = 8  # long int
@@ -4848,7 +4859,9 @@ class CrossEntropy:
         return "vector"
 
     def get_compute_precision(self):
-        return None
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
 
 
 class cross_entropy_fwd(CrossEntropy):
