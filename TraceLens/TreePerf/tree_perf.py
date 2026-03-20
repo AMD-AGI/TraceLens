@@ -28,11 +28,12 @@ from ..PerfModel.torch_op_mapping import (
     dict_cat2names,
     op_to_perf_model_class_map,
 )
+from ..Trace2Tree.extensions import apply_pseudo_op_extensions
+from ..Trace2Tree.trace_capture_merge import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -130,6 +131,7 @@ class TreePerfAnalyzer:
     @staticmethod
     def from_file(
         profile_filepath,
+        capture_trace_filepath=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -148,6 +150,13 @@ class TreePerfAnalyzer:
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
         tree = TraceToTree(data, event_to_category=categorizer)
+
+        # Optionally merge capture trace into graph tree
+        if capture_trace_filepath is not None:
+            tree = merge_capture_trace_into_graph(
+                capture_tree_filepath=capture_trace_filepath,
+                graph_tree_filepath=profile_filepath,
+            )
 
         return TreePerfAnalyzer(
             tree,
@@ -171,6 +180,7 @@ class TreePerfAnalyzer:
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
         detect_recompute=False,
+        rebuild_tree=True,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -187,7 +197,8 @@ class TreePerfAnalyzer:
             event.get("cat") == "python_func" for event in self.tree.events
         )
         self.gpu_only = self.check_gpu_only()
-        self.tree.build_tree(add_python_func=add_python_func)
+        if rebuild_tree:
+            self.tree.build_tree(add_python_func=add_python_func)
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
@@ -195,7 +206,6 @@ class TreePerfAnalyzer:
                 apply_pseudo_op_extensions(self.tree)
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
-
         # Backward compatibility for custom tree postprocessing
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
@@ -521,6 +531,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                    metrics_event["num_kernels"] = len(event["kernel_details"])
             if self.detect_recompute:
                 metrics_event["is_recompute"] = event.get("is_recompute", False)
             rows.append(metrics_event)
@@ -640,6 +651,8 @@ class TreePerfAnalyzer:
         param_cols = [
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
+        if "num_kernels" in df_perf_metrics.columns:
+            param_cols.append("num_kernels")
         groupby_cols = ["name"] + param_cols
         if "is_recompute" in df_perf_metrics.columns:
             groupby_cols.append("is_recompute")
@@ -1024,6 +1037,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
+                    metrics_event["num_kernels"] = len(event["kernel_details"])
                 if include_call_stack:
                     call_stack = self.tree.traverse_parents_and_get_callstack(
                         event, filter=("nn.Module",)
@@ -1316,6 +1330,7 @@ class TreePerfAnalyzer:
         agg_metrics=["mean"],
         include_pct=False,
         include_overlapping_kernels=False,
+        group_by_parent_module=False,
     ) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -1327,6 +1342,7 @@ class TreePerfAnalyzer:
             include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
             include_overlapping_kernels (bool): If True, group by 'overlapping_kernel_names' and
             aggregate overlapping_kernels_details_summary via _summarize_kernel_stats.
+            group_by_parent_module (bool): If True, also group by 'parent_module'.
 
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
@@ -1341,7 +1357,11 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
+        if group_by_parent_module:
+            idx = grouping_cols_original.index("op category") + 1
+            grouping_cols_original.insert(idx, "parent_module")
         if include_overlapping_kernels:
             idx = grouping_cols_original.index("name") + 1
             grouping_cols_original.insert(idx, "overlapping_kernel_names")
@@ -1556,24 +1576,33 @@ class TreePerfAnalyzer:
         """
         Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
 
-        A leaf cpu_op follows the pattern: cpu_op -> runtime -> kernel
+        A leaf cpu_op follows patterns:
+        - cpu_op -> runtime -> kernel
+        - cpu_op -> python_function -> runtime -> kernel
         This matches the definition used in get_kernel_launchers().
         """
         if self.event_to_category(event) != "cpu_op":
             return False
 
-        # Check if any child's grandchild is a kernel (cpu_op -> runtime -> kernel pattern)
-        for child_uid in event.get("children", []):
-            child = self.tree.get_UID2event(child_uid)
-            for grandchild_uid in child.get("children", []):
-                grandchild = self.tree.get_UID2event(grandchild_uid)
-                if self.event_to_category(grandchild) in {
-                    "kernel",
-                    "gpu_memcpy",
-                    "gpu_memset",
-                }:
+        # Check if any descendant is a kernel within 3 levels
+        # Patterns: cpu_op -> runtime -> kernel OR cpu_op -> python_function -> runtime -> kernel
+        def has_kernel_descendant(evt, max_depth=10):
+            if max_depth <= 0:
+                return False
+            for child_uid in evt.get("children", []):
+                child = self.tree.get_UID2event(child_uid)
+                if not child:
+                    continue
+                child_cat = self.event_to_category(child)
+                if child_cat in {"kernel", "gpu_memcpy", "gpu_memset"}:
                     return True
-        return False
+                # Continue traversing through runtime and python_function categories
+                if child_cat in {"cuda_runtime", "python_function"}:
+                    if has_kernel_descendant(child, max_depth - 1):
+                        return True
+            return False
+
+        return has_kernel_descendant(event)
 
     def _launches_gpu_kernels(self, event):
         """
@@ -1718,7 +1747,7 @@ class TreePerfAnalyzer:
                 return
 
             # Skip non-cpu_op events
-            if self.event_to_category(event) != "cpu_op":
+            if not self.add_python_func and self.event_to_category(event) != "cpu_op":
                 return
 
             # First check: Does this subtree have any GPU kernels?
@@ -1772,6 +1801,49 @@ class TreePerfAnalyzer:
         # Start from cpu_root_nodes
         for root_uid in self.tree.cpu_root_nodes:
             traverse(root_uid)
+
+        # Collect GPU kernels that have no cpu_op in their parent hierarchy.
+        # These are missed by the cpu_root_nodes traversal above.
+        collected_gpu_uids = set()
+        for evt in collected:
+            collected_gpu_uids.update(evt.get("gpu_events", []))
+
+        orphan_kernels = []
+        for evt in self.tree.events:
+            if self.event_to_category(evt) not in {"kernel", "gpu_memcpy", "gpu_memset"}:
+                continue
+            if evt["UID"] in collected_gpu_uids:
+                continue
+            if not include_nccl and "nccl" in evt.get("name", "").lower():
+                continue
+
+            has_cpu_op = False
+            parent = self.tree.get_parent_event(evt)
+            while parent is not None:
+                if self.event_to_category(parent) == "cpu_op":
+                    has_cpu_op = True
+                    break
+                parent = self.tree.get_parent_event(parent)
+
+            if not has_cpu_op:
+                orphan_kernels.append(evt)
+
+        # Group orphan kernels by their immediate parent (typically a runtime event)
+        parent_to_orphans = defaultdict(list)
+        for kernel in orphan_kernels:
+            parent = self.tree.get_parent_event(kernel)
+            parent_uid = parent["UID"] if parent else None
+            parent_to_orphans[parent_uid].append(kernel)
+
+        for parent_uid, kernels in parent_to_orphans.items():
+            if parent_uid is None:
+                continue
+            parent_evt = self.tree.get_UID2event(parent_uid)
+            for kernel in kernels:
+                synthetic = dict(parent_evt)
+                synthetic["name"] = f"{parent_evt['name']}::{kernel['name']}"
+                synthetic["gpu_events"] = [kernel["UID"]]
+                collected.append(synthetic)
 
         return collected
 
@@ -2052,6 +2124,7 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
+            "num_kernels",
         ]
         if (
             include_overlapping_kernels
@@ -2817,8 +2890,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
