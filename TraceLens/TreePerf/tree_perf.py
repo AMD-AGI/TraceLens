@@ -2096,6 +2096,7 @@ class TreePerfAnalyzer:
         agg_metrics=["mean", "std"],
         include_pct=True,
         include_overlapping_kernels=False,
+        group_by_parent_module=False,
         group_by_num_kernels=False,
     ):
         """
@@ -2111,6 +2112,7 @@ class TreePerfAnalyzer:
             include_pct (bool): Include percentage and cumulative percentage columns.
             include_overlapping_kernels (bool): If True, group by 'overlapping_kernel_names' and
                 aggregate overlapping_kernels_details_summary via _summarize_kernel_stats.
+            group_by_parent_module (bool): If True, also group by 'parent_module' when present.
 
         Returns:
             pd.DataFrame: Summarized DataFrame grouped by unique args.
@@ -2140,6 +2142,9 @@ class TreePerfAnalyzer:
             grouping_cols.insert(1, "overlapping_kernel_names")  # after name
         if "is_recompute" in df_temp.columns:
             grouping_cols.append("is_recompute")
+        if group_by_parent_module:
+            idx = grouping_cols.index("op category") + 1
+            grouping_cols.insert(idx, "parent_module")
         if group_by_num_kernels:
             grouping_cols.append("num_kernels")
 
