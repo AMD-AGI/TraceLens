@@ -582,7 +582,7 @@ class TreePerfAnalyzer:
 
     @staticmethod
     def summarize_df_perf_metrics(
-        df_perf_metrics, agg_metrics=["mean", "std"], include_overlapping_kernels=False
+        df_perf_metrics, agg_metrics=["mean", "std"], group_by_num_kernels=False, include_overlapping_kernels=False
     ):
         if df_perf_metrics.empty:
             warnings.warn(
@@ -651,7 +651,7 @@ class TreePerfAnalyzer:
         param_cols = [
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
-        if "num_kernels" in df_perf_metrics.columns:
+        if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
         groupby_cols = ["name"] + param_cols
         if "is_recompute" in df_perf_metrics.columns:
@@ -1331,6 +1331,7 @@ class TreePerfAnalyzer:
         include_pct=False,
         include_overlapping_kernels=False,
         group_by_parent_module=False,
+        group_by_num_kernels=False,
     ) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -1343,6 +1344,7 @@ class TreePerfAnalyzer:
             include_overlapping_kernels (bool): If True, group by 'overlapping_kernel_names' and
             aggregate overlapping_kernels_details_summary via _summarize_kernel_stats.
             group_by_parent_module (bool): If True, also group by 'parent_module'.
+            group_by_num_kernels (bool): If True, also group by num_kernels.
 
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
@@ -1357,7 +1359,6 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
-            "num_kernels",
         ]
         if group_by_parent_module:
             idx = grouping_cols_original.index("op category") + 1
@@ -1367,6 +1368,8 @@ class TreePerfAnalyzer:
             grouping_cols_original.insert(idx, "overlapping_kernel_names")
         if "is_recompute" in df_kernel_launchers.columns:
             grouping_cols_original.append("is_recompute")
+        if group_by_num_kernels:
+            grouping_cols_original.append("num_kernels")
 
         # 0. Filter the DataFrame based on the event name if provided
         if event_name is not None:
@@ -1810,7 +1813,11 @@ class TreePerfAnalyzer:
 
         orphan_kernels = []
         for evt in self.tree.events:
-            if self.event_to_category(evt) not in {"kernel", "gpu_memcpy", "gpu_memset"}:
+            if self.event_to_category(evt) not in {
+                "kernel",
+                "gpu_memcpy",
+                "gpu_memset",
+            }:
                 continue
             if evt["UID"] in collected_gpu_uids:
                 continue
@@ -2089,6 +2096,7 @@ class TreePerfAnalyzer:
         agg_metrics=["mean", "std"],
         include_pct=True,
         include_overlapping_kernels=False,
+        group_by_num_kernels=False,
     ):
         """
         Summarize unified perf table by unique (name, Input Dims, Input type, etc.).
@@ -2124,7 +2132,6 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
-            "num_kernels",
         ]
         if (
             include_overlapping_kernels
@@ -2133,6 +2140,8 @@ class TreePerfAnalyzer:
             grouping_cols.insert(1, "overlapping_kernel_names")  # after name
         if "is_recompute" in df_temp.columns:
             grouping_cols.append("is_recompute")
+        if group_by_num_kernels:
+            grouping_cols.append("num_kernels")
 
         # Convert columns to string for grouping
         str_col_names = []
@@ -2890,10 +2899,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
