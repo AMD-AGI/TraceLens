@@ -259,6 +259,8 @@ def generate_perf_report_pytorch(
     detect_recompute: bool = False,
     # first occurrence time column in ops_unique_args
     include_first_occurrence_time: bool = False,
+    group_by_parent_module: bool = False,
+    group_by_num_kernels: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -325,7 +327,10 @@ def generate_perf_report_pytorch(
         )
         df_kernel_launchers_unique_args = (
             perf_analyzer.get_df_kernel_launchers_unique_args(
-                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
+                df_kernel_launchers,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                group_by_num_kernels=group_by_num_kernels,
             )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(
@@ -342,6 +347,7 @@ def generate_perf_report_pytorch(
                     agg_metrics=agg_metrics,
                     include_pct=True,
                     include_overlapping_kernels=True,
+                    group_by_num_kernels=group_by_num_kernels
                 )
             )
             df_kernel_launchers_unique_args_overlapping_kernels = (
@@ -379,7 +385,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_raw, agg_metrics
+                    df_ops_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops = add_truncated_kernel_details(
                     df_ops,
@@ -393,7 +399,7 @@ def generate_perf_report_pytorch(
                 if include_overlap_info:
                     df_ops_overlapping_kernels = (
                         perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_raw, agg_metrics, include_overlapping_kernels=True
+                            df_ops_raw, agg_metrics, include_overlapping_kernels=True, group_by_num_kernels=group_by_num_kernels
                         )
                     )
                     df_ops_overlapping_kernels = add_truncated_kernel_details(
@@ -417,7 +423,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_fwd_raw, agg_metrics
+                    df_ops_fwd_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_fwd = add_truncated_kernel_details(
                     df_ops_fwd,
@@ -452,7 +458,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
                 df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd_raw, agg_metrics
+                    df_ops_bwd_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_bwd = add_truncated_kernel_details(
                     df_ops_bwd,
@@ -483,6 +489,7 @@ def generate_perf_report_pytorch(
                             df_ops_fwd_raw,
                             agg_metrics,
                             include_overlapping_kernels=True,
+                            group_by_num_kernels=group_by_num_kernels
                         )
                     )
                     df_ops_fwd_overlapping_kernels = add_truncated_kernel_details(
@@ -521,6 +528,7 @@ def generate_perf_report_pytorch(
                             df_ops_bwd_raw,
                             agg_metrics,
                             include_overlapping_kernels=True,
+                            group_by_num_kernels=group_by_num_kernels
                         )
                     )
                     df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
@@ -594,7 +602,11 @@ def generate_perf_report_pytorch(
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
-                df_unified_perf, agg_metrics=agg_metrics, include_pct=True
+                df_unified_perf,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                group_by_num_kernels=group_by_num_kernels,
+                group_by_parent_module=group_by_parent_module,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -613,6 +625,8 @@ def generate_perf_report_pytorch(
                         agg_metrics=agg_metrics,
                         include_pct=True,
                         include_overlapping_kernels=True,
+                        group_by_parent_module=group_by_parent_module,
+                        group_by_num_kernels=group_by_num_kernels
                     )
                 )
                 if not df_unified_perf_summary_overlapping_kernels.empty:
@@ -918,6 +932,18 @@ def main():
         help="Add a first_occurrence_time column to ops_unique_args showing when each "
         "unique op+args combination first appeared (normalized so the earliest is 0).",
     )
+    parser.add_argument(
+        "--group_by_parent_module",
+        action="store_true",
+        default=False,
+        help="Group by parent module in summary tables.",
+    )
+    parser.add_argument(
+        "--group_by_num_kernels",
+        action="store_true",
+        default=False,
+        help="Group by number of kernels in summary tables.",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -941,6 +967,8 @@ def main():
         gpu_arch_json_path=args.gpu_arch_json_path,
         detect_recompute=args.detect_recompute,
         include_first_occurrence_time=args.include_first_occurrence_time,
+        group_by_parent_module=args.group_by_parent_module,
+        group_by_num_kernels=args.group_by_num_kernels,
     )
 
 
