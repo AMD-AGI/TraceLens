@@ -605,6 +605,7 @@ def generate_perf_report_pytorch(
                 agg_metrics=agg_metrics,
                 include_pct=True,
                 group_by_num_kernels=group_by_num_kernels,
+                group_by_parent_module=group_by_parent_module,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -623,6 +624,7 @@ def generate_perf_report_pytorch(
                         agg_metrics=agg_metrics,
                         include_pct=True,
                         include_overlapping_kernels=True,
+                        group_by_parent_module=group_by_parent_module,
                         group_by_num_kernels=group_by_num_kernels
                     )
                 )
@@ -928,6 +930,14 @@ def main():
         default=False,
         help="Add a first_occurrence_time column to ops_unique_args showing when each "
         "unique op+args combination first appeared (normalized so the earliest is 0).",
+    )
+    parser.add_argument(
+        "--group_by_parent_module",
+        action="store_true",
+        default=False,
+        help="Group by parent module in summary tables.",
+    )
+    parser.add_argument(
         "--group_by_num_kernels",
         action="store_true",
         default=False,
@@ -956,6 +966,7 @@ def main():
         gpu_arch_json_path=args.gpu_arch_json_path,
         detect_recompute=args.detect_recompute,
         include_first_occurrence_time=args.include_first_occurrence_time,
+        group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
     )
 
