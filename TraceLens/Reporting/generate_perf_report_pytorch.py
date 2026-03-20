@@ -247,6 +247,7 @@ def generate_perf_report_pytorch(
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    group_by_num_kernels: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -311,7 +312,10 @@ def generate_perf_report_pytorch(
         )
         df_kernel_launchers_unique_args = (
             perf_analyzer.get_df_kernel_launchers_unique_args(
-                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True
+                df_kernel_launchers,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                group_by_num_kernels=group_by_num_kernels,
             )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(
@@ -340,7 +344,9 @@ def generate_perf_report_pytorch(
                 df_ops = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
-                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+                df_ops = perf_analyzer.summarize_df_perf_metrics(
+                    df_ops, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                )
                 df_ops = add_truncated_kernel_details(
                     df_ops,
                     source_col="kernel_details__summarize_kernel_stats",
@@ -354,7 +360,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_fwd, agg_metrics
+                    df_ops_fwd, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_fwd = add_truncated_kernel_details(
                     df_ops_fwd,
@@ -389,7 +395,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
                 df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd, agg_metrics
+                    df_ops_bwd, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_bwd = add_truncated_kernel_details(
                     df_ops_bwd,
@@ -440,7 +446,10 @@ def generate_perf_report_pytorch(
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
-                df_unified_perf, agg_metrics=agg_metrics, include_pct=True
+                df_unified_perf,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                group_by_num_kernels=group_by_num_kernels,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -475,7 +484,7 @@ def generate_perf_report_pytorch(
             # Note: Basic 'Parent op category' is added by get_kernel_details() in tree_perf.py
             # This adds categorization for kernels that don't have a parent cpu_op
             if "Parent op category" not in df_kernels.columns:
-                df_kernels["Parent op category"] = np.nan
+                df_kernels["Parent op category"] = pd.NA
 
             if "Launcher" in df_kernels.columns:
                 mask_missing_cat = df_kernels["Parent op category"].isna()
@@ -485,7 +494,7 @@ def generate_perf_report_pytorch(
                         s = str(name).lower()
                         if "cudagraph" in s or "graphlaunch" in s:
                             return "graph"
-                        return "runtime" if s and s != "nan" else np.nan
+                        return "runtime" if s and s != "nan" else pd.NA
 
                     df_kernels.loc[mask_missing_cat, "Parent op category"] = (
                         df_kernels.loc[mask_missing_cat, "Launcher"].apply(
@@ -713,6 +722,12 @@ def main():
         default=None,
         help="Path to the GPU architecture JSON file",
     )
+    parser.add_argument(
+        "--group_by_num_kernels",
+        action="store_true",
+        default=False,
+        help="Group by number of kernels in summary tables.",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -733,6 +748,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        group_by_num_kernels=args.group_by_num_kernels,
     )
 
 

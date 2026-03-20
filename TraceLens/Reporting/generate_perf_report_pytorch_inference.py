@@ -24,9 +24,12 @@ import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
 
 import TraceLens
+
 
 def perf_report_sanity_check(
     events,
@@ -44,11 +47,9 @@ def perf_report_sanity_check(
        accounted by df_kernel_launchers and df_unified_perf.
     """
     use_time = "busy_time" if include_nccl else "computation_time"
-        
+
     computation_time_us = (
-        df_gpu_timeline.loc[
-            df_gpu_timeline["type"] == use_time, "time ms"
-        ].values[0]
+        df_gpu_timeline.loc[df_gpu_timeline["type"] == use_time, "time ms"].values[0]
         * 1e3
     )
 
@@ -81,10 +82,14 @@ def perf_report_sanity_check(
 
     # --- Check 2: per-kernel-name count verification ---
     # Build {kernel_name: count} from tree events (ground truth)
-    tree_kernel_counts = dict(collections.Counter(
-        e["name"] for e in events
-        if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"} and ("nccl" not in e.get("name", "").lower() or include_nccl)
-    ))
+    tree_kernel_counts = dict(
+        collections.Counter(
+            e["name"]
+            for e in events
+            if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"}
+            and ("nccl" not in e.get("name", "").lower() or include_nccl)
+        )
+    )
 
     def _extract_kernel_counts(df, label):
         """Extract {kernel_name: count} from a DataFrame's kernel_details column."""
@@ -172,13 +177,18 @@ def classify_graph_capture_trace(input_folder: str):
     """
     execution_details_path = os.path.join(input_folder, "execution_details.json")
     if os.path.isfile(execution_details_path):
-        print(f"Execution details already exist at {execution_details_path}. Skipping classification.")
+        print(
+            f"Execution details already exist at {execution_details_path}. Skipping classification."
+        )
         return
     ## vLLM specific dummy run pattern
-    dummy_run_pattern = re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run")
+    dummy_run_pattern = re.compile(
+        r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run"
+    )
     ## SGLang specific dummy run pattern
     ##dummy_run_pattern = re.compile(r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph")
     annotation_pattern = re.compile(r"capture_(\d+)_(.*)")
+
     def load_trace(path: str) -> dict:
         if path.endswith(".zip"):
             with zipfile.ZipFile(path, "r") as zf:
@@ -200,7 +210,8 @@ def classify_graph_capture_trace(input_folder: str):
 
     def find_annotation_roots(events):
         roots = [
-            e for e in events
+            e
+            for e in events
             if e.get("cat") == "user_annotation"
             and annotation_pattern.match(e.get("name", ""))
         ]
@@ -215,7 +226,8 @@ def classify_graph_capture_trace(input_folder: str):
 
     def count_stream_begin_captures(events):
         return sum(
-            1 for e in events
+            1
+            for e in events
             if "StreamBeginCapture" in e.get("name", "")
             and e.get("cat") == "cuda_runtime"
         )
@@ -265,20 +277,25 @@ def classify_graph_capture_trace(input_folder: str):
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             batch_size, mode = parse_annotation(annotation_roots[0]["name"])
-            print(f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}")
+            print(
+                f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
+            )
             results.append({"file": basename, "batch_size": batch_size, "mode": mode})
             continue
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
         batch_size = infer_batch_size_from_cpu_ops(events)
-        print(f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}")
-    
+        print(
+            f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
+        )
+
         results.append({"file": basename, "batch_size": batch_size, "mode": mode})
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults written to {input_folder}/execution_details.json")
     return
+
 
 def get_dfs_short_kernels(
     perf_analyzer, short_kernel_threshold_us=10, histogram_bins=100, topk=None
@@ -509,13 +526,14 @@ def generate_perf_report_pytorch(
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     group_by_parent_module: bool = False,
+    group_by_num_kernels: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-    add_python_func=True if group_by_parent_module else False
+    add_python_func = True if group_by_parent_module else False
     if augmented_tree is not None:
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
@@ -536,13 +554,27 @@ def generate_perf_report_pytorch(
             enable_pseudo_ops=enable_pseudo_ops,
         )
 
-        graph_launch_events = [event for event in perf_analyzer.tree.events if "graphlaunch" in event.get("name", "").lower()]
+        graph_launch_events = [
+            event
+            for event in perf_analyzer.tree.events
+            if "graphlaunch" in event.get("name", "").lower()
+        ]
         if len(graph_launch_events) > 0:
-            warnings.warn(f"There are hipgraph launches (Count: {len(graph_launch_events)}) in this trace, but a graph capture folder not provided, the analysis might be limited", UserWarning)
-    
+            warnings.warn(
+                f"There are hipgraph launches (Count: {len(graph_launch_events)}) in this trace, but a graph capture folder not provided, the analysis might be limited",
+                UserWarning,
+            )
+
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output","aiter::mha_varlen_fwd","pseudo_mla_decode_fwd","sglang_profiler::tilelang_kernel_tilelang_sparse_fwd"])
-    
+    perf_analyzer.tree.apply_annotation(
+        name_filters=[
+            "vllm::unified_attention_with_output",
+            "aiter::mha_varlen_fwd",
+            "pseudo_mla_decode_fwd",
+            "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
+        ]
+    )
+
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
 
@@ -574,10 +606,11 @@ def generate_perf_report_pytorch(
     # Only process CPU-dependent analysis for non-GPU-only traces
     if not perf_analyzer.gpu_only:
         df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
-            include_kernel_details=True, include_call_stack=group_by_parent_module,
+            include_kernel_details=True,
+            include_call_stack=group_by_parent_module,
         )
-        df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary_module(
-            df_kernel_launchers
+        df_kernel_launchers_summary = (
+            perf_analyzer.get_df_kernel_launchers_summary_module(df_kernel_launchers)
         )
         df_kernel_launchers_summary_by_category = (
             perf_analyzer.get_df_kernel_launchers_summary_by_category_module(
@@ -586,7 +619,9 @@ def generate_perf_report_pytorch(
         )
         df_kernel_launchers_unique_args = (
             perf_analyzer.get_df_kernel_launchers_unique_args_module(
-                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True, 
+                df_kernel_launchers,
+                agg_metrics=agg_metrics,
+                include_pct=True,
             )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(
@@ -605,13 +640,15 @@ def generate_perf_report_pytorch(
             ]
             if len(op_events) == 0:
                 continue
-              # Skip categories with no events
+            # Skip categories with no events
             if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
                 # For GEMM: create a single table that covers both fwd and bwd.
                 df_ops = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
-                df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
+                df_ops = perf_analyzer.summarize_df_perf_metrics(
+                    df_ops, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                )
                 df_ops = add_truncated_kernel_details(
                     df_ops,
                     source_col="kernel_details__summarize_kernel_stats",
@@ -625,7 +662,7 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_fwd, agg_metrics
+                    df_ops_fwd, agg_metrics, group_by_num_kernels=group_by_num_kernels
                 )
                 df_ops_fwd = add_truncated_kernel_details(
                     df_ops_fwd,
@@ -648,14 +685,26 @@ def generate_perf_report_pytorch(
                     df_ops_fwd = df_ops_fwd[
                         df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
                     ]
-                
-                op_events=[event for event in op_events if (event["name"]!="vllm::unified_attention_with_output" and event["name"]!="aiter::mha_varlen_fwd")]
-                if len(op_events) >0:
+
+                op_events = [
+                    event
+                    for event in op_events
+                    if (
+                        event["name"] != "vllm::unified_attention_with_output"
+                        and event["name"] != "aiter::mha_varlen_fwd"
+                    )
+                ]
+                if len(op_events) > 0:
                     df_ops_bwd = perf_analyzer.build_df_perf_metrics(
-                        op_events, bwd=True, include_kernel_details=True, include_args=True
+                        op_events,
+                        bwd=True,
+                        include_kernel_details=True,
+                        include_args=True,
                     )
                     df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                        df_ops_bwd, agg_metrics
+                        df_ops_bwd,
+                        agg_metrics,
+                        group_by_num_kernels=group_by_num_kernels,
                     )
                     df_ops_bwd = add_truncated_kernel_details(
                         df_ops_bwd,
@@ -668,7 +717,6 @@ def generate_perf_report_pytorch(
                         perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
                 if not df_ops_fwd.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-                
 
     # Short kernel study (works for both GPU-only and regular traces)
     if short_kernel_study:
@@ -694,10 +742,15 @@ def generate_perf_report_pytorch(
             dict_name2df["ops_unique_args"] = df_kernel_launchers_unique_args
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
-        df_unified_perf = perf_analyzer.build_df_unified_perf_table(include_nccl=collective_analysis)
+        df_unified_perf = perf_analyzer.build_df_unified_perf_table(
+            include_nccl=collective_analysis
+        )
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
-                df_unified_perf, agg_metrics=agg_metrics, include_pct=True
+                df_unified_perf,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                group_by_num_kernels=group_by_num_kernels,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -709,7 +762,13 @@ def generate_perf_report_pytorch(
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)
-        perf_report_sanity_check(perf_analyzer.tree.events, df_gpu_timeline, df_kernel_launchers, df_unified_perf, include_nccl=collective_analysis)
+        perf_report_sanity_check(
+            perf_analyzer.tree.events,
+            df_gpu_timeline,
+            df_kernel_launchers,
+            df_unified_perf,
+            include_nccl=collective_analysis,
+        )
 
     # Kernel summary: aggregate per-kernel durations and counts
     if kernel_summary:
@@ -855,7 +914,7 @@ def generate_perf_report_pytorch(
             for sheet_name, df in dict_name2df.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"DataFrames successfully written to {output_xlsx_path}")
-    
+
     return dict_name2df
 
 
@@ -986,15 +1045,22 @@ def main():
         required=False,
         help="Path to the capture trace folder",
     )
-
+    parser.add_argument(
+        "--group_by_num_kernels",
+        action="store_true",
+        default=False,
+        help="Group by number of kernels in summary tables.",
+    )
 
     args = parser.parse_args()
     if args.capture_folder:
         classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
-        graph_tree= merge_capture_trace_into_graph(args.capture_folder, metadata_json_path, args.profile_json_path)
+        graph_tree = merge_capture_trace_into_graph(
+            args.capture_folder, metadata_json_path, args.profile_json_path
+        )
     else:
-        graph_tree=None
+        graph_tree = None
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         augmented_tree=graph_tree,
@@ -1015,6 +1081,7 @@ def main():
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         group_by_parent_module=args.group_by_parent_module,
+        group_by_num_kernels=args.group_by_num_kernels,
     )
 
 

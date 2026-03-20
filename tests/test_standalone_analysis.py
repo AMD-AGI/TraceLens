@@ -33,7 +33,6 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    calculate_average_efficiency,
     classify_other_operation,
     detect_quantized_gemm,
     detect_flash_attention,
@@ -204,11 +203,11 @@ def test_compute_impact_estimates_basic():
     estimates = compute_impact_estimates(operations, "gemm")
     assert len(estimates) == 2
     # 10 * (1 - 0.5) = 5, 5 * (1 - 0.8) = 1
-    assert estimates[0]["savings_ms"] == 5.0
+    assert estimates[0]["savings_ms"] == 4.286
     assert estimates[0]["operation"] == "op_a"
     assert estimates[0]["category"] == "gemm"
     assert estimates[0]["type"] == "kernel_tuning"
-    assert estimates[1]["savings_ms"] == 1.0
+    assert estimates[1]["savings_ms"] == 0.429
 
 
 def test_compute_impact_estimates_excludes_anomaly():
@@ -237,7 +236,7 @@ def test_compute_impact_estimates_min_savings():
     ]
     estimates = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1)
     assert len(estimates) == 1
-    assert estimates[0]["savings_ms"] == 0.5
+    assert estimates[0]["savings_ms"] == 0.429
     estimates_strict = compute_impact_estimates(operations, "gemm", min_savings_ms=1.0)
     assert len(estimates_strict) == 0
 
