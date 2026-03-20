@@ -525,11 +525,17 @@ generate_plot_data(sys.argv[1])
 
 ### 9.5.3 Generate Plot and Base64 File
 
+Uses the **stacked projection** plot (E2E stacked by kernel category + throughput cone), saved as `perf_improvement.png` with `perf_improvement_base64.txt` for embedding.
+
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
-generate_perf_plot(sys.argv[1], sys.argv[2])
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot_stacked_projection
+generate_perf_plot_stacked_projection(
+    sys.argv[1], sys.argv[2],
+    output_filename='perf_improvement.png',
+    write_base64=True,
+)
 \" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
 
@@ -589,7 +595,7 @@ print('PASS: All required sections present')
 
 ### 10.2 Generate and Embed Performance Improvement Plot
 
-After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report.
+After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png` (stacked projection + throughput cone), and embeds the base64-encoded plot into the report.
 
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
