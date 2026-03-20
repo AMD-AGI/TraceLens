@@ -56,6 +56,18 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # CK grouped GEMM (same layout as primus_turbo grouped GEMM)
+    "primus_turbo_cpp_extension::ck_grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo_cpp_extension::ck_grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    # MoE dispatch/combine (communication — bytes only, flops = 0)
+    "MoEDispatch": perf_model.moe_dispatch,
+    "MoECombine": perf_model.moe_combine,
+    # Causal Conv1D (SSM / Mamba depthwise conv)
+    "DaoAILab::_causal_conv1d_fwd_cpp": perf_model.causal_conv1d_fwd,
+    # RoPE (elementwise rotation)
+    "FusedRoPEFunc": perf_model.fused_rope_fwd,
+    # CrossEntropy (fused softmax + nll loss)
+    "CrossEntropyFunction": perf_model.cross_entropy_fwd,
 }
 
 # Add pseudo-op extension mappings
@@ -144,6 +156,10 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.MoEComm: "MoE_comm",
+    perf_model.CausalConv1d: "SSM",
+    perf_model.FusedRoPE: "RoPE",
+    perf_model.CrossEntropy: "CrossEntropy",
 }
 
 # Add pseudo-op extension categories
@@ -175,8 +191,17 @@ def categorize_torch_op(row):
 
     Returns:
         str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused', 'elementwise',
-             'triton', 'reduce', 'multi_tensor_apply', 'record_param_comms', or 'other'.
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused',
+             'SSM_fwd', 'SSM_bwd', 'MoE_comm_fwd', 'MoE_comm_bwd',
+             'RoPE_fwd', 'RoPE_bwd', 'CrossEntropy_fwd', 'CrossEntropy_bwd',
+             'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
+             'record_param_comms', or 'other'.
+
+    Note: MoEDispatch/MoECombine, causal_conv1d, FusedRoPEFunc, and
+    CrossEntropyFunction now have perf models with GFLOPS/TB/s.
+    Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
+    remain categorization-only (timing without GFLOPS or TB/s).
+    MambaSplitConv1dScanCombinedFn is deferred to issue #552.
     """
 
     debug = False
@@ -222,6 +247,35 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
+        "MambaSplitConv1dScanCombinedFn",
+    ]:
+        return "SSM_fwd"
+    elif row["name"] in [
+        "MambaSplitConv1dScanCombinedFnBackward",
+        "DaoAILab::_causal_conv1d_bwd_cpp",
+    ]:
+        return "SSM_bwd"
+    elif row["name"] in dict_cat2names.get("MoE_comm", []) or row["name"] in [
+        "TokenPermuteMaskMap",
+        "_OperationFuserAutogradFunction",
+    ]:
+        return "MoE_comm_fwd"
+    elif row["name"] in [
+        "MoEDispatchBackward",
+        "MoECombineBackward",
+        "TokenPermuteMaskMapBackward",
+        "_OperationFuserAutogradFunctionBackward",
+    ]:
+        return "MoE_comm_bwd"
+    elif row["name"] in dict_cat2names.get("RoPE", []):
+        return "RoPE_fwd"
+    elif row["name"] in ["FusedRoPEFuncBackward"]:
+        return "RoPE_bwd"
+    elif row["name"] in dict_cat2names.get("CrossEntropy", []):
+        return "CrossEntropy_fwd"
+    elif row["name"] in ["CrossEntropyFunctionBackward"]:
+        return "CrossEntropy_bwd"
     elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
         return "elementwise"
     elif row["name"].startswith("triton"):

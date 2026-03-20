@@ -4588,3 +4588,283 @@ class RMSNormBwd(Normalization):
         if self.is_affine:
             bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes
+
+
+# ==============================================================================
+# MoE Communication – MoEDispatch / MoECombine (token routing)
+# ==============================================================================
+
+
+class MoEComm:
+    """
+    MoE all-to-all token dispatch/combine: pure communication, no FLOPS.
+
+    In the trace:
+      MoEDispatch:  Input Dims[0] = (num_tokens_local, hidden_dim)
+      MoECombine:   Input Dims[0] = (num_tokens_dispatched, hidden_dim)
+
+    bytes() = num_tokens × hidden_dim × bpe (data volume moved).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_tokens = self.param_details["num_tokens"]
+        self.hidden_dim = self.param_details["hidden_dim"]
+        self.bpe = self.param_details["bpe"]
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        input_types = event["args"].get("Input type", [])
+        tok_shape = input_dims[0] if input_dims else []
+        num_tokens = tok_shape[0] if len(tok_shape) >= 1 else None
+        hidden_dim = tok_shape[1] if len(tok_shape) >= 2 else None
+        dtype = input_types[0] if input_types else ""
+        bpe = name2bpe(dtype) if dtype else None
+        return {"num_tokens": num_tokens, "hidden_dim": hidden_dim, "bpe": bpe}
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        if self.num_tokens is None or self.hidden_dim is None or self.bpe is None:
+            return None
+        return self.num_tokens * self.hidden_dim * self.bpe
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+
+class moe_dispatch(MoEComm):
+    """MoEDispatch (forward): routes local tokens to remote expert ranks."""
+
+    pass
+
+
+class moe_combine(MoEComm):
+    """MoECombine (forward): collects expert outputs back to local tokens."""
+
+    pass
+
+
+# ==============================================================================
+# Causal Conv1D – DaoAILab depthwise 1D convolution
+# ==============================================================================
+
+
+class CausalConv1d:
+    """
+    DaoAILab causal_conv1d: depthwise 1D convolution used in Mamba/SSM.
+
+    In the trace:
+      Input Dims[0] = (batch, channels, seq_len)  — input tensor
+      Input Dims[1] = (channels, kernel_size)      — conv weight
+      Input Dims[2] = (channels,)                  — bias (optional)
+
+    FLOPS = 2 × batch × channels × seq_len × kernel_size (depthwise conv).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+
+        x_shape = input_dims[0]
+        w_shape = input_dims[1]
+
+        batch = x_shape[0]
+        channels = x_shape[1]
+        seq_len = x_shape[2]
+        kernel_size = w_shape[1]
+
+        has_bias = (
+            len(input_dims) > 2
+            and isinstance(input_dims[2], (list, tuple))
+            and len(input_dims[2]) > 0
+        )
+
+        return {
+            "batch": batch,
+            "channels": channels,
+            "seq_len": seq_len,
+            "kernel_size": kernel_size,
+            "has_bias": has_bias,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 2 * p["batch"] * p["channels"] * p["seq_len"] * p["kernel_size"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        p = self.param_details
+        input_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
+        weight_bytes = p["channels"] * p["kernel_size"] * self.bpe
+        output_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
+        bias_bytes = p["channels"] * self.bpe if p["has_bias"] else 0
+        return input_bytes + weight_bytes + output_bytes + bias_bytes
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        dtype = self.event["args"].get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class causal_conv1d_fwd(CausalConv1d):
+    """DaoAILab::_causal_conv1d_fwd_cpp forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# RoPE – Fused Rotary Position Embedding
+# ==============================================================================
+
+
+class FusedRoPE:
+    """
+    TransformerEngine FusedRoPEFunc: elementwise rotary position embedding.
+
+    In the trace:
+      Input Dims[0] = (seq_len, batch, heads, head_dim)  — input tensor
+      Input Dims[1] = (seq_len, 1, 1, head_dim)          — cos/sin table
+
+    FLOPS: each pair of elements in head_dim requires 4 muls + 2 adds = 6 ops.
+    Total = 3 × num_elements (since 6 ops per 2 elements).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        t_shape = input_dims[0]
+        return {
+            "seq_len": t_shape[0],
+            "batch": t_shape[1],
+            "heads": t_shape[2],
+            "head_dim": t_shape[3],
+            "num_elements": prod(t_shape),
+        }
+
+    def flops(self):
+        return 3 * self.param_details["num_elements"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        n = self.param_details["num_elements"]
+        return 2 * n * self.bpe
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class fused_rope_fwd(FusedRoPE):
+    """FusedRoPEFunc forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# CrossEntropy – Fused softmax + negative log-likelihood
+# ==============================================================================
+
+
+class CrossEntropy:
+    """
+    Fused CrossEntropyFunction: online softmax + cross-entropy loss.
+
+    In the trace:
+      Input Dims[0] = (batch, 1, vocab_size)  — logits
+      Input Dims[1] = (batch, 1)              — targets
+
+    FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        logits_shape = input_dims[0]
+        batch = logits_shape[0]
+        vocab_size = logits_shape[-1]
+        return {
+            "batch": batch,
+            "vocab_size": vocab_size,
+            "logits_shape": logits_shape,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 5 * p["batch"] * p["vocab_size"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        p = self.param_details
+        logits_bytes = prod(p["logits_shape"]) * self.bpe
+        target_bpe = 8  # long int
+        target_bytes = p["batch"] * target_bpe
+        output_bytes = p["batch"] * 4  # loss is float32
+        return logits_bytes + target_bytes + output_bytes
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class cross_entropy_fwd(CrossEntropy):
+    """CrossEntropyFunction forward pass."""
+
+    pass
