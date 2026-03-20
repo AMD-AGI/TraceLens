@@ -97,7 +97,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Bottleneck criteria:**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak TFLOPS
+- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
 
 **Key indicator:**
 - High transpose overhead (>20%) indicates memory layout mismatch
@@ -116,8 +116,8 @@ For each validated bottleneck, provide recommendations in both categories:
 - Expected: 30-45% improvement when transpose overhead is high
 
 **Kernel Optimization Focus:**
-- If already using optimal layout, generate replay artifact
-- Convolution kernels are typically well-optimized in vendor libraries
+- **Compute-bound (large/3x3 kernels):** Tune tile sizes, check wave occupancy
+- **Memory-bound (1x1 pointwise):** Optimize memory access patterns, check bandwidth utilization
 - Check for memory layout inefficiencies affecting kernel performance
 
 ### Step 7: Write Category Findings
@@ -132,6 +132,11 @@ The findings file **must** end with an Impact Summary section:
 |---------------|------|----------------------|-------------------------------|------------|
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
+
+**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
+- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
+- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
+Do not look up peaks independently from the metadata dict.
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/convolution_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
@@ -156,7 +161,7 @@ The findings file **must** end with an Impact Summary section:
 - **Symptoms:** Kernel size > 3x3, compute-bound
 - **Expected:** >70% of peak TFLOPS
 - **Algorithmic:** Limited - these are typically well-optimized
-- **Kernel:** Generate replay artifact if below expected
+- **Kernel:** Profile kernel if efficiency is below expected threshold
 
 ### Small Kernel Convolutions (1x1, 3x3)
 - **Symptoms:** Common in modern architectures
@@ -183,12 +188,12 @@ The findings file **must** end with an Impact Summary section:
 
 ## Efficiency Thresholds
 
-| Convolution Type | Expected Efficiency |
-|------------------|---------------------|
-| Large kernels (5x5+) | >70% of peak TFLOPS |
-| Standard 3x3 | >70% of peak TFLOPS |
-| 1x1 (pointwise) | >60% (memory-bound) |
-| Depthwise | >50% (low parallelism) |
+| Convolution Type | Expected Efficiency | Bound Type |
+|------------------|---------------------|------------|
+| Large kernels (5x5+) | >70% of peak TFLOPS | compute-bound |
+| Standard 3x3 | >70% of peak TFLOPS | compute-bound |
+| 1x1 (pointwise) | >60% of peak HBM BW | memory-bound |
+| Depthwise | >50% (low parallelism) | varies |
 
 **Transpose overhead:**
 - >20%: High - strongly recommend channels_last

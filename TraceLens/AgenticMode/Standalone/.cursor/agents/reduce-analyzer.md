@@ -129,7 +129,6 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Kernel Optimization Focus:**
 - If standalone reduce ops have low efficiency, investigate kernel issues
-- Generate replay artifact for kernel team
 - Check memory access patterns for reduction operations
 - Identify wave occupancy issues
 

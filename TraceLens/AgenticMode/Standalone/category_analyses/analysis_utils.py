@@ -178,9 +178,9 @@ def calculate_efficiency_with_validation(
 def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> float:
     """Resolve the correct peak MAF for an operation using Compute Spec.
 
-    Tier 2 of the 3-tier efficiency fallback: uses Compute Spec column
-    to look up the precision-aware peak from max_achievable_tflops.
-    Falls back to matrix_bf16 if Compute Spec is missing or unknown.
+    Uses the Compute Spec column to look up the precision-aware peak from
+    max_achievable_tflops. Falls back to matrix_bf16 if Compute Spec is
+    missing or unknown.
     """
     compute_spec = row.get("Compute Spec", "")
     if (
@@ -193,28 +193,16 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
 
 
 def calculate_efficiency(
-    row: pd.Series, peak_hbm_bw: float, peak_maf_or_maf_dict, method: str = "auto"
+    row: pd.Series, peak_hbm_bw: float, peak_maf_or_maf_dict
 ) -> Dict[str, Optional[float]]:
     """
-    Calculate efficiency metrics for an operation with 3-tier fallback:
-
-    1. If 'Pct Roofline' exists in CSV row (from TreePerf arch), use it directly.
-       This is precision-aware and roofline-correct.
-    2. Else if 'Compute Spec' + max_achievable_tflops are available, look up the
-       correct peak and compute efficiency manually.
-    3. Else fall back to matrix_bf16 peak (legacy behavior).
+    Extract efficiency metrics for an operation from pre-computed CSV columns.
 
     Args:
         row: DataFrame row with operation metrics
         peak_hbm_bw: Peak HBM bandwidth in TB/s
-        peak_maf_or_maf_dict: Either a float (legacy single peak) or a dict
-            (max_achievable_tflops) for precision-aware lookup
-        method: Efficiency calculation method:
-            - 'memory_bound': Use TB/s only
-            - 'compute_bound': Use TFLOPS/s only
-            - 'auto': Use FLOPS/Byte to determine (default)
-            - 'prefer_compute': Try TFLOPS first, fall back to TB/s
-            - 'prefer_memory': Try TB/s first, fall back to TFLOPS
+        peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
+            for resolving the precision-aware peak
 
     Returns:
         Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type, warning
@@ -223,11 +211,11 @@ def calculate_efficiency(
         "tflops_achieved": None,
         "tb_s_achieved": None,
         "efficiency_percent": None,
-        "efficiency_label": None,
         "bound_type": None,
         "flops_per_byte": None,
         "compute_spec": None,
         "resolved_peak_maf": None,
+        "resolved_peak_hbm_bw": None,
         "warning": None,
         "is_anomaly": False,
     }
@@ -249,114 +237,26 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
-    # Resolve peak_maf upfront so it's available for all tiers
     if isinstance(peak_maf_or_maf_dict, dict):
         fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
         peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
     else:
         peak_maf = peak_maf_or_maf_dict
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
+    result["resolved_peak_hbm_bw"] = round(peak_hbm_bw, 2) if peak_hbm_bw else None
 
-    # --- Tier 1: Use Pct Roofline from TreePerf if available ---
-    pct_roofline = row.get("Pct Roofline")
+    if flops_byte:
+        balance_point = peak_maf / peak_hbm_bw
+        result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
+
+    pct_roofline = row.get("Pct Roofline_mean")
     if pct_roofline is not None and not pd.isna(pct_roofline):
         result["efficiency_percent"] = round(float(pct_roofline), 2)
-        # Determine bound type from FLOPS/Byte
-        if flops_byte > 100:
-            result["bound_type"] = "compute"
-        elif flops_byte < 50:
-            result["bound_type"] = "memory"
-        else:
-            result["bound_type"] = "compute" if tflops_s is not None else "memory"
-        # Check for anomaly
         if result["efficiency_percent"] > 110:
             result["warning"] = (
                 f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
             )
             result["is_anomaly"] = True
-        # Generate human-readable efficiency label
-        if result["bound_type"] == "memory" and result["tb_s_achieved"] is not None:
-            result["efficiency_label"] = (
-                f"{result['efficiency_percent']:.2f}% of peak HBM bandwidth "
-                f"({result['tb_s_achieved']} TB/s achieved vs {peak_hbm_bw} TB/s peak)"
-            )
-        elif (
-            result["bound_type"] == "compute" and result["tflops_achieved"] is not None
-        ):
-            result["efficiency_label"] = (
-                f"{result['efficiency_percent']:.2f}% of peak MAF "
-                f"({result['tflops_achieved']} TFLOPS achieved vs {result['resolved_peak_maf']} TFLOPS peak)"
-            )
-        return result
-
-    # Determine bound type and calculate efficiency with validation
-    def set_efficiency_with_validation(achieved, peak, bound_type, metric_name):
-        validation = validate_efficiency(achieved, peak, metric_name)
-        result["efficiency_percent"] = validation["value"]
-        result["bound_type"] = bound_type
-        result["warning"] = validation["warning"]
-        result["is_anomaly"] = validation["is_anomaly"]
-
-    if method == "memory_bound":
-        if tb_s is not None:
-            set_efficiency_with_validation(
-                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
-            )
-    elif method == "compute_bound":
-        if tflops_s is not None:
-            set_efficiency_with_validation(
-                tflops_s, peak_maf, "compute", "Compute efficiency"
-            )
-    elif method == "auto":
-        if flops_byte > 100 and tflops_s is not None:
-            set_efficiency_with_validation(
-                tflops_s, peak_maf, "compute", "Compute efficiency"
-            )
-        elif flops_byte < 50 and tb_s is not None:
-            set_efficiency_with_validation(
-                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
-            )
-        elif tflops_s is not None:
-            set_efficiency_with_validation(
-                tflops_s, peak_maf, "compute", "Compute efficiency"
-            )
-        elif tb_s is not None:
-            set_efficiency_with_validation(
-                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
-            )
-    elif method == "prefer_compute":
-        if tflops_s is not None:
-            set_efficiency_with_validation(
-                tflops_s, peak_maf, "compute", "Compute efficiency"
-            )
-        elif tb_s is not None:
-            set_efficiency_with_validation(
-                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
-            )
-    elif method == "prefer_memory":
-        if tb_s is not None:
-            set_efficiency_with_validation(
-                tb_s, peak_hbm_bw, "memory", "Memory bandwidth"
-            )
-        elif tflops_s is not None:
-            set_efficiency_with_validation(
-                tflops_s, peak_maf, "compute", "Compute efficiency"
-            )
-
-    # Generate human-readable efficiency label
-    if result["efficiency_percent"] is not None and result["bound_type"] is not None:
-        if result["bound_type"] == "memory" and result["tb_s_achieved"] is not None:
-            result["efficiency_label"] = (
-                f"{result['efficiency_percent']:.2f}% of peak HBM bandwidth "
-                f"({result['tb_s_achieved']} TB/s achieved vs {peak_hbm_bw} TB/s peak)"
-            )
-        elif (
-            result["bound_type"] == "compute" and result["tflops_achieved"] is not None
-        ):
-            result["efficiency_label"] = (
-                f"{result['efficiency_percent']:.2f}% of peak MAF "
-                f"({result['tflops_achieved']} TFLOPS achieved vs {result['resolved_peak_maf']} TFLOPS peak)"
-            )
 
     return result
 
@@ -371,7 +271,6 @@ def build_operation_metrics(
         ops_df: Operations DataFrame
         metadata: Metadata dict with peak performance values
         category_config: Category-specific configuration with:
-            - efficiency_method: How to calculate efficiency
             - extra_fields: Additional fields to extract (optional)
             - operation_classifier: Function to classify operations (optional)
 
@@ -379,10 +278,7 @@ def build_operation_metrics(
         List of operation metric dicts
     """
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    # Use max_achievable_tflops dict for precision-aware efficiency;
-    # fall back to legacy peak_bf16_maf_tflops for backward compatibility
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-    efficiency_method = category_config.get("efficiency_method", "auto")
 
     # Calculate total time for percentage calculations
     total_time_ms = 0
@@ -405,8 +301,7 @@ def build_operation_metrics(
             (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
         )
 
-        # Calculate efficiency (precision-aware via Pct Roofline or Compute Spec)
-        efficiency = calculate_efficiency(row, peak_hbm_bw, maf, efficiency_method)
+        efficiency = calculate_efficiency(row, peak_hbm_bw, maf)
 
         op_metric = {
             "name": op_name,
@@ -434,34 +329,6 @@ def build_operation_metrics(
         operations.append(op_metric)
 
     return operations
-
-
-def calculate_average_efficiency(
-    ops_df: pd.DataFrame, peak_hbm_bw: float, peak_maf_or_maf_dict, method: str = "auto"
-) -> float:
-    """
-    Calculate average efficiency across all operations.
-
-    Args:
-        ops_df: Operations DataFrame
-        peak_hbm_bw: Peak HBM bandwidth in TB/s
-        peak_maf_or_maf_dict: Either a float (legacy single peak) or a dict
-            (max_achievable_tflops) for precision-aware lookup
-        method: Efficiency calculation method
-
-    Returns:
-        Average efficiency percentage
-    """
-    total_eff = 0
-    count = 0
-
-    for _, row in ops_df.iterrows():
-        eff = calculate_efficiency(row, peak_hbm_bw, peak_maf_or_maf_dict, method)
-        if eff["efficiency_percent"] is not None:
-            total_eff += eff["efficiency_percent"]
-            count += 1
-
-    return round(total_eff / count, 2) if count > 0 else 0
 
 
 def compute_impact_estimates(

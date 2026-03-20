@@ -38,9 +38,10 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Environment Setup)
-1. Generate Performance Report
+0. Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
+1. Generate Performance Report (branches on analysis mode: training vs inference)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+5.5. Model Identification (subagent) → metadata/model_info.json
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
@@ -57,11 +58,10 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ### Required Information:
 
-1. **Trace File Path**
+1. **Trace File Path** → `<trace_path>`
    - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
-   - Example: `/home/user/traces/model_trace.json`
 
-2. **Platform**
+2. **Platform** → `<platform>`
    - Ask: "Which platform are you analyzing?"
    - Options:
      1. **MI300X**
@@ -70,15 +70,27 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      4. **MI355X**
      5. **MI400**
 
-3. **Environment Setup**
+3. **Analysis Mode** → `<analysis_mode>`
+   - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
+   - Options:
+     1. **Default (training and eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
+     2. **Inference analysis (vLLM/SGLang)** (`<analysis_mode>` = `inference`) — uses `TraceLens_generate_perf_report_pytorch_inference`
+   - If **Inference (vLLM/SGLang)** is selected, ask **Execution Mode** → `<inference_exec_mode>`:
+     1. **Eager mode** (`<inference_exec_mode>` = `eager`) — only the trace file is needed
+     2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
+   - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
+     - Ask: "Please provide the full path to the graph capture traces folder"
+     - Example: `/home/user/traces/capture_traces/`
+
+4. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
      - If **local**: No further environment questions — prefix is blank (commands run directly).
      - If **cluster**:
        - Ask "Which node should we use?" → `<node>`
        - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
-       - Ask "Are you using a virtual environment?" → if yes, ask for venv path (e.g. `/opt/venvs/tracelens`) → `<venv_path>`
+       - Ask "Are you using a virtual environment?" → if yes, ask for venv path → `<venv_path>`
 
-4. **Output Directory** (Optional)
+5. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
 
@@ -120,13 +132,41 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 ## Step 1: Generate Performance Report
 
-Execute TraceLens CLI:
+Use the analysis mode selected in Step 0 to determine which CLI tool to run.
+
+**Default (training and eager inference)** (analysis_mode = `default`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
+  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --enable_pseudo_ops
+```
+
+**Inference eager mode** (analysis_mode = `inference`, inference_exec_mode = `eager`):
+
+```bash
+<prefix> TraceLens_generate_perf_report_pytorch_inference \
+  --profile_json_path <trace_path> \
+  --output_xlsx_path <output_dir>/perf_report.xlsx \
+  --output_csvs_dir <output_dir>/perf_report_csvs \
+  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --group_by_parent_module \
+  --enable_pseudo_ops
+```
+
+**Inference graph replay + capture mode** (analysis_mode = `inference`, inference_exec_mode = `graph_capture`):
+
+```bash
+<prefix> TraceLens_generate_perf_report_pytorch_inference \
+  --profile_json_path <trace_path> \
+  --capture_folder <capture_folder_path> \
+  --output_xlsx_path <output_dir>/perf_report.xlsx \
+  --output_csvs_dir <output_dir>/perf_report_csvs \
+  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --group_by_parent_module \
   --enable_pseudo_ops
 ```
 
@@ -163,6 +203,14 @@ This script performs:
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
 - `category_findings/` - Directory for compute kernel analysis outputs
+
+---
+
+## Step 5.5: Model Identification (Subagent)
+
+Launch a Task subagent (generalPurpose) with the full contents of `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` and context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
+
+Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace". Wait for completion before proceeding further.
 
 ---
 
@@ -551,7 +599,7 @@ Validate the report before sharing the priority recommendations on the chat and 
 
 ### 10.1 Validate Report Structure (Retry up to 2x)
 
-After writing `standalone_analysis.md`, validate that the report contains all 6 required `##` section headers. If validation fails, modify the report with the missing sections.
+After writing `standalone_analysis.md`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
 
 **Validation procedure:**
 
@@ -600,10 +648,10 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 
 If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
 
-- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`.
+- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user and **abort**.
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-
-If found, inform the user which feature was detected and that TraceLens Agentic Mode currently supports eager-mode PyTorch traces only. **Abort** -- do not retry or continue.
+  - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports eager-mode PyTorch traces only. **Abort** -- do not retry or continue.
+  - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported. Do **NOT** abort. If inference_exec_mode is `eager` (no capture folder was provided), log a warning that analysis may be limited without graph capture traces, but continue.
 
 ### Before Invoking Subagents
 - Read `category_data/category_manifest.json` to get valid categories
