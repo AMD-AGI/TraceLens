@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Generate a multi-sheet performance report from semantic labels + derived shapes.
 
@@ -26,6 +32,7 @@ Usage:
     python generate_semantic_report.py <semantic_labels.json> <derived_shapes.json> \\
         [-o report.xlsx] [--gpu_arch gpu_arch.json] [--output_csvs_dir ./csvs]
 """
+
 import argparse
 import json
 import os
@@ -35,14 +42,17 @@ from collections import OrderedDict
 import pandas as pd
 
 from category_mappings import (
-    get_group, get_perf_category, get_timeline_category,
-    get_op_category, format_input_dims,
+    get_group,
+    get_perf_category,
+    get_timeline_category,
+    get_op_category,
+    format_input_dims,
 )
-
 
 # ---------------------------------------------------------------------------
 # Roofline helpers
 # ---------------------------------------------------------------------------
+
 
 def compute_roofline(flops, data_bytes, kernel_time_us, gpu_arch):
     """Compute roofline metrics given theoretical FLOPS/bytes and actual time."""
@@ -66,8 +76,9 @@ def compute_roofline(flops, data_bytes, kernel_time_us, gpu_arch):
     if gpu_arch:
         mem_bw = gpu_arch.get("mem_bw_gbps", 0)
         peak_tflops_map = gpu_arch.get("max_achievable_tflops", {})
-        peak_tflops = peak_tflops_map.get("matrix_bf16",
-                      peak_tflops_map.get("matrix_fp16", 0))
+        peak_tflops = peak_tflops_map.get(
+            "matrix_bf16", peak_tflops_map.get("matrix_fp16", 0)
+        )
 
         compute_time_us = 0
         if peak_tflops > 0:
@@ -78,7 +89,9 @@ def compute_roofline(flops, data_bytes, kernel_time_us, gpu_arch):
             memory_time_us = (data_bytes / (mem_bw * 1e9)) * 1e6
 
         roofline_time = max(compute_time_us, memory_time_us)
-        pct_roofline = (roofline_time / kernel_time_us) * 100 if kernel_time_us > 0 else 0
+        pct_roofline = (
+            (roofline_time / kernel_time_us) * 100 if kernel_time_us > 0 else 0
+        )
 
         metrics["Roofline_Time_us"] = round(roofline_time, 2)
         metrics["Pct Roofline"] = round(pct_roofline, 1)
@@ -89,6 +102,7 @@ def compute_roofline(flops, data_bytes, kernel_time_us, gpu_arch):
 # ---------------------------------------------------------------------------
 # Sheet builders
 # ---------------------------------------------------------------------------
+
 
 def build_category_breakdown(labels_data, shapes_data):
     """Sheet 1: category_breakdown -- per perf-category time + GFLOPS.
@@ -128,23 +142,27 @@ def build_category_breakdown(labels_data, shapes_data):
         cumul += pct
         cat_gflops = flops_by_cat.get(cat_name, 0) / 1e9
         grand_gflops += cat_gflops
-        rows.append({
-            "category": cat_name,
-            "kernel_count": info["count"],
-            "total_time_ms": round(info["dur"] / 1000, 4),
-            "total_GFLOPS": round(cat_gflops, 4),
-            "Percentage (%)": round(pct, 1),
-            "Cumulative Percentage (%)": round(cumul, 1),
-        })
+        rows.append(
+            {
+                "category": cat_name,
+                "kernel_count": info["count"],
+                "total_time_ms": round(info["dur"] / 1000, 4),
+                "total_GFLOPS": round(cat_gflops, 4),
+                "Percentage (%)": round(pct, 1),
+                "Cumulative Percentage (%)": round(cumul, 1),
+            }
+        )
 
-    rows.append({
-        "category": "Total",
-        "kernel_count": sum(c["count"] for c in cats.values()),
-        "total_time_ms": round(total_time_us / 1000, 4),
-        "total_GFLOPS": round(grand_gflops, 4),
-        "Percentage (%)": 100.0,
-        "Cumulative Percentage (%)": 100.0,
-    })
+    rows.append(
+        {
+            "category": "Total",
+            "kernel_count": sum(c["count"] for c in cats.values()),
+            "total_time_ms": round(total_time_us / 1000, 4),
+            "total_GFLOPS": round(grand_gflops, 4),
+            "Percentage (%)": 100.0,
+            "Cumulative Percentage (%)": 100.0,
+        }
+    )
     return pd.DataFrame(rows)
 
 
@@ -197,9 +215,19 @@ def build_semantic_group_summary(labels_data, shapes_data, gpu_arch):
 
 
 PERF_PARAM_COLUMNS = [
-    "M", "N", "K",
-    "B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v", "causal",
-    "num_elems", "num_channels",
+    "M",
+    "N",
+    "K",
+    "B",
+    "N_Q",
+    "H_Q",
+    "N_KV",
+    "H_KV",
+    "d_h_qk",
+    "d_h_v",
+    "causal",
+    "num_elems",
+    "num_channels",
 ]
 
 
@@ -228,7 +256,9 @@ def build_unified_perf_summary(labels_data, shapes_data, gpu_arch):
         key = (b, pk)
         if key not in blocks:
             blocks[key] = {
-                "dur": [], "layers": set(), "kernel_count": 0,
+                "dur": [],
+                "layers": set(),
+                "kernel_count": 0,
                 "perf_params": shape.get("perf_params", {}),
                 "shape_info": shape,
             }
@@ -280,10 +310,14 @@ def build_unified_perf_summary(labels_data, shapes_data, gpu_arch):
         shape = b_info["shape_info"]
         if shape.get("per_invocation_flops") is not None:
             row["per_invocation_GFLOPS"] = round(shape["per_invocation_flops"] / 1e9, 6)
-            row["per_invocation_data_MB"] = round(shape["per_invocation_bytes"] / 1e6, 6)
+            row["per_invocation_data_MB"] = round(
+                shape["per_invocation_bytes"] / 1e6, 6
+            )
 
         if shape.get("total_flops") is not None:
-            rf = compute_roofline(shape["total_flops"], shape["total_bytes"], t, gpu_arch)
+            rf = compute_roofline(
+                shape["total_flops"], shape["total_bytes"], t, gpu_arch
+            )
             row.update(rf)
 
         rows.append(row)
@@ -308,19 +342,21 @@ def build_ops_summary(labels_data):
         durs = info["dur"]
         t = sum(durs)
         pct = 100 * t / total_time if total_time > 0 else 0
-        rows.append({
-            "name": kname,
-            "op category": get_op_category(block),
-            "Kernel Time (µs)_sum": round(t, 2),
-            "count": info["count"],
-            "semantic_group": get_group(block),
-            "semantic_block": block,
-            "perf_category": get_perf_category(block),
-            "mean_us": round(t / info["count"], 2) if info["count"] else 0,
-            "min_us": round(min(durs), 2),
-            "max_us": round(max(durs), 2),
-            "pct_of_total": round(pct, 1),
-        })
+        rows.append(
+            {
+                "name": kname,
+                "op category": get_op_category(block),
+                "Kernel Time (µs)_sum": round(t, 2),
+                "count": info["count"],
+                "semantic_group": get_group(block),
+                "semantic_block": block,
+                "perf_category": get_perf_category(block),
+                "mean_us": round(t / info["count"], 2) if info["count"] else 0,
+                "min_us": round(min(durs), 2),
+                "max_us": round(max(durs), 2),
+                "pct_of_total": round(pct, 1),
+            }
+        )
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -351,6 +387,7 @@ def build_gpu_timeline(labels_data):
 # Output
 # ---------------------------------------------------------------------------
 
+
 def write_report(dict_name2df, output_xlsx_path=None, output_csvs_dir=None):
     """Write DataFrames as Excel sheets and/or CSV files."""
     if output_csvs_dir:
@@ -364,8 +401,11 @@ def write_report(dict_name2df, output_xlsx_path=None, output_csvs_dir=None):
         try:
             import openpyxl  # noqa: F401
         except ImportError:
-            print("WARNING: openpyxl not installed, skipping xlsx output. "
-                  "Install with: pip install openpyxl", file=sys.stderr)
+            print(
+                "WARNING: openpyxl not installed, skipping xlsx output. "
+                "Install with: pip install openpyxl",
+                file=sys.stderr,
+            )
             return
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dict_name2df.items():
@@ -379,12 +419,18 @@ def main():
     )
     parser.add_argument("labels_json", help="Path to semantic_labels.json")
     parser.add_argument("shapes_json", help="Path to derived_shapes.json")
-    parser.add_argument("-o", "--output", default=None,
-                        help="Output Excel path (default: <labels_base>_semantic_report.xlsx)")
-    parser.add_argument("--gpu_arch", default=None,
-                        help="Path to GPU architecture JSON (for roofline)")
-    parser.add_argument("--output_csvs_dir", default=None,
-                        help="Directory to write per-sheet CSV files")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output Excel path (default: <labels_base>_semantic_report.xlsx)",
+    )
+    parser.add_argument(
+        "--gpu_arch", default=None, help="Path to GPU architecture JSON (for roofline)"
+    )
+    parser.add_argument(
+        "--output_csvs_dir", default=None, help="Directory to write per-sheet CSV files"
+    )
     args = parser.parse_args()
 
     with open(args.labels_json) as f:
@@ -399,7 +445,9 @@ def main():
 
     print("Building report sheets...", file=sys.stderr)
     dict_name2df = OrderedDict()
-    dict_name2df["category_breakdown"] = build_category_breakdown(labels_data, shapes_data)
+    dict_name2df["category_breakdown"] = build_category_breakdown(
+        labels_data, shapes_data
+    )
     dict_name2df["semantic_group_summary"] = build_semantic_group_summary(
         labels_data, shapes_data, gpu_arch
     )
@@ -414,8 +462,9 @@ def main():
         base = args.labels_json.rsplit(".json", 1)[0]
         output_xlsx = base + "_semantic_report.xlsx"
 
-    write_report(dict_name2df, output_xlsx_path=output_xlsx,
-                 output_csvs_dir=args.output_csvs_dir)
+    write_report(
+        dict_name2df, output_xlsx_path=output_xlsx, output_csvs_dir=args.output_csvs_dir
+    )
 
     for name, df in dict_name2df.items():
         print(f"  Sheet '{name}': {len(df)} rows", file=sys.stderr)

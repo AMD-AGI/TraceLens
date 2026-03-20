@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Derive theoretical FLOPS and bytes for each semantic block using the
 model's HuggingFace config.json instead of CPU op shapes.
@@ -16,6 +22,7 @@ Usage:
     python derive_shapes.py <semantic_labels.json> <config.json> \\
         --num_tokens 1 [-o derived_shapes.json] [--context_length 2048]
 """
+
 import argparse
 import json
 import os
@@ -42,8 +49,10 @@ def load_or_prompt_run_config(output_dir, cli_num_tokens, cli_context_length):
     context_length = cli_context_length or cached.get("context_length")
 
     if num_tokens is None:
-        print("ERROR: --num_tokens is required on first run (no cached run_config.json found)",
-              file=sys.stderr)
+        print(
+            "ERROR: --num_tokens is required on first run (no cached run_config.json found)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if context_length is None:
@@ -55,8 +64,10 @@ def load_or_prompt_run_config(output_dir, cli_num_tokens, cli_context_length):
     }
     with open(cfg_path, "w") as f:
         json.dump(run_cfg, f, indent=2)
-    print(f"Run config saved to {cfg_path}: T={num_tokens}, ctx={context_length}",
-          file=sys.stderr)
+    print(
+        f"Run config saved to {cfg_path}: T={num_tokens}, ctx={context_length}",
+        file=sys.stderr,
+    )
     return run_cfg
 
 
@@ -77,7 +88,9 @@ def derive_all_shapes(labeled_kernels, model_cfg, num_tokens, context_length):
     for block, info in seen_blocks.items():
         layer_idx = min(info["layers"]) if info["layers"] else None
         shapes = derive_block_shapes(
-            block, model_cfg, num_tokens,
+            block,
+            model_cfg,
+            num_tokens,
             context_length=context_length,
             layer_idx=layer_idx,
         )
@@ -121,12 +134,21 @@ def main():
     )
     parser.add_argument("labels_json", help="Path to semantic_labels.json")
     parser.add_argument("config_json", help="Path to HuggingFace config.json")
-    parser.add_argument("--num_tokens", type=int, default=None,
-                        help="Number of active tokens (T). Required on first run.")
-    parser.add_argument("--context_length", type=int, default=None,
-                        help="KV context length for SDPA (defaults to num_tokens)")
-    parser.add_argument("-o", "--output", default="derived_shapes.json",
-                        help="Output JSON path")
+    parser.add_argument(
+        "--num_tokens",
+        type=int,
+        default=None,
+        help="Number of active tokens (T). Required on first run.",
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        default=None,
+        help="KV context length for SDPA (defaults to num_tokens)",
+    )
+    parser.add_argument(
+        "-o", "--output", default="derived_shapes.json", help="Output JSON path"
+    )
     args = parser.parse_args()
 
     output_dir = os.path.dirname(os.path.abspath(args.output)) or "."
@@ -143,15 +165,19 @@ def main():
     labeled = labels_data["labeled_kernels"]
 
     results = derive_all_shapes(
-        labeled, model_cfg,
-        run_cfg["num_tokens"], run_cfg["context_length"],
+        labeled,
+        model_cfg,
+        run_cfg["num_tokens"],
+        run_cfg["context_length"],
     )
 
     no_formula = [r for r in results if r["total_flops"] is None]
     if no_formula:
-        print(f"INFO: {len(no_formula)} blocks have no roofline formula: "
-              + ", ".join(r["semantic_block"] for r in no_formula),
-              file=sys.stderr)
+        print(
+            f"INFO: {len(no_formula)} blocks have no roofline formula: "
+            + ", ".join(r["semantic_block"] for r in no_formula),
+            file=sys.stderr,
+        )
 
     output_data = {
         "source_labels": args.labels_json,

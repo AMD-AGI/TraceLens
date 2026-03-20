@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Generate a multi-sheet comparison report from two semantic breakdowns.
 
@@ -29,6 +35,7 @@ Usage:
         [-o comparison_report.xlsx] \\
         [--output-csvs-dir comparison_report_csvs/]
 """
+
 import argparse
 import json
 import os
@@ -70,9 +77,9 @@ def build_kernel_mapping(labeled_a, labeled_b, name_a, name_b):
         b = k["semantic_block"]
         blocks_b.setdefault(b, []).append(k["name"])
 
-    all_blocks = list(OrderedDict.fromkeys(
-        list(blocks_a.keys()) + list(blocks_b.keys())
-    ))
+    all_blocks = list(
+        OrderedDict.fromkeys(list(blocks_a.keys()) + list(blocks_b.keys()))
+    )
 
     col_block = "semantic_block"
     col_a = f"{name_a} Kernels"
@@ -91,12 +98,14 @@ def build_kernel_mapping(labeled_a, labeled_b, name_a, name_b):
 
         for i, (ka, kb) in enumerate(paired):
             is_first = i == 0
-            rows.append({
-                col_block: block if is_first else "",
-                col_a: ka,
-                col_b: kb,
-                col_cat: get_perf_category(block) if is_first else "",
-            })
+            rows.append(
+                {
+                    col_block: block if is_first else "",
+                    col_a: ka,
+                    col_b: kb,
+                    col_cat: get_perf_category(block) if is_first else "",
+                }
+            )
 
     return pd.DataFrame(rows)
 
@@ -123,16 +132,27 @@ def main():
     )
     parser.add_argument("trace_a", help="Path to trace A semantic_labels.json")
     parser.add_argument("trace_b", help="Path to trace B semantic_labels.json")
-    parser.add_argument("--comparison", required=True,
-                        help="Path to comparison.csv (from match_and_compare.py)")
-    parser.add_argument("--diff-dir", required=True,
-                        help="TraceDiff output directory (from generate_semantic_diff.py)")
+    parser.add_argument(
+        "--comparison",
+        required=True,
+        help="Path to comparison.csv (from match_and_compare.py)",
+    )
+    parser.add_argument(
+        "--diff-dir",
+        required=True,
+        help="TraceDiff output directory (from generate_semantic_diff.py)",
+    )
     parser.add_argument("--name-a", default="trace_a", help="Short name for trace A")
     parser.add_argument("--name-b", default="trace_b", help="Short name for trace B")
-    parser.add_argument("-o", "--output", default="comparison_report.xlsx",
-                        help="Output Excel path (default: comparison_report.xlsx)")
-    parser.add_argument("--output-csvs-dir", default=None,
-                        help="Directory to write per-sheet CSV files")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="comparison_report.xlsx",
+        help="Output Excel path (default: comparison_report.xlsx)",
+    )
+    parser.add_argument(
+        "--output-csvs-dir", default=None, help="Directory to write per-sheet CSV files"
+    )
     args = parser.parse_args()
 
     data_a = load_labels(args.trace_a)
@@ -166,8 +186,9 @@ def main():
     if output_xlsx is None and output_csvs is None:
         output_xlsx = "comparison_report.xlsx"
 
-    write_report(dict_name2df, output_xlsx_path=output_xlsx,
-                 output_csvs_dir=output_csvs)
+    write_report(
+        dict_name2df, output_xlsx_path=output_xlsx, output_csvs_dir=output_csvs
+    )
 
     for name, df in dict_name2df.items():
         print(f"  Sheet '{name}': {len(df)} rows", file=sys.stderr)

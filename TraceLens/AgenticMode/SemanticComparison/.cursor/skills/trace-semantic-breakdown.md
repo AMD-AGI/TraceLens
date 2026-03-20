@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: trace-semantic-breakdown
 description: Analyze a single vLLM/PyTorch GPU trace and decompose it into semantic blocks with roofline analysis. Each semantic label maps to a perf model (GEMM, SDPA, Normalization, or Elementwise) so that roofline can be computed for every block. Use when the user wants to break down a trace, label kernels, or run roofline analysis on graph-mode traces.

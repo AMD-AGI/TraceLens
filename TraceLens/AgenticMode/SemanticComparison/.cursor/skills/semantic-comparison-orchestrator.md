@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: Semantic Comparison Orchestrator
 description: End-to-end semantic gap analysis for two GPU traces. Runs semantic breakdown on both traces in parallel, harmonizes vocabularies, generates TraceDiff and comparison outputs, and produces a stakeholder gap analysis report in the standalone visual language.

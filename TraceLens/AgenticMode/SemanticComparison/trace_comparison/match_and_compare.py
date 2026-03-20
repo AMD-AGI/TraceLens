@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Match two semantic breakdowns and compute comparison stats with optional roofline.
 
@@ -16,6 +22,7 @@ Usage:
         [--shapes-a derived_a.json --shapes-b derived_b.json] \
         [-o comparison.csv]
 """
+
 import argparse
 import csv
 import json
@@ -53,8 +60,9 @@ def aggregate(labeled_kernels):
     return blocks
 
 
-def build_comparison(agg_a, agg_b, total_a, total_b, name_a, name_b,
-                     shapes_a=None, shapes_b=None):
+def build_comparison(
+    agg_a, agg_b, total_a, total_b, name_a, name_b, shapes_a=None, shapes_b=None
+):
     """Build comparison rows for all semantic blocks present in either trace."""
     all_blocks = list(OrderedDict.fromkeys(list(agg_a.keys()) + list(agg_b.keys())))
     has_shapes = shapes_a is not None or shapes_b is not None
@@ -183,7 +191,9 @@ def main():
     parser.add_argument("--name-b", default="trace_b", help="Short name for trace B")
     parser.add_argument("--shapes-a", help="Path to trace A derived_shapes.json")
     parser.add_argument("--shapes-b", help="Path to trace B derived_shapes.json")
-    parser.add_argument("-o", "--output", default="comparison.csv", help="Output CSV path")
+    parser.add_argument(
+        "-o", "--output", default="comparison.csv", help="Output CSV path"
+    )
     args = parser.parse_args()
 
     data_a = load_labels(args.trace_a)
@@ -201,12 +211,19 @@ def main():
     agg_b = aggregate(labeled_b)
 
     rows = build_comparison(
-        agg_a, agg_b, total_a, total_b,
-        args.name_a, args.name_b,
-        shapes_a, shapes_b,
+        agg_a,
+        agg_b,
+        total_a,
+        total_b,
+        args.name_a,
+        args.name_b,
+        shapes_a,
+        shapes_b,
     )
 
-    errors = run_assertions(rows, labeled_a, labeled_b, total_a, total_b, args.name_a, args.name_b)
+    errors = run_assertions(
+        rows, labeled_a, labeled_b, total_a, total_b, args.name_a, args.name_b
+    )
     for e in errors:
         print(e, file=sys.stderr)
     if any("FAIL" in e for e in errors):

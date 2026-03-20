@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Generate TraceDiff-compatible output from two semantic breakdowns.
 
@@ -30,6 +36,7 @@ Usage:
         [--shapes-b trace_b/derived_shapes.json] \\
         -o output_dir/
 """
+
 import argparse
 import json
 import os
@@ -45,10 +52,10 @@ from category_mappings import (
     format_input_dims,
 )
 
-
 # ---------------------------------------------------------------------------
 # Loading helpers
 # ---------------------------------------------------------------------------
+
 
 def load_labels(path):
     with open(path) as f:
@@ -66,6 +73,7 @@ def load_shapes(path):
 # diff_stats.csv generation
 # ---------------------------------------------------------------------------
 
+
 def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
     """Build a list of row dicts matching TraceDiff's diff_stats.csv schema.
 
@@ -74,10 +82,12 @@ def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
 
     Returns (rows, block_id_map) where block_id_map is {semantic_block: int}.
     """
-    all_blocks_ordered = list(OrderedDict.fromkeys(
-        [k["semantic_block"] for k in labeled_a] +
-        [k["semantic_block"] for k in labeled_b]
-    ))
+    all_blocks_ordered = list(
+        OrderedDict.fromkeys(
+            [k["semantic_block"] for k in labeled_a]
+            + [k["semantic_block"] for k in labeled_b]
+        )
+    )
     block_id_map = {block: idx for idx, block in enumerate(all_blocks_ordered)}
 
     def _input_dims_for_block(block_name, shapes):
@@ -98,20 +108,22 @@ def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
         for k in kernels:
             block = k["semantic_block"]
             group = get_group(block)
-            rows.append({
-                "name": k["name"],
-                "cpu_op_name": block,
-                "source": source_tag,
-                "Input Dims": _input_dims_for_block(block, shapes),
-                "Input Strides": "",
-                "Input type": "",
-                "Concrete Inputs": "",
-                "kernel_time": k["dur"],
-                "lowest_common_ancestor_name": group,
-                "lowest_common_ancestor_id": block_id_map[block],
-                "nn_module_stack": group,
-                "nn_module_parent": group,
-            })
+            rows.append(
+                {
+                    "name": k["name"],
+                    "cpu_op_name": block,
+                    "source": source_tag,
+                    "Input Dims": _input_dims_for_block(block, shapes),
+                    "Input Strides": "",
+                    "Input type": "",
+                    "Concrete Inputs": "",
+                    "kernel_time": k["dur"],
+                    "lowest_common_ancestor_name": group,
+                    "lowest_common_ancestor_id": block_id_map[block],
+                    "nn_module_stack": group,
+                    "nn_module_parent": group,
+                }
+            )
 
     return rows, block_id_map
 
@@ -119,6 +131,7 @@ def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
 # ---------------------------------------------------------------------------
 # diff_stats_unique_args_summary.csv generation
 # ---------------------------------------------------------------------------
+
 
 def build_unique_args_summary(diff_stats_df):
     """Aggregate diff_stats rows by all non-metric columns.
@@ -128,7 +141,8 @@ def build_unique_args_summary(diff_stats_df):
     """
     metric_columns = ["kernel_time"]
     grouping_cols = [
-        c for c in diff_stats_df.columns
+        c
+        for c in diff_stats_df.columns
         if c not in metric_columns and c != "lowest_common_ancestor_id"
     ]
 
@@ -190,6 +204,7 @@ def build_unique_args_summary(diff_stats_df):
 # cpu_op_map JSON generation
 # ---------------------------------------------------------------------------
 
+
 def build_cpu_op_maps(diff_stats_df):
     """Build cpu_op_map dicts analogous to TraceDiff.get_cpu_op_to_kernels_json().
 
@@ -224,6 +239,7 @@ def build_cpu_op_maps(diff_stats_df):
 # ---------------------------------------------------------------------------
 # merged_tree_output.txt generation
 # ---------------------------------------------------------------------------
+
 
 def build_merged_tree_text(block_id_map, labeled_a, labeled_b, name_a, name_b):
     """Build a text tree representation mimicking TraceDiff's merged tree.
@@ -283,10 +299,9 @@ def build_merged_tree_text(block_id_map, labeled_a, labeled_b, name_a, name_b):
             kernel_names_a = sorted(set(kernels_a))
             kernel_names_b = sorted(set(kernels_b))
 
-            all_kernel_entries = (
-                [(kn, "trace1") for kn in kernel_names_a] +
-                [(kn, "trace2") for kn in kernel_names_b]
-            )
+            all_kernel_entries = [(kn, "trace1") for kn in kernel_names_a] + [
+                (kn, "trace2") for kn in kernel_names_b
+            ]
 
             for ki, (kn, src) in enumerate(all_kernel_entries):
                 is_last_kernel = ki == len(all_kernel_entries) - 1
@@ -297,9 +312,7 @@ def build_merged_tree_text(block_id_map, labeled_a, labeled_b, name_a, name_b):
                     k_line = f">> {src}: {kn}"
                 else:
                     k_line = f"<< {src}: {kn}"
-                lines.append(
-                    f"    {g_prefix}{b_prefix}{k_connector}{k_line}"
-                )
+                lines.append(f"    {g_prefix}{b_prefix}{k_connector}{k_line}")
 
     return "\n".join(lines)
 
@@ -308,14 +321,20 @@ def build_merged_tree_text(block_id_map, labeled_a, labeled_b, name_a, name_b):
 # Output writer
 # ---------------------------------------------------------------------------
 
-def write_outputs(output_dir, diff_stats_df, summary_df, cpu_op_map,
-                  cpu_op_map_trace1, cpu_op_map_trace2, merged_tree_text):
+
+def write_outputs(
+    output_dir,
+    diff_stats_df,
+    summary_df,
+    cpu_op_map,
+    cpu_op_map_trace1,
+    cpu_op_map_trace2,
+    merged_tree_text,
+):
     """Write all output files to output_dir."""
     os.makedirs(output_dir, exist_ok=True)
 
-    diff_stats_df.to_csv(
-        os.path.join(output_dir, "diff_stats.csv"), index=False
-    )
+    diff_stats_df.to_csv(os.path.join(output_dir, "diff_stats.csv"), index=False)
 
     summary_df.to_csv(
         os.path.join(output_dir, "diff_stats_unique_args_summary.csv"), index=False
@@ -325,14 +344,10 @@ def write_outputs(output_dir, diff_stats_df, summary_df, cpu_op_map,
         json.dump(cpu_op_map, f, indent=2, ensure_ascii=False)
 
     with open(os.path.join(output_dir, "cpu_op_map_trace1.json"), "w") as f:
-        json.dump(
-            cpu_op_map_trace1.to_dict()["name"], f, indent=2, ensure_ascii=False
-        )
+        json.dump(cpu_op_map_trace1.to_dict()["name"], f, indent=2, ensure_ascii=False)
 
     with open(os.path.join(output_dir, "cpu_op_map_trace2.json"), "w") as f:
-        json.dump(
-            cpu_op_map_trace2.to_dict()["name"], f, indent=2, ensure_ascii=False
-        )
+        json.dump(cpu_op_map_trace2.to_dict()["name"], f, indent=2, ensure_ascii=False)
 
     with open(os.path.join(output_dir, "merged_tree_output.txt"), "w") as f:
         f.write(merged_tree_text + "\n")
@@ -341,6 +356,7 @@ def write_outputs(output_dir, diff_stats_df, summary_df, cpu_op_map,
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -353,8 +369,10 @@ def main():
     parser.add_argument("--shapes-a", help="Path to trace A derived_shapes.json")
     parser.add_argument("--shapes-b", help="Path to trace B derived_shapes.json")
     parser.add_argument(
-        "-o", "--output", default="semantic_diff_output",
-        help="Output directory (default: semantic_diff_output)"
+        "-o",
+        "--output",
+        default="semantic_diff_output",
+        help="Output directory (default: semantic_diff_output)",
     )
     args = parser.parse_args()
 
@@ -382,8 +400,12 @@ def main():
     )
 
     write_outputs(
-        args.output, diff_stats_df, summary_df,
-        cpu_op_map, cpu_op_map_trace1, cpu_op_map_trace2,
+        args.output,
+        diff_stats_df,
+        summary_df,
+        cpu_op_map,
+        cpu_op_map_trace1,
+        cpu_op_map_trace2,
         merged_tree_text,
     )
 
@@ -402,8 +424,14 @@ def main():
 
     print(f"\nOutput written to: {args.output}/", file=sys.stderr)
     print(f"  diff_stats.csv ({len(diff_stats_df)} rows)", file=sys.stderr)
-    print(f"  diff_stats_unique_args_summary.csv ({len(summary_df)} rows)", file=sys.stderr)
-    print(f"  cpu_op_map.json, cpu_op_map_trace1.json, cpu_op_map_trace2.json", file=sys.stderr)
+    print(
+        f"  diff_stats_unique_args_summary.csv ({len(summary_df)} rows)",
+        file=sys.stderr,
+    )
+    print(
+        f"  cpu_op_map.json, cpu_op_map_trace1.json, cpu_op_map_trace2.json",
+        file=sys.stderr,
+    )
     print(f"  merged_tree_output.txt", file=sys.stderr)
 
 

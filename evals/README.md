@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Standalone Analysis Evals
 
 Evaluation harness for the TraceLens Standalone Analysis pipeline. Validates both **workflow correctness** (directory structure, file existence, report formatting) and **output quality** (comparison against reference reports).

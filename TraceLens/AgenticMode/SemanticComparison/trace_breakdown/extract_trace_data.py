@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Step 1+3: Load a Chrome trace JSON and extract structured data.
 
@@ -10,6 +16,7 @@ Outputs a JSON with:
 Usage:
     python extract_trace_data.py <trace.json> [-o output.json]
 """
+
 import argparse
 import gzip
 import json
@@ -35,8 +42,7 @@ def load_trace(path):
 def extract_kernel_sequence(by_cat):
     kernels = sorted(by_cat.get("kernel", []), key=lambda e: e["ts"])
     return [
-        {"name": k["name"], "dur": k["dur"], "ts": k["ts"],
-         "args": k.get("args", {})}
+        {"name": k["name"], "dur": k["dur"], "ts": k["ts"], "args": k.get("args", {})}
         for k in kernels
     ]
 
@@ -77,7 +83,9 @@ def run_assertions(data, by_cat, kernels, is_graph_mode):
 
     for i, k in enumerate(kernels):
         if k["dur"] <= 0:
-            errors.append(f"A3.2 FAIL: Kernel {i} ({k['name'][:50]}) has non-positive duration {k['dur']}")
+            errors.append(
+                f"A3.2 FAIL: Kernel {i} ({k['name'][:50]}) has non-positive duration {k['dur']}"
+            )
             break
 
     timestamps = [k["ts"] for k in kernels]
@@ -94,7 +102,9 @@ def run_assertions(data, by_cat, kernels, is_graph_mode):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract structured data from a Chrome trace JSON")
+    parser = argparse.ArgumentParser(
+        description="Extract structured data from a Chrome trace JSON"
+    )
     parser.add_argument("trace", help="Path to trace JSON file")
     parser.add_argument("-o", "--output", help="Output JSON path (default: stdout)")
     args = parser.parse_args()
@@ -131,7 +141,10 @@ def main():
     if args.output:
         with open(args.output, "w") as f:
             f.write(output)
-        print(f"Wrote {args.output} ({len(kernels)} kernels, {total_kernel_time:.1f}us total)", file=sys.stderr)
+        print(
+            f"Wrote {args.output} ({len(kernels)} kernels, {total_kernel_time:.1f}us total)",
+            file=sys.stderr,
+        )
     else:
         print(output)
 

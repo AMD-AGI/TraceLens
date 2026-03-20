@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Step 5 (scriptable part): Classify kernels by type using regex rules.
 
@@ -12,6 +18,7 @@ Output: JSON with per-kernel type classification
 Usage:
     python classify_kernels.py <extracted.json> [-o classified.json]
 """
+
 import argparse
 import json
 import re
@@ -22,7 +29,11 @@ KERNEL_TYPE_RULES = [
     # Normalization
     (r"(?i)Rmsnorm|rmsnorm2d", "RMSNorm", 20),
     (r"(?i)layer_norm|layernorm", "LayerNorm", 20),
-    (r"(?i)rsqrt.*mean.*pow|mean.*mul.*pow.*rsqrt|_to_copy_add.*mean.*rsqrt", "RMSNorm (fused triton)", 20),
+    (
+        r"(?i)rsqrt.*mean.*pow|mean.*mul.*pow.*rsqrt|_to_copy_add.*mean.*rsqrt",
+        "RMSNorm (fused triton)",
+        20,
+    ),
     # Attention
     (r"(?i)attention_[23]d|unified_attention", "Attention (AMD unified)", 20),
     (r"(?i)fmha[Ss]m\d+|fmhaSm100f", "Attention (NVIDIA fmha)", 20),
@@ -72,7 +83,9 @@ KERNEL_TYPE_RULES = [
     (r"(?i)triton_", "Triton (unclassified)", 2),
 ]
 
-COMPILED_RULES = [(re.compile(pat), ktype, prio) for pat, ktype, prio in KERNEL_TYPE_RULES]
+COMPILED_RULES = [
+    (re.compile(pat), ktype, prio) for pat, ktype, prio in KERNEL_TYPE_RULES
+]
 
 
 def classify_kernel(name):
@@ -146,7 +159,9 @@ def run_assertions(classified):
             + ", ".join(f"#{c['index']}({c['name'][:40]})" for c in unknowns[:5])
         )
 
-    low_conf = [c for c in classified if c["confidence"] <= 2 and c["kernel_type"] != "Unknown"]
+    low_conf = [
+        c for c in classified if c["confidence"] <= 2 and c["kernel_type"] != "Unknown"
+    ]
     if len(low_conf) > len(classified) * 0.2:
         errors.append(
             f"A5.x WARNING: {len(low_conf)} kernels ({100*len(low_conf)/len(classified):.0f}%) "
@@ -157,7 +172,9 @@ def run_assertions(classified):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Classify kernels by type using regex rules")
+    parser = argparse.ArgumentParser(
+        description="Classify kernels by type using regex rules"
+    )
     parser.add_argument("extracted_json", help="Path to extracted trace data JSON")
     parser.add_argument("-o", "--output", help="Output JSON path (default: stdout)")
     args = parser.parse_args()
@@ -171,6 +188,7 @@ def main():
         print(e, file=sys.stderr)
 
     from collections import Counter
+
     type_counts = Counter(c["kernel_type"] for c in classified)
 
     result = {
@@ -184,7 +202,10 @@ def main():
     if args.output:
         with open(args.output, "w") as f:
             f.write(output)
-        print(f"Classified {len(classified)} kernels into {len(type_counts)} types", file=sys.stderr)
+        print(
+            f"Classified {len(classified)} kernels into {len(type_counts)} types",
+            file=sys.stderr,
+        )
     else:
         print(output)
 

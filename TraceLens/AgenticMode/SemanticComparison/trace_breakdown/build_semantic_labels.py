@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Helper script to build semantic_labels.json from extracted, pattern, and classified data.
 Used by the Semantic Breakdown Agent for the LLM labeling step.
 """
+
 import argparse
 import json
 import sys
-
 
 # Per-layer body mapping: offset within 16-kernel layer -> semantic_block
 # Based on pattern: period=16, MoE architecture (GPT-OSS with sliding/full attention)
@@ -48,8 +54,12 @@ def main():
     parser.add_argument("extracted_json", help="Path to extracted.json")
     parser.add_argument("pattern_json", help="Path to pattern.json")
     parser.add_argument("classified_json", help="Path to classified.json")
-    parser.add_argument("-o", "--output", required=True, help="Output semantic_labels.json path")
-    parser.add_argument("--trace-path", default="", help="Source trace path for metadata")
+    parser.add_argument(
+        "-o", "--output", required=True, help="Output semantic_labels.json path"
+    )
+    parser.add_argument(
+        "--trace-path", default="", help="Source trace path for metadata"
+    )
     args = parser.parse_args()
 
     with open(args.extracted_json) as f:
@@ -92,7 +102,9 @@ def main():
             elif epilogue_pos == 0:
                 semantic = "Epilogue: Final Norm"
             else:
-                semantic = "Epilogue: LM Head" if "nvjet" in name else "Epilogue: Final Norm"
+                semantic = (
+                    "Epilogue: LM Head" if "nvjet" in name else "Epilogue: Final Norm"
+                )
             layer = None
         else:
             # Layer body
@@ -124,14 +136,16 @@ def main():
             elif "reshape_and_cache" in name:
                 semantic = "KV Cache Store"
 
-        labeled.append({
-            "index": i,
-            "name": name,
-            "dur": dur,
-            "kernel_type": ktype,
-            "semantic_block": semantic,
-            "layer": layer,
-        })
+        labeled.append(
+            {
+                "index": i,
+                "name": name,
+                "dur": dur,
+                "kernel_type": ktype,
+                "semantic_block": semantic,
+                "layer": layer,
+            }
+        )
 
     out = {
         "source_file": args.trace_path or extracted.get("source_file", ""),

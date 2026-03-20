@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: magpie-benchmark-profiling
 description: Run Magpie LLM inference benchmarks (vLLM/SGLang) and collect PyTorch profiler traces on remote GPU nodes. Use when the user asks to benchmark, profile, or collect traces for LLM inference workloads using the Magpie framework.

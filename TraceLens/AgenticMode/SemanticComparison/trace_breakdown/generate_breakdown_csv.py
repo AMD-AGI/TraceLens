@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Step 7: Generate the breakdown CSV from a semantic labeling JSON.
 
@@ -22,6 +28,7 @@ The semantic_labels.json format:
 Usage:
     python generate_breakdown_csv.py <semantic_labels.json> [-o breakdown.csv]
 """
+
 import argparse
 import csv
 import json
@@ -55,17 +62,19 @@ def aggregate_by_block(labeled_kernels, total_time):
         total = sum(b["durations"])
         avg = total / b["kernel_count"] if b["kernel_count"] else 0
         pct = 100 * total / total_time if total_time > 0 else 0
-        rows.append({
-            "semantic_block": block,
-            "algorithm_order": order,
-            "kernel_names": " | ".join(sorted(b["kernel_names"])),
-            "kernel_count": b["kernel_count"],
-            "total_us": round(total, 1),
-            "avg_us": round(avg, 1),
-            "pct_of_total": round(pct, 1),
-            "layer_count": len(b["layers"]),
-            "first_kernel_index": b["first_index"],
-        })
+        rows.append(
+            {
+                "semantic_block": block,
+                "algorithm_order": order,
+                "kernel_names": " | ".join(sorted(b["kernel_names"])),
+                "kernel_count": b["kernel_count"],
+                "total_us": round(total, 1),
+                "avg_us": round(avg, 1),
+                "pct_of_total": round(pct, 1),
+                "layer_count": len(b["layers"]),
+                "first_kernel_index": b["first_index"],
+            }
+        )
         order += 1
     return rows
 
@@ -89,9 +98,7 @@ def run_assertions(rows, labeled_kernels, total_time):
 
     pct_sum = sum(r["pct_of_total"] for r in rows)
     if abs(pct_sum - 100.0) > 2.0:
-        errors.append(
-            f"A7.2 FAIL: Percentages sum to {pct_sum:.1f}% (expected ~100%)"
-        )
+        errors.append(f"A7.2 FAIL: Percentages sum to {pct_sum:.1f}% (expected ~100%)")
 
     unlabeled = [k for k in labeled_kernels if not k.get("semantic_block")]
     if unlabeled:
@@ -103,9 +110,13 @@ def run_assertions(rows, labeled_kernels, total_time):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate breakdown CSV from semantic labels")
+    parser = argparse.ArgumentParser(
+        description="Generate breakdown CSV from semantic labels"
+    )
     parser.add_argument("labels_json", help="Path to semantic labels JSON")
-    parser.add_argument("-o", "--output", default="breakdown.csv", help="Output CSV path")
+    parser.add_argument(
+        "-o", "--output", default="breakdown.csv", help="Output CSV path"
+    )
     args = parser.parse_args()
 
     with open(args.labels_json) as f:
@@ -123,15 +134,27 @@ def main():
         sys.exit(1)
 
     with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "semantic_block", "algorithm_order", "kernel_names",
-            "kernel_count", "total_us", "avg_us", "pct_of_total",
-            "layer_count", "first_kernel_index",
-        ])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "semantic_block",
+                "algorithm_order",
+                "kernel_names",
+                "kernel_count",
+                "total_us",
+                "avg_us",
+                "pct_of_total",
+                "layer_count",
+                "first_kernel_index",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Wrote {args.output} ({len(rows)} semantic blocks, {len(labeled)} kernels)", file=sys.stderr)
+    print(
+        f"Wrote {args.output} ({len(rows)} semantic blocks, {len(labeled)} kernels)",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Compute optimization priority ranking from a comparison CSV.
 
@@ -12,6 +18,7 @@ Usage:
     python compute_priority.py <comparison.csv> --name-a MI355 --name-b B200 \
         [-o priority.json] [--top 5]
 """
+
 import argparse
 import csv
 import json
@@ -65,7 +72,9 @@ def compute(csv_path, name_a, name_b, top_n=5):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute optimization priority ranking")
+    parser = argparse.ArgumentParser(
+        description="Compute optimization priority ranking"
+    )
     parser.add_argument("comparison_csv", help="Path to comparison CSV")
     parser.add_argument("--name-a", default="trace_a", help="Name of trace A")
     parser.add_argument("--name-b", default="trace_b", help="Name of trace B")
@@ -86,7 +95,10 @@ def main():
     if args.output:
         with open(args.output, "w") as f:
             f.write(output)
-        print(f"Top {len(priorities)} priorities written to {args.output}", file=sys.stderr)
+        print(
+            f"Top {len(priorities)} priorities written to {args.output}",
+            file=sys.stderr,
+        )
     else:
         print(output)
 
