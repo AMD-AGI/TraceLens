@@ -4720,7 +4720,7 @@ class te_layer_norm_fn(Normalization):
     In the trace:
       Input[0] = X      with shape [..., hidden]
       Input[1] = gamma  with shape [hidden]
-      Input[2] = beta   with shape [hidden] (may be empty)
+      Input[2] = beta   with shape [hidden]  (optional; detected via has_bias)
     """
 
     @staticmethod
