@@ -20,6 +20,7 @@ op_to_perf_model_class_map = {
     "vllm::gemm_with_dynamic_quant": perf_model.vllm_gemm_with_dynamic_quant,
     "FlashAttnFunc": perf_model.flash_attention,
     "flash_attn::_flash_attn_forward": perf_model.flash_attention,
+    "flash_attn::_flash_attn_backward": perf_model.flash_attention_backward,
     "flash_attn::_flash_attn_varlen_forward": perf_model.flash_attention_varlen_forward,
     "flash_attn::_flash_attn_varlen_backward": perf_model.flash_attention_varlen_backward,
     "aten::_scaled_dot_product_cudnn_attention": perf_model.aten__scaled_dot_product_cudnn_attention,
@@ -35,8 +36,19 @@ op_to_perf_model_class_map = {
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
+    "aiter::mha_fwd": perf_model.aiter__mha_fwd,
+    "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::mha_bwd": perf_model.aiter__mha_bwd,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
+    "EvoformerAttention": perf_model.evoformer_attention,
+    "LigerSiLUMulFunction": perf_model.liger_silu_mul_function,
+    "primus_turbo::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_impl": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo_cpp_extension::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo::grouped_gemm_variable_k_impl": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo_cpp_extension::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
     # TEv2 pseudo ops
     "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
@@ -126,6 +138,7 @@ for op_name, op_class in norm_ops.items():
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
+    perf_model.GroupedGemm: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
     perf_model.UnaryElementwise: "UnaryElementwise",
@@ -153,12 +166,17 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
 
 def categorize_torch_op(row):
     """
-    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Categorizes a row based on the 'name' and 'kernel_details' fields.
+
     Args:
-        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+        row (dict): A dictionary with at minimum a 'name' key. May also contain
+            a 'kernel_details' key — a list of dicts each having a 'name' field
+            that holds the underlying GPU kernel name.
+
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+        str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused', 'elementwise',
+             'triton', 'reduce', 'multi_tensor_apply', 'record_param_comms', or 'other'.
     """
 
     debug = False
@@ -193,6 +211,7 @@ def categorize_torch_op(row):
         "aten::_scaled_dot_product_flash_attention_backward",
         "aiter::_flash_attn_backward",
         "aiter::wrapper_fmha_v3_bwd",
+        "aiter::mha_bwd",
     ]
     if row["name"] in dict_cat2names["SDPA"]:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
@@ -203,6 +222,8 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
+        return "elementwise"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
@@ -222,6 +243,5 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-
     # if none of the above cases match, return 'other'
     return "other"
