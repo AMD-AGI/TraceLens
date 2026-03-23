@@ -13,11 +13,11 @@ jobs:
         with:
           script: |
             const protectedDirectories = [
-              'TraceLens/TraceLens/TreePerf/',
-              'TraceLens/TraceLens/Trace2Tree/',
-              'TraceLens/TraceLens/TraceDiff/',
-              'TraceLens/TraceLens/TraceFusion/',
-              'TraceLens/TraceLens/PerfModel/',
+              'TraceLens/TreePerf/',
+              'TraceLens/Trace2Tree/',
+              'TraceLens/TraceDiff/',
+              'TraceLens/TraceFusion/',
+              'TraceLens/PerfModel/',
             ];
 
             const prBranch = context.payload.pull_request.head.ref;
