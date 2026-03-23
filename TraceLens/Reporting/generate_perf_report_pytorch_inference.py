@@ -619,8 +619,11 @@ def generate_perf_report_pytorch(
         )
         df_kernel_launchers_unique_args = (
             perf_analyzer.get_df_kernel_launchers_unique_args(
-                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True, group_by_parent_module=group_by_parent_module,
-                group_by_num_kernels=group_by_num_kernels
+                df_kernel_launchers,
+                agg_metrics=agg_metrics,
+                include_pct=True,
+                group_by_parent_module=group_by_parent_module,
+                group_by_num_kernels=group_by_num_kernels,
             )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(

@@ -537,8 +537,15 @@ def extract_phases_and_save(
                 get_iter_details_from_name(r["name"], prefix) for r in decode_steps
             ]
             phase_details = find_phase_from_window(iter_details)
-            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
-                decode_steps, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
+            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
+                extract_iteration(
+                    decode_steps,
+                    events,
+                    trace_json,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                )
             )
             name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
@@ -618,7 +625,7 @@ def find_steady_state_iterations(
             "warning: no steady state region found, discarding initial and final iterations and selecting middle region"
         )
     sub_regions = []
-    divider = min(int(num_steps/2),10)
+    divider = min(int(num_steps / 2), 10)
     for s, e in regions:
         if (e - s) > num_steps:
             for s1 in range(s, e, num_steps // divider):
@@ -641,8 +648,8 @@ def find_steady_state_iterations(
                 ]
             )
     if not decode_only:
-        sub_regions_tmp = [t for t in sub_regions if t[2]>0]
-        if len(sub_regions_tmp)==0:
+        sub_regions_tmp = [t for t in sub_regions if t[2] > 0]
+        if len(sub_regions_tmp) == 0:
             print("prefilldecode step not found, selecting decode-only region")
         else:
             sub_regions = sub_regions_tmp
