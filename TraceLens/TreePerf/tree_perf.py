@@ -2108,7 +2108,7 @@ class TreePerfAnalyzer:
             )
             kernel_details["kernel_file"] = cpu_op["args"].get("kernel_file")
             if cpu_op.get("gpu_busy_time") is None:
-                # If the cpu_op event does not have GPU busy time, compute it. 
+                # If the cpu_op event does not have GPU busy time, compute it.
                 gpu_events = [
                     self.tree.get_UID2event(uid) for uid in cpu_op.get("gpu_events", [])
                 ]
