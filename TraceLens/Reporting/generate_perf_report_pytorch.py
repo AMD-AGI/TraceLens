@@ -347,7 +347,7 @@ def generate_perf_report_pytorch(
                     agg_metrics=agg_metrics,
                     include_pct=True,
                     include_overlapping_kernels=True,
-                    group_by_num_kernels=group_by_num_kernels
+                    group_by_num_kernels=group_by_num_kernels,
                 )
             )
             df_kernel_launchers_unique_args_overlapping_kernels = (
@@ -399,7 +399,10 @@ def generate_perf_report_pytorch(
                 if include_overlap_info:
                     df_ops_overlapping_kernels = (
                         perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_raw, agg_metrics, include_overlapping_kernels=True, group_by_num_kernels=group_by_num_kernels
+                            df_ops_raw,
+                            agg_metrics,
+                            include_overlapping_kernels=True,
+                            group_by_num_kernels=group_by_num_kernels,
                         )
                     )
                     df_ops_overlapping_kernels = add_truncated_kernel_details(
@@ -423,7 +426,9 @@ def generate_perf_report_pytorch(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
                 )
                 df_ops_fwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_fwd_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                    df_ops_fwd_raw,
+                    agg_metrics,
+                    group_by_num_kernels=group_by_num_kernels,
                 )
                 df_ops_fwd = add_truncated_kernel_details(
                     df_ops_fwd,
@@ -458,7 +463,9 @@ def generate_perf_report_pytorch(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
                 df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd_raw, agg_metrics, group_by_num_kernels=group_by_num_kernels
+                    df_ops_bwd_raw,
+                    agg_metrics,
+                    group_by_num_kernels=group_by_num_kernels,
                 )
                 df_ops_bwd = add_truncated_kernel_details(
                     df_ops_bwd,
@@ -489,7 +496,7 @@ def generate_perf_report_pytorch(
                             df_ops_fwd_raw,
                             agg_metrics,
                             include_overlapping_kernels=True,
-                            group_by_num_kernels=group_by_num_kernels
+                            group_by_num_kernels=group_by_num_kernels,
                         )
                     )
                     df_ops_fwd_overlapping_kernels = add_truncated_kernel_details(
@@ -528,7 +535,7 @@ def generate_perf_report_pytorch(
                             df_ops_bwd_raw,
                             agg_metrics,
                             include_overlapping_kernels=True,
-                            group_by_num_kernels=group_by_num_kernels
+                            group_by_num_kernels=group_by_num_kernels,
                         )
                     )
                     df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
@@ -626,7 +633,7 @@ def generate_perf_report_pytorch(
                         include_pct=True,
                         include_overlapping_kernels=True,
                         group_by_parent_module=group_by_parent_module,
-                        group_by_num_kernels=group_by_num_kernels
+                        group_by_num_kernels=group_by_num_kernels,
                     )
                 )
                 if not df_unified_perf_summary_overlapping_kernels.empty:

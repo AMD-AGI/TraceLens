@@ -582,7 +582,10 @@ class TreePerfAnalyzer:
 
     @staticmethod
     def summarize_df_perf_metrics(
-        df_perf_metrics, agg_metrics=["mean", "std"], group_by_num_kernels=False, include_overlapping_kernels=False
+        df_perf_metrics,
+        agg_metrics=["mean", "std"],
+        group_by_num_kernels=False,
+        include_overlapping_kernels=False,
     ):
         if df_perf_metrics.empty:
             warnings.warn(
