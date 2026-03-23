@@ -8,13 +8,17 @@
 Utils. for perf. model pseudo-op extensions.
 """
 
-from . import moe_perf_model_extensions, attention_perf_model_extensions, perf_model_extensions
+from . import (
+    moe_perf_model_extensions,
+    attention_perf_model_extensions,
+    perf_model_extensions,
+)
 
 
 def get_pseudo_op_mappings():
     """
     Return a dictionary mapping pseudo-op names to their performance model classes.
-    
+
     Returns:
         dict: Mapping of pseudo-op names to performance model classes
     """
@@ -54,11 +58,11 @@ def get_pseudo_op_mappings():
 def get_pseudo_op_categories():
     """
     Return a dictionary mapping pseudo-op base classes to their performance categories.
-    
+
     Returns:
         dict: Mapping of base classes to category names
     """
-    
+
     pseudo_op_categories = {
         moe_perf_model_extensions.FusedMoE: "MoE_fused",
         moe_perf_model_extensions.UnfusedMoE_Up: "MoE_unfused",
@@ -71,5 +75,5 @@ def get_pseudo_op_categories():
         perf_model_extensions.gemm_a16w16_atomic_: "GEMM",
         perf_model_extensions.batched_gemm_a8w8: "GEMM",
     }
-    
+
     return pseudo_op_categories
