@@ -1,0 +1,56 @@
+name: Sync from upstream
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [public-sync]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+
+      - name: Merge upstream changes
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/AMD-AGI/TraceLens.git
+          git fetch upstream main
+          git fetch origin main
+
+          git checkout --track origin/main
+
+          if git diff --quiet main..upstream/main; then
+            echo "No changes to sync."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
+
+          # Keep private repo's workflow files unchanged during merge
+          git config merge.ours.driver true
+          echo '.github/workflows/** merge=ours' >> .git/info/attributes
+          git merge upstream/main --no-edit --strategy-option theirs
+
+          git push origin "$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR
+        if: steps.merge.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          gh api repos/${{ github.repository }}/pulls \
+            -f title="[Auto] Sync from public TraceLens repo" \
+            -f body="Automated sync from public TraceLens repo: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
+            -f head="$BRANCH" \
+            -f base="main"
