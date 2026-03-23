@@ -35,10 +35,11 @@ jobs:
           BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
           git checkout -b "$BRANCH"
 
-          # Keep private repo's workflow files unchanged during merge
-          git config merge.ours.driver true
-          echo '.github/workflows/** merge=ours' >> .git/info/attributes
           git merge upstream/main --no-edit --strategy-option theirs
+          git checkout origin/main -- .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit --amend --no-edit
+          fi
 
           git push origin "$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
