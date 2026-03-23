@@ -30,10 +30,9 @@ jobs:
           git fetch upstream main
           git fetch origin main
 
-          git checkout -B main origin/main
-
-          if git diff --quiet main..upstream/main; then
-            echo "No changes to sync."
+          # No sync if origin/main already contains all of upstream/main (same tip or fork ahead)
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "No changes to sync (origin/main is up to date with upstream/main)."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -53,11 +52,27 @@ jobs:
 
       - name: Create PR
         if: steps.merge.outputs.has_changes == 'true'
+        id: pr
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
-          gh api repos/${{ github.repository }}/pulls \
+          resp=$(gh api repos/${{ github.repository }}/pulls \
             -f title="[Auto] Sync from public TraceLens repo" \
             -f body="Automated sync from public TraceLens repo: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
             -f head="$BRANCH" \
-            -f base="main"
+            -f base="main")
+          echo "number=$(echo "$resp" | jq -r .number)" >> "$GITHUB_OUTPUT"
+
+      - name: Merge PR
+        if: steps.merge.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          gh api -X PUT \
+            "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/merge" \
+            -f merge_method=merge
+
+          ENC_BRANCH=$(echo -n "$BRANCH" | jq -sRr @uri)
+          gh api -X DELETE \
+            "repos/${{ github.repository }}/git/refs/heads/${ENC_BRANCH}" \
+            || true
