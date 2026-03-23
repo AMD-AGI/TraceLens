@@ -16,7 +16,7 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
-        "orjson"
+        "orjson",
     ],
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open("README.md").read(),
