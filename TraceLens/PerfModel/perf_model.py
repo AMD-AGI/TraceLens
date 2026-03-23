@@ -33,6 +33,7 @@ class GEMM:
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
+        kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
         elif "kernel_details" in event and len(event["kernel_details"]) > 0:
@@ -43,7 +44,7 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
-        if not hasattr(self.param_details, "B"):
+        if "B" not in self.param_details:
             self.param_details["B"] = 1
 
         if self.parsed_kernel_info is not None:
@@ -2068,7 +2069,7 @@ class SDPA:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
             bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = True if type(self).__name__ == "flash_attention" else False
+            fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
             simulated_time = SDPA.get_simulation_time_bwd_func(
                 self.arch,
                 dtype,
@@ -2179,15 +2180,65 @@ class flash_attention(SDPA):
         }
 
 
-class flash_attention_backward(flash_attention):
+class flash_attention_backward(SDPA):
+    """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
-    def __init__(self, event):
-        super().__init__(event)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        self.d_h = (
+            self.d_h_qk
+        )  # head dimension for simulation (used by get_simulation_time_bwd_func)
+
+    @staticmethod
+    def get_param_details(event):
+        # Argument order: dout (0), q (1), k (2), v (3), out, softmax_lse, ...
+        input_dims = event["args"]["Input Dims"]
+        q_idx, k_idx, v_idx = 1, 2, 3
+        q_shape, k_shape, v_shape = (
+            input_dims[q_idx],
+            input_dims[k_idx],
+            input_dims[v_idx],
+        )
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+
+        concrete = event["args"].get("Concrete Inputs", [])
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+        strides = event["args"]["Input Strides"]
+        q_stride, k_stride, v_stride = (
+            tuple(strides[q_idx]),
+            tuple(strides[k_idx]),
+            tuple(strides[v_idx]),
+        )
+        dropout = float(concrete[8]) if len(concrete) > 8 and concrete[8] else 0.0
+        causal = eval(concrete[10]) if len(concrete) > 10 and concrete[10] else True
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "q_stride": q_stride,
+            "k_stride": k_stride,
+            "v_stride": v_stride,
+            "dropout": dropout,
+            "causal": causal,
+            "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
+        }
 
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element):
+    def bytes(self, bytes_per_element=None):
+        if bytes_per_element is None:
+            bytes_per_element = name2bpe(self.param_details["dtype_A_B"][0])
         return self.bytes_bwd(bytes_per_element)
 
 
@@ -2782,6 +2833,111 @@ class aiter__fmha_v3_backward(SDPA):
         return self.bytes_bwd(bytes_per_element)
 
 
+def _parse_aiter_mha_fwd_args(event):
+    """Shared parser for aiter::mha_fwd and aiter::fmha_v3_fwd.
+
+    Both ops share the same argument layout:
+      q[0], k[1], v[2] — raw shape (B, N, H, d_h) in bnhd order;
+      bhnd_idx=(0,2,1,3) extracts B, H, N, d_h from the bnhd tuple.
+      dropout_p[3], softmax_scale[4], is_causal[5].
+    """
+    input_dims = event["args"]["Input Dims"]
+    concrete_inputs = event["args"]["Concrete Inputs"]
+    q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+    bhnd_idx = 0, 2, 1, 3
+    sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+    B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+        sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+    )
+    dropout_p = 0.0
+    if concrete_inputs[3] not in ("", "None"):
+        try:
+            dropout_p = float(concrete_inputs[3])
+        except (ValueError, TypeError):
+            pass
+    is_causal = (
+        concrete_inputs[5].lower() == "true"
+        if concrete_inputs[5] not in ("", "None")
+        else False
+    )
+    return {
+        "B": B,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_KV,
+        "H_KV": H_KV,
+        "d_h_qk": d_h_qk,
+        "d_h_v": d_h_v,
+        "dropout": dropout_p,
+        "causal": is_causal,
+        "flash_impl": True,
+    }
+
+
+class aiter__mha_fwd(SDPA):
+    # aiter::mha_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Raw tensor shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_mha_fwd_args(event)
+
+
+class aiter__fmha_v3_fwd(SDPA):
+    # aiter::fmha_v3_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Same argument layout as aiter::mha_fwd — raw shape (B, N, H, d_h) in bnhd order.
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_mha_fwd_args(event)
+
+
+class aiter__mha_bwd(SDPA):
+    # aiter::mha_bwd(dout, q, k, v, out, softmax_lse, dropout_p, softmax_scale, is_causal, ...)
+    # q[1], k[2], v[3] — raw shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if concrete_inputs[6] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[6])
+            except (ValueError, TypeError):
+                pass
+        is_causal = (
+            concrete_inputs[8].lower() == "true"
+            if concrete_inputs[8] not in ("", "None")
+            else False
+        )
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
 class vllm_unified_attention_with_output(SDPA):
 
     @staticmethod
@@ -2878,6 +3034,37 @@ class vllm_unified_attention_with_output(SDPA):
             self.param_details["causal"],
             bytes_per_element,
         )
+
+
+class evoformer_attention(SDPA):
+    # EvoformerAttention(Q, K, V, res_mask, pair_bias)
+    # Q, K, V: [Batch, N_seq, N_res, Head, Dim] — N_seq is an MSA/template depth
+    # dimension that is folded into the effective batch.  Attention is computed
+    # over N_res for every (Batch, N_seq) slice; always non-causal.
+    # res_mask  [Batch, N_seq, 1, 1, N_res] and
+    # pair_bias [Batch, 1,     Head, N_res, N_res] are extra reads not counted
+    # in the standard SDPA bytes formula.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"].get("Input type", [])
+        # Q is input 0: [Batch, N_seq, N_res, Head, Dim]
+        q_shape = input_dims[0]
+        B, N_seq, N_res, Head, Dim = q_shape
+        dtype = input_types[0] if input_types else None
+        return {
+            "B": B * N_seq,
+            "N_Q": N_res,
+            "H_Q": Head,
+            "N_KV": N_res,
+            "H_KV": Head,
+            "d_h_qk": Dim,
+            "d_h_v": Dim,
+            "causal": False,
+            "flash_impl": False,
+            "dtype_A_B": [dtype],
+        }
 
 
 class UnaryElementwise:
@@ -3056,6 +3243,32 @@ class aten_binary_elementwise(BinaryElementwise):
         }
 
 
+class liger_silu_mul_function(BinaryElementwise):
+    # LigerSiLUMulFunction(a, b)  — from linkedin/Liger-Kernel (swiglu.py)
+    # Fused Triton kernel: output = SiLU(a) * b
+    # a, b: same shape; output has the same shape and dtype.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+        input_strides = event["args"]["Input Strides"]
+        a_shape = tuple(input_dims[0])
+        b_shape = tuple(input_dims[1])
+        dtype_a = input_types[0]
+        dtype_b = input_types[1]
+        stride_a = tuple(input_strides[0])
+        stride_b = tuple(input_strides[1])
+        return {
+            "shape_in1": a_shape,
+            "shape_in2": b_shape,
+            "dtype_in1_in2_out": (dtype_a, dtype_b, None),
+            "stride_input1": stride_a,
+            "stride_input2": stride_b,
+            "stride_output": None,
+        }
+
+
 class GroupedGemm:
     """
     Grouped General Matrix Multiplication (GEMM).
@@ -3153,6 +3366,247 @@ class GroupedGemm:
     def bytes_bwd(self):
         return self.bytes_bwd_func(
             self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
+        )
+
+
+def _collect_2d_shapes(obj):
+    """Recursively extract all (rows, cols) int pairs from nested lists/tuples."""
+    shapes = []
+    if isinstance(obj, (list, tuple)):
+        if len(obj) == 2 and all(isinstance(v, int) and v > 0 for v in obj):
+            shapes.append((obj[0], obj[1]))
+        else:
+            for item in obj:
+                shapes.extend(_collect_2d_shapes(item))
+    return shapes
+
+
+class primus_turbo_grouped_gemm(GroupedGemm):
+    """
+    Primus Turbo fixed-K grouped GEMM: X(M,K) @ W(G,K,N) -> Y(M,N).
+
+    All groups share the same K and N, matching GroupedGemm's canonical layout.
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [G,K,N]] or [[M,K], [G,N,K]]
+      - Zipped:         [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]]
+
+    Inherits flops(), bytes(), flops_bwd(), bytes_bwd() from GroupedGemm.
+
+    Mapped op names:
+      primus_turbo::grouped_gemm
+      primus_turbo::grouped_gemm_impl
+      primus_turbo_cpp_extension::grouped_gemm
+    """
+
+    @staticmethod
+    def _extract_impl_dims(input_dims):
+        """
+        Parse compact _impl trace format: [[M,K], [G,K,N]] or [[M,K], [G,N,K]].
+        Returns (M, K, N, G), or None if the format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) >= 2
+            and len(b_shape) == 3
+            and all(isinstance(v, int) and v > 0 for v in a_shape[:2])
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        G = int(b_shape[0])
+        # Some traces store grouped W as [G,K,N]; others use [G,N,K].
+        if b_shape[1] == K:
+            N = int(b_shape[2])
+        elif b_shape[2] == K:
+            N = int(b_shape[1])
+        else:
+            return None
+        return M, K, N, G
+
+    @staticmethod
+    def _extract_zipped_dims(input_dims):
+        """
+        Parse zipped trace format: [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]].
+        Requires uniform K and N across all groups.
+        Returns (M_total, K, N, G), or None if the format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        K = lhs[0][1]
+        N = rhs[0][1]
+        if not all(a[1] == K and b[0] == K and b[1] == N for a, b in zip(lhs, rhs)):
+            return None
+        M_total = sum(a[0] for a in lhs)
+        G = len(lhs)
+        return M_total, K, N, G
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        dims = primus_turbo_grouped_gemm._extract_impl_dims(input_dims)
+        if dims is None:
+            dims = primus_turbo_grouped_gemm._extract_zipped_dims(input_dims)
+        if dims is None:
+            raise ValueError(
+                f"primus_turbo::grouped_gemm could not parse Input Dims: {input_dims}"
+            )
+        M, K, N, G = dims
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        return {"M": M, "K": K, "N": N, "G": G, "bpe_in": bpe_in, "bpe_out": bpe_out}
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+
+class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
+    """
+    Primus Turbo variable-K grouped GEMM: each group i computes X_i(M_i,K_i) @ W_i(K_i,N_i).
+
+    Because K (and potentially N) differs per group, GroupedGemm's single-tensor bytes
+    formula (M*K + G*K*N) does not apply. flops() and bytes() are overridden to sum
+    per-group contributions using GroupedGemm.flops_func / GroupedGemm.bytes_func(G=1).
+
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [M,N]]  (aggregate view; treated as one group)
+      - Zipped:         [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]]
+
+    Mapped op names:
+      primus_turbo::grouped_gemm_variable_k
+      primus_turbo::grouped_gemm_variable_k_impl
+      primus_turbo_cpp_extension::grouped_gemm_variable_k
+    """
+
+    @staticmethod
+    def _extract_impl_pairs(input_dims):
+        """
+        Parse compact variable-K _impl trace format: [[M,K], [M,N]].
+        The trace gives aggregate totals; treated as a single effective group.
+        Returns a list with one ((M,K),(K,N)) pair, or None if format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) == 2
+            and len(b_shape) == 2
+            and all(isinstance(v, int) and v > 0 for v in a_shape)
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        N = int(b_shape[1])
+        return [((M, K), (K, N))]
+
+    @staticmethod
+    def _extract_zipped_pairs(input_dims):
+        """
+        Parse zipped trace format with variable K: [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]].
+        Returns list of ((M_i,K_i),(K_i,N_i)) pairs, or None if format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        if not all(a[1] == b[0] for a, b in zip(lhs, rhs)):
+            return None
+        return list(zip(lhs, rhs))
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        group_pairs = primus_turbo_grouped_gemm_variable_k._extract_impl_pairs(
+            input_dims
+        )
+        if group_pairs is None:
+            group_pairs = primus_turbo_grouped_gemm_variable_k._extract_zipped_pairs(
+                input_dims
+            )
+        if not group_pairs:
+            raise ValueError(
+                "primus_turbo::grouped_gemm_variable_k could not parse"
+                f" Input Dims: {input_dims}"
+            )
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        first_a, first_b = group_pairs[0]
+        return {
+            # M/K/N/G are approximate aggregates; overridden flops/bytes use group_pairs.
+            "M": sum(a[0] for a, _ in group_pairs),
+            "K": first_a[1],
+            "N": first_b[1],
+            "G": len(group_pairs),
+            "bpe_in": bpe_in,
+            "bpe_out": bpe_out,
+            "group_pairs": group_pairs,
+        }
+
+    def flops(self):
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            total += GroupedGemm.flops_func(M=a_shape[0], K=a_shape[1], N=b_shape[1])
+        return total
+
+    def bytes(self):
+        bpe_in, bpe_out = self.bpe_in, self.bpe_out
+        if bpe_in is None or bpe_out is None:
+            return None
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            # Each group has its own weight matrix (G_i=1), so reads X_i + W_i, writes Y_i.
+            total += GroupedGemm.bytes_func(
+                M=a_shape[0],
+                K=a_shape[1],
+                N=b_shape[1],
+                G=1,
+                bpe_in=bpe_in,
+                bpe_out=bpe_out,
+            )
+        return total
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
         )
 
 
@@ -3632,7 +4086,9 @@ class Normalization:
         # read grad_out and the input once, invstd if it is saved
 
         # read grad_out and input (if mask is true and is_training), write grad_in
-        bytes = num_elems * bpe_out + num_elems * bpe_in * (2 if output_mask[0] and is_training else 1)
+        bytes = num_elems * bpe_out + num_elems * bpe_in * (
+            2 if output_mask[0] and is_training else 1
+        )
         if is_training:
             bytes += num_channels * bpe_in  # invstd
         # read weight if affine

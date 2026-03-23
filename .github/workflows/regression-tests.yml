@@ -45,6 +45,9 @@ jobs:
       - name: Run collective analysis tests
         run: pytest tests/test_collective_analysis.py
 
+      - name: Run all2allv summary tests
+        run: pytest tests/test_all2allv_summary.py
+
       - name: Run JAX perf report tests
         run: pytest tests/test_jax_perf_report.py
 

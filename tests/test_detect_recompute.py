@@ -29,6 +29,16 @@ TRACE_PATH = os.path.join(TRACE_DIR, "resnet_act_checkpoint.json.gz")
 REF_XLSX = os.path.join(TRACE_DIR, "resnet_act_checkpoint_recompute_perf_report.xlsx")
 
 SHEETS_WITH_RECOMPUTE = ["ops_summary", "ops_unique_args", "unified_perf_summary"]
+PERF_METRICS_SHEETS = [
+    "GEMM",
+    "SDPA_fwd",
+    "SDPA_bwd",
+    "CONV_fwd",
+    "CONV_bwd",
+    "UnaryElementwise",
+    "BinaryElementwise",
+    "Normalization",
+]
 
 COLS_IGNORE = [
     "kernel_details",
@@ -84,6 +94,15 @@ def test_detect_recompute_e2e(tmp_path):
             "is_recompute"
         ].all(), f"All rows marked as recompute in {sheet_name} — expected a mix"
 
+    # Verify is_recompute propagates to perf metrics sheets (build_df_perf_metrics)
+    all_sheets = pd.ExcelFile(fn_report_path).sheet_names
+    for sheet_name in PERF_METRICS_SHEETS:
+        if sheet_name in all_sheets:
+            df = pd.read_excel(fn_report_path, sheet_name=sheet_name)
+            assert (
+                "is_recompute" in df.columns
+            ), f"is_recompute column missing from perf metrics sheet {sheet_name}"
+
 
 def test_detect_recompute_disabled_no_impact(tmp_path):
     """When detect_recompute=False (default), is_recompute should not appear."""
@@ -96,7 +115,7 @@ def test_detect_recompute_disabled_no_impact(tmp_path):
         detect_recompute=False,
     )
 
-    for sheet_name in SHEETS_WITH_RECOMPUTE:
+    for sheet_name in SHEETS_WITH_RECOMPUTE + PERF_METRICS_SHEETS:
         if sheet_name in dict_name2df:
             df = dict_name2df[sheet_name]
             assert (
