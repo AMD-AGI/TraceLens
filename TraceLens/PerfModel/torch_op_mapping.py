@@ -224,6 +224,5 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-    
     # if none of the above cases match, return 'other'
     return "other"
