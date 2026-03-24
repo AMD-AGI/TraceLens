@@ -79,7 +79,7 @@ Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify yo
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --print --force --trust \
+agent --model claude-4.6-opus-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -87,7 +87,7 @@ agent --print --force --trust \
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --print --force --trust \
+agent --model claude-4.6-opus-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -95,7 +95,7 @@ agent --print --force --trust \
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --print --force --trust \
+agent --model claude-4.6-opus-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
