@@ -56,7 +56,7 @@ python3 Analysis/jarvis_analysis_manual.py \
     --target-gpu-kineto "https://amdcloud.sharepoint.com/:u:/r/sites/AIModelsandApps/Shared%20Documents/AIMA%20Performance%20%26%20Optimization/TL_JARVIS_TRACES/Inference%20Workloads/GPT_OSS_Inferencemax/eager_traces/B200/b200_small_fulltrace_eager.trace.json.gz?csf=1&web=1&e=1Kw8c1" \
     --baseline-gpu-kineto "https://amdcloud.sharepoint.com/:u:/r/sites/AIModelsandApps/Shared%20Documents/AIMA%20Performance%20%26%20Optimization/TL_JARVIS_TRACES/Inference%20Workloads/GPT_OSS_Inferencemax/eager_traces/mi355/mi355_small_fulltrace_eager.trace.json.gz?csf=1&web=1&e=1vufwD" \
     --api-key "$AMD_GATEWAY_API_KEY" \
-    --output-dir "jarvis_test_plots/DevalsTraces_B200_vs_MI355_20251212_215042" \
+    --output-dir "comparative_test_plots/DevalsTraces_B200_vs_MI355_20251212_215042" \
     --target-gpu-name "B200" \
     --baseline-gpu-name "MI355" \
     --generate-plots \
