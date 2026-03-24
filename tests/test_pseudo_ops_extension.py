@@ -616,6 +616,37 @@ class TestLayerNormFnPerfModel:
         assert model.flops() > 0
         assert model.bytes() > 0
 
+    def test_layer_norm_fn_bwd_consistent_with_fwd(self):
+        """Backward has_bias/is_affine defaults must be consistent with forward."""
+        fwd_event = {
+            "args": {
+                "Input Dims": [(2048, 4, 2048), (2048,), ()],
+                "Input type": ["c10::BFloat16", "c10::BFloat16", ""],
+                "Input Strides": [(8192, 2048, 1), (1,), ()],
+                "Concrete Inputs": ["", "", "", "", "1e-05", "256", "False", "True"],
+                "Sequence number": 1,
+                "External id": 1,
+            }
+        }
+        bwd_event = {
+            "args": {
+                "Input Dims": [(2048, 4, 2048)],
+                "Input type": ["c10::BFloat16"],
+                "Input Strides": [(8192, 2048, 1)],
+                "Concrete Inputs": [""],
+                "Sequence number": 1,
+                "External id": 1,
+            }
+        }
+        fwd_model = te_layer_norm_fwd(fwd_event)
+        bwd_model = te_layer_norm_bwd(bwd_event)
+        assert (
+            fwd_model.has_bias == bwd_model.has_bias
+        ), f"has_bias mismatch: fwd={fwd_model.has_bias}, bwd={bwd_model.has_bias}"
+        assert (
+            fwd_model.is_affine == bwd_model.is_affine
+        ), f"is_affine mismatch: fwd={fwd_model.is_affine}, bwd={bwd_model.is_affine}"
+
     def test_categorization_normalization(self):
         """LayerNormFn/LayerNormFnBackward must be in Normalization category."""
         assert "LayerNormFn" in dict_cat2names_extension["Normalization"]

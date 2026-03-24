@@ -568,9 +568,11 @@ class te_layer_norm_fwd(Normalization):
 class te_layer_norm_bwd(Normalization):
     """TransformerEngine's LayerNormFnBackward.
 
-    The backward event only records the gradient tensor shape:
-      args[0] = grad_output tensor
-    Weight dimensions and bias are inferred from the gradient's last dim.
+    The backward event only records the gradient tensor shape (args[0]).
+    TE's LayerNormFn always has a weight (affine=True), but bias is
+    optional.  Since the backward trace args don't carry bias metadata,
+    we default has_bias=False to stay consistent with the forward model
+    which infers it from the (often empty) ln_bias dim.
     """
 
     @staticmethod
@@ -586,7 +588,7 @@ class te_layer_norm_bwd(Normalization):
             "stride_input": stride_input,
             "stride_output": None,
             "num_channels": num_channels,
-            "has_bias": True,
+            "has_bias": False,
             "is_affine": True,
             "is_training": True,
         }
@@ -598,7 +600,7 @@ class te_layer_norm_bwd(Normalization):
             self.is_training,
             self.num_elems,
             self.num_channels,
-            [True, True, True],
+            [True, self.is_affine, self.has_bias],
         )
 
     def bytes(self):
@@ -610,7 +612,7 @@ class te_layer_norm_bwd(Normalization):
             self.num_channels,
             self.bpe_in,
             self.bpe_out,
-            [True, True, True],
+            [True, self.is_affine, self.has_bias],
         )
 
 
