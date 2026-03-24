@@ -275,7 +275,7 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 - `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
 
 **Invocation conditions:**
-- **CPU/Idle**: Read `category_data/cpu_idle_metrics.json` and check `idle_flagged`. Only invoke the subagent if `idle_flagged` is `true` (idle > 15%). Skip if `false` -- the deterministic script already captured the factual data.
+- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 
 **Task prompt structure for each subagent:**
@@ -576,14 +576,8 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 
 ## Step 10: Generate Final Report
 
-1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
-3. **Fill in** each section by substituting placeholders with data from:
-   - `category_data/category_manifest.json` (metrics, GPU utilization)
-   - `category_findings/*.md` (compute kernel P-items, detailed analysis)
-   - `system_findings/*.md` (system-level P-items, detailed analysis)
-   - `category_data/*_metrics.json` (per-op tables, impact estimates)
-4. **Write** the completed report back to `<output_dir>/standalone_analysis.md` using `<prefix>`.
+1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md` — use it as a **reference only**. Do **NOT** copy the raw template to the output directory.
+2. **Build the completed report and write it in a single operation** to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> tee ...` with a heredoc). Fill all sections using `category_data/category_manifest.json`, `category_findings/*.md`, `system_findings/*.md`, and `category_data/*_metrics.json`. Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it. **Never write template placeholders** (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
 
 The report **must** use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
@@ -618,9 +612,10 @@ print('PASS: All required sections present')
 **If validation fails (exit code 1):**
 
 1. Read the FAIL output to identify missing sections
-2. Fix the report by adding the missing sections with the correct `##` headers, keeping existing content
-3. Run validation again
-4. Maximum 2 retry attempt. If still failing after retry, proceed to Step 10.2 with a warning
+2. Check if the report contains similar but incorrectly named headers (e.g., `## Compute Kernel Analysis` instead of `## Compute Kernel Optimizations`, or `## System-Level Analysis` instead of `## System-Level Optimizations`) and rename them to match the exact required names using string replacement. Do NOT rewrite the report from scratch.
+3. If sections are entirely absent, add them with the correct `##` headers, keeping existing content
+4. Run validation again
+5. Maximum 3 retry attempts. If still failing after retry, proceed to Step 10.2 with a warning
 
 ---
 

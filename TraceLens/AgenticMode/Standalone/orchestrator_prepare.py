@@ -673,6 +673,17 @@ def main():
     with open(manifest_file, "w") as f:
         json.dump(manifest, f, indent=2)
 
+    model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
+    if not os.path.exists(model_info_path):
+        default_model_info = {
+            "model": "Cannot be inferred from trace",
+            "architecture": "Cannot be inferred from trace",
+            "scale": "Cannot be inferred from trace",
+            "precision": "Cannot be inferred from trace",
+        }
+        with open(model_info_path, "w") as f:
+            json.dump(default_model_info, f, indent=2)
+
     print(f"\n{'='*80}")
     print(f"✓ Orchestrator Preparation Complete (Steps 2-5)")
     print(f"✓ Exported {len(exported_categories)} categories")
