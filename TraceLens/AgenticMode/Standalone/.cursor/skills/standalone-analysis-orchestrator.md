@@ -574,12 +574,17 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 
 ---
 
-## Step 10: Generate Final Report
+## Step 10: Generate Final Report (<output_dir>/standalone_analysis.md)
 
-1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md` — use it as a **reference only**. Do **NOT** copy the raw template to the output directory.
-2. **Build the completed report and write it in a single operation** to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> tee ...` with a heredoc). Fill all sections using `category_data/category_manifest.json`, `category_findings/*.md`, `system_findings/*.md`, and `category_data/*_metrics.json`. Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it. **Never write template placeholders** (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
+1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md`
+2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it.
+3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
+   - `category_data/category_manifest.json` (metrics, GPU utilization)
+   - `category_findings/*.md` (compute kernel P-items, detailed analysis)
+   - `system_findings/*.md` (system-level P-items, detailed analysis)
+   - `category_data/*_metrics.json` (per-op tables, impact estimates)
 
-The report **must** use these exact `##` headers — do NOT rename them:
+The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
 2. `## Compute Kernel Optimizations`
 3. `## System-Level Optimizations`
