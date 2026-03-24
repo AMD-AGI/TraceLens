@@ -68,10 +68,9 @@ op_to_perf_model_class_map = {
     "FusedRoPEFunc": perf_model.fused_rope_fwd,
     # CrossEntropy (fused softmax + nll loss)
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
-    # TE fused ops (forward — full GEMM perf model with GFLOPS + TB/s)
-    "_Linear": perf_model.te_linear,
-    "_LayerNormLinear": perf_model.te_layer_norm_linear,
-    # TE standalone LayerNorm (memory-bound; reports both FLOPS and TB/s)
+    # TE standalone LayerNorm (memory-bound; reports both FLOPS and TB/s).
+    # _Linear / _LayerNormLinear are handled by the Megatron extension
+    # (example_megatron_extension.py) which decomposes them into pseudo-ops.
     "LayerNormFn": perf_model.te_layer_norm_fn,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
@@ -254,8 +253,6 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
-    elif row["name"] in ["_LinearBackward", "_LayerNormLinearBackward"]:
-        return "GEMM"
     elif row["name"] == "LayerNormFnBackward":
         return "NORM_bwd"
     elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
