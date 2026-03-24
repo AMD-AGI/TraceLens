@@ -21,7 +21,6 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     generate_plot_data,
 )
 import re
-from typing import Optional
 
 import numpy as np
 import matplotlib
@@ -41,10 +40,11 @@ _CAT_PALETTE = [
 ]
 
 def _short_name(name: str, max_len: int = 8) -> str:
-    """Shorten a category name for plot labels. Truncates with ellipsis if needed."""
-    if len(name) <= max_len:
-        return name
-    return name[:max_len - 1] + "\u2026"
+    """Shorten a category name for plot labels. Capitalizes first letter, truncates if needed."""
+    display = name[0].upper() + name[1:] if name else name
+    if len(display) <= max_len:
+        return display
+    return display[:max_len - 1] + "\u2026"
 
 _REST_KEY = "__rest_e2e__"
 
@@ -72,7 +72,8 @@ def _compute_cumulative_projections(baseline_ms, recommendations):
         lat_best = max(0.01, baseline_ms - cum_hi)
         lat_worst = max(0.01, baseline_ms - cum_lo)
         cnt = rec.get("operation_count", 1)
-        steps.append(f"{rec['category']}\n({cnt} ops)")
+        cat_display = rec["category"][0].upper() + rec["category"][1:] if rec["category"] else rec["category"]
+        steps.append(f"{cat_display}\n({cnt} ops)")
         e2e_ms.append(lat_mid)
         savings.append(sm)
         rel.append(round(baseline_ms / lat_mid * 100, 1))
@@ -238,7 +239,7 @@ def generate_perf_plot(
     n_bars = len(proj["steps"])
     x = np.arange(n_bars, dtype=float)
     width = 0.62
-    rest_label = "Rest of E2E"
+    rest_label = "Non-computing"
 
     def _segment_heights(num_recs: int) -> dict[str, float]:
         savings_by_cat: dict[str, float] = {}
@@ -262,6 +263,8 @@ def generate_perf_plot(
     # -- Left panel: stacked bars --
     bottom = np.zeros(n_bars, dtype=float)
     rest_color = "#aab7c4"
+    rest_bottom = np.zeros(n_bars, dtype=float)
+    rest_height = np.zeros(n_bars, dtype=float)
     for seg_name in segment_order:
         h = np.array([_segment_heights(k)[seg_name] for k in range(n_bars)], dtype=float)
         if np.all(h <= 0):
@@ -272,6 +275,9 @@ def generate_perf_plot(
             x, h, width, bottom=bottom, label=lbl, color=color,
             edgecolor="white", linewidth=0.9, alpha=0.95,
         )
+        if seg_name == _REST_KEY:
+            rest_bottom = bottom.copy()
+            rest_height = h.copy()
         bottom += h
 
     for k in range(n_bars):
@@ -286,8 +292,9 @@ def generate_perf_plot(
             ha="center", va="bottom", fontsize=9, fontweight="bold", color=accent,
         )
         if k > 0 and proj["savings"][k] > 0:
+            rest_mid = float(rest_bottom[k]) + float(rest_height[k]) / 2
             ax_stack.text(
-                x[k], total_h * 0.5, f"-{proj['savings'][k]:.1f} ms",
+                x[k], rest_mid, f"-{proj['savings'][k]:.1f} ms",
                 ha="center", va="center", fontsize=8, color=accent,
                 fontweight="bold", zorder=5,
             )
@@ -309,7 +316,21 @@ def generate_perf_plot(
     ax_stack.set_ylim(0, ymax * 1.12)
     ax_stack.spines["top"].set_visible(False)
     ax_stack.spines["right"].set_visible(False)
+    handles, labels = ax_stack.get_legend_handles_labels()
+    rec_order = [_short_name(r["category"]) for r in recommendations]
+    ordered_handles = []
+    ordered_labels = []
+    for rn in rec_order:
+        if rn in labels:
+            idx = labels.index(rn)
+            ordered_handles.append(handles[idx])
+            ordered_labels.append(labels[idx])
+    for h, l in zip(handles, labels):
+        if l not in ordered_labels:
+            ordered_handles.append(h)
+            ordered_labels.append(l)
     ax_stack.legend(
+        ordered_handles, ordered_labels,
         loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=7.5,
         frameon=False, title="Operations",
     )
