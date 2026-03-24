@@ -56,6 +56,8 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # Mamba SSD (fused conv1d + selective scan, issue #552)
+    "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
 }
 
 # Add pseudo-op extension mappings
@@ -144,6 +146,7 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.MambaSSD: "SSM",
 }
 
 # Add pseudo-op extension categories
@@ -175,8 +178,10 @@ def categorize_torch_op(row):
 
     Returns:
         str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused', 'elementwise',
-             'triton', 'reduce', 'multi_tensor_apply', 'record_param_comms', or 'other'.
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused',
+             'SSM_fwd', 'SSM_bwd',
+             'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
+             'record_param_comms', or 'other'.
     """
 
     debug = False
@@ -222,6 +227,10 @@ def categorize_torch_op(row):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):
         return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("SSM", []):
+        return "SSM_fwd"
+    elif row["name"] in ["MambaSplitConv1dScanCombinedFnBackward"]:
+        return "SSM_bwd"
     elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
         return "elementwise"
     elif row["name"].startswith("triton"):
