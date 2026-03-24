@@ -4588,3 +4588,164 @@ class RMSNormBwd(Normalization):
         if self.is_affine:
             bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes
+
+
+# ==============================================================================
+# MambaSSD – MambaSplitConv1dScanCombinedFn (fused SSM kernel)
+# ==============================================================================
+
+
+class MambaSSD:
+    """
+    Perf model for MambaSplitConv1dScanCombinedFn (Mamba-2 SSD algorithm).
+
+    This fused autograd function combines conv1d + selective scan using the
+    State Space Duality (SSD) chunked algorithm from Tri Dao et al.
+    (https://arxiv.org/abs/2405.21060).
+
+    Trace layout (18 input slots):
+      [0] zxbcdt         (B, T, combined_dim)  — fused projection
+      [1] conv1d_weight  (conv_channels, d_conv)
+      [2] conv1d_bias    (conv_channels,)
+      [3] dt_bias        (H,)                  — nheads
+      [4] A              (H,)
+      [5] D              (H,)
+      [6] chunk_size     Scalar = C
+      [15] headdim       Scalar = P
+      [16] ngroups       Scalar = G
+
+    Derived:
+      d_inner = H × P
+      d_state = (combined_dim − 2·d_inner − H) / (2·G)
+      conv_channels = d_inner + 2·G·d_state  (should match Input[1][0])
+
+    FLOPS (matmul terms from the 4-step SSD algorithm):
+      conv1d:         2 · B · conv_channels · T · d_conv
+      CB^T (step 1):  2 · B · G · T · C · N
+      M@X  (step 1):  2 · B · H · T · C · P
+      B^T@X (step 2): 2 · B · H · T · N · P
+      C@h   (step 4): 2 · B · H · T · N · P
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+        self.bpe_dt_bias = self._param_bpe(input_types, 3, 4)
+        self.bpe_A = self._param_bpe(input_types, 4, 4)
+        self.bpe_D = self._param_bpe(input_types, 5, self.bpe)
+
+    @staticmethod
+    def _param_bpe(input_types, slot, default):
+        """Derive bytes-per-element for a parameter slot, falling back to default."""
+        if len(input_types) > slot and input_types[slot]:
+            bpe = name2bpe(input_types[slot])
+            return bpe if bpe is not None else default
+        return default
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs", [])
+
+        zxbcdt_shape = input_dims[0]  # (B, T, combined_dim)
+        conv_w_shape = input_dims[1]  # (conv_channels, d_conv)
+        dt_bias_shape = input_dims[3]  # (H,)
+
+        B = zxbcdt_shape[0]
+        T = zxbcdt_shape[1]
+        combined_dim = zxbcdt_shape[2]
+        conv_channels = conv_w_shape[0]
+        d_conv = conv_w_shape[1]
+        H = dt_bias_shape[0]
+
+        C = int(concrete[6]) if len(concrete) > 6 and concrete[6] else 128
+        P = int(concrete[15]) if len(concrete) > 15 and concrete[15] else 64
+        G = int(concrete[16]) if len(concrete) > 16 and concrete[16] else 1
+
+        d_inner = H * P
+        numerator = combined_dim - 2 * d_inner - H
+        denom = 2 * G
+        if numerator <= 0 or numerator % denom != 0:
+            raise ValueError(
+                f"Cannot derive d_state: combined_dim={combined_dim}, "
+                f"H={H}, P={P}, G={G}, d_inner={d_inner}, "
+                f"numerator={numerator}, denom={denom}"
+            )
+        N = numerator // denom
+
+        return {
+            "B": B,
+            "T": T,
+            "H": H,
+            "P": P,
+            "G": G,
+            "N": N,
+            "C": C,
+            "d_inner": d_inner,
+            "d_conv": d_conv,
+            "conv_channels": conv_channels,
+            "combined_dim": combined_dim,
+        }
+
+    def flops(self):
+        p = self.param_details
+        B, T, H, P, G, N, C = (
+            p["B"],
+            p["T"],
+            p["H"],
+            p["P"],
+            p["G"],
+            p["N"],
+            p["C"],
+        )
+        conv_channels, d_conv = p["conv_channels"], p["d_conv"]
+
+        flops_conv1d = 2 * B * conv_channels * T * d_conv
+        flops_cbt = 2 * B * G * T * C * N  # Step 1a: C @ B^T
+        flops_mx = 2 * B * H * T * C * P  # Step 1b: M @ X
+        flops_chunk_state = 2 * B * H * T * N * P  # Step 2: B^T @ X
+        flops_state_out = 2 * B * H * T * N * P  # Step 4: C @ h
+
+        return flops_conv1d + flops_cbt + flops_mx + flops_chunk_state + flops_state_out
+
+    def bytes(self):
+        p = self.param_details
+        B, T = p["B"], p["T"]
+        combined_dim = p["combined_dim"]
+        d_inner = p["d_inner"]
+        conv_channels, d_conv = p["conv_channels"], p["d_conv"]
+        H = p["H"]
+
+        read_input = B * T * combined_dim * self.bpe
+        read_conv_w = conv_channels * d_conv * self.bpe
+        read_conv_b = conv_channels * self.bpe
+        read_params = H * self.bpe_dt_bias + H * self.bpe_A + H * self.bpe_D
+        write_output = B * T * d_inner * self.bpe
+
+        return read_input + read_conv_w + read_conv_b + read_params + write_output
+
+    def flops_bwd(self):
+        return self.flops()
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        dtype = self.event["args"].get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class mamba_ssd_fwd(MambaSSD):
+    """MambaSplitConv1dScanCombinedFn forward pass."""
+
+    pass
