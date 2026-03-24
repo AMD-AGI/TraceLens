@@ -203,6 +203,12 @@ def categorize_torch_op(row):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
         return "record_param_comms"
+    elif row["name"] in dict_cat2names.get("MoE_fused", []):
+        return "MoE_fused"
+    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
+        return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("InferenceAttention", []):
+        return "InferenceAttention"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
         # else:
