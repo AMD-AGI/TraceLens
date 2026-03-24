@@ -3431,8 +3431,10 @@ class aten_reduce(Reduce):
                     elif isinstance(val, int):
                         dim = [int(val)]
                         break
+                    print(f"failed to parse dimension specification for reduce: {name}")
                 except (TypeError, ValueError):
                     # Not a valid dimension specification; ignore
+                    print("failed to parse dimension specification for reduce: {name}")
                     continue
 
         # cumsum/cumprod preserve shape
@@ -3452,9 +3454,6 @@ class aten_reduce(Reduce):
             num_output_elems = prod(out_shape) if out_shape else 1
         else:
             # Reduce over all dimensions: scalar or single element
-            print(
-                f"No output dimension provided to reduce. Assuming a reduction over all dimensions: {name}"
-            )
             num_output_elems = 1
 
         reduce_type = "sum"
