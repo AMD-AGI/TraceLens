@@ -11,6 +11,71 @@ import re
 import logging
 
 
+def _collect_descendants_by_name(trace_tree, root_uid, target_name):
+    """Collect all descendant events with a given name (BFS)."""
+    results = []
+    queue = list(trace_tree.get_UID2event(root_uid).get("children", []))
+    while queue:
+        uid = queue.pop(0)
+        evt = trace_tree.get_UID2event(uid)
+        if evt.get("name") == target_name:
+            results.append(evt)
+        queue.extend(evt.get("children", []))
+    return results
+
+
+def _link_checkpoint_fwd_bwd(trace_tree):
+    """Wire bwd_events for TEv2 ops inside CheckpointFunctionBackward.
+
+    Activation checkpointing recomputes forward ops during backprop.  The
+    recomputed forward ops (_Linear, _LayerNormLinear) appear as direct
+    children of CheckpointFunctionBackward, but the backward counterparts
+    are wrapped inside autograd evaluate_function nodes::
+
+        CheckpointFunctionBackward
+        ├── _Linear                                          (direct child)
+        ├── autograd::engine::evaluate_function: _LinearBackward
+        │   └── _LinearBackward                              (grandchild)
+
+    This function pairs each recomputed forward op with its backward
+    descendant using timestamp ordering (forward order for fwd ops,
+    reversed for bwd ops since backprop reverses the execution order).
+    """
+    if "CheckpointFunctionBackward" not in trace_tree.name2event_uids:
+        return
+
+    pairs = [
+        ("_Linear", "_LinearBackward"),
+        ("_LayerNormLinear", "_LayerNormLinearBackward"),
+    ]
+
+    for ckpt_uid in trace_tree.name2event_uids["CheckpointFunctionBackward"]:
+        ckpt_event = trace_tree.get_UID2event(ckpt_uid)
+        children_uids = ckpt_event.get("children", [])
+        child_events = [trace_tree.get_UID2event(uid) for uid in children_uids]
+
+        for fwd_name, bwd_name in pairs:
+            fwd_ops = sorted(
+                [e for e in child_events if e.get("name") == fwd_name],
+                key=lambda e: e["ts"],
+            )
+            bwd_ops = sorted(
+                _collect_descendants_by_name(trace_tree, ckpt_uid, bwd_name),
+                key=lambda e: e["ts"],
+            )
+
+            if len(fwd_ops) != len(bwd_ops):
+                logging.warning(
+                    f"[Warning] Checkpoint UID {ckpt_uid}: "
+                    f"{len(fwd_ops)} {fwd_name} vs {len(bwd_ops)} {bwd_name}"
+                )
+                continue
+
+            for fwd_op, bwd_op in zip(fwd_ops, reversed(bwd_ops)):
+                if not fwd_op.get("bwd_events"):
+                    fwd_op["bwd_events"] = [bwd_op["UID"]]
+
+
 def tree_postprocess_extension(trace_tree):
     """
     Context: In Transformer Engine v1, the blas GEMM calls are made by tex_ts::te_gemm_ts CPU ops.
@@ -34,6 +99,8 @@ def tree_postprocess_extension(trace_tree):
         X_grad = Y_grad.matmul(W)
         W_grad = Y_grad^T.matmul(X)
     """
+    _link_checkpoint_fwd_bwd(trace_tree)
+
     if (
         "_Linear" in trace_tree.name2event_uids
         and "tex_ts::te_gemm_ts" not in trace_tree.name2event_uids
@@ -400,7 +467,7 @@ class tev2_pseudo_gemm(GEMM):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
 
-from TraceLens.PerfModel import SDPA, GroupedGemm, extract_sdpa_cfg
+from TraceLens.PerfModel import SDPA, GroupedGemm, extract_sdpa_cfg, Normalization
 
 
 class transformer_engine_attention(SDPA):
@@ -462,6 +529,91 @@ class transformer_engine_attention(SDPA):
         }
 
 
+class te_layer_norm_fwd(Normalization):
+    """TransformerEngine's standalone LayerNormFn forward pass.
+
+    TE's LayerNormFn has a different arg layout than aten::layer_norm:
+      args[0] = input tensor  (activation)
+      args[1] = ln_weight      (gamma)
+      args[2] = ln_bias        (beta, may be empty)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        weight_shape = args_input_dims[1]
+        num_channels = weight_shape[0] if weight_shape else op_shape[-1]
+        has_bias = bool(args_input_dims[2])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": has_bias,
+            "is_affine": bool(weight_shape),
+            "is_training": True,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError("Use te_layer_norm_bwd for backward pass.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Use te_layer_norm_bwd for backward pass.")
+
+
+class te_layer_norm_bwd(Normalization):
+    """TransformerEngine's LayerNormFnBackward.
+
+    The backward event only records the gradient tensor shape:
+      args[0] = grad_output tensor
+    Weight dimensions and bias are inferred from the gradient's last dim.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        num_channels = op_shape[-1]
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": True,
+            "is_affine": True,
+            "is_training": True,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            [True, True, True],
+        )
+
+    def bytes(self):
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            [True, True, True],
+        )
+
+
 import ast
 
 
@@ -508,6 +660,8 @@ perf_model_extension = {
     "_LayerNormLinearBackward_wgrad_mm": tev2_pseudo_gemm,
     "FusedAttnFunc": transformer_engine_attention,
     "GroupedGemm": custom_grouped_gemm,
+    "LayerNormFn": te_layer_norm_fwd,
+    "LayerNormFnBackward": te_layer_norm_bwd,
 }
 
 dict_cat2names_extension = {
@@ -519,6 +673,7 @@ dict_cat2names_extension = {
         "_LayerNormLinearBackward_xgrad_mm",
         "_LayerNormLinearBackward_wgrad_mm",
     ],
-    "SDPA": ["FusedAttnFunc"],
+    "SDPA": ["FusedAttnFunc", "FusedAttnFuncBackward"],
     "GroupedGEMM": ["GroupedGemm"],
+    "Normalization": ["LayerNormFn", "LayerNormFnBackward"],
 }

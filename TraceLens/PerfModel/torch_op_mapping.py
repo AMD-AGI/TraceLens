@@ -221,14 +221,17 @@ def categorize_torch_op(row):
         "ConvBiasReLU_Backward",
     ]:
         return "CONV_bwd"
-    elif row["name"] in norm_ops.keys():
-        if row["name"].endswith("_backward"):
+    elif row["name"] in norm_ops.keys() or row["name"] in dict_cat2names.get(
+        "Normalization", []
+    ):
+        if row["name"].endswith("_backward") or row["name"].endswith("Backward"):
             return "NORM_bwd"
         else:
             return "NORM_fwd"
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
+        "FusedAttnFuncBackward",
         "flash_attn::_flash_attn_backward",
         "flash_attn::_flash_attn_varlen_backward",
         "aten::_scaled_dot_product_cudnn_attention_backward",
