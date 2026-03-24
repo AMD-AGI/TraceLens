@@ -5,23 +5,11 @@
 ###############################################################################
 
 import argparse
+import collections
 import json
 import math
 import re
 import logging
-
-
-def _collect_descendants_by_name(trace_tree, root_uid, target_name):
-    """Collect all descendant events with a given name (BFS)."""
-    results = []
-    queue = list(trace_tree.get_UID2event(root_uid).get("children", []))
-    while queue:
-        uid = queue.pop(0)
-        evt = trace_tree.get_UID2event(uid)
-        if evt.get("name") == target_name:
-            results.append(evt)
-        queue.extend(evt.get("children", []))
-    return results
 
 
 def _link_checkpoint_fwd_bwd(trace_tree):
@@ -49,10 +37,22 @@ def _link_checkpoint_fwd_bwd(trace_tree):
         ("_LayerNormLinear", "_LayerNormLinearBackward"),
     ]
 
+    bwd_names = {bwd for _, bwd in pairs}
+
     for ckpt_uid in trace_tree.name2event_uids["CheckpointFunctionBackward"]:
         ckpt_event = trace_tree.get_UID2event(ckpt_uid)
         children_uids = ckpt_event.get("children", [])
         child_events = [trace_tree.get_UID2event(uid) for uid in children_uids]
+
+        name2descendants = {}
+        queue = collections.deque(children_uids)
+        while queue:
+            uid = queue.popleft()
+            evt = trace_tree.get_UID2event(uid)
+            evt_name = evt.get("name")
+            if evt_name in bwd_names:
+                name2descendants.setdefault(evt_name, []).append(evt)
+            queue.extend(evt.get("children", []))
 
         for fwd_name, bwd_name in pairs:
             fwd_ops = sorted(
@@ -60,7 +60,7 @@ def _link_checkpoint_fwd_bwd(trace_tree):
                 key=lambda e: e["ts"],
             )
             bwd_ops = sorted(
-                _collect_descendants_by_name(trace_tree, ckpt_uid, bwd_name),
+                name2descendants.get(bwd_name, []),
                 key=lambda e: e["ts"],
             )
 
