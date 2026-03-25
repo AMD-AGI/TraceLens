@@ -7,37 +7,44 @@
 """
 Regression tests for perf report generation.
 
-For each .json.gz / .xlsx pair in tests/traces, generates a fresh perf report
-and compares every sheet against the checked-in reference xlsx.
+For each .json.gz / *_perf_report_csvs/ pair in tests/traces, generates a fresh
+perf report as CSVs and compares every sheet against the checked-in reference
+directory (one .csv per sheet).
 """
 
 import os
 
-import pandas as pd
 import pytest
 
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
 
-from conftest import compare_cols, format_diff_details
+from conftest import (
+    compare_cols,
+    format_diff_details,
+    list_perf_report_csv_sheets,
+    perf_report_csv_dirname,
+    read_perf_report_csv,
+)
 
 
 def find_test_cases(ref_root):
     """
-    Recursively find all .json.gz/.xlsx pairs in ref_root. The .xlsx file must
-    have the same basename as the .json.gz, but with _perf_report.xlsx.
-    Returns a list of tuples: (dirpath, gz_filename, xlsx_filename)
+    Recursively find all .json.gz / *_perf_report_csvs/ pairs in ref_root.
+    The directory must be named trace_basename + '_perf_report_csvs' and sit
+    alongside the .json.gz.
+    Returns a list of tuples: (dirpath, gz_filename, report_csv_dirname)
     """
     test_cases = []
     for dirpath, _, filenames in os.walk(ref_root):
         gz_files = [f for f in filenames if f.endswith(".json.gz")]
         for gz in gz_files:
             base = gz[:-8]  # remove .json.gz
-            xlsx = base + "_perf_report.xlsx"
-            xlsx_path = os.path.join(dirpath, xlsx)
-            if os.path.exists(xlsx_path):
-                test_cases.append((dirpath, gz, xlsx))
+            csv_dir_name = perf_report_csv_dirname(base)
+            csv_dir_path = os.path.join(dirpath, csv_dir_name)
+            if os.path.isdir(csv_dir_path):
+                test_cases.append((dirpath, gz, csv_dir_name))
     return test_cases
 
 
@@ -48,26 +55,27 @@ COLS_IGNORE = [
 ]
 
 
-@pytest.mark.parametrize("dirpath,gz,report_filename", find_test_cases("tests/traces"))
-def test_perf_report_regression(dirpath, gz, report_filename, tmp_path, tol=1e-6):
+@pytest.mark.parametrize("dirpath,gz,report_csv_dirname", find_test_cases("tests/traces"))
+def test_perf_report_regression(dirpath, gz, report_csv_dirname, tmp_path, tol=1e-6):
     """
-    For each .gz/.xlsx pair, generate a report and compare to the reference .xlsx.
+    For each .gz / *_perf_report_csvs/ pair, generate a report and compare to reference CSVs.
     """
     profile_path = os.path.join(dirpath, gz)
-    ref_report_path = os.path.join(dirpath, report_filename)
-    fn_report_path = str(tmp_path / report_filename)
+    ref_csv_dir = os.path.join(dirpath, report_csv_dirname)
+    fn_csv_dir = str(tmp_path / report_csv_dirname)
 
     generate_perf_report_pytorch(
         profile_json_path=profile_path,
-        output_xlsx_path=fn_report_path,
+        output_xlsx_path=None,
+        output_csvs_dir=fn_csv_dir,
         kernel_summary=True,
         short_kernel_study=True,
     )
 
-    sheets = pd.ExcelFile(ref_report_path).sheet_names
+    sheets = list_perf_report_csv_sheets(ref_csv_dir)
     for sheet in sheets:
-        df_ref = pd.read_excel(ref_report_path, sheet_name=sheet)
-        df_fn = pd.read_excel(fn_report_path, sheet_name=sheet)
+        df_ref = read_perf_report_csv(ref_csv_dir, sheet)
+        df_fn = read_perf_report_csv(fn_csv_dir, sheet)
         if df_ref.empty:
             continue
         cols = [

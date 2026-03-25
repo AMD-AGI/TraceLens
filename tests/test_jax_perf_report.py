@@ -8,21 +8,27 @@
 End-to-end tests for JAX perf report generation.
 
 Verifies that generate_perf_report_jax runs successfully on real JAX traces
-and produces non-empty output. This catches breaking changes anywhere in
-the JAX reporting pipeline (XPlane parsing, tree building, perf analysis,
-report writing).
+and matches checked-in CSV reference directories (one .csv per sheet), when
+present alongside the trace tree.
 
 Usage:
     pytest tests/test_jax_perf_report.py -v
 """
 
-import os
 import glob
+import os
 import tempfile
 
 import pytest
 
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
+
+from conftest import (
+    compare_cols,
+    format_diff_details,
+    list_perf_report_csv_sheets,
+    read_perf_report_csv,
+)
 
 # ---------------------------------------------------------------------------
 # Test-trace discovery
@@ -41,6 +47,17 @@ def find_jax_traces(root=TRACES_ROOT):
     return sorted(traces)
 
 
+def jax_ref_perf_report_csv_dir(trace_path):
+    """
+    Reference CSV directory for a trace under tests/traces/.../folder/foo.xplane.pb:
+    tests/traces/.../folder_perf_report_csvs/
+    """
+    trace_dir = os.path.dirname(os.path.abspath(trace_path))
+    parent = os.path.dirname(trace_dir)
+    folder = os.path.basename(trace_dir)
+    return os.path.join(parent, f"{folder}_perf_report_csvs")
+
+
 JAX_TRACES = find_jax_traces()
 
 # Guard: skip the entire module if no JAX traces are present
@@ -48,7 +65,6 @@ if not JAX_TRACES:
     pytest.skip(
         "No .xplane.pb traces found under tests/traces/", allow_module_level=True
     )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,10 +77,9 @@ def _short_id(path):
 
 
 # ---------------------------------------------------------------------------
-# Fixture — run the XLSX report once per trace, reuse across tests
+# Fixture — run report once per trace_path (CSV output only), cache results
 # ---------------------------------------------------------------------------
 
-# Module-level cache so the report is generated only once per trace_path.
 _report_cache = {}
 
 
@@ -73,14 +88,13 @@ def jax_report(trace_path):
     """Run generate_perf_report_jax once per trace_path and cache the results."""
     if trace_path not in _report_cache:
         tmpdir = tempfile.mkdtemp()
-        output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
         dict_name2df = generate_perf_report_jax(
             profile_path=trace_path,
-            output_xlsx_path=output_xlsx,
+            output_csvs_dir=tmpdir,
         )
         _report_cache[trace_path] = {
             "dict_name2df": dict_name2df,
-            "xlsx_path": output_xlsx,
+            "csv_dir": tmpdir,
             "tmpdir": tmpdir,
         }
     return _report_cache[trace_path]
@@ -97,25 +111,16 @@ def jax_report(trace_path):
 class TestJaxPerfReportE2E:
     """End-to-end tests: generate_perf_report_jax runs without error."""
 
-    def test_generate_report_xlsx(self, trace_path, jax_report):
-        """XLSX report is created and contains DataFrames."""
-        assert os.path.exists(jax_report["xlsx_path"]), "XLSX file was not created"
-        assert len(jax_report["dict_name2df"]) > 0, "No DataFrames returned"
-
-    def test_generate_report_csvs(self, trace_path):
-        """CSV reports are created, one per sheet."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            csvs_dir = os.path.join(tmpdir, "csvs")
-            dict_name2df = generate_perf_report_jax(
-                profile_path=trace_path,
-                output_csvs_dir=csvs_dir,
-            )
-            csv_files = glob.glob(os.path.join(csvs_dir, "*.csv"))
-            assert len(csv_files) > 0, "No CSV files created"
-            assert len(csv_files) == len(dict_name2df), (
-                f"CSV count ({len(csv_files)}) "
-                f"!= DataFrame count ({len(dict_name2df)})"
-            )
+    def test_generate_report_csvs(self, trace_path, jax_report):
+        """CSV reports are created in the output dir, one per sheet."""
+        csv_dir = jax_report["csv_dir"]
+        dict_name2df = jax_report["dict_name2df"]
+        csv_files = glob.glob(os.path.join(csv_dir, "*.csv"))
+        assert len(csv_files) > 0, "No CSV files created"
+        assert len(csv_files) == len(dict_name2df), (
+            f"CSV count ({len(csv_files)}) "
+            f"!= DataFrame count ({len(dict_name2df)})"
+        )
 
     def test_expected_core_sheets(self, trace_path, jax_report):
         """Report contains the expected core sheets and they are non-empty."""
@@ -144,3 +149,32 @@ class TestJaxPerfReportE2E:
         ]
         for col in expected_cols:
             assert col in df.columns, f"Missing column: '{col}'"
+
+
+@pytest.mark.parametrize(
+    "trace_path", JAX_TRACES, ids=[_short_id(t) for t in JAX_TRACES]
+)
+def test_jax_perf_report_csv_regression(trace_path, tmp_path, tol=1e-6):
+    """
+    When a sibling ``<trace_folder>_perf_report_csvs/`` directory exists under
+    tests/traces, generated CSVs must match it (regression).
+    """
+    ref_dir = jax_ref_perf_report_csv_dir(trace_path)
+    if not os.path.isdir(ref_dir):
+        pytest.skip(f"No CSV reference directory: {ref_dir}")
+    out_dir = str(tmp_path / "jax_perf_report_csvs")
+    generate_perf_report_jax(profile_path=trace_path, output_csvs_dir=out_dir)
+
+    sheets = list_perf_report_csv_sheets(ref_dir)
+    assert sheets, f"Reference directory has no CSV files: {ref_dir}"
+
+    for sheet in sheets:
+        df_ref = read_perf_report_csv(ref_dir, sheet)
+        df_fn = read_perf_report_csv(out_dir, sheet)
+        if df_ref.empty:
+            continue
+        cols = [c for c in df_ref.columns if c in df_fn.columns]
+        diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
+        assert (
+            not diff_cols
+        ), f"Sheet '{sheet}' has differences for {trace_path}:{format_diff_details(diff_cols)}"
