@@ -17,10 +17,7 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
-from TraceLens.Reporting.reporting_utils import (
-    dataframe_for_csv_export,
-    request_install,
-)
+from TraceLens.Reporting.reporting_utils import dataframe_for_csv_export, request_install
 
 
 def get_dfs_short_kernels(
