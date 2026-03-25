@@ -14,11 +14,9 @@ and test_detect_recompute.
 import ast
 import os
 import re
-from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
-from ordered_set import OrderedSet
 from pandas.api.types import is_float_dtype
 
 
@@ -44,22 +42,14 @@ def read_perf_report_csv(csv_dir: str, sheet: str):
 
 
 def normalize_value(val):
-    """Convert numpy scalars and nested structures to comparable Python types.
-
-    Maps OrderedDict/OrderedSet to plain dict/frozenset, normalizes numpy scalars,
-    and uses tuple() for lists/tuples so order-only differences do not fail tests.
-    """
+    """Convert numpy scalars and their string representations to Python native types."""
     if isinstance(val, (np.integer, np.floating)):
         return val.item()
-    if isinstance(val, OrderedSet):
-        return frozenset(normalize_value(x) for x in val)
-    if isinstance(val, set):
-        return frozenset(normalize_value(x) for x in val)
-    if isinstance(val, Mapping) and not isinstance(val, (str, bytes)):
+    elif isinstance(val, list):
+        return [normalize_value(v) for v in val]
+    elif isinstance(val, dict):
         return {k: normalize_value(v) for k, v in val.items()}
-    if isinstance(val, (list, tuple)):
-        return tuple(normalize_value(v) for v in val)
-    if isinstance(val, str):
+    elif isinstance(val, str):
         cleaned_val = re.sub(r"np\.(?:float|int)\d*\((.*?)\)", r"\1", val)
         try:
             parsed = ast.literal_eval(cleaned_val)

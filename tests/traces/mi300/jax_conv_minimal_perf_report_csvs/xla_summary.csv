@@ -1,4 +1,4 @@
-name,total_direct_kernel_time_sum,total_subtree_kernel_time_sum,total_direct_kernel_time_ms,total_subtree_kernel_time_ms,Count,Categories,Percentage (%),Cumulative Percentage (%),time ms per gpu
-input_transpose_fusion,1950.96,1950.96,1.95096,1.95096,5,OrderedSet(['Uncategorized Events/XLA']),95.32404242813051,95.32404242813051,1.95096
-input_transpose_fusion_,69.261,69.261,0.06926099999999999,0.06926099999999999,5,OrderedSet(['Uncategorized Events/XLA']),3.384097317533289,98.7081397456638,0.06926099999999999
-loop_transpose_fusion,26.44,26.44,0.02644,0.02644,5,OrderedSet(['Uncategorized Events/XLA']),1.2918602543362092,100.00000000000001,0.02644
+name,total_direct_kernel_time_sum,Count,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%),time ms per gpu
+input_transpose_fusion,1950.96,5,1.95096,95.32404242813051,95.32404242813051,1.95096
+input_transpose_fusion_,69.261,5,0.06926099999999999,3.384097317533289,98.7081397456638,0.06926099999999999
+loop_transpose_fusion,26.44,5,0.02644,1.291860254336209,100.0,0.02644
