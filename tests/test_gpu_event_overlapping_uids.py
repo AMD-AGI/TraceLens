@@ -13,7 +13,7 @@ overlapping_uids computation (GPUEventAnalyser):
 - Two overlapping events -> each has the other's UID
 - Two touching at boundary -> NOT overlapping (end processed before start at same time)
 - Three events with one containing the other two -> all pairs overlap
-- overlapping_uids are sets; self not in overlapping_uids; kernel + gpu_memcpy mix
+- overlapping_uids are ordered sets; self not in overlapping_uids; kernel + gpu_memcpy mix
 - Same cpu_op: overlapping kernels under the same cpu_op are NOT marked overlapping
 - Different cpu_ops: overlapping kernels under different cpu_ops ARE marked overlapping
 - Mixed: some kernels share a cpu_op, others don't
@@ -41,6 +41,7 @@ import os
 import pytest
 import pandas as pd
 from copy import deepcopy
+from ordered_set import OrderedSet
 
 from TraceLens.TreePerf import GPUEventAnalyser
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
@@ -63,9 +64,11 @@ def _make_event(uid, ts_us, dur_us, cat="kernel", name="", args=None):
 
 
 def _get_overlapping_uids_by_uid(result):
-    """Return dict UID -> set of overlapping UIDs from get_gpu_event_lists result."""
+    """Return dict UID -> ordered set of overlapping UIDs from get_gpu_event_lists result."""
     gpu = result[GPUEventAnalyser.all_gpu_key]
-    return {e["UID"]: set(e.get("overlapping_uids", set())) for e in gpu}
+    return {
+        e["UID"]: OrderedSet(e.get("overlapping_uids", OrderedSet())) for e in gpu
+    }
 
 
 def test_empty_events():
@@ -139,11 +142,11 @@ def test_self_not_in_overlapping_uids():
     analyser = GPUEventAnalyser([a, b])
     result = analyser.get_gpu_event_lists()
     for event in result[GPUEventAnalyser.all_gpu_key]:
-        assert event["UID"] not in event.get("overlapping_uids", set())
+        assert event["UID"] not in event.get("overlapping_uids", OrderedSet())
 
 
-def test_overlapping_uids_are_sets():
-    """overlapping_uids should be a set (no duplicates, fast membership)."""
+def test_overlapping_uids_are_ordered_sets():
+    """overlapping_uids should be an OrderedSet (no duplicates, fast membership)."""
     a = _make_event(1, 0, 100)
     b = _make_event(2, 10, 10)
     c = _make_event(3, 15, 10)
@@ -152,7 +155,7 @@ def test_overlapping_uids_are_sets():
     for event in result[GPUEventAnalyser.all_gpu_key]:
         ou = event.get("overlapping_uids")
         assert ou is not None
-        assert isinstance(ou, set)
+        assert isinstance(ou, OrderedSet)
 
 
 def test_memcpy_and_kernel_events_both_get_overlapping_uids():

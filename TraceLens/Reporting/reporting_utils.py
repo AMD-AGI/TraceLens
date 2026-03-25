@@ -7,14 +7,59 @@
 import ast
 import logging
 import re
+from collections import OrderedDict
 from typing import Dict, List, Optional, Union
 
+import numpy as np
 import pandas as pd
+
+try:
+    from ordered_set import OrderedSet
+except ImportError:
+    OrderedSet = None  # type: ignore
 from pathlib import Path
 import sys
 import subprocess
 
 logger = logging.getLogger(__name__)
+
+
+def _cell_for_csv_export(val):
+    """Recursively convert OrderedDict/OrderedSet/numpy scalars for CSV/Excel round-trip."""
+    if val is None:
+        return None
+    if OrderedSet is not None and isinstance(val, OrderedSet):
+        return set(val)
+    if isinstance(val, OrderedDict):
+        return {k: _cell_for_csv_export(v) for k, v in val.items()}
+    if isinstance(val, dict):
+        return {k: _cell_for_csv_export(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return type(val)(_cell_for_csv_export(v) for v in val)
+    if isinstance(val, set):
+        return sorted(val)
+    if isinstance(val, (np.integer, np.floating)):
+        return val.item()
+    return val
+
+
+def dataframe_for_csv_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy of df with cells converted to plain Python types for stable CSV/Excel serialization."""
+
+    def _map_cell(v):
+        if v is None:
+            return None
+        try:
+            if not isinstance(v, (list, tuple, dict, OrderedDict, set)) and pd.isna(v):
+                return v
+        except (TypeError, ValueError):
+            pass
+        return _cell_for_csv_export(v)
+
+    try:
+        return df.map(_map_cell)
+    except AttributeError:
+        return df.applymap(_map_cell)
 
 
 def export_data_df(

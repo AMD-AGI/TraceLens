@@ -13,14 +13,22 @@ import pprint
 
 # TODO: warning should show the stack as well
 import warnings
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from functools import partial
 from typing import Any, Callable, Dict
 
 import numpy as np
 import pandas as pd
+from ordered_set import OrderedSet
 
 logger = logging.getLogger(__name__)
+
+
+def _pandas_agg_ordered_set(series):
+    return OrderedSet(series)
+
+
+_pandas_agg_ordered_set.__name__ = "set"  # keeps flattened column name "op category_set"
 
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
@@ -322,11 +330,13 @@ class TreePerfAnalyzer:
                 list_non_data_mov_kernels
             ).compute_metrics()["busy_time"]
         event["kernel_details"] = [
-            {
-                "name": kernel["name"],
-                "dur": kernel["dur"],
-                "stream": kernel.get("args", {}).get("stream", None),
-            }
+            OrderedDict(
+                (
+                    ("name", kernel["name"]),
+                    ("dur", kernel["dur"]),
+                    ("stream", kernel.get("args", {}).get("stream", None)),
+                )
+            )
             for kernel in list_kernels
         ]
 
@@ -352,11 +362,13 @@ class TreePerfAnalyzer:
         )
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": busy_kernel_time,
-            "TFLOPS/s": tflops_per_s,
-        }
+        dict_metrics = OrderedDict(
+            (
+                ("GFLOPS", gflops),
+                ("Kernel Time (µs)", busy_kernel_time),
+                ("TFLOPS/s", tflops_per_s),
+            )
+        )
         if non_data_mov:
             dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
             dict_metrics["Non-Data-Mov TFLOPS/s"] = non_data_mov_tflops_per_s
@@ -461,26 +473,40 @@ class TreePerfAnalyzer:
         list_warn_perf_metrics_failed = []
         list_no_bwd_events = []
         for event in events:
-            metrics_event = {
-                "cat": self.event_to_category(event),
-                "name": event["name"],
-                "UID": event["UID"],
-                "pid": event["pid"],
-                "tid": event["tid"],
-                "process_name": self.tree.metadata.get(event["pid"], {})
-                .get(0, {})
-                .get("process_name", "Unknown"),
-                "process_label": self.tree.metadata.get(event["pid"], {})
-                .get(0, {})
-                .get("process_labels", "Unknown"),
-                "thread_name": self.tree.metadata.get(event["pid"], {})
-                .get(event["tid"], {})
-                .get("thread_name", "Unknown"),
-                "external_id": event["args"].get("External id"),
-                "overlapping_kernel_names": event.get("overlapping_kernel_names"),
-                "overlapping_kernels_details": event.get("overlapping_kernels_details"),
-                "overlap_pct": event.get("overlap_pct"),
-            }
+            metrics_event = OrderedDict(
+                (
+                    ("cat", self.event_to_category(event)),
+                    ("name", event["name"]),
+                    ("UID", event["UID"]),
+                    ("pid", event["pid"]),
+                    ("tid", event["tid"]),
+                    (
+                        "process_name",
+                        self.tree.metadata.get(event["pid"], {})
+                        .get(0, {})
+                        .get("process_name", "Unknown"),
+                    ),
+                    (
+                        "process_label",
+                        self.tree.metadata.get(event["pid"], {})
+                        .get(0, {})
+                        .get("process_labels", "Unknown"),
+                    ),
+                    (
+                        "thread_name",
+                        self.tree.metadata.get(event["pid"], {})
+                        .get(event["tid"], {})
+                        .get("thread_name", "Unknown"),
+                    ),
+                    ("external_id", event["args"].get("External id")),
+                    ("overlapping_kernel_names", event.get("overlapping_kernel_names")),
+                    (
+                        "overlapping_kernels_details",
+                        event.get("overlapping_kernels_details"),
+                    ),
+                    ("overlap_pct", event.get("overlap_pct")),
+                )
+            )
             if include_args:
                 args_cols = [
                     "Input Dims",
@@ -517,7 +543,7 @@ class TreePerfAnalyzer:
                 list_warn_non_zero_flops_and_zero_time.append(event)
 
             if dict_perf_metrics is not None:
-                metrics_event.update(dict_perf_metrics)
+                metrics_event.update(OrderedDict(dict_perf_metrics))
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
@@ -897,7 +923,7 @@ class TreePerfAnalyzer:
             dict.fromkeys(
                 self.tree.get_UID2event(uid).get("name", None)
                 for kernel in kernels
-                for uid in kernel.get("overlapping_uids", set())
+                for uid in kernel.get("overlapping_uids", OrderedSet())
             )
         )
         total_kernel_runtime = (
@@ -913,7 +939,7 @@ class TreePerfAnalyzer:
 
         overlapping_details = []
         for kernel in kernels:
-            for uid in kernel.get("overlapping_uids", set()):
+            for uid in kernel.get("overlapping_uids", OrderedSet()):
                 ov_event = self.tree.get_UID2event(uid)
                 overlap_start = max(kernel["ts"], ov_event.get("ts", 0))
                 overlap_end = min(kernel["t_end"], ov_event.get("t_end", 0))
@@ -958,7 +984,7 @@ class TreePerfAnalyzer:
             total_overlap_time = 0
             for kernel in kernels:
                 ov_intervals = []
-                for uid in kernel.get("overlapping_uids", set()):
+                for uid in kernel.get("overlapping_uids", OrderedSet()):
                     ov_evt = self.tree.get_UID2event(uid)
                     os = max(kernel["ts"], ov_evt.get("ts", 0))
                     oe = min(kernel["t_end"], ov_evt.get("t_end", 0))
@@ -998,17 +1024,22 @@ class TreePerfAnalyzer:
         kernel_launchers = self.get_kernel_launchers()
         rows = []
         for event in kernel_launchers:
-            metrics_event = {
-                "name": event["name"],
-                "op category": event["op category"],
-                "UID": event["UID"],
-                "total_direct_kernel_time": event["total_direct_kernel_time"],
-                "total_subtree_kernel_time": event["total_subtree_kernel_time"],
-                "direct_kernel_count": event["direct_kernel_count"],
-                "overlapping_kernel_names": event["overlapping_kernel_names"],
-                "overlapping_kernels_details": event["overlapping_kernels_details"],
-                "overlap_pct": event.get("overlap_pct"),
-            }
+            metrics_event = OrderedDict(
+                (
+                    ("name", event["name"]),
+                    ("op category", event["op category"]),
+                    ("UID", event["UID"]),
+                    ("total_direct_kernel_time", event["total_direct_kernel_time"]),
+                    ("total_subtree_kernel_time", event["total_subtree_kernel_time"]),
+                    ("direct_kernel_count", event["direct_kernel_count"]),
+                    ("overlapping_kernel_names", event["overlapping_kernel_names"]),
+                    (
+                        "overlapping_kernels_details",
+                        event["overlapping_kernels_details"],
+                    ),
+                    ("overlap_pct", event.get("overlap_pct")),
+                )
+            )
             if include_first_occurrence_time:
                 metrics_event["ts"] = event.get("ts")
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
@@ -1111,7 +1142,7 @@ class TreePerfAnalyzer:
             groupby_cols.append("is_recompute")
         agg_dict = {
             "total_direct_kernel_time": ["sum", "count"],
-            "op category": set,
+            "op category": _pandas_agg_ordered_set,
         }
         if "total_subtree_kernel_time" in df_temp.columns:
             agg_dict["total_subtree_kernel_time"] = ["sum"]
@@ -1155,7 +1186,10 @@ class TreePerfAnalyzer:
         groupby_cols = ["name"]
         if "parent_module" in df_temp.columns:
             groupby_cols.append("parent_module")
-        agg_dict = {"total_direct_kernel_time": ["sum", "count"], "op category": set}
+        agg_dict = {
+            "total_direct_kernel_time": ["sum", "count"],
+            "op category": _pandas_agg_ordered_set,
+        }
         if "total_subtree_kernel_time" in df_temp.columns:
             agg_dict["total_subtree_kernel_time"] = ["sum", "count"]
         if "call_stack" in df_temp.columns:
@@ -1844,28 +1878,45 @@ class TreePerfAnalyzer:
                 if kernels:
                     self._compute_overlap_info(event, kernels)
 
-            row = {
-                "name": event.get("name"),
-                "op category": self.op_categorizer(event),
-                "UID": event.get("UID"),
-                "pid": event.get("pid"),
-                "tid": event.get("tid"),
-                "process_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_name", "Unknown"),
-                "process_label": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_labels", "Unknown"),
-                "thread_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(event.get("tid"), {})
-                .get("thread_name", "Unknown"),
-                "External id": args.get("External id"),
-                "duration_us": event.get("dur"),
-                "has_perf_model": has_own_perf_model or is_sole_bwd,
-                "overlapping_kernel_names": event.get("overlapping_kernel_names"),
-                "overlapping_kernels_details": event.get("overlapping_kernels_details"),
-                "overlap_pct": event.get("overlap_pct"),
-            }
+            row = OrderedDict(
+                (
+                    ("name", event.get("name")),
+                    ("op category", self.op_categorizer(event)),
+                    ("UID", event.get("UID")),
+                    ("pid", event.get("pid")),
+                    ("tid", event.get("tid")),
+                    (
+                        "process_name",
+                        self.tree.metadata.get(event.get("pid"), {})
+                        .get(0, {})
+                        .get("process_name", "Unknown"),
+                    ),
+                    (
+                        "process_label",
+                        self.tree.metadata.get(event.get("pid"), {})
+                        .get(0, {})
+                        .get("process_labels", "Unknown"),
+                    ),
+                    (
+                        "thread_name",
+                        self.tree.metadata.get(event.get("pid"), {})
+                        .get(event.get("tid"), {})
+                        .get("thread_name", "Unknown"),
+                    ),
+                    ("External id", args.get("External id")),
+                    ("duration_us", event.get("dur")),
+                    ("has_perf_model", has_own_perf_model or is_sole_bwd),
+                    (
+                        "overlapping_kernel_names",
+                        event.get("overlapping_kernel_names"),
+                    ),
+                    (
+                        "overlapping_kernels_details",
+                        event.get("overlapping_kernels_details"),
+                    ),
+                    ("overlap_pct", event.get("overlap_pct")),
+                )
+            )
             if self.detect_recompute:
                 row["is_recompute"] = event.get("is_recompute", False)
 
@@ -1887,11 +1938,16 @@ class TreePerfAnalyzer:
                         "gpu_memset",
                     }:
                         kernel_details.append(
-                            {
-                                "name": gpu_event.get("name"),
-                                "dur": gpu_event.get("dur"),
-                                "stream": gpu_event.get("args", {}).get("stream"),
-                            }
+                            OrderedDict(
+                                (
+                                    ("name", gpu_event.get("name")),
+                                    ("dur", gpu_event.get("dur")),
+                                    (
+                                        "stream",
+                                        gpu_event.get("args", {}).get("stream"),
+                                    ),
+                                )
+                            )
                         )
                 row["kernel_details"] = kernel_details if kernel_details else None
 
@@ -1917,11 +1973,11 @@ class TreePerfAnalyzer:
                         if col in metrics:
                             row[col] = metrics[col]
                     # Extract perf model params (e.g., M, N, K for GEMM)
-                    perf_params = {
-                        k.replace("param: ", ""): v
+                    perf_params = OrderedDict(
+                        (k.replace("param: ", ""), v)
                         for k, v in metrics.items()
                         if k.startswith("param: ")
-                    }
+                    )
                     row["perf_params"] = perf_params if perf_params else None
                 except NotImplementedError:
                     # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
@@ -1939,11 +1995,11 @@ class TreePerfAnalyzer:
                         if col in metrics:
                             row[col] = metrics[col]
                     # Extract perf model params
-                    perf_params = {
-                        k.replace("param: ", ""): v
+                    perf_params = OrderedDict(
+                        (k.replace("param: ", ""), v)
                         for k, v in metrics.items()
                         if k.startswith("param: ")
-                    }
+                    )
                     row["perf_params"] = perf_params if perf_params else None
                 except NotImplementedError:
                     # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
@@ -2420,13 +2476,15 @@ class TreePerfAnalyzer:
         if self.event_to_category(kernel_event) != "kernel":
             return None
 
-        kernel_details = {
-            "UID": kernel_event["UID"],
-            "Kernel name": kernel_event["name"],
-            "Kernel t start": kernel_event["ts"],
-            "Kernel duration (µs)": kernel_event["dur"],
-            "Kernel stream": kernel_event["args"].get("stream"),
-        }
+        kernel_details = OrderedDict(
+            (
+                ("UID", kernel_event["UID"]),
+                ("Kernel name", kernel_event["name"]),
+                ("Kernel t start", kernel_event["ts"]),
+                ("Kernel duration (µs)", kernel_event["dur"]),
+                ("Kernel stream", kernel_event["args"].get("stream")),
+            )
+        )
 
         # 1. get launcher event
         launcher = self.tree.get_parent_event(kernel_event)
@@ -3089,14 +3147,16 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         )
         rows = []
         for event in kernel_launchers:
-            metrics_event = {
-                "name": event["name"],
-                "UID": event["UID"],
-                "op category": event["gpu_kernel_op_cat"],
-                "total_direct_kernel_time": event["total_direct_kernel_time"],
-                "total_subtree_kernel_time": event["total_subtree_kernel_time"],
-                "direct_kernel_count": event["direct_kernel_count"],
-            }
+            metrics_event = OrderedDict(
+                (
+                    ("name", event["name"]),
+                    ("UID", event["UID"]),
+                    ("op category", event["gpu_kernel_op_cat"]),
+                    ("total_direct_kernel_time", event["total_direct_kernel_time"]),
+                    ("total_subtree_kernel_time", event["total_subtree_kernel_time"]),
+                    ("direct_kernel_count", event["direct_kernel_count"]),
+                )
+            )
             if id_cols:
                 metrics_event["pid"] = event["pid"]
                 metrics_event["tid"] = event["tid"]
@@ -3161,7 +3221,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         )
         if perf_model_class is None:
             logger.warning(f"\nPerf model is not implemented. \n\nEvent: {event}")
-            return dict()
+            return OrderedDict()
         perf_model = perf_model_class(
             event, arch=self.arch, python_path=self.python_path
         )
@@ -3177,11 +3237,13 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
 
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": busy_kernel_time,
-            "TFLOPS/s": tflops_per_s,
-        }
+        dict_metrics = OrderedDict(
+            (
+                ("GFLOPS", gflops),
+                ("Kernel Time (µs)", busy_kernel_time),
+                ("TFLOPS/s", tflops_per_s),
+            )
+        )
         if bytes_moved is not None:
             dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
             dict_metrics["FLOPS/Byte"] = (
@@ -3249,10 +3311,12 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         for event in events:
             # update event metadata, required for perf model: perf_model_name, kernel names, args['Input Dims']
             event["kernel_details"] = [
-                {
-                    "name": event["name"],
-                    "dur": event["dur"],
-                }
+                OrderedDict(
+                    (
+                        ("name", event["name"]),
+                        ("dur", event["dur"]),
+                    )
+                )
             ]
             perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event)
@@ -3272,24 +3336,35 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         f"\n{e} Exception occurred when computing perf metrics for Event: \n\n {event}"
                     )
             if dict_perf_metrics is not None:
-                metrics_event = {
-                    "name": event["name"],
-                    "UID": event["UID"],
-                    "pid": event["pid"],
-                    "process_name": self.tree.metadata.get(event["pid"], {})
-                    .get(0, {})
-                    .get("process_name", "Unknown"),
-                    "process_label": self.tree.metadata.get(event["pid"], {})
-                    .get(0, {})
-                    .get("process_labels", "Unknown"),
-                    "thread_name": self.tree.metadata.get(event["pid"], {})
-                    .get(event["tid"], {})
-                    .get("thread_name", "Unknown"),
-                    "dur": event["dur"],
-                    "cat": event["cat"],
-                    "op category": event["gpu_kernel_op_cat"],
-                    "perf model": perf_model_name,
-                }
+                metrics_event = OrderedDict(
+                    (
+                        ("name", event["name"]),
+                        ("UID", event["UID"]),
+                        ("pid", event["pid"]),
+                        (
+                            "process_name",
+                            self.tree.metadata.get(event["pid"], {})
+                            .get(0, {})
+                            .get("process_name", "Unknown"),
+                        ),
+                        (
+                            "process_label",
+                            self.tree.metadata.get(event["pid"], {})
+                            .get(0, {})
+                            .get("process_labels", "Unknown"),
+                        ),
+                        (
+                            "thread_name",
+                            self.tree.metadata.get(event["pid"], {})
+                            .get(event["tid"], {})
+                            .get("thread_name", "Unknown"),
+                        ),
+                        ("dur", event["dur"]),
+                        ("cat", event["cat"]),
+                        ("op category", event["gpu_kernel_op_cat"]),
+                        ("perf model", perf_model_name),
+                    )
+                )
                 metrics_event.update(dict_perf_metrics)
                 if (
                     dict_perf_metrics["GFLOPS"] > 0

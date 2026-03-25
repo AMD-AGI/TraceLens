@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.Reporting.reporting_utils import dataframe_for_csv_export, request_install
 
 
 def get_dfs_short_kernels(
@@ -763,7 +763,7 @@ def generate_perf_report_pytorch(
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
             csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
+            dataframe_for_csv_export(df).to_csv(csv_path, index=False)
             print(f"DataFrame '{sheet_name}' written to {csv_path}")
 
     if output_xlsx_path is not None or output_csvs_dir is None:
@@ -778,7 +778,9 @@ def generate_perf_report_pytorch(
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                dataframe_for_csv_export(df).to_excel(
+                    writer, sheet_name=sheet_name, index=False
+                )
             print(f"DataFrames successfully written to {output_xlsx_path}")
 
     return dict_name2df

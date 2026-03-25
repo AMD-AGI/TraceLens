@@ -7,6 +7,7 @@
 import pandas as pd
 import itertools
 import tqdm
+from ordered_set import OrderedSet
 
 
 class GPUEventAnalyser:
@@ -112,7 +113,7 @@ class GPUEventAnalyser:
                         (event["ts"], 1, event["UID"])
                     )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
                     points.append((event["t_end"], 0, event["UID"]))
-                    event["overlapping_uids"] = set()
+                    event["overlapping_uids"] = OrderedSet()
                 gpu_events.append(event)
 
                 if category == "gpu_memcpy":
@@ -126,7 +127,7 @@ class GPUEventAnalyser:
                     raise ValueError(f"Unknown event category: {category}")
         if compute_overlapping_uids:
             points.sort(key=lambda x: (x[0], x[1]))
-            active_uids = set()
+            active_uids = OrderedSet()
             event_map = {event["UID"]: event for event in gpu_events}
 
             all_events_by_uid = {
@@ -352,7 +353,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
     def __init__(self, events):
         super().__init__(events)  # Call the parent's __init__
         self.gpu_pids = list(
-            set([event["pid"] for event in events if event["pid"] < 100])
+            OrderedSet([event["pid"] for event in events if event["pid"] < 100])
         )
 
     def get_gpu_event_lists(self, gpu_pid=None, event_filter=None):

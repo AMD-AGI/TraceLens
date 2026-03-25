@@ -12,6 +12,8 @@ import re
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
+from TraceLens.Reporting.reporting_utils import dataframe_for_csv_export
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
@@ -593,7 +595,7 @@ def generate_compare_perf_reports_pytorch(
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in results.items():
             csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
+            dataframe_for_csv_export(df).to_csv(csv_path, index=False)
             print(
                 f"Wrote '{sheet_name}.csv' with {len(df)} rows × {len(df.columns)} columns"
             )
@@ -603,7 +605,7 @@ def generate_compare_perf_reports_pytorch(
             for sheet_name, df in results.items():
                 if df.empty:
                     print(f"Sheet '{sheet_name}' is empty (no matching rows)")
-                df.to_excel(
+                dataframe_for_csv_export(df).to_excel(
                     xls, sheet_name=sheet_name[:31], index=False
                 )  # Excel 31-char limit
                 for col in cols_to_hide_xl.get(sheet_name, []):
