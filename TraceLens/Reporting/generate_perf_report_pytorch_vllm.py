@@ -255,7 +255,7 @@ def generate_perf_report_pytorch(
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-    add_python_func=True if group_by_parent_module else False
+    add_python_func = True if group_by_parent_module else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
         arch=gpu_arch_json,
@@ -264,12 +264,12 @@ def generate_perf_report_pytorch(
         add_python_func=add_python_func,
         enable_pseudo_ops=enable_pseudo_ops,
     )
-    
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(name_filters=["vllm::unified_attention_with_output"])
-    
-    
+    perf_analyzer.tree.apply_annotation(
+        name_filters=["vllm::unified_attention_with_output"]
+    )
+
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
 
@@ -302,10 +302,11 @@ def generate_perf_report_pytorch(
     # Only process CPU-dependent analysis for non-GPU-only traces
     if not perf_analyzer.gpu_only:
         df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
-            include_kernel_details=True, include_call_stack=group_by_parent_module,
+            include_kernel_details=True,
+            include_call_stack=group_by_parent_module,
         )
-        df_kernel_launchers_summary = perf_analyzer.get_df_kernel_launchers_summary_module(
-            df_kernel_launchers
+        df_kernel_launchers_summary = (
+            perf_analyzer.get_df_kernel_launchers_summary_module(df_kernel_launchers)
         )
         df_kernel_launchers_summary_by_category = (
             perf_analyzer.get_df_kernel_launchers_summary_by_category_module(
@@ -314,7 +315,9 @@ def generate_perf_report_pytorch(
         )
         df_kernel_launchers_unique_args = (
             perf_analyzer.get_df_kernel_launchers_unique_args(
-                df_kernel_launchers, agg_metrics=agg_metrics, include_pct=True, 
+                df_kernel_launchers,
+                agg_metrics=agg_metrics,
+                include_pct=True,
             )
         )
         df_kernel_launchers_unique_args = add_truncated_kernel_details(
@@ -375,8 +378,12 @@ def generate_perf_report_pytorch(
                     df_ops_fwd = df_ops_fwd[
                         df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
                     ]
-                
-                op_events=[event for event in op_events if event["name"]!="vllm::unified_attention_with_output"]
+
+                op_events = [
+                    event
+                    for event in op_events
+                    if event["name"] != "vllm::unified_attention_with_output"
+                ]
                 df_ops_bwd = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=True, include_kernel_details=True, include_args=True
                 )
