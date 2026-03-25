@@ -118,8 +118,7 @@ class TestJaxPerfReportE2E:
         csv_files = glob.glob(os.path.join(csv_dir, "*.csv"))
         assert len(csv_files) > 0, "No CSV files created"
         assert len(csv_files) == len(dict_name2df), (
-            f"CSV count ({len(csv_files)}) "
-            f"!= DataFrame count ({len(dict_name2df)})"
+            f"CSV count ({len(csv_files)}) " f"!= DataFrame count ({len(dict_name2df)})"
         )
 
     def test_expected_core_sheets(self, trace_path, jax_report):

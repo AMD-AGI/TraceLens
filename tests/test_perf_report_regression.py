@@ -55,7 +55,9 @@ COLS_IGNORE = [
 ]
 
 
-@pytest.mark.parametrize("dirpath,gz,report_csv_dirname", find_test_cases("tests/traces"))
+@pytest.mark.parametrize(
+    "dirpath,gz,report_csv_dirname", find_test_cases("tests/traces")
+)
 def test_perf_report_regression(dirpath, gz, report_csv_dirname, tmp_path, tol=1e-6):
     """
     For each .gz / *_perf_report_csvs/ pair, generate a report and compare to reference CSVs.

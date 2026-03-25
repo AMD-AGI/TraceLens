@@ -125,9 +125,7 @@ def load_sheet(path: str, sheet_name: str) -> pd.DataFrame:
 def list_report_sheet_names(path: str) -> List[str]:
     """Sheet names for an Excel report or basenames of *.csv in a report directory."""
     if os.path.isdir(path):
-        return sorted(
-            f[:-4] for f in os.listdir(path) if f.endswith(".csv")
-        )
+        return sorted(f[:-4] for f in os.listdir(path) if f.endswith(".csv"))
     return pd.ExcelFile(path).sheet_names
 
 

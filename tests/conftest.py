@@ -27,9 +27,7 @@ def perf_report_csv_dirname(trace_base: str) -> str:
 
 def list_perf_report_csv_sheets(csv_dir: str):
     """Return sorted sheet names (CSV stems) in a perf-report CSV directory."""
-    return sorted(
-        f[:-4] for f in os.listdir(csv_dir) if f.endswith(".csv")
-    )
+    return sorted(f[:-4] for f in os.listdir(csv_dir) if f.endswith(".csv"))
 
 
 def read_perf_report_csv(csv_dir: str, sheet: str):
