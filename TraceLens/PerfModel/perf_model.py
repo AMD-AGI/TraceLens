@@ -4945,6 +4945,55 @@ class EPComm:
         return None
 
 
+class deepep_dispatch(EPComm):
+    """
+    DeepEPDispatch (forward): routes local tokens to remote expert ranks.
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    Concrete Inputs[3] = num_experts (total), [6] = dispatch capacity.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine(EPComm):
+    """
+    DeepEPCombine (forward): collects expert outputs back to local tokens.
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_dispatch_backward(EPComm):
+    """
+    DeepEPDispatchBackward: backward of DeepEPDispatch (combines expert gradients).
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine_backward(EPComm):
+    """
+    DeepEPCombineBackward: backward of DeepEPCombine (scatters local token gradients).
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
 # ==============================================================================
 # MambaSSD – MambaSplitConv1dScanCombinedFn (fused SSM kernel)
 # ==============================================================================

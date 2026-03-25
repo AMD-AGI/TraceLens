@@ -68,6 +68,11 @@ op_to_perf_model_class_map = {
     "FusedRoPEFunc": perf_model.fused_rope_fwd,
     # CrossEntropy (fused softmax + nll loss)
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
+    # DeepEP Expert-Parallel communication ops
+    "DeepEPDispatch": perf_model.deepep_dispatch,
+    "DeepEPCombine": perf_model.deepep_combine,
+    "DeepEPDispatchBackward": perf_model.deepep_dispatch_backward,
+    "DeepEPCombineBackward": perf_model.deepep_combine_backward,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
 }
