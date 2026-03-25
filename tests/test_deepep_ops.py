@@ -14,16 +14,24 @@ Trace shape reference (DeepSeek V2 Lite, EP=8):
   DeepEPCombineBackward  Input Dims[0] = (16384, 2048)  – gradient of local tokens
 """
 
-from TraceLens.PerfModel.perf_model import (
-    EPComm,
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
+
+from TraceLens.PerfModel.perf_model import EPComm
+from TraceLens.PerfModel.torch_op_mapping import (
+    op_to_perf_model_class_map,
+    categorize_torch_op,
+    dict_cat2names,
+)
+from example_megatron_extension import (
     deepep_dispatch,
     deepep_combine,
     deepep_dispatch_backward,
     deepep_combine_backward,
-)
-from TraceLens.PerfModel.torch_op_mapping import (
-    op_to_perf_model_class_map,
-    categorize_torch_op,
+    perf_model_extension,
+    dict_cat2names_extension,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,28 +108,36 @@ def _combine_bwd_event(num_tokens=16384, hidden=2048, dtype="c10::BFloat16"):
 
 
 # ---------------------------------------------------------------------------
-# Mapping tests
+# Extension registration tests
 # ---------------------------------------------------------------------------
 
 
-def test_deepep_dispatch_mapped():
-    assert op_to_perf_model_class_map["DeepEPDispatch"] is deepep_dispatch
+def test_deepep_dispatch_in_extension():
+    assert perf_model_extension["DeepEPDispatch"] is deepep_dispatch
 
 
-def test_deepep_combine_mapped():
-    assert op_to_perf_model_class_map["DeepEPCombine"] is deepep_combine
+def test_deepep_combine_in_extension():
+    assert perf_model_extension["DeepEPCombine"] is deepep_combine
 
 
-def test_deepep_dispatch_backward_mapped():
-    assert (
-        op_to_perf_model_class_map["DeepEPDispatchBackward"] is deepep_dispatch_backward
-    )
+def test_deepep_dispatch_backward_in_extension():
+    assert perf_model_extension["DeepEPDispatchBackward"] is deepep_dispatch_backward
 
 
-def test_deepep_combine_backward_mapped():
-    assert (
-        op_to_perf_model_class_map["DeepEPCombineBackward"] is deepep_combine_backward
-    )
+def test_deepep_combine_backward_in_extension():
+    assert perf_model_extension["DeepEPCombineBackward"] is deepep_combine_backward
+
+
+def test_deepep_not_in_core_mapping():
+    for name in [
+        "DeepEPDispatch",
+        "DeepEPCombine",
+        "DeepEPDispatchBackward",
+        "DeepEPCombineBackward",
+    ]:
+        assert (
+            name not in op_to_perf_model_class_map
+        ), f"{name} should be in extension, not core"
 
 
 # ---------------------------------------------------------------------------
@@ -129,24 +145,35 @@ def test_deepep_combine_backward_mapped():
 # ---------------------------------------------------------------------------
 
 
-def test_deepep_dispatch_category():
-    row = {"name": "DeepEPDispatch", "kernel_details": []}
-    assert categorize_torch_op(row) == "EP_Communication"
+def test_deepep_in_extension_category():
+    ep_ops = dict_cat2names_extension.get("EP_Communication", [])
+    for name in [
+        "DeepEPDispatch",
+        "DeepEPCombine",
+        "DeepEPDispatchBackward",
+        "DeepEPCombineBackward",
+    ]:
+        assert name in ep_ops
 
 
-def test_deepep_combine_category():
-    row = {"name": "DeepEPCombine", "kernel_details": []}
-    assert categorize_torch_op(row) == "EP_Communication"
-
-
-def test_deepep_dispatch_backward_category():
-    row = {"name": "DeepEPDispatchBackward", "kernel_details": []}
-    assert categorize_torch_op(row) == "EP_Communication"
-
-
-def test_deepep_combine_backward_category():
-    row = {"name": "DeepEPCombineBackward", "kernel_details": []}
-    assert categorize_torch_op(row) == "EP_Communication"
+def test_deepep_categorization_with_extension_loaded():
+    """After merging extension into core dict_cat2names, categorize_torch_op works."""
+    for name, ep_names in dict_cat2names_extension.items():
+        dict_cat2names[name].extend(ep_names)
+    try:
+        for op_name in [
+            "DeepEPDispatch",
+            "DeepEPCombine",
+            "DeepEPDispatchBackward",
+            "DeepEPCombineBackward",
+        ]:
+            row = {"name": op_name, "kernel_details": []}
+            assert categorize_torch_op(row) == "EP_Communication"
+    finally:
+        for name in dict_cat2names_extension:
+            for ep_name in dict_cat2names_extension[name]:
+                if ep_name in dict_cat2names[name]:
+                    dict_cat2names[name].remove(ep_name)
 
 
 # ---------------------------------------------------------------------------

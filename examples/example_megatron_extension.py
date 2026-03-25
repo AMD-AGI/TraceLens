@@ -498,6 +498,53 @@ class custom_grouped_gemm(GroupedGemm):
         return {"M": M, "K": K, "N": N, "G": G, "bpe_in": bpe_in, "bpe_out": bpe_out}
 
 
+from TraceLens.PerfModel import EPComm
+
+
+class deepep_dispatch(EPComm):
+    """DeepEPDispatch (forward): routes local tokens to remote expert ranks.
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine(EPComm):
+    """DeepEPCombine (forward): collects expert outputs back to local tokens.
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_dispatch_backward(EPComm):
+    """DeepEPDispatchBackward: backward of DeepEPDispatch.
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine_backward(EPComm):
+    """DeepEPCombineBackward: backward of DeepEPCombine.
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
 # Step 2: Register the new Perf Model class in the mapping
 perf_model_extension = {
     "_Linear_yfwd_mm": tev2_pseudo_gemm,
@@ -508,6 +555,10 @@ perf_model_extension = {
     "_LayerNormLinearBackward_wgrad_mm": tev2_pseudo_gemm,
     "FusedAttnFunc": transformer_engine_attention,
     "GroupedGemm": custom_grouped_gemm,
+    "DeepEPDispatch": deepep_dispatch,
+    "DeepEPCombine": deepep_combine,
+    "DeepEPDispatchBackward": deepep_dispatch_backward,
+    "DeepEPCombineBackward": deepep_combine_backward,
 }
 
 dict_cat2names_extension = {
@@ -521,4 +572,10 @@ dict_cat2names_extension = {
     ],
     "SDPA": ["FusedAttnFunc"],
     "GroupedGEMM": ["GroupedGemm"],
+    "EP_Communication": [
+        "DeepEPDispatch",
+        "DeepEPCombine",
+        "DeepEPDispatchBackward",
+        "DeepEPCombineBackward",
+    ],
 }
