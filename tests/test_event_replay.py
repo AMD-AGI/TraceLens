@@ -10,6 +10,7 @@ import argparse
 import json
 import subprocess
 
+import pytest
 import torch
 import torchvision.models as torchvision_models
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -242,6 +243,9 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
     Get events and replay them
     Compare the duration of the replayed events with the original events
     """
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+        pytest.skip("Requires CUDA/HIP with at least one visible GPU")
+
     if full_run_trace_path is None or not os.path.exists(full_run_trace_path):
         full_run_trace_path = profile_resnet(full_run_trace_path)
     if output_csv_path is None:

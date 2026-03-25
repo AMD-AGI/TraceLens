@@ -104,10 +104,11 @@ def get_dfs_short_kernels(
         * 100
     )
 
-    # Sort and format
-    df_grouped.sort_values(
-        by="Short Kernel duration (µs) sum", ascending=False, inplace=True
-    )
+    # Sort: primary by total short-kernel time (desc), then all other columns for stable order
+    _sum_col = "Short Kernel duration (µs) sum"
+    _sort_cols = [_sum_col] + [c for c in df_grouped.columns if c != _sum_col]
+    _ascending = [False] + [True] * (len(_sort_cols) - 1)
+    df_grouped.sort_values(by=_sort_cols, ascending=_ascending, inplace=True)
     df_grouped.reset_index(inplace=True)
     if topk is not None:
         df_grouped = df_grouped.head(topk)
