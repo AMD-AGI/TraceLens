@@ -66,9 +66,7 @@ def _make_event(uid, ts_us, dur_us, cat="kernel", name="", args=None):
 def _get_overlapping_uids_by_uid(result):
     """Return dict UID -> ordered set of overlapping UIDs from get_gpu_event_lists result."""
     gpu = result[GPUEventAnalyser.all_gpu_key]
-    return {
-        e["UID"]: OrderedSet(e.get("overlapping_uids", OrderedSet())) for e in gpu
-    }
+    return {e["UID"]: OrderedSet(e.get("overlapping_uids", OrderedSet())) for e in gpu}
 
 
 def test_empty_events():

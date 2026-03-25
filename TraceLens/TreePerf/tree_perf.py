@@ -28,7 +28,9 @@ def _pandas_agg_ordered_set(series):
     return OrderedSet(series)
 
 
-_pandas_agg_ordered_set.__name__ = "set"  # keeps flattened column name "op category_set"
+_pandas_agg_ordered_set.__name__ = (
+    "set"  # keeps flattened column name "op category_set"
+)
 
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
