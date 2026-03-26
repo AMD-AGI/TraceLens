@@ -104,10 +104,11 @@ def get_dfs_short_kernels(
         * 100
     )
 
-    # Sort and format
-    df_grouped.sort_values(
-        by="Short Kernel duration (µs) sum", ascending=False, inplace=True
-    )
+    # Sort: primary by total short-kernel time (desc), then all other columns for stable order
+    _sum_col = "Short Kernel duration (µs) sum"
+    _sort_cols = [_sum_col] + [c for c in df_grouped.columns if c != _sum_col]
+    _ascending = [False] + [True] * (len(_sort_cols) - 1)
+    df_grouped.sort_values(by=_sort_cols, ascending=_ascending, inplace=True)
     df_grouped.reset_index(inplace=True)
     if topk is not None:
         df_grouped = df_grouped.head(topk)
@@ -758,17 +759,16 @@ def generate_perf_report_pytorch(
                 dict_name2df.update(additional_dfs)
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
-    # Write all DataFrames to separate sheets in an Excel workbook
+    # Write CSVs and/or Excel (independent options)
     if output_csvs_dir:
-        # Ensure the output directory exists
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
             csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
             df.to_csv(csv_path, index=False)
             print(f"DataFrame '{sheet_name}' written to {csv_path}")
-    else:
+
+    if output_xlsx_path is not None or output_csvs_dir is None:
         if output_xlsx_path is None:
-            # split input path at 'json' and take the first part and append '.xlsx'
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
         try:

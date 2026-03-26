@@ -12,10 +12,33 @@ and test_detect_recompute.
 """
 
 import ast
+import os
 import re
 
 import numpy as np
+import pandas as pd
 from pandas.api.types import is_float_dtype
+
+
+def perf_report_csv_dirname(trace_base: str) -> str:
+    """Directory name for CSV sheets next to trace_base.json.gz (e.g. foo_perf_report_csvs)."""
+    return trace_base + "_perf_report_csvs"
+
+
+def list_perf_report_csv_sheets(csv_dir: str):
+    """Return sorted sheet names (CSV stems) in a perf-report CSV directory."""
+    return sorted(f[:-4] for f in os.listdir(csv_dir) if f.endswith(".csv"))
+
+
+def read_perf_report_csv(csv_dir: str, sheet: str):
+    """Load one sheet from a directory of per-sheet CSV files."""
+    path = os.path.join(csv_dir, f"{sheet}.csv")
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def normalize_value(val):

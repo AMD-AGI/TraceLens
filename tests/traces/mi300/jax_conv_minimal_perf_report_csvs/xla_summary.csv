@@ -1,0 +1,4 @@
+name,total_direct_kernel_time_sum,Count,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%),time ms per gpu
+input_transpose_fusion,1950.96,5,1.95096,95.32404242813051,95.32404242813051,1.95096
+input_transpose_fusion_,69.261,5,0.06926099999999999,3.384097317533289,98.7081397456638,0.06926099999999999
+loop_transpose_fusion,26.44,5,0.02644,1.291860254336209,100.0,0.02644
