@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Verification script for the cross-trace comparison pipeline.
 
@@ -9,6 +15,7 @@ Usage:
     python verify_comparison.py <trace_a_labels.json> <trace_b_labels.json> \
         <comparison.csv> --name-a MI355 --name-b B200
 """
+
 import argparse
 import csv
 import json
@@ -56,9 +63,7 @@ def verify(a_path, b_path, csv_path, name_a, name_b):
     csv_blocks = set(r["semantic_block"] for r in csv_rows)
     missing_from_csv = (blocks_a | blocks_b) - csv_blocks
     if missing_from_csv:
-        errors.append(
-            f"A6.2 FAIL: Blocks missing from CSV: {sorted(missing_from_csv)}"
-        )
+        errors.append(f"A6.2 FAIL: Blocks missing from CSV: {sorted(missing_from_csv)}")
 
     # --- A6.3: semantic_group / perf_category correctness ---
     if "semantic_group" in csv_rows[0]:
@@ -126,7 +131,10 @@ def verify(a_path, b_path, csv_path, name_a, name_b):
             actual_tflops = float(r[f"{name_a}_TFLOPS_s"])
             if a_t > 0 and gflops > 0.01 and actual_tflops > 0.01:
                 expected_tflops = gflops / (a_t / 1e6) / 1e3
-                if abs(expected_tflops - actual_tflops) / max(expected_tflops, 1e-9) > 0.05:
+                if (
+                    abs(expected_tflops - actual_tflops) / max(expected_tflops, 1e-9)
+                    > 0.05
+                ):
                     errors.append(
                         f"A7.6 FAIL: {r['semantic_block']}: {name_a} TFLOPS/s "
                         f"{actual_tflops} != expected {expected_tflops:.4f}"
@@ -145,7 +153,9 @@ def verify(a_path, b_path, csv_path, name_a, name_b):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify cross-trace comparison outputs")
+    parser = argparse.ArgumentParser(
+        description="Verify cross-trace comparison outputs"
+    )
     parser.add_argument("trace_a_labels", help="Path to trace A semantic_labels.json")
     parser.add_argument("trace_b_labels", help="Path to trace B semantic_labels.json")
     parser.add_argument("comparison_csv", help="Path to comparison CSV")
@@ -153,7 +163,13 @@ def main():
     parser.add_argument("--name-b", default="trace_b", help="Name of trace B")
     args = parser.parse_args()
 
-    ok = verify(args.trace_a_labels, args.trace_b_labels, args.comparison_csv, args.name_a, args.name_b)
+    ok = verify(
+        args.trace_a_labels,
+        args.trace_b_labels,
+        args.comparison_csv,
+        args.name_a,
+        args.name_b,
+    )
     sys.exit(0 if ok else 1)
 
 

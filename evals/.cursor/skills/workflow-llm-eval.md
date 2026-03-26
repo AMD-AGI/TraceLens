@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: Workflow LLM Eval
 description: Run LLM-based workflow evals on a standalone analysis output and produce a results CSV.

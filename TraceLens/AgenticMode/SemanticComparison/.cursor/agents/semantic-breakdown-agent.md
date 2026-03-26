@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Semantic Breakdown Agent
 
 Run the full semantic breakdown pipeline on a single GPU trace, producing

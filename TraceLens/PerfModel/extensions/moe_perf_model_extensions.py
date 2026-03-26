@@ -538,7 +538,7 @@ class UnfusedMoE_Down:
         # Uniform routing estimate of unique active experts across M tokens
         E_active = num_experts * (1 - ((num_experts - topk) / num_experts) ** M)
 
-        input_bytes = M * N * input_bpe
+        input_bytes = M * N * topk * input_bpe
         weight_bytes = E_active * N * K * weight_bpe
         output_bytes = M * K * output_bpe
 

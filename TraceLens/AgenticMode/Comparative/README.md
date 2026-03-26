@@ -15,7 +15,7 @@ See LICENSE for license information.
 1. [Prerequisites](#prerequisites)
 2. [Environment Setup](#environment-setup)
 3. [Installation](#installation)
-4. [Running Jarvis Analysis](#running-jarvis-analysis)
+4. [Running Comparative Analysis](#running-comparative-analysis)
 5. [Understanding the Output](#understanding-the-output)
 6. [Troubleshooting](#troubleshooting)
 
@@ -86,7 +86,7 @@ bash requirements.sh
 
 **Important** 
 
-Set your AMD-LLM-gateway API key in jarvis-analysis.sh.
+Set your AMD-LLM-gateway API key in run-comparative-analysis.sh.
 
 
 **Verify installation:**
@@ -97,18 +97,18 @@ python3 -c "import TraceLens; print('TraceLens installed successfully!')"
 
 ---
 
-## Running Jarvis Analysis
+## Running Comparative Analysis
 
 ### Quick Test Run
 
 ```bash
 # Run the test script (uses sample traces)
-bash jarvis-analysis.sh
+bash run-comparative-analysis.sh
 ```
 
 ### Custom Analysis
 
-Modify jarvis-analysis.sh accordingly to run on your custom traces.
+Modify run-comparative-analysis.sh accordingly to run on your custom traces.
 
 ### Command Line Arguments
 
@@ -129,12 +129,12 @@ Modify jarvis-analysis.sh accordingly to run on your custom traces.
 
 ## Understanding the Output
 
-After running Jarvis analysis, you'll find the following outputs:
+After running Comparative analysis, you'll find the following outputs:
 
 ### Generated Files
 
 The output directory contains multiple files with analysis of different levels of granularity. 
-To start with, we recommend downloading three files from the output directory specified in jarvis-analysis.sh:
+To start with, we recommend downloading three files from the output directory specified in run-comparative-analysis:
 
 - output_dir/cumulative_projection_parent_module.png
 - output_dir/optimization_opportunities_interactive.html
@@ -168,7 +168,7 @@ python3 -c "import TraceLens"
 
 **Solution:**
 ```bash
-Follow instructions in jarvis-analysis.sh to properly set the AMD Gateway LLM api Key.
+Follow instructions in run-comparative-analysis.sh to properly set the AMD Gateway LLM api Key.
 ```
 
 ### Issue: Trace files not found
@@ -188,11 +188,11 @@ ls -lh complete_traces/crit_path_traces/MI300/
 **Solution:**
 ```bash
 # Make scripts executable
-chmod +x jarvis-analysis.sh
+chmod +x run-comparative-analysis.sh
 chmod +x requirements.sh
 
 # Run with bash explicitly
-bash jarvis-analysis.sh
+bash run-comparative-analysis.sh
 ```
 
 ---
@@ -201,7 +201,7 @@ bash jarvis-analysis.sh
 
 ### Using Custom Traces
 
-The simplest way is to modify jarvis-analysis.sh and provide sharepoint links to your baseline and target traces. However local paths should work as well. 
+The simplest way is to modify run-comparative-analysis.sh and provide sharepoint links to your baseline and target traces. However local paths should work as well. 
 
 ---
 
@@ -209,8 +209,8 @@ The simplest way is to modify jarvis-analysis.sh and provide sharepoint links to
 
 After successful setup:
 
-1. ✅ Run the test analysis: `bash test-jarvis-analysis.sh`
-2. ✅ Review the generated reports in `jarvis_test_plots/`
+1. ✅ Run the test analysis: `bash run-comparative-analysis.sh`
+2. ✅ Review the generated reports in `comparative_test_plots/`
 3. ✅ Try analyzing your own GPU traces
 4. ✅ Explore optimization recommendations
 5. ✅ Implement suggested optimizations and compare results

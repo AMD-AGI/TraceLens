@@ -475,7 +475,7 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
-                    metrics_event["num_kernels"] = len(event["kernel_details"]) 
+                    metrics_event["num_kernels"] = len(event["kernel_details"])
             rows.append(metrics_event)
 
         self._show_warnings(
@@ -523,7 +523,9 @@ class TreePerfAnalyzer:
         return self.build_df_perf_metrics(events, bwd=True)
 
     @staticmethod
-    def summarize_df_perf_metrics(df_perf_metrics, agg_metrics=["mean", "std"]):
+    def summarize_df_perf_metrics(
+        df_perf_metrics, agg_metrics=["mean", "std"], group_by_num_kernels=False
+    ):
         if df_perf_metrics.empty:
             warnings.warn(
                 "Input DataFrame is empty. Returning an empty summary DataFrame."
@@ -579,7 +581,7 @@ class TreePerfAnalyzer:
         param_cols = [
             col for col in df_perf_metrics.columns if col.startswith("param: ")
         ]
-        if "num_kernels" in df_perf_metrics.columns:
+        if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
@@ -966,6 +968,7 @@ class TreePerfAnalyzer:
         event_name=None,
         agg_metrics=["mean"],
         include_pct=False,
+        group_by_num_kernels=False,
     ) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -975,6 +978,7 @@ class TreePerfAnalyzer:
             event_name (str): Optional name of the event to filter the DataFrame.
             agg_metrics (list): List of aggregation metrics to apply. ex: ['mean', 'std', 'median']
             include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
+            group_by_num_kernels (bool): If True, also group by num_kernels.
 
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
@@ -989,8 +993,9 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
-            "num_kernels",
         ]
+        if group_by_num_kernels:
+            grouping_cols_original.append("num_kernels")
 
         # 0. Filter the DataFrame based on the event name if provided
         if event_name is not None:
@@ -1097,6 +1102,7 @@ class TreePerfAnalyzer:
         event_name=None,
         agg_metrics=["mean"],
         include_pct=False,
+        group_by_num_kernels=False,
     ) -> pd.DataFrame:
         """
         Generate a DataFrame with unique arguments for each operation in the input DataFrame.
@@ -1106,6 +1112,7 @@ class TreePerfAnalyzer:
             event_name (str): Optional name of the event to filter the DataFrame.
             agg_metrics (list): List of aggregation metrics to apply. ex: ['mean', 'std', 'median']
             include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
+            group_by_num_kernels (bool): If True, also group by num_kernels.
 
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
@@ -1118,8 +1125,9 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
-            "num_kernels",
         ]
+        if group_by_num_kernels:
+            grouping_cols_original.append("num_kernels")
 
         # 0. Filter the DataFrame based on the event name if provided
         if event_name is not None:
@@ -1223,6 +1231,7 @@ class TreePerfAnalyzer:
                 "Percentage (%)"
             ].cumsum()
         return df_unique_args
+
     # =========================================================================
     # Unified Perf Metrics Table Methods
     # =========================================================================
@@ -1462,7 +1471,11 @@ class TreePerfAnalyzer:
 
         orphan_kernels = []
         for evt in self.tree.events:
-            if self.event_to_category(evt) not in {"kernel", "gpu_memcpy", "gpu_memset"}:
+            if self.event_to_category(evt) not in {
+                "kernel",
+                "gpu_memcpy",
+                "gpu_memset",
+            }:
                 continue
             if evt["UID"] in collected_gpu_uids:
                 continue
@@ -1717,6 +1730,7 @@ class TreePerfAnalyzer:
         df_unified_perf: pd.DataFrame,
         agg_metrics=["mean", "std"],
         include_pct=True,
+        group_by_num_kernels=False,
     ):
         """
         Summarize unified perf table by unique (name, Input Dims, Input type, etc.).
@@ -1750,8 +1764,9 @@ class TreePerfAnalyzer:
             "Input type",
             "Input Strides",
             "Concrete Inputs",
-            "num_kernels",
         ]
+        if group_by_num_kernels:
+            grouping_cols.append("num_kernels")
 
         # Convert columns to string for grouping
         str_col_names = []
@@ -2460,10 +2475,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )

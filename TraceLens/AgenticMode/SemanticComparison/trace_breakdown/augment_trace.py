@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Augment a trace JSON with gpu_user_annotation events based on semantic labels.
 
@@ -19,6 +25,7 @@ Output: augmented trace JSON
 Usage:
     python augment_trace.py <trace.json> <semantic_labels.json> [-o augmented_trace.json]
 """
+
 import argparse
 import json
 import sys
@@ -158,8 +165,9 @@ def build_group_spans(groups):
     return _clamp_spans(spans)
 
 
-def create_annotation_events(groups, layer_spans, group_spans,
-                              gpu_pid, group_tid, layer_tid, block_tid):
+def create_annotation_events(
+    groups, layer_spans, group_spans, gpu_pid, group_tid, layer_tid, block_tid
+):
     """Create the annotation trace events for all three tiers."""
     new_events = []
 
@@ -167,43 +175,49 @@ def create_annotation_events(groups, layer_spans, group_spans,
         dur = te - ts
         if dur <= 0:
             continue
-        new_events.append({
-            "ph": "X",
-            "cat": "gpu_user_annotation",
-            "name": label,
-            "pid": gpu_pid,
-            "tid": group_tid,
-            "ts": ts,
-            "dur": dur,
-        })
+        new_events.append(
+            {
+                "ph": "X",
+                "cat": "gpu_user_annotation",
+                "name": label,
+                "pid": gpu_pid,
+                "tid": group_tid,
+                "ts": ts,
+                "dur": dur,
+            }
+        )
 
     for label, ts, te in layer_spans:
         dur = te - ts
         if dur <= 0:
             continue
-        new_events.append({
-            "ph": "X",
-            "cat": "gpu_user_annotation",
-            "name": label,
-            "pid": gpu_pid,
-            "tid": layer_tid,
-            "ts": ts,
-            "dur": dur,
-        })
+        new_events.append(
+            {
+                "ph": "X",
+                "cat": "gpu_user_annotation",
+                "name": label,
+                "pid": gpu_pid,
+                "tid": layer_tid,
+                "ts": ts,
+                "dur": dur,
+            }
+        )
 
     for block, layer, ts, te in groups:
         dur = te - ts
         if dur <= 0:
             continue
-        new_events.append({
-            "ph": "X",
-            "cat": "gpu_user_annotation",
-            "name": block,
-            "pid": gpu_pid,
-            "tid": block_tid,
-            "ts": ts,
-            "dur": dur,
-        })
+        new_events.append(
+            {
+                "ph": "X",
+                "cat": "gpu_user_annotation",
+                "name": block,
+                "pid": gpu_pid,
+                "tid": block_tid,
+                "ts": ts,
+                "dur": dur,
+            }
+        )
 
     return new_events
 
@@ -212,33 +226,51 @@ def create_metadata_events(gpu_pid, group_tid, layer_tid, block_tid):
     """Create thread name metadata events for Perfetto display."""
     return [
         {
-            "ph": "M", "cat": "", "name": "thread_name",
-            "pid": gpu_pid, "tid": group_tid,
+            "ph": "M",
+            "cat": "",
+            "name": "thread_name",
+            "pid": gpu_pid,
+            "tid": group_tid,
             "args": {"name": "Semantic Groups"},
         },
         {
-            "ph": "M", "cat": "", "name": "thread_name",
-            "pid": gpu_pid, "tid": layer_tid,
+            "ph": "M",
+            "cat": "",
+            "name": "thread_name",
+            "pid": gpu_pid,
+            "tid": layer_tid,
             "args": {"name": "Semantic Layers"},
         },
         {
-            "ph": "M", "cat": "", "name": "thread_name",
-            "pid": gpu_pid, "tid": block_tid,
+            "ph": "M",
+            "cat": "",
+            "name": "thread_name",
+            "pid": gpu_pid,
+            "tid": block_tid,
             "args": {"name": "Semantic Blocks"},
         },
         {
-            "ph": "M", "cat": "", "name": "thread_sort_index",
-            "pid": gpu_pid, "tid": group_tid,
+            "ph": "M",
+            "cat": "",
+            "name": "thread_sort_index",
+            "pid": gpu_pid,
+            "tid": group_tid,
             "args": {"sort_index": -3},
         },
         {
-            "ph": "M", "cat": "", "name": "thread_sort_index",
-            "pid": gpu_pid, "tid": layer_tid,
+            "ph": "M",
+            "cat": "",
+            "name": "thread_sort_index",
+            "pid": gpu_pid,
+            "tid": layer_tid,
             "args": {"sort_index": -2},
         },
         {
-            "ph": "M", "cat": "", "name": "thread_sort_index",
-            "pid": gpu_pid, "tid": block_tid,
+            "ph": "M",
+            "cat": "",
+            "name": "thread_sort_index",
+            "pid": gpu_pid,
+            "tid": block_tid,
             "args": {"sort_index": -1},
         },
     ]
@@ -307,8 +339,13 @@ def augment(trace_path, labels_path, output_path):
     group_spans = build_group_spans(groups)
 
     annotation_events = create_annotation_events(
-        groups, layer_spans, group_spans,
-        gpu_pid, group_tid, layer_tid, block_tid,
+        groups,
+        layer_spans,
+        group_spans,
+        gpu_pid,
+        group_tid,
+        layer_tid,
+        block_tid,
     )
     metadata_events = create_metadata_events(gpu_pid, group_tid, layer_tid, block_tid)
 

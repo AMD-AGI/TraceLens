@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Verification script for the semantic breakdown pipeline.
 
@@ -8,6 +14,7 @@ Returns exit code 0 if all pass, 1 if any fail.
 Usage:
     python verify_breakdown.py <semantic_labels.json> <breakdown.csv>
 """
+
 import argparse
 import csv
 import json

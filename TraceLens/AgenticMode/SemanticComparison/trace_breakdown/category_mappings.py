@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Shared category mappings and shape derivation formulas for semantic trace breakdown.
 
@@ -20,7 +26,6 @@ SEMANTIC_BLOCK_TO_GROUP = {
     # --- Preamble (optional -- may not be in graph mode traces) ---
     "Preamble: Embedding": "Preamble",
     "Preamble: Input Norm": "Preamble",
-
     # --- Self-Attention ---
     "Pre-Attn Norm": "Self-Attention",
     "QKV Projection": "Self-Attention",
@@ -32,7 +37,6 @@ SEMANTIC_BLOCK_TO_GROUP = {
     "Output Projection": "Self-Attention",
     "Attention Output Gate": "Self-Attention",
     "Post-Attn Residual Add": "Self-Attention",
-
     # --- MoE FFN (models with mixture of experts) ---
     "Post-Attn Norm": "MoE / FFN",
     "Router Gate": "MoE / FFN",
@@ -44,7 +48,6 @@ SEMANTIC_BLOCK_TO_GROUP = {
     "Shared Expert GateUp": "MoE / FFN",
     "Shared Expert Down": "MoE / FFN",
     "Post-MoE Residual Add": "MoE / FFN",
-
     # --- Dense FFN (models without MoE) ---
     "FFN Norm": "Dense FFN",
     "GateUp Projection": "Dense FFN",
@@ -53,7 +56,6 @@ SEMANTIC_BLOCK_TO_GROUP = {
     "Activation": "Dense FFN",
     "Down Projection": "Dense FFN",
     "Post-FFN Residual Add": "Dense FFN",
-
     # --- Epilogue (optional -- may not be in graph mode traces) ---
     "Epilogue: Final Norm": "Epilogue",
     "Epilogue: LM Head": "Epilogue",
@@ -173,13 +175,21 @@ def format_input_dims(perf_params, perf_category):
     ne = perf_params.get("num_elems", perf_params.get("num_channels", 0))
     return f"(({ne},),)"
 
+
 DTYPE_TO_BYTES = {
-    "float32": 4, "fp32": 4,
-    "float16": 2, "fp16": 2,
-    "bfloat16": 2, "bf16": 2,
-    "float8": 1, "fp8": 1, "fp8_e4m3": 1, "fp8_e5m2": 1,
+    "float32": 4,
+    "fp32": 4,
+    "float16": 2,
+    "fp16": 2,
+    "bfloat16": 2,
+    "bf16": 2,
+    "float8": 1,
+    "fp8": 1,
+    "fp8_e4m3": 1,
+    "fp8_e5m2": 1,
     "int8": 1,
-    "int4": 0.5, "fp4": 0.5,
+    "int4": 0.5,
+    "fp4": 0.5,
 }
 
 
@@ -204,6 +214,7 @@ def get_perf_category(semantic_block):
 # Shape derivation from HuggingFace config.json
 # ---------------------------------------------------------------------------
 
+
 def parse_model_config(config):
     """Extract relevant dimensions from a HuggingFace config dict.
 
@@ -220,8 +231,9 @@ def parse_model_config(config):
         "dtype": tc.get("dtype", tc.get("torch_dtype", "bfloat16")),
         # MoE fields (optional, with common aliases)
         "num_experts": tc.get("num_experts", tc.get("num_local_experts", 0)),
-        "num_experts_per_tok": tc.get("num_experts_per_tok",
-                                      tc.get("experts_per_token", 0)),
+        "num_experts_per_tok": tc.get(
+            "num_experts_per_tok", tc.get("experts_per_token", 0)
+        ),
         "moe_intermediate_size": tc.get("moe_intermediate_size", 0),
         "shared_expert_intermediate_size": tc.get("shared_expert_intermediate_size", 0),
         # Dense FFN (non-MoE)
@@ -244,6 +256,7 @@ def parse_model_config(config):
 # ---------------------------------------------------------------------------
 # FLOPS / bytes formulas (mirroring TraceLens PerfModel)
 # ---------------------------------------------------------------------------
+
 
 def _gemm_flops(M, N, K, bias=False):
     """2*M*N*K  (+M*N if bias)"""
@@ -284,7 +297,7 @@ def _rmsnorm_flops(num_elems, num_channels, affine=True):
 def _rmsnorm_bytes(num_elems, num_channels, bpe, affine=True):
     b = num_elems * bpe * 2  # read + write
     if affine:
-        b += num_channels * bpe   # weight
+        b += num_channels * bpe  # weight
     return b
 
 
@@ -315,8 +328,10 @@ def _elementwise_bytes(num_elems, bpe, *, unary=False):
 # Per-block shape derivation
 # ---------------------------------------------------------------------------
 
-def derive_block_shapes(semantic_block, model_cfg, num_tokens,
-                        context_length=None, layer_idx=None):
+
+def derive_block_shapes(
+    semantic_block, model_cfg, num_tokens, context_length=None, layer_idx=None
+):
     """Compute theoretical FLOPS and bytes for a semantic block.
 
     Args:
@@ -348,7 +363,9 @@ def derive_block_shapes(semantic_block, model_cfg, num_tokens,
         if is_linear_attn:
             n_q = n_heads * d
             n_k = model_cfg["linear_num_key_heads"] * model_cfg["linear_key_head_dim"]
-            n_v = model_cfg["linear_num_value_heads"] * model_cfg["linear_value_head_dim"]
+            n_v = (
+                model_cfg["linear_num_value_heads"] * model_cfg["linear_value_head_dim"]
+            )
             N = n_q + n_k + n_v
         else:
             N = n_heads * d + 2 * n_kv * d
@@ -491,16 +508,21 @@ def derive_block_shapes(semantic_block, model_cfg, num_tokens,
     # --- SDPA (includes any splitK reduce as part of the attention operation) ---
 
     if semantic_block == "Attention":
-        causal = (T == ctx)
+        causal = T == ctx
         flops = _sdpa_flops(1, T, n_heads, ctx, n_kv, d, d, causal)
         bts = _sdpa_bytes(1, T, n_heads, ctx, n_kv, d, d, bpe)
         return {
             "flops": flops,
             "bytes": bts,
             "perf_params": {
-                "B": 1, "N_Q": T, "H_Q": n_heads,
-                "N_KV": ctx, "H_KV": n_kv,
-                "d_h_qk": d, "d_h_v": d, "causal": causal,
+                "B": 1,
+                "N_Q": T,
+                "H_Q": n_heads,
+                "N_KV": ctx,
+                "H_KV": n_kv,
+                "d_h_qk": d,
+                "d_h_v": d,
+                "causal": causal,
             },
         }
 

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Verify our perf model formulas against TraceLens reference CSVs.
 
@@ -135,6 +141,7 @@ def _close(a, b, rel_tol=1e-6, abs_tol=1e-3):
 
 # -- GEMM -------------------------------------------------------------------
 
+
 def verify_gemm(csv_path):
     res = Result("GEMM")
     df = pd.read_csv(csv_path)
@@ -166,8 +173,16 @@ def verify_gemm(csv_path):
         our_flops = _gemm_flops(M, N, K, bias)
         our_gflops = our_flops / 1e9
 
-        our_bytes = _gemm_bytes(M, N, K, bpe_A, bpe_B, bpe_out, bias=bias,
-                                bpe_bias=bpe_out if bias else None)
+        our_bytes = _gemm_bytes(
+            M,
+            N,
+            K,
+            bpe_A,
+            bpe_B,
+            bpe_out,
+            bias=bias,
+            bpe_bias=bpe_out if bias else None,
+        )
         our_data_mb = our_bytes / MiB
 
         desc = f"Row {idx}: aten::mm M={M} N={N} K={K} bias={bias}"
@@ -191,6 +206,7 @@ def verify_gemm(csv_path):
 
 
 # -- SDPA -------------------------------------------------------------------
+
 
 def verify_sdpa(csv_path):
     res = Result("SDPA_fwd")
@@ -226,8 +242,10 @@ def verify_sdpa(csv_path):
         our_bytes = _sdpa_bytes(B, N_Q, H_Q, N_KV, H_KV, d_qk, d_v, bpe)
         our_data_mb = our_bytes / MiB
 
-        desc = (f"Row {idx}: SDPA B={B} N_Q={N_Q} H_Q={H_Q} N_KV={N_KV} "
-                f"H_KV={H_KV} d_qk={d_qk} d_v={d_v} causal={causal}")
+        desc = (
+            f"Row {idx}: SDPA B={B} N_Q={N_Q} H_Q={H_Q} N_KV={N_KV} "
+            f"H_KV={H_KV} d_qk={d_qk} d_v={d_v} causal={causal}"
+        )
 
         ok_flops = _close(our_gflops, ref_gflops)
         ok_bytes = True
@@ -248,6 +266,7 @@ def verify_sdpa(csv_path):
 
 
 # -- Unary Elementwise ------------------------------------------------------
+
 
 def verify_unary_elementwise(csv_path):
     res = Result("UnaryElementwise")
@@ -285,8 +304,7 @@ def verify_unary_elementwise(csv_path):
             ok_bytes = _close(our_data_mb, ref_data_mb)
             if not ok_bytes:
                 bytes_detail = (
-                    f"Data MB: our_unary={our_data_mb:.6f} "
-                    f"ref={ref_data_mb:.6f}"
+                    f"Data MB: our_unary={our_data_mb:.6f} " f"ref={ref_data_mb:.6f}"
                 )
 
         desc = f"Row {idx}: {row['name']} shape={shape} dtypes={dtypes}"
@@ -305,6 +323,7 @@ def verify_unary_elementwise(csv_path):
 
 
 # -- Binary Elementwise -----------------------------------------------------
+
 
 def verify_binary_elementwise(csv_path):
     res = Result("BinaryElementwise")
@@ -344,27 +363,29 @@ def verify_binary_elementwise(csv_path):
 
         ok_bytes = True
         bytes_detail = ""
-        if (not pd.isna(ref_data_mb) and bpe_in1 is not None
-                and bpe_in2 is not None and bpe_o is not None):
-            our_bytes = (nelems_in1 * bpe_in1 + nelems_in2 * bpe_in2
-                         + nelems_out * bpe_o)
+        if (
+            not pd.isna(ref_data_mb)
+            and bpe_in1 is not None
+            and bpe_in2 is not None
+            and bpe_o is not None
+        ):
+            our_bytes = nelems_in1 * bpe_in1 + nelems_in2 * bpe_in2 + nelems_out * bpe_o
             our_data_mb = our_bytes / MiB
             ok_bytes = _close(our_data_mb, ref_data_mb)
             if not ok_bytes:
-                bytes_detail = (
-                    f"Data MB: ours={our_data_mb:.6f} ref={ref_data_mb:.6f}"
-                )
+                bytes_detail = f"Data MB: ours={our_data_mb:.6f} ref={ref_data_mb:.6f}"
 
-        desc = (f"Row {idx}: {row['name']} shape1={shape1} shape2={shape2} "
-                f"dtypes={dtypes}")
+        desc = (
+            f"Row {idx}: {row['name']} shape1={shape1} shape2={shape2} "
+            f"dtypes={dtypes}"
+        )
 
         if ok_flops and ok_bytes:
             res.record_pass()
         else:
             detail = []
             if not ok_flops:
-                detail.append(
-                    f"GFLOPS: ours={our_gflops:.6f} ref={ref_gflops:.6f}")
+                detail.append(f"GFLOPS: ours={our_gflops:.6f} ref={ref_gflops:.6f}")
             if bytes_detail:
                 detail.append(bytes_detail)
             res.record_fail(desc, "; ".join(detail))
@@ -373,6 +394,7 @@ def verify_binary_elementwise(csv_path):
 
 
 # -- Main -------------------------------------------------------------------
+
 
 def print_results(results):
     print("\n" + "=" * 80)
@@ -384,9 +406,11 @@ def print_results(results):
         status = "PASS" if r.failed == 0 else "FAIL"
         if r.failed > 0:
             all_pass = False
-        print(f"\n  {r.category:25s}  {status}  "
-              f"(passed={r.passed}, failed={r.failed}, "
-              f"skipped={r.skipped}, total={r.total})")
+        print(
+            f"\n  {r.category:25s}  {status}  "
+            f"(passed={r.passed}, failed={r.failed}, "
+            f"skipped={r.skipped}, total={r.total})"
+        )
         for desc, detail in r.failures[:10]:
             print(f"    FAIL: {desc}")
             print(f"          {detail}")
@@ -404,9 +428,11 @@ def print_results(results):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Verify perf formulas against TraceLens reference CSVs")
-    parser.add_argument("--ref-dir", required=True,
-                        help="Path to TraceLens perf_report_csvs directory")
+        description="Verify perf formulas against TraceLens reference CSVs"
+    )
+    parser.add_argument(
+        "--ref-dir", required=True, help="Path to TraceLens perf_report_csvs directory"
+    )
     args = parser.parse_args()
 
     ref = args.ref_dir
@@ -428,15 +454,19 @@ def main():
     if os.path.exists(unary_csv):
         results.append(verify_unary_elementwise(unary_csv))
     else:
-        print(f"WARNING: {unary_csv} not found, "
-              "skipping Unary Elementwise verification")
+        print(
+            f"WARNING: {unary_csv} not found, "
+            "skipping Unary Elementwise verification"
+        )
 
     binary_csv = os.path.join(ref, "BinaryElementwise.csv")
     if os.path.exists(binary_csv):
         results.append(verify_binary_elementwise(binary_csv))
     else:
-        print(f"WARNING: {binary_csv} not found, "
-              "skipping Binary Elementwise verification")
+        print(
+            f"WARNING: {binary_csv} not found, "
+            "skipping Binary Elementwise verification"
+        )
 
     if not results:
         print("ERROR: No reference CSVs found. Nothing to verify.")

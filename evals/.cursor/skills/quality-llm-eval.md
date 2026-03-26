@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: Quality LLM Eval
 description: Run LLM-based quality evals comparing standalone analysis output against a reference and produce a results CSV.

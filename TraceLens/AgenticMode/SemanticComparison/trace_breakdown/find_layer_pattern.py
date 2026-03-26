@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Step 4 (scriptable part): Detect the repeating layer pattern in a kernel sequence.
 
@@ -11,6 +17,7 @@ Output: JSON with pattern analysis results
 Usage:
     python find_layer_pattern.py <extracted.json> [-o pattern.json]
 """
+
 import argparse
 import json
 import sys
@@ -59,9 +66,11 @@ def detect_alternating_periods(kernel_names, p1, p2, start_offset=0):
         if idx + p2 + p2 <= n:
             match_p2 = sum(1 for j in range(p2) if sigs[idx + j] == sigs[idx + p2 + j])
         if idx + p1 + p2 <= n:
-            match_p1_then_p2 = sum(1 for j in range(min(p1, p2))
-                                   if j < len(sigs) - idx - p1
-                                   and sigs[idx + j] == sigs[idx + p1 + j])
+            match_p1_then_p2 = sum(
+                1
+                for j in range(min(p1, p2))
+                if j < len(sigs) - idx - p1 and sigs[idx + j] == sigs[idx + p1 + j]
+            )
         else:
             match_p1_then_p2 = 0
 
@@ -112,9 +121,11 @@ def run_assertions(kernel_names, analysis):
     if n_layers < 1 or n_layers > 200:
         errors.append(f"A4.2 FAIL: Unreasonable layer count: {n_layers}")
 
-    total_accounted = (analysis["preamble_size"]
-                       + sum(analysis["kernels_per_layer"])
-                       + analysis["epilogue_size"])
+    total_accounted = (
+        analysis["preamble_size"]
+        + sum(analysis["kernels_per_layer"])
+        + analysis["epilogue_size"]
+    )
     if total_accounted != len(kernel_names):
         errors.append(
             f"A4.3 FAIL: Kernel accounting mismatch: "
@@ -140,7 +151,9 @@ def analyze(extracted_data):
     best_period = top_periods[0][0]
     best_score = top_periods[0][1]
 
-    nearby = [p for p, s in top_periods if abs(p - best_period) <= 2 and p != best_period]
+    nearby = [
+        p for p, s in top_periods if abs(p - best_period) <= 2 and p != best_period
+    ]
     is_alternating = len(nearby) > 0
 
     preamble_offset, preamble_score = find_preamble_boundary(kernel_names, best_period)
@@ -176,7 +189,7 @@ def analyze(extracted_data):
 
     period_counts = Counter(layers_seq)
     unique_kernel_names_in_body = set()
-    for name in kernel_names[preamble_offset:preamble_offset + total_layer_kernels]:
+    for name in kernel_names[preamble_offset : preamble_offset + total_layer_kernels]:
         unique_kernel_names_in_body.add(kernel_signature(name))
 
     analysis = {
@@ -191,9 +204,15 @@ def analyze(extracted_data):
         "estimated_layers": len(layers_seq),
         "kernels_per_layer": layers_seq,
         "epilogue_size": epilogue_size,
-        "epilogue_kernel_names": kernel_names[n - epilogue_size:] if epilogue_size > 0 else [],
+        "epilogue_kernel_names": (
+            kernel_names[n - epilogue_size :] if epilogue_size > 0 else []
+        ),
         "unique_body_signatures": len(unique_kernel_names_in_body),
-        "first_layer_kernel_names": kernel_names[preamble_offset:preamble_offset + layers_seq[0]] if layers_seq else [],
+        "first_layer_kernel_names": (
+            kernel_names[preamble_offset : preamble_offset + layers_seq[0]]
+            if layers_seq
+            else []
+        ),
     }
 
     errors = run_assertions(kernel_names, analysis)
@@ -203,7 +222,9 @@ def analyze(extracted_data):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Find repeating layer pattern in kernel sequence")
+    parser = argparse.ArgumentParser(
+        description="Find repeating layer pattern in kernel sequence"
+    )
     parser.add_argument("extracted_json", help="Path to extracted trace data JSON")
     parser.add_argument("-o", "--output", help="Output JSON path (default: stdout)")
     args = parser.parse_args()
