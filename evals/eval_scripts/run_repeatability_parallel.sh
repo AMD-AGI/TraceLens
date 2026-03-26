@@ -63,7 +63,7 @@ run_single_job() {
         agent_attempts=$((agent_attempts + 1))
         (
             cd "$STANDALONE_DIR"
-            agent --print --force --trust --output-format stream-json \
+            timeout 1200 agent --print --force --trust --output-format stream-json \
                 "Run standalone analysis on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
