@@ -22,8 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
-- `node`: Node name for SSH access (e.g., `my_node`)
-- `container`: Docker container with TraceLens installed (e.g., `my_container`)
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - `sdpa`: Either `sdpa_fwd` (forward pass) or `sdpa_bwd` (backward pass)
 
 **Input files (pre-computed by orchestrator):**
@@ -61,15 +60,15 @@ Use vendor-agnostic terminology:
 
 ## Analysis Workflow
 
-### Step 1: Run Analysis Script (Inside Container)
+### Step 1: Run Analysis Script
 
-Execute the Python script inside the container on the node. Pass `--category` to specify forward or backward:
+Execute the analysis script using the command prefix. Pass `--category` to specify forward or backward:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/sdpa_analysis.py \
   --output-dir <output_dir> \
-  --category <sdpa>"
+  --category <sdpa>
 ```
 
 Where `<sdpa>` is `sdpa_fwd` or `sdpa_bwd`.
@@ -159,7 +158,7 @@ For each validated bottleneck, provide recommendations based on attention type. 
 
 ### Step 8: Write Category Findings
 
-Create `<output_dir>/category_findings/<sdpa>_findings.md`. Create it through the container on the node:
+Write `<output_dir>/category_findings/<sdpa>_findings.md` using the command prefix:
 
 Include:
 - Attention type detected (Flash, Paged, Standard)

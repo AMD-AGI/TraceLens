@@ -22,8 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory (e.g., `/path/to/analysis_output/`)
-- `node`: Node name for SSH access (e.g., `my_node`)
-- `container`: Docker container with TraceLens installed (e.g., `my_container`)
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/gemm_ops.csv` - Filtered GEMM operations
@@ -66,14 +65,14 @@ Use vendor-agnostic terminology:
 
 ## Analysis Workflow
 
-### Step 1: Run Analysis Script (Inside Container)
+### Step 1: Run Analysis Script
 
-Execute the Python script inside the container on the node:
+Execute the analysis script using the command prefix:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/gemm_analysis.py \
-  --output-dir <output_dir>"
+  --output-dir <output_dir>
 ```
 
 The script outputs `gemm_metrics.json` to `category_data/`.
@@ -200,10 +199,10 @@ Do not look up peaks independently from the metadata dict.
 ## Key Principles
 
 1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
-2. **Count matters** - High invocation counts indicate batching opportunities
-3. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
-4. **Be specific** - Include M/N/K shapes, batch sizes, data types
-5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+2. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
+3. **Be specific** - Include M/N/K shapes, batch sizes, data types
+4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
 
 ---
 
@@ -235,5 +234,3 @@ Do not look up peaks independently from the metadata dict.
 | Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
 | Occupancy | Requires hardware counters | "Kernel running slower than expected" |
 | Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
-
-**Key principle**: This analysis identifies bottlenecks. Root cause diagnosis requires profiling tools with hardware counters.
