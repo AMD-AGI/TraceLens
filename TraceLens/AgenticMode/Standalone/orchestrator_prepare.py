@@ -15,8 +15,10 @@ TO DO: Prune out unnecessary segments
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
+from collections import defaultdict
 
 import pandas as pd
 
@@ -26,6 +28,19 @@ from utils.category_utils import CATEGORY_SKILL_MAP, get_enhanced_category
 
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+from TraceLens.AgenticMode.SemanticComparison.trace_breakdown.classify_kernels import (
+    classify_kernel,
+)
+
+# Kernel fusion candidate extraction constants
+FUSION_EXCLUDED_KERNELS = ["nccl", "rccl", "memcpy", "memset"]
+FUSION_ALREADY_FUSED = [
+    "attn_fwd", "attn_bwd", "fmha",
+    "unified_attention", "paged_attention",
+    "flash_attn", "flash_fwd",
+    "silu_and_mul", "SiluAndMul",
+]
+_MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
 def main():
@@ -404,6 +419,197 @@ def main():
             with open(multi_kernel_data_file, "w") as f:
                 json.dump(multi_kernel_data, f, indent=2)
 
+        # ====================================================================
+        # STEP 4b: Extract Kernel Fusion Candidates (Experimental)
+        # ====================================================================
+        print("\n[STEP 4b] Extracting Kernel Fusion Candidates...")
+
+        try:
+            def _strip_module_index(name):
+                prefix = name[len("nn.Module: "):] if name.startswith("nn.Module: ") else name
+                return _MODULE_INDEX_RE.sub("", prefix)
+
+            def _is_fusion_eligible(name):
+                lower = name.lower()
+                return (
+                    not any(x in lower for x in FUSION_EXCLUDED_KERNELS)
+                    and not any(x in lower for x in FUSION_ALREADY_FUSED)
+                )
+
+            def _has_fused_kernel(kernel_list):
+                return any(
+                    any(p in k["name"].lower() for p in FUSION_ALREADY_FUSED)
+                    for k in kernel_list
+                )
+
+            seen_base = {}
+            base_order = []
+            categorizer = analyzer.event_to_category
+
+            for ev in tree.events:
+                if categorizer(ev) in {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}:
+                    continue
+                gpu_uids = ev.get("gpu_events", [])
+                if len(gpu_uids) < 2:
+                    continue
+                name = ev.get("name", "")
+                base = _strip_module_index(name)
+                if not base:
+                    continue
+
+                if base in seen_base:
+                    seen_base[base]["instance_count"] += 1
+                    seen_base[base]["total_kernel_time_us"] += sum(
+                        tree.get_UID2event(u).get("dur", 0)
+                        for u in gpu_uids if categorizer(tree.get_UID2event(u)) == "kernel"
+                    )
+                    continue
+
+                kernels = []
+                for uid in gpu_uids:
+                    try:
+                        k = tree.get_UID2event(uid)
+                        if categorizer(k) == "kernel":
+                            kname = k.get("name", "")
+                            ktype, _ = classify_kernel(kname)
+                            kernels.append({
+                                "name": kname,
+                                "type": ktype,
+                                "dur_us": k.get("dur", 0),
+                                "eligible": _is_fusion_eligible(kname),
+                            })
+                    except (KeyError, IndexError):
+                        pass
+                if len(kernels) < 2:
+                    continue
+
+                type_sig = [k["type"] for k in kernels]
+                type_summary = {}
+                for k in kernels:
+                    type_summary[k["type"]] = type_summary.get(k["type"], 0) + 1
+
+                parent_chain = []
+                ancestor = ev
+                while tree.get_parent_event(ancestor) is not None:
+                    ancestor = tree.get_parent_event(ancestor)
+                    pname = ancestor.get("name", "")
+                    if pname:
+                        if pname.startswith("nn.Module: "):
+                            pname = pname[len("nn.Module: "):]
+                        elif "/" in pname:
+                            pname = pname.rsplit("/", 1)[-1]
+                        parent_chain.append(pname)
+
+                entry = {
+                    "module_name": name,
+                    "base_name": base,
+                    "parent_chain": parent_chain,
+                    "instance_count": 1,
+                    "kernel_count": len(kernels),
+                    "eligible_kernel_count": sum(1 for k in kernels if k["eligible"]),
+                    "kernels": kernels,
+                    "kernel_type_signature": type_sig,
+                    "kernel_type_summary": type_summary,
+                    "has_fused_kernel": _has_fused_kernel(kernels),
+                    "total_kernel_time_us": sum(k["dur_us"] for k in kernels),
+                }
+                seen_base[base] = entry
+                base_order.append(base)
+
+            # Sibling sequence extraction
+            collected_events = analyzer.collect_unified_perf_events()
+            parent_groups = defaultdict(list)
+            for ev in collected_events:
+                gpu_uids = ev.get("gpu_events", [])
+                if len(gpu_uids) != 1:
+                    continue
+                parent_uid = ev.get("parent")
+                if parent_uid is None:
+                    continue
+                try:
+                    k = tree.get_UID2event(gpu_uids[0])
+                    if categorizer(k) != "kernel":
+                        continue
+                    kname = k.get("name", "")
+                    ktype, _ = classify_kernel(kname)
+                    parent_groups[parent_uid].append({
+                        "op": ev.get("name", ""),
+                        "kernel_type": ktype,
+                        "kernel_name": kname,
+                        "dur_us": k.get("dur", 0),
+                    })
+                except (KeyError, IndexError):
+                    pass
+
+            sibling_seqs = []
+            seen_sibling_bases = {}
+            for parent_uid, children in parent_groups.items():
+                if len(children) < 2:
+                    continue
+                try:
+                    parent_evt = tree.get_UID2event(parent_uid)
+                except (KeyError, IndexError):
+                    continue
+                pname = parent_evt.get("name", "")
+                sbase = _strip_module_index(pname)
+                if sbase in seen_sibling_bases:
+                    seen_sibling_bases[sbase]["instance_count"] += 1
+                    seen_sibling_bases[sbase]["total_time_us"] += sum(c["dur_us"] for c in children)
+                    continue
+                entry = {
+                    "ancestor_name": pname,
+                    "base_name": sbase,
+                    "sequence": children,
+                    "kernel_type_signature": [c["kernel_type"] for c in children],
+                    "total_time_us": sum(c["dur_us"] for c in children),
+                    "instance_count": 1,
+                }
+                seen_sibling_bases[sbase] = entry
+                sibling_seqs.append(entry)
+
+            # Build candidate summary -- minimal filtering, let the LLM decide fusability
+            fusion_candidates = []
+            for b in base_order:
+                m = seen_base[b]
+                if m["has_fused_kernel"] or m["eligible_kernel_count"] < 2:
+                    continue
+                fusion_candidates.append(m)
+
+            for s in sibling_seqs:
+                if len(s["sequence"]) < 2:
+                    continue
+                fusion_candidates.append({
+                    "module_name": s["ancestor_name"],
+                    "base_name": s["base_name"],
+                    "parent_chain": [],
+                    "instance_count": s["instance_count"],
+                    "kernel_count": len(s["sequence"]),
+                    "eligible_kernel_count": len(s["sequence"]),
+                    "kernels": s["sequence"],
+                    "kernel_type_signature": s["kernel_type_signature"],
+                    "kernel_type_summary": {},
+                    "has_fused_kernel": False,
+                    "total_kernel_time_us": s["total_time_us"],
+                    "source": "sibling_sequence",
+                })
+
+            fusion_candidates.sort(key=lambda c: c.get("total_kernel_time_us", 0), reverse=True)
+
+            fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
+            with open(fusion_candidates_file, "w") as f:
+                json.dump(fusion_candidates, f, indent=2, default=str)
+
+            print(f"  ✓ Fusion candidates: {len(seen_base)} unique module types, {len(fusion_candidates)} candidates")
+            print(f"  ✓ Written to fusion_candidates.json ({os.path.getsize(fusion_candidates_file) / 1024:.1f} KB)")
+
+        except Exception as ex:
+            print(f"  ⚠️  Error during fusion candidate extraction: {ex}")
+            traceback.print_exc()
+            fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
+            fusion_candidates = []
+            with open(fusion_candidates_file, "w") as f:
+                json.dump([], f)
+
     except Exception as e:
         print(f"  ⚠️  Error during tree data pre-computation: {e}")
         traceback.print_exc()
@@ -579,6 +785,30 @@ def main():
         )
 
     # ============================================================================
+    # Kernel Fusion System-Level Category Creation (Experimental)
+    # ============================================================================
+    fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
+    if os.path.exists(fusion_candidates_file):
+        with open(fusion_candidates_file, "r") as f:
+            _fc = json.load(f)
+        if _fc:
+            print(f"\n  Category: Kernel Fusion Opportunities (kernel_fusion)")
+            print(f"    ℹ️  {len(_fc)} fusion candidates available")
+            exported_categories.append(
+                {
+                    "name": "kernel_fusion",
+                    "display_name": "Kernel Fusion Opportunities",
+                    "skill": "kernel-fusion-analyzer",
+                    "tier": "system",
+                    "ops_count": len(_fc),
+                    "csv_file": None,
+                    "metadata_file": None,
+                    "data_file": fusion_candidates_file,
+                    "tree_data_file": None,
+                }
+            )
+
+    # ============================================================================
     # STEP 5.5: Calculate Time Metric Breakdown per Category
     # ============================================================================
     print("\n[STEP 5.5] Calculating Time Metric Breakdown per Category...")
@@ -640,8 +870,8 @@ def main():
             cat_info["has_sync_bottleneck"] = False
 
         # Also update the metadata file with time breakdown
-        metadata_file = cat_info["metadata_file"]
-        if os.path.exists(metadata_file):
+        metadata_file = cat_info.get("metadata_file")
+        if metadata_file and os.path.exists(metadata_file):
             with open(metadata_file, "r") as f:
                 metadata = json.load(f)
 
