@@ -22,8 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
-- `node`: Node name for SSH access
-- `container`: Docker container with TraceLens installed
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input files (pre-computed by orchestrator Step 4b):**
 1. `<output_dir>/category_data/fusion_candidates.json` - Module-level candidate summaries with kernel details
@@ -107,7 +106,7 @@ Then look for novel patterns:
 
 ### Step 4: Write Findings
 
-Create `<output_dir>/category_findings/kernel_fusion_findings.md` through the container on the node.
+Write `<output_dir>/category_findings/kernel_fusion_findings.md` using the command prefix.
 
 Confidence maps directly to priority tier:
 - All HIGH confidence findings → 🔴 P1

@@ -302,7 +302,7 @@ Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script inside the container on the node
+1. Running its Python script using the command prefix
 2. Reading the metrics JSON output
 3. Identifying issues and generating findings
 
@@ -385,7 +385,7 @@ Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script inside the container on the node
+1. Running its Python script using the command prefix
 2. Reading the metrics JSON output
 3. Identifying bottlenecks and generating findings
 
@@ -487,7 +487,7 @@ load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
-Then read the individual findings files through the container as needed for report assembly.
+Then read the individual findings files using the command prefix as needed for report assembly.
 
 ### Aggregate Compute Kernel Recommendations
 
