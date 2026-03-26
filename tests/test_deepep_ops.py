@@ -231,3 +231,4 @@ def test_deepep_dispatch_bytes_bwd():
     num_tokens, hidden = 16384, 2048
     model = deepep_dispatch(_dispatch_event(num_tokens=num_tokens, hidden=hidden))
     assert model.bytes_bwd() == model.bytes()
+
