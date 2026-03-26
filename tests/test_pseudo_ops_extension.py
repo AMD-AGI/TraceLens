@@ -905,4 +905,3 @@ class TestActivationCheckpointingPseudoOps:
             "bwd_events"
         ), "bwd_events should be wired after _link_checkpoint_fwd_bwd"
         assert len(fwd_events[0]["bwd_events"]) == 1
-
