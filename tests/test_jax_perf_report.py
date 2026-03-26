@@ -82,11 +82,15 @@ def jax_report(trace_path):
     """Run generate_perf_report_jax once per trace_path and cache the results."""
     if trace_path not in _report_cache:
         tmpdir = tempfile.mkdtemp()
-        output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
-        dict_name2df = generate_perf_report_jax(
-            profile_path=trace_path,
-            output_xlsx_path=output_xlsx,
-        )
+        try:
+            output_xlsx = os.path.join(tmpdir, "perf_report.xlsx")
+            dict_name2df = generate_perf_report_jax(
+                profile_path=trace_path,
+                output_xlsx_path=output_xlsx,
+            )
+        except Exception:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise
         _report_cache[trace_path] = {
             "dict_name2df": dict_name2df,
             "xlsx_path": output_xlsx,

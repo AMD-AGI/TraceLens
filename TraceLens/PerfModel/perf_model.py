@@ -3269,6 +3269,211 @@ class liger_silu_mul_function(BinaryElementwise):
         }
 
 
+class Reduce:
+    """
+    Base class for single-GPU reduce operations (sum, mean, max, min, norm, etc.).
+    Models reduction over one or more dimensions of a tensor.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_input_elems = self.param_details["num_input_elems"]
+        self.num_output_elems = self.param_details["num_output_elems"]
+        self.dtype_in_out = self.param_details["dtype_in_out"]
+
+        # Safely convert dtypes to bytes-per-element, allowing unknown/missing dtypes.
+        dtype_in = self.dtype_in_out[0] if self.dtype_in_out else None
+        if isinstance(dtype_in, str) and dtype_in:
+            self.bpe_in = name2bpe(dtype_in)
+        else:
+            self.bpe_in = None
+
+        dtype_out = self.dtype_in_out[1] if self.dtype_in_out else None
+        if dtype_out is not None:
+            if isinstance(dtype_out, str) and dtype_out:
+                self.bpe_out = name2bpe(dtype_out)
+            else:
+                self.bpe_out = None
+        else:
+            # If output dtype is unknown, default to input BPE (may be None).
+            self.bpe_out = self.bpe_in
+
+    @staticmethod
+    def flops_func(num_input_elems, num_output_elems, reduce_type="sum"):
+        # Each input element is read and combined: ~1 op per input element.
+        # Sum/mean: N-1 adds (and 1 div for mean) over reduced dimension(s).
+        # Max/min: N-1 comparisons. Norm: N muls + N-1 adds + 1 sqrt.
+        # Use num_input_elems as the dominant term for roofline modeling.
+        return num_input_elems
+
+    def flops(self):
+        return self.flops_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            self.param_details.get("reduce_type", "sum"),
+        )
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.dtype_in_out[0] if self.dtype_in_out else None
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (vector for reduce)."""
+        return "vector"
+
+    @staticmethod
+    def bytes_func(num_input_elems, num_output_elems, bpe_in, bpe_out):
+        if None in {bpe_in, bpe_out}:
+            return None
+        return num_input_elems * bpe_in + num_output_elems * bpe_out
+
+    def bytes(self):
+        return self.bytes_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            self.bpe_in,
+            self.bpe_out,
+        )
+
+    @staticmethod
+    def flops_bwd_func(num_input_elems, num_output_elems, reduce_type="sum"):
+        # Backward: grad_output is broadcast/copied to grad_input (sum/mean),
+        # or scattered for max/min. Dominant work is writing grad_input.
+        return num_input_elems
+
+    def flops_bwd(self):
+        return self.flops_bwd_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            self.param_details.get("reduce_type", "sum"),
+        )
+
+    @staticmethod
+    def bytes_bwd_func(num_input_elems, num_output_elems, bpe_in, bpe_out):
+        # Read grad_output, write grad_input (broadcast or scatter).
+        if None in {bpe_in, bpe_out}:
+            return None
+        return num_output_elems * bpe_out + num_input_elems * bpe_in
+
+    def bytes_bwd(self, bytes_per_element=None):
+        bpe_in = bytes_per_element if bytes_per_element is not None else self.bpe_in
+        bpe_out = bytes_per_element if bytes_per_element is not None else self.bpe_out
+        return self.bytes_bwd_func(
+            self.num_input_elems,
+            self.num_output_elems,
+            bpe_in,
+            bpe_out,
+        )
+
+
+class aten_reduce(Reduce):
+    """
+    Single-GPU reduce ops: sum, mean, max, min, norm, etc.
+    Parses PyTorch trace event args (Input Dims, Concrete Inputs for dim/keepdim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        args_input_dims = args.get("Input Dims", [])
+        if not args_input_dims or args_input_dims[0] is None:
+            return {
+                "num_input_elems": 0,
+                "num_output_elems": 0,
+                "dtype_in_out": (None, None),
+            }
+        input_shape = tuple(args_input_dims[0])
+        num_input_elems = prod(input_shape)
+        name = event.get("name", "")
+
+        input_types = args.get("Input type", [])
+        dtype_in = input_types[0] if input_types else None
+        dtype_out = args.get("Output type", [None])
+        if isinstance(dtype_out, list) and dtype_out:
+            dtype_out = dtype_out[0]
+        else:
+            dtype_out = None
+
+        # Infer output shape from dim and keepdim if available
+        concrete = args.get("Concrete Inputs", [])
+        dim = None
+        keepdim = False
+        # concrete[0] is expected to be the input tensor; parse the rest heuristically
+        if len(concrete) >= 2:
+            # Slice off the input tensor; remaining are scalar/config args
+            scalar_args = concrete[1:]
+
+            # Heuristic for keepdim: use the last boolean argument
+            keepdim_idx = None
+            for idx in range(len(scalar_args) - 1, -1, -1):
+                val = scalar_args[idx]
+                if isinstance(val, bool):
+                    keepdim = val
+                    keepdim_idx = idx
+                    break
+
+            # Heuristic for dim: prefer the last int or list/tuple of ints, excluding keepdim_idx
+            for idx in range(len(scalar_args) - 1, -1, -1):
+                if keepdim_idx is not None and idx == keepdim_idx:
+                    continue
+                val = scalar_args[idx]
+                if val is None:
+                    continue
+                try:
+                    if isinstance(val, (list, tuple)):
+                        dim_list = [int(d) for d in val]
+                        dim = dim_list
+                        break
+                    elif isinstance(val, int):
+                        dim = [int(val)]
+                        break
+                    print(f"failed to parse dimension specification for reduce: {name}")
+                except (TypeError, ValueError):
+                    # Not a valid dimension specification; ignore
+                    print("failed to parse dimension specification for reduce: {name}")
+                    continue
+
+        # cumsum/cumprod preserve shape
+        if "cumsum" in name or "cumprod" in name:
+            num_output_elems = num_input_elems
+        elif dim is not None and len(dim) > 0:
+            # Normalize dim to positive indices
+            ndim = len(input_shape)
+            dim = [d if d >= 0 else ndim + d for d in dim]
+            out_shape = list(input_shape)
+            for d in sorted(dim, reverse=True):
+                if 0 <= d < len(out_shape):
+                    if keepdim:
+                        out_shape[d] = 1
+                    else:
+                        out_shape.pop(d)
+            num_output_elems = prod(out_shape) if out_shape else 1
+        else:
+            # Reduce over all dimensions: scalar or single element
+            num_output_elems = 1
+
+        reduce_type = "sum"
+        if "mean" in name:
+            reduce_type = "mean"
+        elif "max" in name:
+            reduce_type = "max"
+        elif "min" in name:
+            reduce_type = "min"
+        elif "norm" in name:
+            reduce_type = "norm"
+
+        return {
+            "num_input_elems": num_input_elems,
+            "num_output_elems": num_output_elems,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "reduce_type": reduce_type,
+        }
+
+
 class GroupedGemm:
     """
     Grouped General Matrix Multiplication (GEMM).
@@ -4588,3 +4793,444 @@ class RMSNormBwd(Normalization):
         if self.is_affine:
             bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes
+
+
+# ==============================================================================
+# MoE Communication – MoEDispatch / MoECombine (token routing)
+# ==============================================================================
+
+
+class MoEComm:
+    """
+    MoE all-to-all token dispatch/combine: pure communication, no FLOPS.
+
+    In the trace:
+      MoEDispatch:  Input Dims[0] = (num_tokens_local, hidden_dim)
+      MoECombine:   Input Dims[0] = (num_tokens_dispatched, hidden_dim)
+
+    bytes() = num_tokens × hidden_dim × bpe (data volume moved).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_tokens = self.param_details["num_tokens"]
+        self.hidden_dim = self.param_details["hidden_dim"]
+        self.bpe = self.param_details["bpe"]
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        input_types = event["args"].get("Input type", [])
+        tok_shape = input_dims[0] if input_dims else []
+        num_tokens = tok_shape[0] if len(tok_shape) >= 1 else None
+        hidden_dim = tok_shape[1] if len(tok_shape) >= 2 else None
+        dtype = input_types[0] if input_types else ""
+        bpe = name2bpe(dtype) if dtype else None
+        return {"num_tokens": num_tokens, "hidden_dim": hidden_dim, "bpe": bpe}
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        if self.num_tokens is None or self.hidden_dim is None or self.bpe is None:
+            return None
+        return self.num_tokens * self.hidden_dim * self.bpe
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+
+class moe_dispatch(MoEComm):
+    """MoEDispatch (forward): routes local tokens to remote expert ranks."""
+
+    pass
+
+
+class moe_combine(MoEComm):
+    """MoECombine (forward): collects expert outputs back to local tokens."""
+
+    pass
+
+
+# ==============================================================================
+# Causal Conv1D – DaoAILab depthwise 1D convolution
+# ==============================================================================
+
+
+class CausalConv1d:
+    """
+    DaoAILab causal_conv1d: depthwise 1D convolution used in Mamba/SSM.
+
+    In the trace:
+      Input Dims[0] = (batch, channels, seq_len)  — input tensor
+      Input Dims[1] = (channels, kernel_size)      — conv weight
+      Input Dims[2] = (channels,)                  — bias (optional)
+
+    FLOPS = 2 × batch × channels × seq_len × kernel_size (depthwise conv).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+
+        x_shape = input_dims[0]
+        w_shape = input_dims[1]
+
+        batch = x_shape[0]
+        channels = x_shape[1]
+        seq_len = x_shape[2]
+        kernel_size = w_shape[1]
+
+        has_bias = (
+            len(input_dims) > 2
+            and isinstance(input_dims[2], (list, tuple))
+            and len(input_dims[2]) > 0
+        )
+
+        return {
+            "batch": batch,
+            "channels": channels,
+            "seq_len": seq_len,
+            "kernel_size": kernel_size,
+            "has_bias": has_bias,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 2 * p["batch"] * p["channels"] * p["seq_len"] * p["kernel_size"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        p = self.param_details
+        input_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
+        weight_bytes = p["channels"] * p["kernel_size"] * self.bpe
+        output_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
+        bias_bytes = p["channels"] * self.bpe if p["has_bias"] else 0
+        return input_bytes + weight_bytes + output_bytes + bias_bytes
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        dtype = self.event["args"].get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class causal_conv1d_fwd(CausalConv1d):
+    """DaoAILab::_causal_conv1d_fwd_cpp forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# RoPE – Fused Rotary Position Embedding
+# ==============================================================================
+
+
+class FusedRoPE:
+    """
+    TransformerEngine FusedRoPEFunc: elementwise rotary position embedding.
+
+    In the trace:
+      Input Dims[0] = (seq_len, batch, heads, head_dim)  — input tensor
+      Input Dims[1] = (seq_len, 1, 1, head_dim)          — cos/sin table
+
+    FLOPS: each pair of elements in head_dim requires 4 muls + 2 adds = 6 ops.
+    Total = 3 × num_elements (since 6 ops per 2 elements).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        t_shape = input_dims[0]
+        return {
+            "seq_len": t_shape[0],
+            "batch": t_shape[1],
+            "heads": t_shape[2],
+            "head_dim": t_shape[3],
+            "num_elements": prod(t_shape),
+        }
+
+    def flops(self):
+        return 3 * self.param_details["num_elements"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        n = self.param_details["num_elements"]
+        return 2 * n * self.bpe
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class fused_rope_fwd(FusedRoPE):
+    """FusedRoPEFunc forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# CrossEntropy – Fused softmax + negative log-likelihood
+# ==============================================================================
+
+
+class CrossEntropy:
+    """
+    Fused CrossEntropyFunction: online softmax + cross-entropy loss.
+
+    In the trace:
+      Input Dims[0] = (batch, 1, vocab_size)  — logits
+      Input Dims[1] = (batch, 1)              — targets
+
+    FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        logits_shape = input_dims[0]
+        batch = logits_shape[0]
+        vocab_size = logits_shape[-1]
+        return {
+            "batch": batch,
+            "vocab_size": vocab_size,
+            "logits_shape": logits_shape,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 5 * p["batch"] * p["vocab_size"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        p = self.param_details
+        logits_bytes = prod(p["logits_shape"]) * self.bpe
+        target_bpe = 8  # long int
+        target_bytes = p["batch"] * target_bpe
+        output_bytes = p["batch"] * 4  # loss is float32
+        return logits_bytes + target_bytes + output_bytes
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class cross_entropy_fwd(CrossEntropy):
+    """CrossEntropyFunction forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# MambaSSD – MambaSplitConv1dScanCombinedFn (fused SSM kernel)
+# ==============================================================================
+
+
+class MambaSSD:
+    """
+    Perf model for MambaSplitConv1dScanCombinedFn (Mamba-2 SSD algorithm).
+
+    This fused autograd function combines conv1d + selective scan using the
+    State Space Duality (SSD) chunked algorithm from Tri Dao et al.
+    (https://arxiv.org/abs/2405.21060).
+
+    Trace layout (18 input slots):
+      [0] zxbcdt         (B, T, combined_dim)  — fused projection
+      [1] conv1d_weight  (conv_channels, d_conv)
+      [2] conv1d_bias    (conv_channels,)
+      [3] dt_bias        (H,)                  — nheads
+      [4] A              (H,)
+      [5] D              (H,)
+      [6] chunk_size     Scalar = C
+      [15] headdim       Scalar = P
+      [16] ngroups       Scalar = G
+
+    Derived:
+      d_inner = H × P
+      d_state = (combined_dim − 2·d_inner − H) / (2·G)
+      conv_channels = d_inner + 2·G·d_state  (should match Input[1][0])
+
+    FLOPS (matmul terms from the 4-step SSD algorithm):
+      conv1d:         2 · B · conv_channels · T · d_conv
+      CB^T (step 1):  2 · B · G · T · C · N
+      M@X  (step 1):  2 · B · H · T · C · P
+      B^T@X (step 2): 2 · B · H · T · N · P
+      C@h   (step 4): 2 · B · H · T · N · P
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+        self.bpe_dt_bias = self._param_bpe(input_types, 3, 4)
+        self.bpe_A = self._param_bpe(input_types, 4, 4)
+        self.bpe_D = self._param_bpe(input_types, 5, self.bpe)
+
+    @staticmethod
+    def _param_bpe(input_types, slot, default):
+        """Derive bytes-per-element for a parameter slot, falling back to default."""
+        if len(input_types) > slot and input_types[slot]:
+            bpe = name2bpe(input_types[slot])
+            return bpe if bpe is not None else default
+        return default
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs", [])
+
+        zxbcdt_shape = input_dims[0]  # (B, T, combined_dim)
+        conv_w_shape = input_dims[1]  # (conv_channels, d_conv)
+        dt_bias_shape = input_dims[3]  # (H,)
+
+        B = zxbcdt_shape[0]
+        T = zxbcdt_shape[1]
+        combined_dim = zxbcdt_shape[2]
+        conv_channels = conv_w_shape[0]
+        d_conv = conv_w_shape[1]
+        H = dt_bias_shape[0]
+
+        C = int(concrete[6]) if len(concrete) > 6 and concrete[6] else 128
+        P = int(concrete[15]) if len(concrete) > 15 and concrete[15] else 64
+        G = int(concrete[16]) if len(concrete) > 16 and concrete[16] else 1
+
+        d_inner = H * P
+        numerator = combined_dim - 2 * d_inner - H
+        denom = 2 * G
+        if numerator <= 0 or numerator % denom != 0:
+            raise ValueError(
+                f"Cannot derive d_state: combined_dim={combined_dim}, "
+                f"H={H}, P={P}, G={G}, d_inner={d_inner}, "
+                f"numerator={numerator}, denom={denom}"
+            )
+        N = numerator // denom
+
+        return {
+            "B": B,
+            "T": T,
+            "H": H,
+            "P": P,
+            "G": G,
+            "N": N,
+            "C": C,
+            "d_inner": d_inner,
+            "d_conv": d_conv,
+            "conv_channels": conv_channels,
+            "combined_dim": combined_dim,
+        }
+
+    def flops(self):
+        p = self.param_details
+        B, T, H, P, G, N, C = (
+            p["B"],
+            p["T"],
+            p["H"],
+            p["P"],
+            p["G"],
+            p["N"],
+            p["C"],
+        )
+        conv_channels, d_conv = p["conv_channels"], p["d_conv"]
+
+        flops_conv1d = 2 * B * conv_channels * T * d_conv
+        flops_cbt = 2 * B * G * T * C * N  # Step 1a: C @ B^T
+        flops_mx = 2 * B * H * T * C * P  # Step 1b: M @ X
+        flops_chunk_state = 2 * B * H * T * N * P  # Step 2: B^T @ X
+        flops_state_out = 2 * B * H * T * N * P  # Step 4: C @ h
+
+        return flops_conv1d + flops_cbt + flops_mx + flops_chunk_state + flops_state_out
+
+    def bytes(self):
+        p = self.param_details
+        B, T = p["B"], p["T"]
+        combined_dim = p["combined_dim"]
+        d_inner = p["d_inner"]
+        conv_channels, d_conv = p["conv_channels"], p["d_conv"]
+        H = p["H"]
+
+        read_input = B * T * combined_dim * self.bpe
+        read_conv_w = conv_channels * d_conv * self.bpe
+        read_conv_b = conv_channels * self.bpe
+        read_params = H * self.bpe_dt_bias + H * self.bpe_A + H * self.bpe_D
+        write_output = B * T * d_inner * self.bpe
+
+        return read_input + read_conv_w + read_conv_b + read_params + write_output
+
+    def flops_bwd(self):
+        return self.flops()
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        dtype = self.event["args"].get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class mamba_ssd_fwd(MambaSSD):
+    """MambaSplitConv1dScanCombinedFn forward pass."""
+
+    pass

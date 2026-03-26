@@ -16,8 +16,8 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
-        "xprof==2.20.7",  # Preferred JAX trace library; required for JAX 0.8+; older traces work with either
-        "protobuf>=6.31.1,<7.0.0",  # Required for grpcio-status; avoids INT_MAX crash on JAX 0.8 trace HLO ids
+        "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+ (with benign INT_MAX warnings)
+        "protobuf>=6.31.1,<7.0.0",  # Required by xprof's grpcio-status dependency
         # 'openpyxl',
         # 'tensorflow',
     ],
