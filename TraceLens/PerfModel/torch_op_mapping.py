@@ -143,12 +143,31 @@ norm_ops = {
 }
 
 
+# Single-GPU reduce operations (sum, mean, max, min, norm over dimensions)
+reduce_ops = [
+    "aten::sum",
+    "aten::mean",
+    "aten::max",
+    "aten::min",
+    "aten::norm",
+    "aten::linalg_norm",
+    "aten::std",
+    "aten::var",
+    "aten::logsumexp",
+    "aten::cumsum",
+    "aten::cumprod",
+    "aten::amin",
+    "aten::amax",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
 for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
+for op in reduce_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_reduce
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
@@ -158,6 +177,7 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.Reduce: "Reduce",
     perf_model.MoEComm: "MoE_comm",
     perf_model.CausalConv1d: "SSM",
     perf_model.FusedRoPE: "RoPE",
@@ -281,6 +301,8 @@ def categorize_torch_op(row):
         return "CrossEntropy_bwd"
     elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
         return "elementwise"
+    elif row["name"] in dict_cat2names.get("Reduce", []):
+        return "reduce"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"].startswith("record_param_comms"):
