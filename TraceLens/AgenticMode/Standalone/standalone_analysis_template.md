@@ -122,6 +122,17 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ---
 
+## Kernel Fusion Opportunities (Experimental)
+
+<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Each finding uses Insight / Action format (no Impact -- detection only). -->
+<!-- P1/P2/P3+ ordered by confidence then kernel time. -->
+<!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
+
+No kernel fusion opportunities detected.
+
+---
+
 ## System-Level Optimizations
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.

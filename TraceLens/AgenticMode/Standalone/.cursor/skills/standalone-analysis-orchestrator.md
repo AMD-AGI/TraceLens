@@ -273,10 +273,12 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 - `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_flagged` is `true`)
 - `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
+- `kernel_fusion` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/kernel-fusion-analyzer.md` (invoke if `kernel_fusion` category exists in manifest)
 
 **Invocation conditions:**
 - **CPU/Idle**: Read `category_data/cpu_idle_metrics.json` and check `idle_flagged`. Only invoke the subagent if `idle_flagged` is `true` (idle > 15%). Skip if `false` -- the deterministic script already captured the factual data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
+- **Kernel Fusion**: `kernel_fusion` category exists in manifest
 
 **Task prompt structure for each subagent:**
 
@@ -588,10 +590,11 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 The report **must** use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
 2. `## Compute Kernel Optimizations`
-3. `## System-Level Optimizations`
-4. `## Detailed Analysis: Compute Kernels`
-5. `## Detailed Analysis: System-Level`
-6. `## Appendix`
+3. `## Kernel Fusion Opportunities (Experimental)`
+4. `## System-Level Optimizations`
+5. `## Detailed Analysis: Compute Kernels`
+6. `## Detailed Analysis: System-Level`
+7. `## Appendix`
 
 Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
 
