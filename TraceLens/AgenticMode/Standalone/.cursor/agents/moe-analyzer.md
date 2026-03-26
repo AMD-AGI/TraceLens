@@ -201,7 +201,8 @@ Do not look up peaks independently from the metadata dict.
 2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the appropriate peak (MAF for compute-bound, HBM BW for memory-bound)
 3. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
-5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**.When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
+5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**. When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
+6. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution -- these are not observable from kernel-level trace data
 
 ---
 
@@ -240,5 +241,3 @@ Do not look up peaks independently from the metadata dict.
 | Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
 | Occupancy | Requires hardware counters | "Kernel running slower than expected" |
 | Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
-
-**Key principle**: This analysis identifies bottlenecks. Root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution — these are not observable from kernel-level trace data.

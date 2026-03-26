@@ -199,10 +199,10 @@ Do not look up peaks independently from the metadata dict.
 ## Key Principles
 
 1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
-2. **Count matters** - High invocation counts indicate batching opportunities
-3. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
-4. **Be specific** - Include M/N/K shapes, batch sizes, data types
-5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+2. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
+3. **Be specific** - Include M/N/K shapes, batch sizes, data types
+4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
 
 ---
 
@@ -234,5 +234,3 @@ Do not look up peaks independently from the metadata dict.
 | Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
 | Occupancy | Requires hardware counters | "Kernel running slower than expected" |
 | Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
-
-**Key principle**: This analysis identifies bottlenecks. Root cause diagnosis requires profiling tools with hardware counters.

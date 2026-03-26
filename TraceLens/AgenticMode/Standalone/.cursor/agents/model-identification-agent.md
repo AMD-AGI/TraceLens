@@ -88,3 +88,12 @@ Write `<output_dir>/metadata/model_info.json` with these four keys. **Use "Canno
 
 - If the script fails or `condensed_op_info.csv` is missing: write `metadata/model_info.json` with all four fields set to `"Cannot be inferred from trace"`.
 - Always ensure `metadata/model_info.json` exists and is a valid JSON with keys `model`, `architecture`, `scale`, `precision` before returning to the orchestrator.
+
+---
+
+## Key Principles
+
+1. **Conservative inference** -- use "Cannot be inferred from trace" for any field you cannot determine with high confidence
+2. **Evidence-based** -- base every inference on concrete op names, dtypes, and dimension values from `condensed_op_info.csv`
+3. **Exact output schema** -- always produce a valid JSON with exactly four keys: `model`, `architecture`, `scale`, `precision`
+4. **Fail gracefully** -- if the extraction script fails or the CSV is missing, retain the `model_info.json` with all fields set to the default unknown string
