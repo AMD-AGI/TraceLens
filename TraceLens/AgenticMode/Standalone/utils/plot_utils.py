@@ -35,16 +35,24 @@ __all__ = [
 ]
 
 _CAT_PALETTE = [
-    "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71",
-    "#9b59b6", "#1abc9c", "#e84393", "#3498db",
+    "#e74c3c",
+    "#e67e22",
+    "#f1c40f",
+    "#2ecc71",
+    "#9b59b6",
+    "#1abc9c",
+    "#e84393",
+    "#3498db",
 ]
+
 
 def _short_name(name: str, max_len: int = 8) -> str:
     """Shorten a category name for plot labels. Capitalizes first letter, truncates if needed."""
     display = name[0].upper() + name[1:] if name else name
     if len(display) <= max_len:
         return display
-    return display[:max_len - 1] + "\u2026"
+    return display[: max_len - 1] + "\u2026"
+
 
 _REST_KEY = "__rest_e2e__"
 
@@ -72,14 +80,20 @@ def _compute_cumulative_projections(baseline_ms, recommendations):
         lat_best = max(0.01, baseline_ms - cum_hi)
         lat_worst = max(0.01, baseline_ms - cum_lo)
         cnt = rec.get("operation_count", 1)
-        cat_display = rec["category"][0].upper() + rec["category"][1:] if rec["category"] else rec["category"]
+        cat_display = (
+            rec["category"][0].upper() + rec["category"][1:]
+            if rec["category"]
+            else rec["category"]
+        )
         steps.append(f"{cat_display}\n({cnt} ops)")
         e2e_ms.append(lat_mid)
         savings.append(sm)
         rel.append(round(baseline_ms / lat_mid * 100, 1))
         err_lo.append(lat_mid - lat_best)
         err_hi.append(lat_worst - lat_mid)
-        rel_lo.append(round(baseline_ms / lat_worst * 100 if lat_worst > 0 else 100.0, 1))
+        rel_lo.append(
+            round(baseline_ms / lat_worst * 100 if lat_worst > 0 else 100.0, 1)
+        )
         rel_hi.append(round(baseline_ms / lat_best * 100 if lat_best > 0 else 100.0, 1))
 
     return {
@@ -111,13 +125,19 @@ def _build_stacked_segments(manifest, recommendations, baseline_ms):
         baseline_by_cat[_REST_KEY] = rest_e2e
 
     analyzed = sorted(
-        [{"name": n, "time_ms": t} for n, t in baseline_by_cat.items()
-         if n != _REST_KEY and n in plotted_cats],
+        [
+            {"name": n, "time_ms": t}
+            for n, t in baseline_by_cat.items()
+            if n != _REST_KEY and n in plotted_cats
+        ],
         key=lambda x: x["time_ms"],
     )
     unanalyzed = sorted(
-        [{"name": n, "time_ms": t} for n, t in baseline_by_cat.items()
-         if n != _REST_KEY and n not in plotted_cats],
+        [
+            {"name": n, "time_ms": t}
+            for n, t in baseline_by_cat.items()
+            if n != _REST_KEY and n not in plotted_cats
+        ],
         key=lambda x: x["time_ms"],
     )
     segment_order = [x["name"] for x in analyzed + unanalyzed]
@@ -147,23 +167,37 @@ def _render_throughput_cone(ax, proj):
     ax.plot(x_vals, cum_hi, "-", color="#27ae60", linewidth=1.0, alpha=0.4, zorder=2)
     ax.plot(x_vals, cum_lo, "-", color="#27ae60", linewidth=1.0, alpha=0.4, zorder=2)
     ax.plot(
-        x_vals, proj["rel"], "o-", color="#2ecc71", linewidth=2.5,
-        markersize=9, markerfacecolor="white", markeredgewidth=2.5, zorder=4,
+        x_vals,
+        proj["rel"],
+        "o-",
+        color="#2ecc71",
+        linewidth=2.5,
+        markersize=9,
+        markerfacecolor="white",
+        markeredgewidth=2.5,
+        zorder=4,
     )
     last_idx = len(proj["rel"]) - 1
     ax.annotate(
         f"{proj['rel'][last_idx]:.0f}%",
         (last_idx, proj["rel"][last_idx]),
-        textcoords="offset points", xytext=(0, -16),
-        ha="center", va="top", fontsize=11, fontweight="bold",
-        color="#1a7a3a", zorder=5,
+        textcoords="offset points",
+        xytext=(0, -16),
+        ha="center",
+        va="top",
+        fontsize=11,
+        fontweight="bold",
+        color="#1a7a3a",
+        zorder=5,
     )
     ax.set_xticks(range(len(proj["steps"])))
     ax.set_xticklabels(proj["steps"], fontsize=9)
     ax.set_ylabel("% Relative Throughput (Baseline = 100)", fontsize=11)
     ax.set_title(
         "Cumulative Throughput Improvement\n(75\u2013100% roofline potential)",
-        fontsize=12, fontweight="bold", pad=12,
+        fontsize=12,
+        fontweight="bold",
+        pad=12,
     )
     ax.set_ylim(80, max(cum_hi) * 1.15)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
@@ -232,7 +266,9 @@ def generate_perf_plot(
 
     proj = _compute_cumulative_projections(baseline_ms, recommendations)
     baseline_by_cat, segment_order, plotted_cats = _build_stacked_segments(
-        manifest, recommendations, baseline_ms,
+        manifest,
+        recommendations,
+        baseline_ms,
     )
     cat_color_map = _build_color_map(recommendations)
 
@@ -252,12 +288,17 @@ def generate_perf_plot(
             elif _REST_KEY in baseline_by_cat:
                 savings_by_cat[_REST_KEY] = savings_by_cat.get(_REST_KEY, 0.0) + sv
         return {
-            name: max(0.0, baseline_by_cat.get(name, 0.0) - savings_by_cat.get(name, 0.0))
+            name: max(
+                0.0, baseline_by_cat.get(name, 0.0) - savings_by_cat.get(name, 0.0)
+            )
             for name in segment_order
         }
 
     fig, (ax_stack, ax_cone) = plt.subplots(
-        1, 2, figsize=(14, 5.5), gridspec_kw={"width_ratios": [1.45, 1.0]},
+        1,
+        2,
+        figsize=(14, 5.5),
+        gridspec_kw={"width_ratios": [1.45, 1.0]},
     )
 
     # -- Left panel: stacked bars --
@@ -266,14 +307,27 @@ def generate_perf_plot(
     rest_bottom = np.zeros(n_bars, dtype=float)
     rest_height = np.zeros(n_bars, dtype=float)
     for seg_name in segment_order:
-        h = np.array([_segment_heights(k)[seg_name] for k in range(n_bars)], dtype=float)
+        h = np.array(
+            [_segment_heights(k)[seg_name] for k in range(n_bars)], dtype=float
+        )
         if np.all(h <= 0):
             continue
-        color = rest_color if seg_name == _REST_KEY else cat_color_map.get(seg_name, "#bdc3c7")
+        color = (
+            rest_color
+            if seg_name == _REST_KEY
+            else cat_color_map.get(seg_name, "#bdc3c7")
+        )
         lbl = rest_label if seg_name == _REST_KEY else _short_name(seg_name)
         ax_stack.bar(
-            x, h, width, bottom=bottom, label=lbl, color=color,
-            edgecolor="white", linewidth=0.9, alpha=0.95,
+            x,
+            h,
+            width,
+            bottom=bottom,
+            label=lbl,
+            color=color,
+            edgecolor="white",
+            linewidth=0.9,
+            alpha=0.95,
         )
         if seg_name == _REST_KEY:
             rest_bottom = bottom.copy()
@@ -288,21 +342,38 @@ def generate_perf_plot(
             accent = cat_color_map.get(cat, "#333333")
         label_y = total_h + (proj["err_hi"][k] + 1.2 if show_error_bars else 1.2)
         ax_stack.text(
-            x[k], label_y, f"{proj['e2e_ms'][k]:.1f} ms",
-            ha="center", va="bottom", fontsize=9, fontweight="bold", color=accent,
+            x[k],
+            label_y,
+            f"{proj['e2e_ms'][k]:.1f} ms",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color=accent,
         )
         if k > 0 and proj["savings"][k] > 0:
             rest_mid = float(rest_bottom[k]) + float(rest_height[k]) / 2
             ax_stack.text(
-                x[k], rest_mid, f"-{proj['savings'][k]:.1f} ms",
-                ha="center", va="center", fontsize=8, color=accent,
-                fontweight="bold", zorder=5,
+                x[k],
+                rest_mid,
+                f"-{proj['savings'][k]:.1f} ms",
+                ha="center",
+                va="center",
+                fontsize=8,
+                color=accent,
+                fontweight="bold",
+                zorder=5,
             )
         if show_error_bars:
             ax_stack.errorbar(
-                [x[k]], [total_h],
+                [x[k]],
+                [total_h],
                 yerr=[[proj["err_lo"][k]], [proj["err_hi"][k]]],
-                fmt="none", ecolor=accent, elinewidth=1.1, capsize=3, zorder=6,
+                fmt="none",
+                ecolor=accent,
+                elinewidth=1.1,
+                capsize=3,
+                zorder=6,
             )
 
     ax_stack.set_xticks(x)
@@ -310,9 +381,15 @@ def generate_perf_plot(
     ax_stack.set_ylabel("E2E time stacked by category (ms)", fontsize=11)
     ax_stack.set_title(
         "Projected E2E Latency (stacked by kernel category)",
-        fontsize=11, fontweight="bold", pad=10,
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
     )
-    ymax = float(np.max(bottom + proj["err_hi"]) + 8) if show_error_bars else float(np.max(bottom) + 8)
+    ymax = (
+        float(np.max(bottom + proj["err_hi"]) + 8)
+        if show_error_bars
+        else float(np.max(bottom) + 8)
+    )
     ax_stack.set_ylim(0, ymax * 1.12)
     ax_stack.spines["top"].set_visible(False)
     ax_stack.spines["right"].set_visible(False)
@@ -330,15 +407,23 @@ def generate_perf_plot(
             ordered_handles.append(h)
             ordered_labels.append(l)
     ax_stack.legend(
-        ordered_handles, ordered_labels,
-        loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=7.5,
-        frameon=False, title="Operations",
+        ordered_handles,
+        ordered_labels,
+        loc="upper left",
+        bbox_to_anchor=(1.0, 1.0),
+        fontsize=7.5,
+        frameon=False,
+        title="Operations",
     )
 
     fig.text(
-        0.5, -0.02,
+        0.5,
+        -0.02,
         "Gray bars represent categories without performance models — not reflected in savings projections.",
-        ha="center", fontsize=8.5, color="#888888", style="italic",
+        ha="center",
+        fontsize=8.5,
+        color="#888888",
+        style="italic",
     )
 
     # -- Right panel: throughput cone --

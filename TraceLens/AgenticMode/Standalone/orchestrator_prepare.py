@@ -35,10 +35,15 @@ from TraceLens.AgenticMode.SemanticComparison.trace_breakdown.classify_kernels i
 # Kernel fusion candidate extraction constants
 FUSION_EXCLUDED_KERNELS = ["nccl", "rccl", "memcpy", "memset"]
 FUSION_ALREADY_FUSED = [
-    "attn_fwd", "attn_bwd", "fmha",
-    "unified_attention", "paged_attention",
-    "flash_attn", "flash_fwd",
-    "silu_and_mul", "SiluAndMul",
+    "attn_fwd",
+    "attn_bwd",
+    "fmha",
+    "unified_attention",
+    "paged_attention",
+    "flash_attn",
+    "flash_fwd",
+    "silu_and_mul",
+    "SiluAndMul",
 ]
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
@@ -425,15 +430,19 @@ def main():
         print("\n[STEP 4b] Extracting Kernel Fusion Candidates...")
 
         try:
+
             def _strip_module_index(name):
-                prefix = name[len("nn.Module: "):] if name.startswith("nn.Module: ") else name
+                prefix = (
+                    name[len("nn.Module: ") :]
+                    if name.startswith("nn.Module: ")
+                    else name
+                )
                 return _MODULE_INDEX_RE.sub("", prefix)
 
             def _is_fusion_eligible(name):
                 lower = name.lower()
-                return (
-                    not any(x in lower for x in FUSION_EXCLUDED_KERNELS)
-                    and not any(x in lower for x in FUSION_ALREADY_FUSED)
+                return not any(x in lower for x in FUSION_EXCLUDED_KERNELS) and not any(
+                    x in lower for x in FUSION_ALREADY_FUSED
                 )
 
             def _has_fused_kernel(kernel_list):
@@ -447,7 +456,13 @@ def main():
             categorizer = analyzer.event_to_category
 
             for ev in tree.events:
-                if categorizer(ev) in {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}:
+                if categorizer(ev) in {
+                    "kernel",
+                    "gpu_memcpy",
+                    "gpu_memset",
+                    "cuda_runtime",
+                    "cuda_driver",
+                }:
                     continue
                 gpu_uids = ev.get("gpu_events", [])
                 if len(gpu_uids) < 2:
@@ -461,7 +476,8 @@ def main():
                     seen_base[base]["instance_count"] += 1
                     seen_base[base]["total_kernel_time_us"] += sum(
                         tree.get_UID2event(u).get("dur", 0)
-                        for u in gpu_uids if categorizer(tree.get_UID2event(u)) == "kernel"
+                        for u in gpu_uids
+                        if categorizer(tree.get_UID2event(u)) == "kernel"
                     )
                     continue
 
@@ -472,12 +488,14 @@ def main():
                         if categorizer(k) == "kernel":
                             kname = k.get("name", "")
                             ktype, _ = classify_kernel(kname)
-                            kernels.append({
-                                "name": kname,
-                                "type": ktype,
-                                "dur_us": k.get("dur", 0),
-                                "eligible": _is_fusion_eligible(kname),
-                            })
+                            kernels.append(
+                                {
+                                    "name": kname,
+                                    "type": ktype,
+                                    "dur_us": k.get("dur", 0),
+                                    "eligible": _is_fusion_eligible(kname),
+                                }
+                            )
                     except (KeyError, IndexError):
                         pass
                 if len(kernels) < 2:
@@ -495,7 +513,7 @@ def main():
                     pname = ancestor.get("name", "")
                     if pname:
                         if pname.startswith("nn.Module: "):
-                            pname = pname[len("nn.Module: "):]
+                            pname = pname[len("nn.Module: ") :]
                         elif "/" in pname:
                             pname = pname.rsplit("/", 1)[-1]
                         parent_chain.append(pname)
@@ -532,12 +550,14 @@ def main():
                         continue
                     kname = k.get("name", "")
                     ktype, _ = classify_kernel(kname)
-                    parent_groups[parent_uid].append({
-                        "op": ev.get("name", ""),
-                        "kernel_type": ktype,
-                        "kernel_name": kname,
-                        "dur_us": k.get("dur", 0),
-                    })
+                    parent_groups[parent_uid].append(
+                        {
+                            "op": ev.get("name", ""),
+                            "kernel_type": ktype,
+                            "kernel_name": kname,
+                            "dur_us": k.get("dur", 0),
+                        }
+                    )
                 except (KeyError, IndexError):
                     pass
 
@@ -554,7 +574,9 @@ def main():
                 sbase = _strip_module_index(pname)
                 if sbase in seen_sibling_bases:
                     seen_sibling_bases[sbase]["instance_count"] += 1
-                    seen_sibling_bases[sbase]["total_time_us"] += sum(c["dur_us"] for c in children)
+                    seen_sibling_bases[sbase]["total_time_us"] += sum(
+                        c["dur_us"] for c in children
+                    )
                     continue
                 entry = {
                     "ancestor_name": pname,
@@ -578,34 +600,46 @@ def main():
             for s in sibling_seqs:
                 if len(s["sequence"]) < 2:
                     continue
-                fusion_candidates.append({
-                    "module_name": s["ancestor_name"],
-                    "base_name": s["base_name"],
-                    "parent_chain": [],
-                    "instance_count": s["instance_count"],
-                    "kernel_count": len(s["sequence"]),
-                    "eligible_kernel_count": len(s["sequence"]),
-                    "kernels": s["sequence"],
-                    "kernel_type_signature": s["kernel_type_signature"],
-                    "kernel_type_summary": {},
-                    "has_fused_kernel": False,
-                    "total_kernel_time_us": s["total_time_us"],
-                    "source": "sibling_sequence",
-                })
+                fusion_candidates.append(
+                    {
+                        "module_name": s["ancestor_name"],
+                        "base_name": s["base_name"],
+                        "parent_chain": [],
+                        "instance_count": s["instance_count"],
+                        "kernel_count": len(s["sequence"]),
+                        "eligible_kernel_count": len(s["sequence"]),
+                        "kernels": s["sequence"],
+                        "kernel_type_signature": s["kernel_type_signature"],
+                        "kernel_type_summary": {},
+                        "has_fused_kernel": False,
+                        "total_kernel_time_us": s["total_time_us"],
+                        "source": "sibling_sequence",
+                    }
+                )
 
-            fusion_candidates.sort(key=lambda c: c.get("total_kernel_time_us", 0), reverse=True)
+            fusion_candidates.sort(
+                key=lambda c: c.get("total_kernel_time_us", 0), reverse=True
+            )
 
-            fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
+            fusion_candidates_file = (
+                f"{output_dir}/category_data/fusion_candidates.json"
+            )
             with open(fusion_candidates_file, "w") as f:
                 json.dump(fusion_candidates, f, indent=2, default=str)
 
-            print(f"  ✓ Fusion candidates: {len(seen_base)} unique module types, {len(fusion_candidates)} candidates")
-            print(f"  ✓ Written to fusion_candidates.json ({os.path.getsize(fusion_candidates_file) / 1024:.1f} KB)")
+            print(
+                f"  ✓ Fusion candidates: {len(seen_base)} unique module types, {len(fusion_candidates)} candidates"
+            )
+            print(
+                f"  ✓ Written to fusion_candidates.json ({os.path.getsize(fusion_candidates_file) / 1024:.1f} KB)"
+            )
 
         except Exception as ex:
             print(f"  ⚠️  Error during fusion candidate extraction: {ex}")
             traceback.print_exc()
-            fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
+            fusion_candidates_file = (
+                f"{output_dir}/category_data/fusion_candidates.json"
+            )
             fusion_candidates = []
             with open(fusion_candidates_file, "w") as f:
                 json.dump([], f)

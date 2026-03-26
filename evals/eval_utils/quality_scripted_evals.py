@@ -55,7 +55,8 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
 
         missing_cols = set(ref_df.columns) - set(gen_df.columns)
         missing_cols = {
-            c for c in missing_cols
+            c
+            for c in missing_cols
             if not any(c.startswith(p) for p in OPTIONAL_COLUMN_PREFIXES)
         }
         if missing_cols:
