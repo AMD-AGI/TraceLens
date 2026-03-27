@@ -1209,6 +1209,15 @@ class aten_conv_bwd(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
 
 class ConvBias_(CONV):
     """
@@ -1406,6 +1415,19 @@ class ConvBias_Backward(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
+    def bytes_bwd(self):
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
 
 class ConvBiasReLU_(CONV):
     """
@@ -1587,6 +1609,19 @@ class ConvBiasReLU_Backward(CONV):
     def bytes(self):
         # Use backward bytes calculation from CONV base class
         # ReLU backward requires reading the forward output mask
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
+    def bytes_bwd(self):
         if self.param_details["input_shape"] is None:
             return None
         dtype_input_weight = self.param_details["dtype_input_weight"]
