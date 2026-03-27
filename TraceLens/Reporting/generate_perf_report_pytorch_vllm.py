@@ -104,20 +104,12 @@ def get_dfs_short_kernels(
         * 100
     )
 
-    # Sort and format — deterministic ordering for reproducible reports.
-    # Only use string-typed groupby columns as tie-breakers (tuple columns
-    # like Input dims / Input strides are not sortable).
+    # Sort: primary by total short-kernel time (desc), then all other columns for stable order
+    _sum_col = "Short Kernel duration (µs) sum"
+    _sort_cols = [_sum_col] + [c for c in df_grouped.columns if c != _sum_col]
+    _ascending = [False] + [True] * (len(_sort_cols) - 1)
+    df_grouped.sort_values(by=_sort_cols, ascending=_ascending, inplace=True)
     df_grouped.reset_index(inplace=True)
-    str_tiebreakers = [
-        c
-        for c in groupby_cols
-        if df_grouped[c].dtype == object
-        and not df_grouped[c].apply(lambda v: isinstance(v, tuple)).any()
-    ]
-    sort_cols = ["Short Kernel duration (µs) sum"] + str_tiebreakers
-    sort_ascending = [False] + [True] * len(str_tiebreakers)
-    df_grouped.sort_values(by=sort_cols, ascending=sort_ascending, inplace=True)
-    df_grouped.reset_index(drop=True, inplace=True)
     if topk is not None:
         df_grouped = df_grouped.head(topk)
     return df_hist, df_grouped
