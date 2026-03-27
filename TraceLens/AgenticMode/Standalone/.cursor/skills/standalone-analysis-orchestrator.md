@@ -50,6 +50,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 10.1. Generate and Embed Performance Improvement Plot (single atomic call: plot_data + matplotlib PNG + base64 embed)
 ```
 
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 5.5, 6, 7). All other steps must be performed directly by the orchestrator using the command prefix.
+
 ---
 
 ## Step 0: Query User Inputs
