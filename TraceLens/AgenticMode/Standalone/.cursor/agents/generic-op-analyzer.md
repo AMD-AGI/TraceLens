@@ -140,7 +140,16 @@ X uncategorized operations account for Y% of compute time.
 Sub-categories: W graph, V miscellaneous.
 
 ## Operations Breakdown
-[Generated table with name, count, time, efficiency, sub-category]
+
+| Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type | Sub-Category |
+|-----------|-------|-----------|---------------|------------|------------|------|--------------|
+
+**Column mappings:**
+- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. Format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
+- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
+- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
+- **Sub-Category**: Use `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`)
 
 ## Key Findings
 

@@ -424,11 +424,11 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 **CRITICAL - READ FIRST:**
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
 - Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
-- When citing peak TFLOPS, use each operation's `efficiency.resolved_peak_maf` from the metrics JSON (precision-specific)
+- When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
 
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
-- Resolved Peak MAF: Each operation's `efficiency.resolved_peak_maf` has the precision-correct peak — use this when citing peak TFLOPS
+- Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
 - Impact estimates assume tuning can reach 75–100% of roofline (midpoint 87.5% used for plots)
 
 **Input files:**
