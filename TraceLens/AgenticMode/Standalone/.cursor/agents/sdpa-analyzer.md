@@ -22,8 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
-- `node`: Node name for SSH access (e.g., `my_node`)
-- `container`: Docker container with TraceLens installed (e.g., `my_container`)
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - `sdpa`: Either `sdpa_fwd` (forward pass) or `sdpa_bwd` (backward pass)
 
 **Input files (pre-computed by orchestrator):**
@@ -61,15 +60,15 @@ Use vendor-agnostic terminology:
 
 ## Analysis Workflow
 
-### Step 1: Run Analysis Script (Inside Container)
+### Step 1: Run Analysis Script
 
-Execute the Python script inside the container on the node. Pass `--category` to specify forward or backward:
+Execute the analysis script using the command prefix. Pass `--category` to specify forward or backward:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/sdpa_analysis.py \
   --output-dir <output_dir> \
-  --category <sdpa>"
+  --category <sdpa>
 ```
 
 Where `<sdpa>` is `sdpa_fwd` or `sdpa_bwd`.
@@ -138,7 +137,18 @@ From each operation's `classification.workload_profile`:
 
 ### Step 6: Generate Markdown Tables
 
-Build operations table from `metrics['operations']`.
+Build the operations breakdown table from `metrics['operations']`:
+
+```markdown
+| Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type |
+|-----------|-------|-----------|---------------|------------|------------|------|
+```
+
+**Column mappings:**
+- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. Format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
+- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
+- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
 
 For Paged Attention, include additional columns:
 - Kernel breakdown (if available)
@@ -159,7 +169,7 @@ For each validated bottleneck, provide recommendations based on attention type. 
 
 ### Step 8: Write Category Findings
 
-Create `<output_dir>/category_findings/<sdpa>_findings.md`. Create it through the container on the node:
+Write `<output_dir>/category_findings/<sdpa>_findings.md` using the command prefix:
 
 Include:
 - Attention type detected (Flash, Paged, Standard)

@@ -22,8 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
-- `node`: Node name for SSH access (e.g., `my_node`)
-- `container`: Docker container with TraceLens installed (e.g., `my_container`)
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input files (pre-computed by orchestrator, if MoE exists):**
 1. `<output_dir>/category_data/moe_fused_ops.csv` - Filtered MoE operations
@@ -59,14 +58,14 @@ Use vendor-agnostic terminology:
 
 ## Analysis Workflow
 
-### Step 1: Run Analysis Script (Inside Container)
+### Step 1: Run Analysis Script
 
-Execute the Python script inside the container on the node:
+Execute the analysis script using the command prefix:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/moe_analysis.py \
-  --output-dir <output_dir>"
+  --output-dir <output_dir>
 ```
 
 The script outputs `moe_fused_metrics.json` to `category_data/`.
@@ -100,7 +99,7 @@ Build the operations breakdown table from `metrics['operations']`:
 
 **Column mappings:**
 - **Count**: Use `operations[i].count` (total invocations, not unique signatures)
-- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. Format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
 - **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
 - **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
 
@@ -121,7 +120,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 6: Write Category Findings
 
-Create `<output_dir>/category_findings/moe_fused_findings.md`. Create it through the container on the node.
+Write `<output_dir>/category_findings/moe_fused_findings.md` using the command prefix.
 
 ```markdown
 # MoE Analysis Summary
@@ -202,7 +201,8 @@ Do not look up peaks independently from the metadata dict.
 2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the appropriate peak (MAF for compute-bound, HBM BW for memory-bound)
 3. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
-5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**.When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
+5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**. When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
+6. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution -- these are not observable from kernel-level trace data
 
 ---
 
@@ -241,5 +241,3 @@ Do not look up peaks independently from the metadata dict.
 | Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
 | Occupancy | Requires hardware counters | "Kernel running slower than expected" |
 | Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |
-
-**Key principle**: This analysis identifies bottlenecks. Root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution — these are not observable from kernel-level trace data.

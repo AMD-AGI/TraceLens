@@ -122,6 +122,19 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ---
 
+## Kernel Fusion Opportunities (Experimental)
+
+> **Note:** Kernel fusion analysis is experimental. The Compute Kernel section above analyzes the individual constituent kernels of these fusion candidates independently. Joint analysis, where fusion candidate's performance is also estimated, is planned for a future release. Opportunities are ranked by confidence level. Actual savings depend on implementation feasibility and interaction effects.
+
+<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Each finding uses Insight / Action format (no Impact -- detection only). -->
+<!-- P1/P2/P3+ ordered by confidence then kernel time. -->
+<!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
+
+No kernel fusion opportunities detected.
+
+---
+
 ## System-Level Optimizations
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
@@ -177,7 +190,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 For each category, include total time, % of compute, average efficiency (if from metrics), and either:
 
-- **Per-op table from `*_metrics.json`**: columns **Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Potential improvement (time, E2E %)**. The FLOPS/Byte column shows arithmetic intensity from `operations[i].efficiency.flops_per_byte` (use "—" when null); this grounds the compute-bound vs memory-bound classification against the platform's ridge point (peak MAF / peak HBM BW). The last column shows both time range and E2E % range from `impact_estimates` when kernel_tuning estimates exist (e.g. "~635–2378 ms (1.12–4.19% E2E)"); use "—" when no estimates. Match impact rows to ops by `time_ms` (and operation name) from the same metrics file.
+- **Per-op table from `*_metrics.json`**: columns **Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Potential improvement (time, E2E %)**. The FLOPS/Byte column shows arithmetic intensity from `operations[i].efficiency.flops_per_byte` (use "—" when null); this grounds the compute-bound vs memory-bound classification against the platform's ridge point (peak MAF / peak HBM BW). The Efficiency column shows `efficiency_percent` from the metrics JSON, formatted as `X.XX% of Y TFLOPS` for compute-bound ops (Y = `resolved_peak_maf`) or `X.XX% of Y TB/s` for memory-bound ops (Y = `resolved_peak_hbm_bw`). The last column shows both time range and E2E % range from `impact_estimates` when kernel_tuning estimates exist (e.g. "~635–2378 ms (1.12–4.19% E2E)"); use "—" when no estimates. Match impact rows to ops by `time_ms` (and operation name) from the same metrics file.
 
 - **For categories with a CSV but no metrics** (e.g. **multi_tensor_apply**): a **Most expensive instances** table from the category CSV: top N rows by `Kernel Time (µs)_sum`, columns Operation | Kernel time (ms) | % of category | Count. (No Efficiency or Potential improvement columns when metrics are absent.)
 

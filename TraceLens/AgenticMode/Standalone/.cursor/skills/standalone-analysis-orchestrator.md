@@ -50,6 +50,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 10.1. Generate and Embed Performance Improvement Plot (single atomic call: plot_data + matplotlib PNG + base64 embed)
 ```
 
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 5.5, 6, 7). All other steps must be performed directly by the orchestrator using the command prefix.
+
 ---
 
 ## Step 0: Query User Inputs
@@ -142,7 +144,8 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
-  --enable_pseudo_ops
+  --enable_pseudo_ops \
+  --group_by_num_kernels
 ```
 
 **Inference eager mode** (analysis_mode = `inference`, inference_exec_mode = `eager`):
@@ -154,7 +157,8 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --group_by_parent_module \
-  --enable_pseudo_ops
+  --enable_pseudo_ops \
+  --group_by_num_kernels
 ```
 
 **Inference graph replay + capture mode** (analysis_mode = `inference`, inference_exec_mode = `graph_capture`):
@@ -167,7 +171,8 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --group_by_parent_module \
-  --enable_pseudo_ops
+  --enable_pseudo_ops \
+  --group_by_num_kernels
 ```
 
 This generates:
@@ -273,10 +278,12 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 
 - `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_flagged` is `true`)
 - `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
+- `kernel_fusion` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/kernel-fusion-analyzer.md` (invoke if `kernel_fusion` category exists in manifest)
 
 **Invocation conditions:**
-- **CPU/Idle**: Read `category_data/cpu_idle_metrics.json` and check `idle_flagged`. Only invoke the subagent if `idle_flagged` is `true` (idle > 15%). Skip if `false` -- the deterministic script already captured the factual data.
+- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
+- **Kernel Fusion**: `kernel_fusion` category exists in manifest
 
 **Task prompt structure for each subagent:**
 
@@ -300,7 +307,7 @@ Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script inside the container on the node
+1. Running its Python script using the command prefix
 2. Reading the metrics JSON output
 3. Identifying issues and generating findings
 
@@ -383,7 +390,7 @@ Follow the agent instructions above to complete the analysis.
 ```
 
 **CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script inside the container on the node
+1. Running its Python script using the command prefix
 2. Reading the metrics JSON output
 3. Identifying bottlenecks and generating findings
 
@@ -422,11 +429,11 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 **CRITICAL - READ FIRST:**
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
 - Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
-- When citing peak TFLOPS, use each operation's `efficiency.resolved_peak_maf` from the metrics JSON (precision-specific)
+- When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
 
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
-- Resolved Peak MAF: Each operation's `efficiency.resolved_peak_maf` has the precision-correct peak — use this when citing peak TFLOPS
+- Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
 - Impact estimates assume tuning can reach 75–100% of roofline (midpoint 87.5% used for plots)
 
 **Input files:**
@@ -485,7 +492,7 @@ load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
-Then read the individual findings files through the container as needed for report assembly.
+Then read the individual findings files using the command prefix as needed for report assembly.
 
 ### Aggregate Compute Kernel Recommendations
 
@@ -574,24 +581,24 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 
 ---
 
-## Step 10: Generate Final Report
+## Step 10: Generate Final Report (<output_dir>/standalone_analysis.md)
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it, otherwise NFS caching may cause `generate_and_embed_plot()` to see a stale version and silently fail to embed the performance plot.
-3. **Fill in** each section by substituting placeholders with data from:
+2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it.
+3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items, detailed analysis)
    - `system_findings/*.md` (system-level P-items, detailed analysis)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
-4. **Write** the completed report back to `<output_dir>/standalone_analysis.md` using `<prefix>`.
 
-The report **must** use these exact `##` headers — do NOT rename them:
+The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
 2. `## Compute Kernel Optimizations`
-3. `## System-Level Optimizations`
-4. `## Detailed Analysis: Compute Kernels`
-5. `## Detailed Analysis: System-Level`
-6. `## Appendix`
+3. `## Kernel Fusion Opportunities (Experimental)`
+4. `## System-Level Optimizations`
+5. `## Detailed Analysis: Compute Kernels`
+6. `## Detailed Analysis: System-Level`
+7. `## Appendix`
 
 Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
 
@@ -618,9 +625,10 @@ print('PASS: All required sections present')
 **If validation fails (exit code 1):**
 
 1. Read the FAIL output to identify missing sections
-2. Fix the report by adding the missing sections with the correct `##` headers, keeping existing content
-3. Run validation again
-4. Maximum 2 retry attempt. If still failing after retry, proceed to Step 10.2 with a warning
+2. Check if the report contains similar but incorrectly named headers (e.g., `## Compute Kernel Analysis` instead of `## Compute Kernel Optimizations`, or `## System-Level Analysis` instead of `## System-Level Optimizations`) and rename them to match the exact required names using string replacement. Do NOT rewrite the report from scratch.
+3. If sections are entirely absent, add them with the correct `##` headers, keeping existing content
+4. Run validation again
+5. Maximum 3 retry attempts. If still failing after retry, proceed to Step 10.2 with a warning
 
 ---
 

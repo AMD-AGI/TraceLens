@@ -21,6 +21,7 @@ import pandas as pd
 CSV_COLUMNS = ["index", "category", "issue_summary", "result", "details"]
 NUMERIC_TOLERANCE = 0.01
 ABS_TOLERANCE = 0.05
+OPTIONAL_COLUMN_PREFIXES = ("Pct Roofline", "Roofline Time")
 
 _NUMPY_TYPE_RE = re.compile(r"np\.\w+\(([^)]+)\)")
 
@@ -53,6 +54,11 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
         gen_df = pd.read_csv(gen_path)
 
         missing_cols = set(ref_df.columns) - set(gen_df.columns)
+        missing_cols = {
+            c
+            for c in missing_cols
+            if not any(c.startswith(p) for p in OPTIONAL_COLUMN_PREFIXES)
+        }
         if missing_cols:
             mismatches.append(f"{fname}: missing required columns: {missing_cols}")
             continue

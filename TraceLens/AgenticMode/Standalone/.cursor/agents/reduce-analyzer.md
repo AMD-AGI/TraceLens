@@ -22,8 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
-- `node`: Node name for SSH access (e.g., `my_node`)
-- `container`: Docker container with TraceLens installed (e.g., `my_container`)
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/reduce_ops.csv` - Filtered reduce operations
@@ -71,14 +70,14 @@ Use vendor-agnostic terminology:
 
 ## Analysis Workflow
 
-### Step 1: Run Analysis Script (Inside Container)
+### Step 1: Run Analysis Script
 
-Execute the Python script inside the container on the node:
+Execute the analysis script using the command prefix:
 
 ```bash
-ssh <node> "docker exec <container> python3 \
+<prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/reduce_analysis.py \
-  --output-dir <output_dir>"
+  --output-dir <output_dir>
 ```
 
 ### Step 2: Read Metrics
@@ -134,7 +133,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 7: Write Category Findings
 
-Create `<output_dir>/category_findings/reduce_findings.md`. Create it through the container on the node.
+Write `<output_dir>/category_findings/reduce_findings.md` using the command prefix.
 
 The findings file **must** include the performance model caveat after the Status line:
 
