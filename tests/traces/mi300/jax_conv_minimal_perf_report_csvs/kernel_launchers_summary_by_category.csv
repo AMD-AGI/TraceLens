@@ -1,0 +1,3 @@
+op category,Count,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%),time ms per gpu
+Uncategorized Events/XLA,15,2.046661,57.06580216384083,57.06580216384083,2.046661
+Conv,10,1.539832,42.93419783615917,100.0,1.539832
