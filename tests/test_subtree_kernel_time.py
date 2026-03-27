@@ -258,8 +258,8 @@ class TestComputeSubtreeKernelTimeUs:
         assert analyzer._compute_subtree_kernel_time_us(child_mul) == 40.0
 
 
-def _generate_pytorch_perf_report(profile_path, output_path):
-    """Run generate_perf_report_pytorch.py to produce an xlsx report."""
+def _generate_pytorch_perf_report(profile_path, output_csvs_dir):
+    """Run generate_perf_report_pytorch.py to produce per-sheet CSVs."""
     script_path = os.path.abspath(
         os.path.join(
             os.path.dirname(__file__),
@@ -274,15 +274,15 @@ def _generate_pytorch_perf_report(profile_path, output_path):
         script_path,
         "--profile_json_path",
         profile_path,
-        "--output_xlsx_path",
-        output_path,
+        "--output_csvs_dir",
+        output_csvs_dir,
         "--enable_kernel_summary",
         "--short_kernel_study",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"generate_perf_report_pytorch failed: {result.stderr}")
-    return output_path
+    return output_csvs_dir
 
 
 class TestOpsSummarySubtreeVsDirectFromReport:
@@ -307,14 +307,15 @@ class TestOpsSummarySubtreeVsDirectFromReport:
             pytest.skip(f"Trace not found: {profile_path}")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            report_path = os.path.join(tmpdir, "perf_report.xlsx")
-            _generate_pytorch_perf_report(profile_path, report_path)
+            csv_dir = os.path.join(tmpdir, "perf_report_csvs")
+            os.makedirs(csv_dir, exist_ok=True)
+            _generate_pytorch_perf_report(profile_path, csv_dir)
 
-            xls = pd.ExcelFile(report_path)
-            if "ops_summary" not in xls.sheet_names:
-                pytest.skip("ops_summary sheet not in report")
+            ops_path = os.path.join(csv_dir, "ops_summary.csv")
+            if not os.path.isfile(ops_path):
+                pytest.skip("ops_summary.csv not in report")
 
-            df = pd.read_excel(report_path, sheet_name="ops_summary")
+            df = pd.read_csv(ops_path)
 
             if "total_direct_kernel_time_sum" not in df.columns:
                 pytest.skip("ops_summary missing total_direct_kernel_time_sum")

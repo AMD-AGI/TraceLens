@@ -358,10 +358,11 @@ class RocprofAnalyzer:
             else 0
         )
 
-        # Sort by total time descending
-        df_summary.sort_values(
-            by="Short Kernel duration (µs) sum", ascending=False, inplace=True
-        )
+        # Primary: total short-kernel time (desc); then all other columns for stable order
+        _sum_col = "Short Kernel duration (µs) sum"
+        _sort_cols = [_sum_col] + [c for c in df_summary.columns if c != _sum_col]
+        _ascending = [False] + [True] * (len(_sort_cols) - 1)
+        df_summary.sort_values(by=_sort_cols, ascending=_ascending, inplace=True)
         df_summary.reset_index(drop=True, inplace=True)
 
         return df_summary
