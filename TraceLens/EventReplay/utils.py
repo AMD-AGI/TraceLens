@@ -32,8 +32,16 @@ list_profile_tensor_types = [
     "c10::Half",
     "c10::BFloat16",
     "long",
+    "long int",
     "int",
     "bool",
+    "unsigned char",
+    "char",
+    "short",
+    "c10::Float8_e4m3fnuz",
+    "c10::Float8_e5m2fnuz",
+    "c10::Float8_e4m3fn",
+    "c10::Float8_e5m2",
 ]
 
 from dataclasses import dataclass
@@ -58,15 +66,35 @@ def build_tensor(cfg: TensorCfg, device: str = "cuda") -> "torch.Tensor":
         "bool": torch.bool,
         "int": torch.int,
         "long": torch.long,
+        "long int": torch.long,
+        "short": torch.short,
+        "char": torch.int8,
+        "unsigned char": torch.uint8,
         "double": torch.float64,
         "float": torch.float32,
         "c10::Half": torch.float16,
         "c10::BFloat16": torch.bfloat16,
     }
+    # FP8 types (available in PyTorch >= 2.1)
+    for fp8_name in (
+        "c10::Float8_e4m3fnuz",
+        "c10::Float8_e5m2fnuz",
+        "c10::Float8_e4m3fn",
+        "c10::Float8_e5m2",
+    ):
+        attr = fp8_name.replace("c10::", "")
+        torch_dtype = getattr(torch, attr.lower(), None)
+        if torch_dtype is not None:
+            dict_profile2torchdtype[fp8_name] = torch_dtype
+
+    if cfg.dtype not in dict_profile2torchdtype:
+        raise ValueError(
+            f"Unknown profiled dtype '{cfg.dtype}'. "
+            f"Known types: {list(dict_profile2torchdtype.keys())}"
+        )
     dtype = dict_profile2torchdtype[cfg.dtype]
     size = cfg.shape
     stride = cfg.strides
-    # allocate *exactly* the storage needed for that stride/shape
     t = torch.empty_strided(size, stride, dtype=dtype, device=device)
     is_floating = t.is_floating_point() or t.is_complex()
     init = cfg.init
@@ -75,7 +103,9 @@ def build_tensor(cfg: TensorCfg, device: str = "cuda") -> "torch.Tensor":
             raise ValueError(
                 f"Cannot initialize tensor of type {cfg.dtype} with 'normal' init."
             )
-        t.normal_()  # or whatever init you like
+        t.normal_()
+    elif init == "zeros":
+        t.zero_()
     elif init is not None:
         raise ValueError(f"Unsupported tensor initialization: {init}")
     return t
