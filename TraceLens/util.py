@@ -141,7 +141,7 @@ class JaxProfileProcessor:
         return hlo_ops
 
     @staticmethod
-    def _resolve_operand_references(hlo_ops: dict):
+    def _resolve_operand_references(hlo_ops: dict, max_warnings: int = 10):
         """Resolve operand references that lack inline type info.
 
         Some graph viewer backends (e.g. xprof >= 2.20.0) emit operands as bare
@@ -150,6 +150,7 @@ class JaxProfileProcessor:
         downstream consumers (parse_operands, parse_conv_metadata) see the expected
         shape strings.
         """
+        unresolved_count = 0
         for op_data in hlo_ops.values():
             operands = op_data.get("operands")
             if not isinstance(operands, list):
@@ -161,13 +162,22 @@ class JaxProfileProcessor:
                     if ref_data and "output" in ref_data:
                         resolved.append(ref_data["output"])
                         continue
-                    logger.warning(
-                        "Unable to resolve HLO operand reference '%s'; "
-                        "HLO metadata for this operand may be incomplete.",
-                        operand,
-                    )
+                    unresolved_count += 1
+                    if unresolved_count <= max_warnings:
+                        logger.warning(
+                            "Unable to resolve HLO operand reference '%s'; "
+                            "HLO metadata for this operand may be incomplete.",
+                            operand,
+                        )
                 resolved.append(operand)
             op_data["operands"] = resolved
+        if unresolved_count > max_warnings:
+            logger.warning(
+                "Total unresolved HLO operand references: %d "
+                "(%d warnings suppressed)",
+                unresolved_count,
+                unresolved_count - max_warnings,
+            )
 
     @staticmethod
     def process_line(hlo_ops: dict, line: str):

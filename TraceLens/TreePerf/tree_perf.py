@@ -3036,6 +3036,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             "u32": 4,
             "f16": 2,
             "u64": 8,
+            "pred": 1,
         }
 
         def parse_dtype_shape_layout(operand):
@@ -3060,8 +3061,12 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             for operand in operands:
                 dtype, shape, layout = parse_dtype_shape_layout(operand)
                 if shape and dtype:
+                    bpe = dtype_to_bytes.get(dtype, None)
+                    if bpe is None:
+                        logger.warning(f"Unknown dtype: {dtype}")
+                        continue
                     total_input_bytes = (
-                        total_input_bytes + np.prod(shape) * dtype_to_bytes[dtype]
+                        total_input_bytes + np.prod(shape) * bpe
                     )
 
             total_input_bytes_list.append(total_input_bytes)
