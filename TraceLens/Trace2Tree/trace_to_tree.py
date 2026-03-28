@@ -315,6 +315,8 @@ class JaxTraceToTree(BaseTraceToTree):
         self.linking_key_to_uid_map = defaultdict(list)
         self.hlo_ops = defaultdict(list)
         self.metadata = dict
+        self._missing_hlo_warnings = 0
+        self._max_hlo_warnings = 10
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
@@ -575,10 +577,21 @@ class JaxTraceToTree(BaseTraceToTree):
                                             hlo_module
                                         ).get(hlo_op)
                                     else:
-                                        logger.warning(f"Missing hlo_op: {hlo_op}")
-                                        logger.warning(
-                                            f"in hlo_module: {GPU_event['args']['hlo_module']}"
-                                        )
+                                        self._missing_hlo_warnings += 1
+                                        if self._missing_hlo_warnings <= self._max_hlo_warnings:
+                                            logger.warning(f"Missing hlo_op: {hlo_op}")
+                                            logger.warning(
+                                                f"in hlo_module: {GPU_event['args']['hlo_module']}"
+                                            )
+                                            if self._missing_hlo_warnings == self._max_hlo_warnings:
+                                                logger.warning(
+                                                    "Further missing hlo_op warnings will be suppressed."
+                                                )
+        if self._missing_hlo_warnings > self._max_hlo_warnings:
+            logger.warning(
+                f"Total missing hlo_op warnings: {self._missing_hlo_warnings} "
+                f"({self._missing_hlo_warnings - self._max_hlo_warnings} suppressed)"
+            )
 
 
 class TraceToTree:
