@@ -9,6 +9,7 @@
 
 from pprint import pprint
 from typing import Dict, Any, List, Optional, Tuple
+import logging
 import re
 import warnings
 import time
@@ -20,19 +21,36 @@ from .utils import (
     list_profile_tensor_types,
 )
 
+logger = logging.getLogger(__name__)
 
-def _resolve_op_func(op_name: str):
-    """
-    Resolve an op name (e.g. 'aten::mm', 'vllm::rocm_unquantized_gemm') to a
-    callable.  Tries multiple resolution strategies and returns the first that
-    yields a non-None callable.
+# ── Known defaults for string arguments the profiler drops ──────────────
+# The PyTorch profiler records `str` arguments as empty strings.  When we
+# know the only sensible default we fill it in automatically and warn.
+# Key = argument name, Value = default string value.
+_STR_ARG_DEFAULTS: Dict[str, str] = {
+    "kv_cache_dtype": "auto",
+}
 
-    Returns (func, source_str) or raises RuntimeError.
+# ── Op-name aliases ─────────────────────────────────────────────────────
+# Some frameworks profile an op under one namespace but register the
+# actual callable under a different one.
+# Key = name as it appears in the trace, Value = list of candidates to try.
+# NOTE: aiter::paged_attention_v1/v2 are NOT aliasable — the aiter JIT
+# wrapper records a different arg layout than the underlying _C:: / _rocm_C::
+# schemas, so arg mapping would fail even if resolution succeeds.
+_OP_NAME_ALIASES: Dict[str, List[str]] = {
+    "_rocm_C::wvSplitK": ["_rocm_C::wvSpltK"],
+}
+
+
+def _try_resolve(op_name: str):
+    """Attempt JIT + torch.ops + module resolution for a single op name.
+    Returns (func, source_str) or (None, None).
     """
     torch = _get_torch_or_raise()
+    import importlib
 
-    # 1. JIT registry first — preserves dispatch behaviour that the original
-    #    profiled run used (important for in-place aten ops like add_).
+    # 1. JIT registry — preserves dispatch behaviour for aten ops.
     try:
         func, _ = torch._C._jit_get_operation(op_name)
         if func is not None:
@@ -40,15 +58,54 @@ def _resolve_op_func(op_name: str):
     except RuntimeError:
         pass
 
-    # 2. torch.ops namespace lookup (most reliable for custom ops that may
-    #    not be registered in the JIT registry).
     if "::" in op_name:
         ns, func_name = op_name.split("::", 1)
+
+        # 2. torch.ops namespace — custom ops registered via torch.library.
         ns_obj = getattr(torch.ops, ns, None)
         if ns_obj is not None:
             func_obj = getattr(ns_obj, func_name, None)
             if callable(func_obj):
                 return func_obj, "torch.ops"
+
+        # 3. Direct Python module lookup — handles JIT-compiled ops (e.g.
+        #    aiter) that exist as Python callables but aren't registered in
+        #    the torch op registry.
+        try:
+            mod = importlib.import_module(ns)
+            func_obj = getattr(mod, func_name, None)
+            if callable(func_obj):
+                return func_obj, f"module:{ns}"
+        except ImportError:
+            pass
+
+    return None, None
+
+
+def _resolve_op_func(op_name: str):
+    """
+    Resolve an op name (e.g. 'aten::mm', 'vllm::rocm_unquantized_gemm') to a
+    callable.  Tries multiple resolution strategies:
+
+    1. JIT registry (preserves original dispatch behaviour).
+    2. torch.ops namespace (custom ops registered via torch.library / pybind).
+    3. Known aliases from _OP_NAME_ALIASES (handles trace-name mismatches).
+
+    Returns (func, source_str, resolved_name) or raises RuntimeError.
+    """
+    func, source = _try_resolve(op_name)
+    if func is not None:
+        return func, source, op_name
+
+    for alias in _OP_NAME_ALIASES.get(op_name, []):
+        func, source = _try_resolve(alias)
+        if func is not None:
+            logger.warning(
+                "Op '%s' resolved via alias '%s' (%s). "
+                "The trace recorded a different namespace than the runtime registration.",
+                op_name, alias, source,
+            )
+            return func, source, alias
 
     raise RuntimeError(
         f"Cannot resolve op '{op_name}'. Ensure the library that defines it "
@@ -141,13 +198,17 @@ class EventReplayer:
         if self.verbose:
             print(f"Preparing {self.event['name']} event for replay")
 
-        self._func, self._func_source = _resolve_op_func(self.event["name"])
+        self._func, self._func_source, self._resolved_name = _resolve_op_func(
+            self.event["name"]
+        )
         if self.verbose:
             print(f"Resolved op via {self._func_source}")
+            if self._resolved_name != self.event["name"]:
+                print(f"  (aliased from '{self.event['name']}' -> '{self._resolved_name}')")
 
         try:
             self.matched_schema = EventReplayer._search_schema(
-                self.event, self.verbose
+                self.event, self._resolved_name, self.verbose
             )
             self._schemaless = False
         except ValueError:
@@ -161,7 +222,7 @@ class EventReplayer:
 
         if self._schemaless:
             self.event_replay_IR = EventReplayer._get_event_replay_IR_schemaless(
-                self.event, self.verbose
+                self.event, self.verbose, resolved_name=self._resolved_name
             )
         else:
             self.event_replay_IR = EventReplayer._get_event_replay_IR(
@@ -189,9 +250,12 @@ class EventReplayer:
 
     @staticmethod
     def _search_schema(
-        event: Dict[str, Any], verbose: bool = False
+        event: Dict[str, Any],
+        resolved_name: Optional[str] = None,
+        verbose: bool = False,
     ) -> Optional["torch._C.FunctionSchema"]:
-        op_schemas = _search_schemas(event["name"], verbose=verbose)
+        name = resolved_name or event["name"]
+        op_schemas = _search_schemas(name, verbose=verbose)
 
         for schema in op_schemas:
             if verbose:
@@ -206,7 +270,7 @@ class EventReplayer:
                 print("-" * 80)
 
         raise ValueError(
-            f"Cannot find matching schema for {event['name']}. "
+            f"Cannot find matching schema for {name}. "
             f"Searched {len(op_schemas)} candidate(s). "
             f"Please check the event data and ensure the op's library is imported."
         )
@@ -372,7 +436,15 @@ class EventReplayer:
             if arg_type.endswith("?") and event["args"]["Input type"][idx] == "":
                 if arg_type.startswith("str"):
                     default = full_args_schema[idx].get("default")
-                    value = "" if default is None or default == "None" else default
+                    if default is None or default == "None":
+                        default = _STR_ARG_DEFAULTS.get(arg_name)
+                        if default is not None:
+                            logger.warning(
+                                "%s arg '%s' (position %d): profiler dropped "
+                                "the string value. Using known default '%s'.",
+                                evt_name, arg_name, idx, default,
+                            )
+                    value = "" if default is None else default
                 else:
                     value = None
             elif (
@@ -408,7 +480,15 @@ class EventReplayer:
                     elif arg_type in ("float", "float?"):
                         value = float(arg_str)
                     elif arg_type in ("str", "str?"):
-                        value = arg_str
+                        if not arg_str and arg_name in _STR_ARG_DEFAULTS:
+                            value = _STR_ARG_DEFAULTS[arg_name]
+                            logger.warning(
+                                "%s arg '%s' (position %d): profiler dropped "
+                                "the string value. Using known default '%s'.",
+                                evt_name, arg_name, idx, value,
+                            )
+                        else:
+                            value = arg_str
                     elif arg_type.startswith("int[") or arg_type.startswith("SymInt["):
                         value = [
                             int(x.strip()) for x in arg_str.strip()[1:-1].split(",")
@@ -437,8 +517,22 @@ class EventReplayer:
         return {"list_pos_args": list_pos_args, "list_kwargs": list_kwargs}
 
     @staticmethod
+    def _get_schema_arg_names(op_name: str) -> List[str]:
+        """Best-effort: return a list of arg names from any available schema."""
+        schemas = _search_schemas(op_name, verbose=False)
+        if not schemas:
+            return []
+        try:
+            _, pos_args, kw_args, _ = EventReplayer.parse_schema_string(schemas[0])
+            return [a["arg_name"] for a in pos_args + kw_args]
+        except Exception:
+            return []
+
+    @staticmethod
     def _get_event_replay_IR_schemaless(
-        event: Dict[str, Any], verbose: bool = False
+        event: Dict[str, Any],
+        verbose: bool = False,
+        resolved_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Build a replay IR without a schema by inferring types directly from the
@@ -449,9 +543,13 @@ class EventReplayer:
           - If Input type is 'Scalar' and Concrete Inputs looks like int -> int
           - If Input type is 'Scalar' and Concrete Inputs looks like float -> float
           - If Input type is 'Scalar' and Concrete Inputs is true/false -> bool
-          - If Input type is '' and Concrete Inputs is '' -> None
+          - If Input type is '' and Concrete Inputs is '' -> check _STR_ARG_DEFAULTS
         """
         evt_name = event["name"]
+        schema_arg_names = EventReplayer._get_schema_arg_names(
+            resolved_name or evt_name
+        )
+
         list_pos_args = []
         n_args = len(event["args"]["Input type"])
         for idx in range(n_args):
@@ -494,8 +592,22 @@ class EventReplayer:
                         value = concrete
                         arg_type = "str"
             elif profiled_type == "" and concrete == "":
-                value = None
-                arg_type = "None"
+                # Likely a dropped str arg — check known defaults
+                hint_name = (
+                    schema_arg_names[idx] if idx < len(schema_arg_names) else None
+                )
+                default = _STR_ARG_DEFAULTS.get(hint_name) if hint_name else None
+                if default is not None:
+                    value = default
+                    arg_type = "str"
+                    logger.warning(
+                        "%s arg '%s' (position %d): profiler dropped the "
+                        "string value. Using known default '%s'.",
+                        evt_name, hint_name, idx, default,
+                    )
+                else:
+                    value = None
+                    arg_type = "None"
             elif profiled_type == "ScalarList" and concrete:
                 items = [x.strip() for x in concrete.strip()[1:-1].split(",") if x.strip()]
                 if all(x.lstrip("-").isdigit() for x in items):
@@ -509,7 +621,9 @@ class EventReplayer:
                 if verbose:
                     print(f"  -> defaulting to None for unknown type")
 
-            inferred_name = f"arg{idx}"
+            inferred_name = (
+                schema_arg_names[idx] if idx < len(schema_arg_names) else f"arg{idx}"
+            )
             list_pos_args.append(
                 {"arg_name": inferred_name, "arg_type": arg_type, "value": value}
             )
@@ -556,17 +670,22 @@ class EventReplayer:
         kwarg_part = parts[1].lstrip(",").strip() if len(parts) > 1 else ""
 
         def _parse_arg(raw_arg: str) -> Tuple[str, str, Optional[str], bool]:
-            m = re.match(r"^(\S+)\s+(.*)$", raw_arg)
+            # Match type (may contain spaces, e.g. "Tensor($0! -> )") then name[=default].
+            # Greedy (.+) consumes everything up to the last whitespace before
+            # a valid identifier, so "Tensor($0! -> ) key_cache" parses correctly.
+            m = re.match(
+                r"^(.+)\s+([A-Za-z_]\w*(?:=.*)?)$", raw_arg.strip()
+            )
             if not m:
                 raise ValueError(f"Invalid arg: {raw_arg}")
-            arg_type, rest = m.groups()
-            m2 = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", rest)
+            arg_type = m.group(1).strip()
+            name_default = m.group(2)
+            m2 = re.match(r"^([A-Za-z_]\w*)(?:=(.*))?$", name_default)
             if not m2:
-                raise ValueError(f"Invalid arg name/default: {rest}")
-            arg_name, default = m2.group(1), (
-                m2.group(2).strip() if m2.group(2) else None
-            )
-            return arg_type.strip(), arg_name.strip(), default
+                raise ValueError(f"Invalid arg name/default: {name_default}")
+            arg_name = m2.group(1)
+            default = m2.group(2).strip() if m2.group(2) else None
+            return arg_type, arg_name, default
 
         args = []
         for item in [x.strip() for x in pos_part.split(",") if x.strip()]:
