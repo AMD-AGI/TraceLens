@@ -381,10 +381,11 @@ def get_dfs_short_kernels(
         * 100
     )
 
-    # Sort and format
-    df_grouped.sort_values(
-        by="Short Kernel duration (µs) sum", ascending=False, inplace=True
-    )
+    # Sort: primary by total short-kernel time (desc), then all other columns for stable order
+    _sum_col = "Short Kernel duration (µs) sum"
+    _sort_cols = [_sum_col] + [c for c in df_grouped.columns if c != _sum_col]
+    _ascending = [False] + [True] * (len(_sort_cols) - 1)
+    df_grouped.sort_values(by=_sort_cols, ascending=_ascending, inplace=True)
     df_grouped.reset_index(inplace=True)
     if topk is not None:
         df_grouped = df_grouped.head(topk)
@@ -618,7 +619,11 @@ def generate_perf_report_pytorch(
             )
         )
         df_kernel_launchers_unique_args = (
+<<<<<<< HEAD:TraceLens/Reporting/generate_perf_report_pytorch_inference.py
             perf_analyzer.get_df_kernel_launchers_unique_args_module(
+=======
+            perf_analyzer.get_df_kernel_launchers_unique_args(
+>>>>>>> upstream/main:TraceLens/Reporting/generate_perf_report_pytorch_vllm.py
                 df_kernel_launchers,
                 agg_metrics=agg_metrics,
                 include_pct=True,
@@ -689,6 +694,7 @@ def generate_perf_report_pytorch(
                 op_events = [
                     event
                     for event in op_events
+<<<<<<< HEAD:TraceLens/Reporting/generate_perf_report_pytorch_inference.py
                     if (
                         event["name"] != "vllm::unified_attention_with_output"
                         and event["name"] != "aiter::mha_varlen_fwd"
@@ -715,6 +721,23 @@ def generate_perf_report_pytorch(
                         df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
                     if not df_ops_bwd.empty:
                         perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+=======
+                    if event["name"] != "vllm::unified_attention_with_output"
+                ]
+                df_ops_bwd = perf_analyzer.build_df_perf_metrics(
+                    op_events, bwd=True, include_kernel_details=True, include_args=True
+                )
+                df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
+                    df_ops_bwd, agg_metrics
+                )
+                df_ops_bwd = add_truncated_kernel_details(
+                    df_ops_bwd,
+                    source_col="kernel_details__summarize_kernel_stats",
+                    new_col_name="trunc_kernel_details",
+                )
+                if filtered_df_bwd_ops is not None:
+                    df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
+>>>>>>> upstream/main:TraceLens/Reporting/generate_perf_report_pytorch_vllm.py
                 if not df_ops_fwd.empty:
                     perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
 

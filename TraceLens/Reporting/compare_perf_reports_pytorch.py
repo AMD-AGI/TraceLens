@@ -105,12 +105,28 @@ def _ensure_list(obj) -> List[str]:
 
 
 def load_sheet(path: str, sheet_name: str) -> pd.DataFrame:
-    """Read a sheet and verify that all key columns exist."""
+    """Read a sheet from an .xlsx file or a directory of per-sheet .csv files."""
+    if os.path.isdir(path):
+        csv_path = os.path.join(path, f"{sheet_name}.csv")
+        if not os.path.isfile(csv_path):
+            raise ValueError(f"{path} has no '{sheet_name}.csv'")
+        if os.path.getsize(csv_path) == 0:
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(csv_path)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
     xls = pd.ExcelFile(path)
     if sheet_name not in xls.sheet_names:
         raise ValueError(f"{path} has no sheet named '{sheet_name}'")
-    df = pd.read_excel(xls, sheet_name=sheet_name)
-    return df
+    return pd.read_excel(xls, sheet_name=sheet_name)
+
+
+def list_report_sheet_names(path: str) -> List[str]:
+    """Sheet names for an Excel report or basenames of *.csv in a report directory."""
+    if os.path.isdir(path):
+        return sorted(f[:-4] for f in os.listdir(path) if f.endswith(".csv"))
+    return pd.ExcelFile(path).sheet_names
 
 
 def prefix_columns(df: pd.DataFrame, tag: str, keys: Sequence[str]) -> pd.DataFrame:
@@ -372,10 +388,11 @@ def split_df_diff(
 
 
 def generate_compare_perf_reports_pytorch(
-    reports: List[str],  # List of paths to TraceLens reports
-    output: str = "comparison.xlsx",
+    reports: List[str],  # List of paths to TraceLens reports (.xlsx or csv dirs)
+    output: Optional[str] = "comparison.xlsx",
     names: List[str] = None,
     sheets: List[str] = ["all"],
+    output_csvs_dir: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
 
     tags = (
@@ -401,7 +418,7 @@ def generate_compare_perf_reports_pytorch(
         )
         results["gpu_timeline"] = dtl
 
-    report_sheet_names = pd.ExcelFile(reports[0]).sheet_names
+    report_sheet_names = list_report_sheet_names(reports[0])
 
     # ── Ops summary / Kernel summary ──────────────────────────────────────────
     # Perform ops_summary if specified
@@ -572,21 +589,31 @@ def generate_compare_perf_reports_pytorch(
                 cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Write workbook ────────────────────────────────────────────────────────
-    with pd.ExcelWriter(output, engine="openpyxl") as xls:
+    if output_csvs_dir:
+        os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in results.items():
-            if df.empty:
-                print(f"Sheet '{sheet_name}' is empty (no matching rows)")
-            df.to_excel(
-                xls, sheet_name=sheet_name[:31], index=False
-            )  # Excel 31-char limit
-            for col in cols_to_hide_xl.get(sheet_name, []):
-                col_idx = df.columns.get_loc(col) + 1
-                col_letter = get_column_letter(col_idx)
-                worksheet = xls.sheets[sheet_name[:31]]
-                worksheet.column_dimensions[col_letter].hidden = True
+            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
+            df.to_csv(csv_path, index=False)
             print(
-                f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns"
+                f"Wrote '{sheet_name}.csv' with {len(df)} rows × {len(df.columns)} columns"
             )
+
+    if output is not None:
+        with pd.ExcelWriter(output, engine="openpyxl") as xls:
+            for sheet_name, df in results.items():
+                if df.empty:
+                    print(f"Sheet '{sheet_name}' is empty (no matching rows)")
+                df.to_excel(
+                    xls, sheet_name=sheet_name[:31], index=False
+                )  # Excel 31-char limit
+                for col in cols_to_hide_xl.get(sheet_name, []):
+                    col_idx = df.columns.get_loc(col) + 1
+                    col_letter = get_column_letter(col_idx)
+                    worksheet = xls.sheets[sheet_name[:31]]
+                    worksheet.column_dimensions[col_letter].hidden = True
+                print(
+                    f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns"
+                )
 
     return results
 
@@ -596,9 +623,18 @@ def generate_compare_perf_reports_pytorch(
 # ──────────────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("reports", nargs="+", help="TraceLens Excel reports (.xlsx)")
     parser.add_argument(
-        "-o", "--output", default="comparison.xlsx", help="Output file name"
+        "reports",
+        nargs="+",
+        help="TraceLens reports: .xlsx files or directories of per-sheet .csv files",
+    )
+    parser.add_argument(
+        "-o", "--output", default="comparison.xlsx", help="Output Excel file name"
+    )
+    parser.add_argument(
+        "--output_csvs_dir",
+        default=None,
+        help="Also write each comparison sheet as a CSV in this directory",
     )
     parser.add_argument(
         "--names", nargs="*", help="Optional tags for each report (must match count)"
@@ -629,6 +665,7 @@ def main() -> None:
         output=args.output,
         names=args.names,
         sheets=args.sheets,
+        output_csvs_dir=args.output_csvs_dir,
     )
 
 
