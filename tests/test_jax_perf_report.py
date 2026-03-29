@@ -17,6 +17,7 @@ Usage:
 
 import glob
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -83,15 +84,27 @@ def _short_id(path):
 _report_cache = {}
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_report_cache():
+    """Remove tmpdirs created by jax_report after all tests in this module."""
+    yield
+    for entry in _report_cache.values():
+        shutil.rmtree(entry["tmpdir"], ignore_errors=True)
+
+
 @pytest.fixture()
 def jax_report(trace_path):
     """Run generate_perf_report_jax once per trace_path and cache the results."""
     if trace_path not in _report_cache:
         tmpdir = tempfile.mkdtemp()
-        dict_name2df = generate_perf_report_jax(
-            profile_path=trace_path,
-            output_csvs_dir=tmpdir,
-        )
+        try:
+            dict_name2df = generate_perf_report_jax(
+                profile_path=trace_path,
+                output_csvs_dir=tmpdir,
+            )
+        except Exception:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise
         _report_cache[trace_path] = {
             "dict_name2df": dict_name2df,
             "csv_dir": tmpdir,

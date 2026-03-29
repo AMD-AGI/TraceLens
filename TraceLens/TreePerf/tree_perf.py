@@ -2672,7 +2672,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.event_to_category = event_to_category
         self.pb_file_name = pb_file_name
         self.arch = arch
-        self.tree.build_tree(metadata_events, pb_file_name=pb_file_name)
+        self.tree.build_tree(
+            metadata_events if metadata_events is not None else {},
+            pb_file_name=pb_file_name,
+        )
         self.gpu_event_filter = JaxAnalyses.default_gpu_event_filter
         self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map
