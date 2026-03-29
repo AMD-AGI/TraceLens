@@ -29,7 +29,7 @@ from ..PerfModel.torch_op_mapping import (
     op_to_perf_model_class_map,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
-from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
+from ..Trace2Tree.trace_capture_merge import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
@@ -179,15 +179,11 @@ class TreePerfAnalyzer:
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
-        detect_recompute=False,
         rebuild_tree=True,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
-        self.detect_recompute = detect_recompute
-        if detect_recompute:
-            add_python_func = True
         self.add_python_func = add_python_func
         self.arch = arch
         self.python_path = python_path
@@ -210,9 +206,6 @@ class TreePerfAnalyzer:
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
 
-        if detect_recompute:
-            self._detect_recompute_events()
-
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
@@ -222,35 +215,6 @@ class TreePerfAnalyzer:
             if event.get("cat") in {"python_func", "cpu_op"}:
                 return False
         return True
-
-    def _detect_recompute_events(self):
-        """Mark all events under torch.utils.checkpoint recompute_fn as is_recompute=True.
-
-        Walks top-down from each recompute_fn python_function node, marking
-        the entire subtree. This is O(n) over the marked subtrees and runs
-        once during __init__ when detect_recompute=True.
-        """
-        recompute_roots = []
-        for event in self.tree.events:
-            if self.event_to_category(event) != "python_function":
-                continue
-            name = event.get("name", "")
-            if "torch/utils/checkpoint.py" in name and "recompute_fn" in name:
-                recompute_roots.append(event)
-
-        marked = 0
-        for root in recompute_roots:
-            stack = [root]
-            while stack:
-                evt = stack.pop()
-                evt["is_recompute"] = True
-                marked += 1
-                for child_uid in evt.get("children", []):
-                    stack.append(self.tree.get_UID2event(child_uid))
-
-        print(
-            f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, marked {marked} events"
-        )
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
@@ -284,18 +248,6 @@ class TreePerfAnalyzer:
             total_kernel_time += this_total_kernel_time
             list_kernels.extend(this_list_kernels)
         return total_kernel_time, list_kernels
-
-    def _compute_subtree_kernel_time_us(self, event):
-        """
-        Compute inclusive (subtree) GPU kernel busy time for an event.
-        Includes all kernels in the event's subtree (this op and all descendants).
-        Overlaps between kernels are accounted for via GPUEventAnalyser busy_time.
-        """
-        _, list_kernel_uids = self.loop_and_aggregate_kernels([event])
-        if not list_kernel_uids:
-            return 0
-        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernel_uids]
-        return self.GPUEventAnalyser(list_kernels).compute_metrics()["busy_time"]
 
     @staticmethod
     def non_data_mov_filter(event):
@@ -405,12 +357,7 @@ class TreePerfAnalyzer:
                 # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
                 memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
                 roofline_time_us = max(compute_time_us, memory_time_us)
-                if compute_time_us >= memory_time_us:
-                    roofline_bound = "COMPUTE_BOUND"
-                else:
-                    roofline_bound = "MEMORY_BOUND"
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
-                dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
                     (roofline_time_us / busy_kernel_time) * 100
                     if busy_kernel_time > 0
@@ -487,9 +434,6 @@ class TreePerfAnalyzer:
                 .get(event["tid"], {})
                 .get("thread_name", "Unknown"),
                 "external_id": event["args"].get("External id"),
-                "overlapping_kernel_names": event.get("overlapping_kernel_names"),
-                "overlapping_kernels_details": event.get("overlapping_kernels_details"),
-                "overlap_pct": event.get("overlap_pct"),
             }
             if include_args:
                 args_cols = [
@@ -532,8 +476,6 @@ class TreePerfAnalyzer:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
                     metrics_event["num_kernels"] = len(event["kernel_details"])
-            if self.detect_recompute:
-                metrics_event["is_recompute"] = event.get("is_recompute", False)
             rows.append(metrics_event)
 
         self._show_warnings(
@@ -582,10 +524,7 @@ class TreePerfAnalyzer:
 
     @staticmethod
     def summarize_df_perf_metrics(
-        df_perf_metrics,
-        agg_metrics=["mean", "std"],
-        group_by_num_kernels=False,
-        include_overlapping_kernels=False,
+        df_perf_metrics, agg_metrics=["mean", "std"], group_by_num_kernels=False
     ):
         if df_perf_metrics.empty:
             warnings.warn(
@@ -614,8 +553,6 @@ class TreePerfAnalyzer:
         # Roofline metrics - first since they should be same for the group
         if "Roofline Time (µs)" in df_perf_metrics.columns:
             dict_agg["Roofline Time (µs)"] = "first"
-        if "Roofline Bound" in df_perf_metrics.columns:
-            dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
         if "Simulated Time (µs)" in df_perf_metrics.columns:
@@ -631,16 +568,6 @@ class TreePerfAnalyzer:
             dict_agg["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
-        if (
-            include_overlapping_kernels
-            and "overlapping_kernels_details" in df_perf_metrics.columns
-        ):
-            dict_agg["overlapping_kernel_names"] = "first"
-            dict_agg["overlapping_kernels_details"] = partial(
-                TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
-            )
-            if "overlap_pct" in df_perf_metrics.columns:
-                dict_agg["overlap_pct"] = agg_metrics
         args_cols = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
         for arg in args_cols:
             if arg in df_perf_metrics.columns:
@@ -656,31 +583,14 @@ class TreePerfAnalyzer:
         ]
         if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
-        groupby_cols = ["name"] + param_cols
-        if "is_recompute" in df_perf_metrics.columns:
-            groupby_cols.append("is_recompute")
-        if (
-            include_overlapping_kernels
-            and "overlapping_kernel_names" in df_perf_metrics.columns
-        ):
-            df_perf_metrics["overlapping_kernel_names_str_repr_for_grouping"] = (
-                df_perf_metrics["overlapping_kernel_names"].apply(str)
-            )
-            groupby_cols.append("overlapping_kernel_names_str_repr_for_grouping")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
         for col in param_cols:
             df_perf_metrics[col] = df_perf_metrics[col].astype(str)
-        # overlapping_kernel_names is list-like; use str for groupby
-        # if (
-        #     "overlapping_kernel_names" in df_perf_metrics.columns
-        #     and "overlapping_kernel_names" in groupby_cols
-        # ):
-
         # TODO warn user if nans in the performance metrics
         # Perform the aggregation
         df_perf_metrics_summary = df_perf_metrics.groupby(
-            groupby_cols, dropna=False
+            ["name"] + param_cols, dropna=False
         ).agg(dict_agg)
         df_perf_metrics_summary.columns = [
             "_".join(col).strip() for col in df_perf_metrics_summary.columns.values
@@ -692,24 +602,17 @@ class TreePerfAnalyzer:
 
         if "Compute Spec_first" in df_perf_metrics_summary.columns:
             rename_map["Compute Spec_first"] = "Compute Spec"
-            col_first = f"{col}_first"
-            if col_first in df_perf_metrics_summary.columns:
-                rename_map[col_first] = col
-                df_perf_metrics_summary.rename(columns={col_first: col}, inplace=True)
         if rename_map:
             df_perf_metrics_summary.rename(columns=rename_map, inplace=True)
 
-        # Reorder columns: name, process_name, process_label, thread_name, overlapping_kernel_names (if present), param cols, everything else
+        # Reorder columns: name, process_name, process_label, thread_name, param cols, everything else
         priority_cols = ["name"]
-        if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
-            priority_cols.append("overlapping_kernel_names")
         if "process_name" in df_perf_metrics_summary.columns:
             priority_cols.append("process_name")
         if "process_label" in df_perf_metrics_summary.columns:
             priority_cols.append("process_label")
         if "thread_name" in df_perf_metrics_summary.columns:
             priority_cols.append("thread_name")
-
         other_cols = [
             col
             for col in df_perf_metrics_summary.columns
@@ -720,88 +623,14 @@ class TreePerfAnalyzer:
             priority_cols + param_cols + other_cols
         ]
 
-        # Sort so rows with the same grouping appear consecutively, with the
-        # highest-total-time group first. When groups tie on time, order by min(UID_first)
-        # in group (asc) to match legacy refs. Within each group: Kernel Time (µs)_sum desc, UID_first asc.
-        if "Kernel Time (µs)_sum" in df_perf_metrics_summary.columns:
-            group_cols = [
-                c
-                for c in groupby_cols
-                if c in df_perf_metrics_summary.columns
-                and c != "overlapping_kernel_names_str_repr_for_grouping"
-            ]
-            if group_cols:
-                df_perf_metrics_summary["_group_total_time"] = (
-                    df_perf_metrics_summary.groupby(group_cols, dropna=False)[
-                        "Kernel Time (µs)_sum"
-                    ].transform("sum")
-                )
-                sort_by = ["_group_total_time"]
-                sort_ascending = [False]
-                if "UID_first" in df_perf_metrics_summary.columns:
-                    df_perf_metrics_summary["_group_min_uid"] = (
-                        df_perf_metrics_summary.groupby(group_cols, dropna=False)[
-                            "UID_first"
-                        ].transform("min")
-                    )
-                    sort_by.append("_group_min_uid")
-                    sort_ascending.append(True)
-                sort_by.extend(group_cols)
-                sort_ascending.extend([True] * len(group_cols))
-                sort_by.append("Kernel Time (µs)_sum")
-                sort_ascending.append(False)
-                if "UID_first" in df_perf_metrics_summary.columns:
-                    sort_by.append("UID_first")
-                    sort_ascending.append(True)
-                df_perf_metrics_summary = df_perf_metrics_summary.sort_values(
-                    by=sort_by, ascending=sort_ascending
-                )
-                drop_cols = ["_group_total_time"]
-                if "_group_min_uid" in df_perf_metrics_summary.columns:
-                    drop_cols.append("_group_min_uid")
-                df_perf_metrics_summary.drop(columns=drop_cols, inplace=True)
-                if include_overlapping_kernels:
-                    df_perf_metrics_summary.drop(
-                        columns=["overlapping_kernel_names_str_repr_for_grouping"],
-                        inplace=True,
-                    )
-
+        df_perf_metrics_summary.sort_values(
+            by=["Kernel Time (µs)_sum", "UID_first"],
+            ascending=[False, True],
+            inplace=True,
+        )
+        # df_perf_metrics_summary.sort_values(by='Simulated Kernel Time (us)_sum', ascending=False, inplace=True)
         df_perf_metrics_summary.reset_index(drop=True, inplace=True)
-
-        # Show blank instead of string "None" or "[]" for empty overlapping_kernel_names
-        # if "overlapping_kernel_names" in df_perf_metrics_summary.columns:
-        #     col = df_perf_metrics_summary["overlapping_kernel_names"]
-        #     df_perf_metrics_summary["overlapping_kernel_names"] = col.replace(
-        #         ["None", "[]"], pd.NA
-        #     )
-
-        for col in df_perf_metrics_summary.columns:
-            if "overlap_pct" in col:
-                df_perf_metrics_summary[col] = df_perf_metrics_summary[col].round(2)
-                if (
-                    col.endswith("_std")
-                    and "overlap_pct_mean" in df_perf_metrics_summary.columns
-                ):
-                    has_overlap = pd.notna(df_perf_metrics_summary["overlap_pct_mean"])
-                    df_perf_metrics_summary.loc[has_overlap, col] = (
-                        df_perf_metrics_summary.loc[has_overlap, col].fillna(0.0)
-                    )
-
         return df_perf_metrics_summary
-
-    def compute_overlapping_kernels(self, kernel_events):
-        """Run sweep-line overlap detection on all GPU events globally.
-
-        Populates ``overlapping_uids`` on each GPU event dict in-place so that
-        downstream methods like ``_compute_overlap_info()`` see correct
-        cross-stream overlap regardless of call order.
-
-        This is idempotent: if ``overlapping_uids`` is already present on every
-        event the sweep-line is skipped automatically.
-        """
-        if not self.include_unlinked_kernels:
-            kernel_events = [event for event in kernel_events if event.get("tree")]
-        self.GPUEventAnalyser(kernel_events).get_gpu_event_lists()
 
     def get_kernel_launchers(self, include_nccl=False):
         # This method identifies kernel launchers, which are the events directly responsible for launching GPU kernels.
@@ -818,16 +647,12 @@ class TreePerfAnalyzer:
         # the first cpu_op ancestor. If no cpu_op is found, the runtime event is used as the launcher.
         # This approach gives consistent results regardless of whether add_python_func=True or False.
 
-        # Step 0: Ensure overlapping_uids is populated globally before per-launcher processing
-
         # Step 1: Find all kernel events
         kernel_events = [
             evt
             for evt in self.tree.events
             if self.event_to_category(evt) in {"kernel", "gpu_memcpy", "gpu_memset"}
         ]
-
-        self.compute_overlapping_kernels(kernel_events)
 
         # Step 2: Map each kernel to its launcher (cpu_op if found, else runtime event)
         launcher_to_kernels = defaultdict(list)
@@ -887,9 +712,6 @@ class TreePerfAnalyzer:
             event["total_direct_kernel_time"] = self.GPUEventAnalyser(
                 kernels
             ).compute_metrics()["busy_time"]
-            event["total_subtree_kernel_time"] = self._compute_subtree_kernel_time_us(
-                event
-            )
             event["direct_kernel_count"] = len(kernels)
             event["kernel_details"] = [
                 {
@@ -900,110 +722,12 @@ class TreePerfAnalyzer:
                 for kernel in kernels
             ]
             event["op category"] = self.op_categorizer(event)
-            self._compute_overlap_info(event, kernels)
             kernel_launchers.append(event)
 
         return kernel_launchers
 
-    def _compute_overlap_info(self, event, kernels):
-        """Compute overlap_pct, overlapping_kernel_names, and
-        overlapping_kernels_details for an event from its kernel list.
-        Modifies the event dict in-place."""
-        event["overlapping_kernel_names"] = list(
-            dict.fromkeys(
-                self.tree.get_UID2event(uid).get("name", None)
-                for kernel in kernels
-                for uid in kernel.get("overlapping_uids", set())
-            )
-        )
-        total_kernel_runtime = (
-            sum(
-                e - s
-                for s, e in GPUEventAnalyser.merge_intervals(
-                    [(k["ts"], k["t_end"]) for k in kernels]
-                )
-            )
-            if kernels
-            else 0
-        )
-
-        overlapping_details = []
-        for kernel in kernels:
-            for uid in kernel.get("overlapping_uids", set()):
-                ov_event = self.tree.get_UID2event(uid)
-                overlap_start = max(kernel["ts"], ov_event.get("ts", 0))
-                overlap_end = min(kernel["t_end"], ov_event.get("t_end", 0))
-                overlap_time = max(0, overlap_end - overlap_start)
-                overlap_pct = (
-                    overlap_time / total_kernel_runtime
-                    if total_kernel_runtime > 0
-                    else 0.0
-                )
-                overlapping_details.append(
-                    {
-                        "name": ov_event.get("name", None),
-                        "dur": ov_event.get("dur", None),
-                        "stream": ov_event.get("args", {}).get("stream", None),
-                        "overlap_pct": round(overlap_pct, 2),
-                    }
-                )
-        if overlapping_details:
-            grouped = {}
-            for d in overlapping_details:
-                grouped.setdefault(d["name"], []).append(d)
-            overlapping_details = []
-            for name, entries in grouped.items():
-                n = len(entries)
-                avg_dur = (
-                    round(sum(e["dur"] for e in entries) / n, 2)
-                    if all(e["dur"] is not None for e in entries)
-                    else None
-                )
-                avg_pct = round(sum(e["overlap_pct"] for e in entries) / n, 2)
-                overlapping_details.append(
-                    {
-                        "name": name,
-                        "dur": avg_dur,
-                        "stream": entries[0]["stream"],
-                        "overlap_pct": avg_pct,
-                    }
-                )
-        event["overlapping_kernels_details"] = overlapping_details
-
-        if overlapping_details:
-            total_overlap_time = 0
-            for kernel in kernels:
-                ov_intervals = []
-                for uid in kernel.get("overlapping_uids", set()):
-                    ov_evt = self.tree.get_UID2event(uid)
-                    os = max(kernel["ts"], ov_evt.get("ts", 0))
-                    oe = min(kernel["t_end"], ov_evt.get("t_end", 0))
-                    if oe > os:
-                        ov_intervals.append((os, oe))
-                merged = GPUEventAnalyser.merge_intervals(ov_intervals)
-                total_overlap_time += sum(e - s for s, e in merged)
-            event["overlap_pct"] = round(
-                (
-                    total_overlap_time / total_kernel_runtime
-                    if total_kernel_runtime > 0
-                    else 0.0
-                ),
-                2,
-            )
-        else:
-            event["overlap_pct"] = None
-
-        if event["overlapping_kernels_details"] == []:
-            event["overlapping_kernels_details"] = None
-        if event["overlapping_kernel_names"] == []:
-            event["overlapping_kernel_names"] = None
-
     def get_df_kernel_launchers(
-        self,
-        id_cols=False,
-        include_kernel_details=False,
-        include_call_stack=False,
-        include_first_occurrence_time=False,
+        self, id_cols=False, include_kernel_details=False, include_call_stack=False
     ):
 
         def list_to_tuple(obj):
@@ -1019,14 +743,8 @@ class TreePerfAnalyzer:
                 "op category": event["op category"],
                 "UID": event["UID"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
-                "total_subtree_kernel_time": event["total_subtree_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
-                "overlapping_kernel_names": event["overlapping_kernel_names"],
-                "overlapping_kernels_details": event["overlapping_kernels_details"],
-                "overlap_pct": event.get("overlap_pct"),
             }
-            if include_first_occurrence_time:
-                metrics_event["ts"] = event.get("ts")
             for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
                 if arg in event["args"]:
                     metrics_event[arg] = list_to_tuple(event["args"][arg])
@@ -1049,8 +767,6 @@ class TreePerfAnalyzer:
                     metrics_event["parent_module"] = re.sub(
                         r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
                     ).strip("")
-            if self.detect_recompute:
-                metrics_event["is_recompute"] = event.get("is_recompute", False)
             thread_metadata = self.tree.metadata.get(event["pid"], {}).get(
                 event["tid"], {}
             )
@@ -1067,72 +783,11 @@ class TreePerfAnalyzer:
         return df
 
     @staticmethod
-    def _reorder_cols_direct_subtree_pairs(
-        df, direct_prefix, subtree_prefix, suffix_order=None
-    ):
-        """
-        Reorder columns so direct and subtree kernel time appear in pairs:
-        direct_mean, subtree_mean, direct_median, subtree_median, direct_std, subtree_std, etc.
-        """
-        direct_cols = [
-            c
-            for c in df.columns
-            if c == direct_prefix or c.startswith(direct_prefix + "_")
-        ]
-        subtree_cols = [
-            c
-            for c in df.columns
-            if c == subtree_prefix or c.startswith(subtree_prefix + "_")
-        ]
-        if not direct_cols and not subtree_cols:
-            return df
-
-        def get_suffix(col, pre):
-            if col == pre:
-                return ""
-            return col[len(pre) :].lstrip("_") if col.startswith(pre + "_") else None
-
-        all_suffixes = set()
-        for c in direct_cols:
-            s = get_suffix(c, direct_prefix)
-            if s is not None:
-                all_suffixes.add(s)
-        for c in subtree_cols:
-            s = get_suffix(c, subtree_prefix)
-            if s is not None:
-                all_suffixes.add(s)
-        if suffix_order is None:
-            suffix_order = ["mean", "median", "std", "min", "max", "sum", "count", "ms"]
-        ordered_suffixes = [s for s in suffix_order if s in all_suffixes]
-        ordered_suffixes += sorted(all_suffixes - set(suffix_order))
-        paired = []
-        for s in ordered_suffixes:
-            d = direct_prefix + ("_" + s if s else "")
-            if d in df.columns:
-                paired.append(d)
-            st = subtree_prefix + ("_" + s if s else "")
-            if st in df.columns:
-                paired.append(st)
-        other = [c for c in df.columns if c not in paired]
-        orig = list(df.columns)
-        first_idx = min(orig.index(c) for c in paired) if paired else len(orig)
-        other_before = [c for c in other if orig.index(c) < first_idx]
-        other_after = [c for c in other if orig.index(c) > first_idx]
-        return df[other_before + paired + other_after]
-
-    @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
         df_temp = df_kernel_launchers.copy()
-        groupby_cols = ["name"]
-        if "is_recompute" in df_temp.columns:
-            groupby_cols.append("is_recompute")
-        agg_dict = {
-            "total_direct_kernel_time": ["sum", "count"],
-            "op category": set,
-        }
-        if "total_subtree_kernel_time" in df_temp.columns:
-            agg_dict["total_subtree_kernel_time"] = ["sum"]
-        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
+        df_agg = df_temp.groupby(["name"]).agg(
+            {"total_direct_kernel_time": ["sum", "count"], "op category": set},
+        )
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(
@@ -1153,17 +808,8 @@ class TreePerfAnalyzer:
             df_agg["total_direct_kernel_time_ms"] / total_duration_ms
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
-        if "total_subtree_kernel_time_sum" in df_agg.columns:
-            df_agg["total_subtree_kernel_time_ms"] = (
-                df_agg["total_subtree_kernel_time_sum"] / 1000
-            )
         df_agg.reset_index(drop=True, inplace=True)
-        df_agg = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
-            df_agg,
-            "total_direct_kernel_time",
-            "total_subtree_kernel_time",
-            suffix_order=["sum", "ms"],
-        )
+
         return df_agg
 
     @staticmethod
@@ -1173,8 +819,6 @@ class TreePerfAnalyzer:
         if "parent_module" in df_temp.columns:
             groupby_cols.append("parent_module")
         agg_dict = {"total_direct_kernel_time": ["sum", "count"], "op category": set}
-        if "total_subtree_kernel_time" in df_temp.columns:
-            agg_dict["total_subtree_kernel_time"] = ["sum", "count"]
         if "call_stack" in df_temp.columns:
             agg_dict["call_stack"] = "first"
         df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
@@ -1200,12 +844,7 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-        df_agg = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
-            df_agg,
-            "total_direct_kernel_time",
-            "total_subtree_kernel_time",
-            suffix_order=["sum", "count", "ms"],
-        )
+
         return df_agg
 
     # separate out name wise perf breakdown and shape wise perf breakdown for a given name
@@ -1258,7 +897,7 @@ class TreePerfAnalyzer:
             "median": ("median_duration_us", np.median),
             "max": ("max_duration_us", np.max),
             "min": ("min_duration_us", np.min),
-            "std": ("std_dev_duration_us", lambda x: np.nan_to_num(np.std(x))),
+            "std": ("std_dev_duration_us", np.std),
         }
 
         # --- CHANGE: More robust way to get the template ---
@@ -1270,10 +909,7 @@ class TreePerfAnalyzer:
                 if isinstance(item, list) and item
             )
         except StopIteration:
-            return (
-                []
-            )  # The series was empty or contained no valid lists (match ref reports).
-
+            return []  # The series was empty or contained no valid lists.
         # --- CHANGE: Collect durations BY INDEX, not by name ---
         all_durations = [[] for _ in template]
 
@@ -1332,8 +968,6 @@ class TreePerfAnalyzer:
         event_name=None,
         agg_metrics=["mean"],
         include_pct=False,
-        include_overlapping_kernels=False,
-        group_by_parent_module=False,
         group_by_num_kernels=False,
     ) -> pd.DataFrame:
         """
@@ -1344,9 +978,6 @@ class TreePerfAnalyzer:
             event_name (str): Optional name of the event to filter the DataFrame.
             agg_metrics (list): List of aggregation metrics to apply. ex: ['mean', 'std', 'median']
             include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
-            include_overlapping_kernels (bool): If True, group by 'overlapping_kernel_names' and
-            aggregate overlapping_kernels_details_summary via _summarize_kernel_stats.
-            group_by_parent_module (bool): If True, also group by 'parent_module'.
             group_by_num_kernels (bool): If True, also group by num_kernels.
 
         Returns:
@@ -1363,14 +994,6 @@ class TreePerfAnalyzer:
             "Input Strides",
             "Concrete Inputs",
         ]
-        if group_by_parent_module:
-            idx = grouping_cols_original.index("op category") + 1
-            grouping_cols_original.insert(idx, "parent_module")
-        if include_overlapping_kernels:
-            idx = grouping_cols_original.index("name") + 1
-            grouping_cols_original.insert(idx, "overlapping_kernel_names")
-        if "is_recompute" in df_kernel_launchers.columns:
-            grouping_cols_original.append("is_recompute")
         if group_by_num_kernels:
             grouping_cols_original.append("num_kernels")
 
@@ -1400,38 +1023,18 @@ class TreePerfAnalyzer:
             agg_dict["total_direct_kernel_time"] = agg_metrics + (
                 ["sum"] if "sum" not in agg_metrics else []
             )
-        if "total_subtree_kernel_time" in df_filtered.columns:
-            agg_dict["total_subtree_kernel_time"] = agg_metrics + (
-                ["sum"] if "sum" not in agg_metrics else []
-            )
         columns_to_keep_first = []
         if "UID" in df_filtered.columns:
             agg_dict["UID"] = ["first", "count"]
             columns_to_keep_first.append("UID")
-        if "ts" in df_filtered.columns:
-            agg_dict["ts"] = "min"
         if "kernel_details" in df_filtered.columns:
             agg_dict["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
             columns_to_keep_first.append("kernel_details")
-        if (
-            include_overlapping_kernels
-            and "overlapping_kernels_details" in df_filtered.columns
-        ):
-            agg_dict["overlapping_kernels_details"] = partial(
-                TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
-            )
-            columns_to_keep_first.append("overlapping_kernels_details")
-            if "overlap_pct" in df_filtered.columns:
-                agg_dict["overlap_pct"] = agg_metrics
-        if "parent_module" in df_filtered.columns:
-            agg_dict["parent_module"] = "first"
-            columns_to_keep_first.append("parent_module")
         for col in actual_grouping_cols:
-            if col not in agg_dict:
-                agg_dict[col] = "first"
-                columns_to_keep_first.append(col)
+            agg_dict[col] = "first"
+            columns_to_keep_first.append(col)
         df_unique_args = df_filtered.groupby(
             str_col_names, dropna=False, sort=False
         ).agg(agg_dict)
@@ -1449,25 +1052,10 @@ class TreePerfAnalyzer:
         # uid needs to be mapped to ex_UID
         if "UID_first" in df_unique_args.columns:
             rename_map["UID_first"] = "ex_UID"
-        if "ts_min" in df_unique_args.columns:
-            rename_map["ts_min"] = "first_occurrence_time"
-            normalize_first_occurrence_ts = True
-        else:
-            normalize_first_occurrence_ts = False
         for col in df_unique_args.columns:
             if col.startswith("kernel_details_"):
                 rename_map[col] = "kernel_details_summary"
-            # Rename aggregated overlapping_kernels_details or overlapping_kernels_details_summary
-            if (
-                col.startswith("overlapping_kernels_details_")
-                or col.startswith("overlapping_kernels_details_summary_")
-            ) and not col.endswith("_str_repr_for_grouping"):
-                rename_map[col] = "overlapping_kernels_details_summary"
         df_unique_args.rename(columns=rename_map, inplace=True)
-        if normalize_first_occurrence_ts:
-            df_unique_args["first_occurrence_time"] -= df_unique_args[
-                "first_occurrence_time"
-            ].min()
 
         # 4. Reorder columns: start with grouping + key metrics, then rest
         primary_cols = [
@@ -1478,60 +1066,11 @@ class TreePerfAnalyzer:
             for col in [
                 "UID",
                 "operation_count",
-                "first_occurrence_time",
                 "kernel_names",
                 "total_direct_kernel_time_mean",
-                "total_subtree_kernel_time_mean",
             ]
             if col in df_unique_args.columns
         ]
-        # 5. Sort so rows with the same grouping appear consecutively, with the
-        #    highest-total-time group first. When groups have the same total time,
-        #    order by min(ex_UID) in group (asc) so order matches legacy refs.
-        #    Within each group: total_direct_kernel_time_sum desc then ex_UID asc.
-        if "total_direct_kernel_time_sum" in df_unique_args.columns:
-            group_cols = [
-                c
-                for c in str_col_names
-                if c in df_unique_args.columns
-                and c != "overlapping_kernel_names_str_repr_for_grouping"
-            ]
-            if group_cols:
-                # Group total time (same for every row in the group) to order groups by time
-                df_unique_args["_group_total_time"] = df_unique_args.groupby(
-                    group_cols, dropna=False
-                )["total_direct_kernel_time_sum"].transform("sum")
-                # When same _group_total_time, order groups by min ex_UID (matches legacy sort)
-                if "ex_UID" in df_unique_args.columns:
-                    df_unique_args["_group_min_ex_uid"] = df_unique_args.groupby(
-                        group_cols, dropna=False
-                    )["ex_UID"].transform("min")
-                    sort_by = (
-                        ["_group_total_time", "_group_min_ex_uid"]
-                        + group_cols
-                        + ["total_direct_kernel_time_sum", "ex_UID"]
-                    )
-                    sort_ascending = (
-                        [False, True] + [True] * len(group_cols) + [False, True]
-                    )
-                    df_unique_args = df_unique_args.sort_values(
-                        by=sort_by, ascending=sort_ascending
-                    ).reset_index(drop=True)
-                    df_unique_args.drop(
-                        columns=["_group_total_time", "_group_min_ex_uid"], inplace=True
-                    )
-                else:
-                    sort_by = (
-                        ["_group_total_time"]
-                        + group_cols
-                        + ["total_direct_kernel_time_sum"]
-                    )
-                    sort_ascending = [False] + [True] * len(group_cols) + [False]
-                    df_unique_args = df_unique_args.sort_values(
-                        by=sort_by, ascending=sort_ascending
-                    ).reset_index(drop=True)
-                    df_unique_args.drop(columns=["_group_total_time"], inplace=True)
-
         other_cols = [
             col
             for col in df_unique_args.columns
@@ -1539,12 +1078,12 @@ class TreePerfAnalyzer:
             and not col.endswith("_str_repr_for_grouping")
         ]
         df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
-        df_unique_args = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
-            df_unique_args,
-            "total_direct_kernel_time",
-            "total_subtree_kernel_time",
-            suffix_order=["mean", "median", "std", "min", "max", "sum", "count"],
-        )
+
+        # 5. Sort the DataFrame by the sum of total_direct_kernel_time and then by ex_uid for stability
+        if "total_direct_kernel_time_sum" in df_unique_args.columns:
+            df_unique_args = df_unique_args.sort_values(
+                by=["total_direct_kernel_time_sum", "ex_UID"], ascending=[False, True]
+            ).reset_index(drop=True)
 
         # 6. Calculate percentage of total time and cumulative percentage if requested
         if include_pct and "total_direct_kernel_time_sum" in df_unique_args.columns:
@@ -1555,19 +1094,142 @@ class TreePerfAnalyzer:
             df_unique_args["Cumulative Percentage (%)"] = df_unique_args[
                 "Percentage (%)"
             ].cumsum()
+        return df_unique_args
 
+    @staticmethod
+    def get_df_kernel_launchers_unique_args_module(
+        df_kernel_launchers: pd.DataFrame,
+        event_name=None,
+        agg_metrics=["mean"],
+        include_pct=False,
+        group_by_num_kernels=False,
+    ) -> pd.DataFrame:
+        """
+        Generate a DataFrame with unique arguments for each operation in the input DataFrame.
+
+        Args:
+            df_kernel_launchers (pd.DataFrame): DataFrame containing kernel launchers.
+            event_name (str): Optional name of the event to filter the DataFrame.
+            agg_metrics (list): List of aggregation metrics to apply. ex: ['mean', 'std', 'median']
+            include_pct (bool): If True, include percentage of total time for each row as well as cumulative percentage.
+            group_by_num_kernels (bool): If True, also group by num_kernels.
+
+        Returns:
+            pd.DataFrame: DataFrame with unique arguments for each operation.
+        """
+        grouping_cols_original = [
+            "name",
+            "op category",
+            "parent_module",
+            "Input Dims",
+            "Input type",
+            "Input Strides",
+            "Concrete Inputs",
+        ]
+        if group_by_num_kernels:
+            grouping_cols_original.append("num_kernels")
+
+        # 0. Filter the DataFrame based on the event name if provided
+        if event_name is not None:
+            df_filtered = df_kernel_launchers[
+                df_kernel_launchers["name"] == event_name
+            ].copy()
+        else:
+            df_filtered = df_kernel_launchers.copy()
+
+        # 1. Create string representations of the grouping columns - so we can group by them
+        str_col_names, actual_grouping_cols = [], []
+        for col in grouping_cols_original:
+            if col not in df_filtered.columns:
+                continue
+            actual_grouping_cols.append(col)
+            str_col_name = f"{col}_str_repr_for_grouping"
+            df_filtered[str_col_name] = df_filtered[col].apply(str)
+            str_col_names.append(str_col_name)
+        if not str_col_names:
+            raise ValueError("No valid columns found to group by.")
+
+        # 2. Aggregate the DataFrame by the string representations of the grouping columns
+        agg_dict = {}
+        if "total_direct_kernel_time" in df_filtered.columns:
+            agg_dict["total_direct_kernel_time"] = agg_metrics + (
+                ["sum"] if "sum" not in agg_metrics else []
+            )
+        columns_to_keep_first = []
+        if "UID" in df_filtered.columns:
+            agg_dict["UID"] = ["first", "count"]
+            columns_to_keep_first.append("UID")
+
+        if "call_stack" in df_filtered.columns:
+            agg_dict["call_stack"] = ["first"]
+            columns_to_keep_first.append("call_stack")
+        if "kernel_details" in df_filtered.columns:
+            agg_dict["kernel_details"] = partial(
+                TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
+            )
+            columns_to_keep_first.append("kernel_details")
+        for col in actual_grouping_cols:
+            agg_dict[col] = "first"
+            columns_to_keep_first.append(col)
+        df_unique_args = df_filtered.groupby(
+            str_col_names, dropna=False, sort=False
+        ).agg(agg_dict)
+        df_unique_args.columns = [
+            "_".join(col).strip() for col in df_unique_args.columns.values
+        ]
+        df_unique_args.reset_index(inplace=True)
+
+        # 3. Rename columns for clarity
+        rename_map = {"UID_count": "operation_count"}
+        for col in columns_to_keep_first:
+            col_first = f"{col}_first"
+            if col_first in df_unique_args.columns:
+                rename_map[col_first] = col
+        # uid needs to be mapped to ex_UID
+        if "UID_first" in df_unique_args.columns:
+            rename_map["UID_first"] = "ex_UID"
         for col in df_unique_args.columns:
-            if "overlap_pct" in col:
-                df_unique_args[col] = df_unique_args[col].round(2)
-                if (
-                    col.endswith("_std")
-                    and "overlap_pct_mean" in df_unique_args.columns
-                ):
-                    has_overlap = pd.notna(df_unique_args["overlap_pct_mean"])
-                    df_unique_args.loc[has_overlap, col] = df_unique_args.loc[
-                        has_overlap, col
-                    ].fillna(0.0)
+            if col.startswith("kernel_details_"):
+                rename_map[col] = "kernel_details_summary"
+        df_unique_args.rename(columns=rename_map, inplace=True)
 
+        # 4. Reorder columns: start with grouping + key metrics, then rest
+        primary_cols = [
+            col for col in grouping_cols_original if col in df_unique_args.columns
+        ]
+        metric_cols = [
+            col
+            for col in [
+                "UID",
+                "operation_count",
+                "kernel_names",
+                "total_direct_kernel_time_mean",
+            ]
+            if col in df_unique_args.columns
+        ]
+        other_cols = [
+            col
+            for col in df_unique_args.columns
+            if col not in primary_cols + metric_cols
+            and not col.endswith("_str_repr_for_grouping")
+        ]
+        df_unique_args = df_unique_args[primary_cols + metric_cols + other_cols]
+
+        # 5. Sort the DataFrame by the sum of total_direct_kernel_time and then by ex_uid for stability
+        if "total_direct_kernel_time_sum" in df_unique_args.columns:
+            df_unique_args = df_unique_args.sort_values(
+                by=["total_direct_kernel_time_sum", "ex_UID"], ascending=[False, True]
+            ).reset_index(drop=True)
+
+        # 6. Calculate percentage of total time and cumulative percentage if requested
+        if include_pct and "total_direct_kernel_time_sum" in df_unique_args.columns:
+            total_duration_ms = df_unique_args["total_direct_kernel_time_sum"].sum()
+            df_unique_args["Percentage (%)"] = (
+                df_unique_args["total_direct_kernel_time_sum"] / total_duration_ms
+            ) * 100
+            df_unique_args["Cumulative Percentage (%)"] = df_unique_args[
+                "Percentage (%)"
+            ].cumsum()
         return df_unique_args
 
     # =========================================================================
@@ -1745,13 +1407,6 @@ class TreePerfAnalyzer:
 
             event = self.tree.get_UID2event(event_uid)
 
-            # python_function nodes are transparent — traverse their children
-            # to reach the cpu_ops underneath (needed when add_python_func=True)
-            if self.event_to_category(event) == "python_function":
-                for child_uid in event.get("children", []):
-                    traverse(child_uid)
-                return
-
             # Skip non-cpu_op events
             if not self.add_python_func and self.event_to_category(event) != "cpu_op":
                 return
@@ -1914,18 +1569,6 @@ class TreePerfAnalyzer:
             has_own_perf_model = self._has_perf_model(event)
             is_sole_bwd = self._is_sole_bwd_with_fwd_perf_model(event)
 
-            # Compute overlap info if not already set by get_kernel_launchers
-            if event.get("overlap_pct") is None and event.get("gpu_events"):
-                kernels = [
-                    self.tree.get_UID2event(uid)
-                    for uid in event.get("gpu_events", [])
-                    if self.event_to_category(self.tree.get_UID2event(uid))
-                    in {"kernel", "gpu_memcpy", "gpu_memset"}
-                ]
-                kernels = [k for k in kernels if k is not None]
-                if kernels:
-                    self._compute_overlap_info(event, kernels)
-
             row = {
                 "name": event.get("name"),
                 "op category": self.op_categorizer(event),
@@ -1944,12 +1587,7 @@ class TreePerfAnalyzer:
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
-                "overlapping_kernel_names": event.get("overlapping_kernel_names"),
-                "overlapping_kernels_details": event.get("overlapping_kernels_details"),
-                "overlap_pct": event.get("overlap_pct"),
             }
-            if self.detect_recompute:
-                row["is_recompute"] = event.get("is_recompute", False)
 
             if include_args:
                 row["Input Dims"] = list_to_tuple(args.get("Input Dims"))
@@ -1987,7 +1625,6 @@ class TreePerfAnalyzer:
                 "TB/s",
                 "Compute Spec",
                 "Roofline Time (µs)",
-                "Roofline Bound",
                 "Pct Roofline",
             ]
 
@@ -2073,17 +1710,12 @@ class TreePerfAnalyzer:
             "process_label",
             "thread_name",
             "External id",
-            "overlapping_kernel_names",
-            "overlapping_kernels_details",
-            "overlap_pct",
         ]
         if include_args:
             col_order.extend(
                 ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
             )
         col_order.extend(["duration_us", "has_perf_model"])
-        if "is_recompute" in df.columns:
-            col_order.append("is_recompute")
         if include_perf_metrics:
             col_order.extend(perf_cols)
             col_order.append("perf_params")
@@ -2098,8 +1730,6 @@ class TreePerfAnalyzer:
         df_unified_perf: pd.DataFrame,
         agg_metrics=["mean", "std"],
         include_pct=True,
-        include_overlapping_kernels=False,
-        group_by_parent_module=False,
         group_by_num_kernels=False,
     ):
         """
@@ -2113,9 +1743,6 @@ class TreePerfAnalyzer:
             df_unified_perf (pd.DataFrame): DataFrame from build_df_unified_perf_table().
             agg_metrics (list): Aggregation metrics for time-varying columns.
             include_pct (bool): Include percentage and cumulative percentage columns.
-            include_overlapping_kernels (bool): If True, group by 'overlapping_kernel_names' and
-                aggregate overlapping_kernels_details_summary via _summarize_kernel_stats.
-            group_by_parent_module (bool): If True, also group by 'parent_module' when present.
 
         Returns:
             pd.DataFrame: Summarized DataFrame grouped by unique args.
@@ -2138,16 +1765,6 @@ class TreePerfAnalyzer:
             "Input Strides",
             "Concrete Inputs",
         ]
-        if (
-            include_overlapping_kernels
-            and "overlapping_kernel_names" in df_temp.columns
-        ):
-            grouping_cols.insert(1, "overlapping_kernel_names")  # after name
-        if "is_recompute" in df_temp.columns:
-            grouping_cols.append("is_recompute")
-        if group_by_parent_module:
-            idx = grouping_cols.index("op category") + 1
-            grouping_cols.insert(idx, "parent_module")
         if group_by_num_kernels:
             grouping_cols.append("num_kernels")
 
@@ -2191,8 +1808,6 @@ class TreePerfAnalyzer:
         # Roofline metrics
         if "Roofline Time (µs)" in df_temp.columns:
             agg_dict["Roofline Time (µs)"] = "first"  # Static for same args
-        if "Roofline Bound" in df_temp.columns:
-            agg_dict["Roofline Bound"] = "first"  # Static for same args
         if "Pct Roofline" in df_temp.columns:
             agg_dict["Pct Roofline"] = agg_metrics  # Varies per instance
 
@@ -2205,24 +1820,14 @@ class TreePerfAnalyzer:
             agg_dict["kernel_details"] = partial(
                 TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
             )
-        if (
-            include_overlapping_kernels
-            and "overlapping_kernels_details" in df_temp.columns
-        ):
-            agg_dict["overlapping_kernels_details"] = partial(
-                TreePerfAnalyzer._summarize_kernel_stats, agg_metrics=agg_metrics
-            )
-            if "overlap_pct" in df_temp.columns:
-                agg_dict["overlap_pct"] = agg_metrics
 
         # Perf params - static per unique args (e.g., M, N, K for GEMM)
         if "perf_params" in df_temp.columns:
             agg_dict["perf_params"] = "first"
 
-        # Keep original grouping columns (skip any already assigned, e.g. _summarize_kernel_stats)
+        # Keep original grouping columns
         for col in actual_grouping_cols:
-            if col not in agg_dict:
-                agg_dict[col] = "first"
+            agg_dict[col] = "first"
 
         if "has_perf_model" in df_temp.columns:
             agg_dict["has_perf_model"] = "first"
@@ -2237,8 +1842,7 @@ class TreePerfAnalyzer:
             "_".join(col).strip() if isinstance(col, tuple) and col[1] else col[0]
             for col in df_summary.columns
         ]
-        # Keep index (str_col_names) as columns so we can use them for sorting
-        df_summary = df_summary.reset_index()
+        df_summary = df_summary.reset_index(drop=True)
 
         # Rename columns for clarity
         rename_map = {
@@ -2260,58 +1864,28 @@ class TreePerfAnalyzer:
         # Rename perf_params aggregation column
         if "perf_params_first" in df_summary.columns:
             rename_map["perf_params_first"] = "perf_params"
-        # Rename kernel_details and overlapping_kernels_details_summary aggregation columns
+        # Rename kernel_details aggregation column
         for col in df_summary.columns:
             if col.startswith("kernel_details_"):
                 rename_map[col] = "kernel_details_summary"
-            if col.startswith("overlapping_kernels_details_"):
-                rename_map[col] = "overlapping_kernels_details_summary"
 
         df_summary = df_summary.rename(columns=rename_map)
 
-        # Sort by total kernel time (GPU) so highest-time group first, then ex_UID for stability.
-        # Use Kernel Time (µs)_sum when available to match legacy refs; else total_duration_us.
-        # When groups tie on time, order by min(ex_UID) in group to match ops_unique_args.
-        group_cols = [
-            c
-            for c in str_col_names
-            if c in df_summary.columns
-            and c != "overlapping_kernel_names_str_repr_for_grouping"
-        ]
-        time_col = (
-            "Kernel Time (µs)_sum"
-            if "Kernel Time (µs)_sum" in df_summary.columns
-            else "total_duration_us"
-        )
-        drop_after_sort = []
-        if group_cols and time_col in df_summary.columns:
-            df_summary["_group_total_time"] = df_summary.groupby(
-                group_cols, dropna=False
-            )[time_col].transform("sum")
-            drop_after_sort.append("_group_total_time")
-            sort_by = ["_group_total_time"]
-            sort_ascending = [False]
-            if "ex_UID" in df_summary.columns:
-                df_summary["_group_min_ex_uid"] = df_summary.groupby(
-                    group_cols, dropna=False
-                )["ex_UID"].transform("min")
-                drop_after_sort.append("_group_min_ex_uid")
-                sort_by.append("_group_min_ex_uid")
-                sort_ascending.append(True)
-            sort_by.extend(group_cols)
-            sort_ascending.extend([True] * len(group_cols))
-            if time_col not in sort_by:
-                sort_by.append(time_col)
-                sort_ascending.append(False)
-            if "ex_UID" in df_summary.columns and "ex_UID" not in sort_by:
-                sort_by.append("ex_UID")
-                sort_ascending.append(True)
-            df_summary = df_summary.sort_values(by=sort_by, ascending=sort_ascending)
-            df_summary.drop(columns=drop_after_sort, inplace=True)
+        # Sort by total kernel time (GPU), then by ex_UID for stability
+        # This matches the ops_unique_args sorting behavior
+        sort_cols = []
+        if "Kernel Time (µs)_sum" in df_summary.columns:
+            sort_cols.append("Kernel Time (µs)_sum")
+        elif "total_duration_us" in df_summary.columns:
+            sort_cols.append("total_duration_us")
+        if "ex_UID" in df_summary.columns:
+            sort_cols.append("ex_UID")
+        if sort_cols:
+            df_summary = df_summary.sort_values(
+                by=sort_cols, ascending=[False] + [True] * (len(sort_cols) - 1)
+            )
+
         # Add percentage columns based on kernel time (GPU time)
-        str_cols_to_drop = [c for c in str_col_names if c in df_summary.columns]
-        if str_cols_to_drop:
-            df_summary = df_summary.drop(columns=str_cols_to_drop)
         if include_pct and "Kernel Time (µs)_sum" in df_summary.columns:
             total = df_summary["Kernel Time (µs)_sum"].sum()
             df_summary["Percentage (%)"] = (
@@ -2375,15 +1949,6 @@ class TreePerfAnalyzer:
             + pct_cols
         )
 
-        for col in df_summary.columns:
-            if "overlap_pct" in col:
-                df_summary[col] = df_summary[col].round(2)
-                if col.endswith("_std") and "overlap_pct_mean" in df_summary.columns:
-                    has_overlap = pd.notna(df_summary["overlap_pct_mean"])
-                    df_summary.loc[has_overlap, col] = df_summary.loc[
-                        has_overlap, col
-                    ].fillna(0.0)
-
         return df_summary[col_order]
 
     @staticmethod
@@ -2398,8 +1963,9 @@ class TreePerfAnalyzer:
             pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
         """
         df_temp = df_kernel_launchers.copy()
-        agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
-        df_agg = df_temp.groupby("op category").agg(agg_dict)
+        df_agg = df_temp.groupby("op category").agg(
+            {"total_direct_kernel_time": ["sum", "count"]}
+        )
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
@@ -2417,6 +1983,7 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
+
         return df_agg
 
     @staticmethod
@@ -2456,6 +2023,7 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
+
         return df_agg
 
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
@@ -3085,7 +2653,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         for event in kernel_events:
             event["op category"] = event["gpu_kernel_op_cat"]
             event["total_direct_kernel_time"] = event["dur"]
-            event["total_subtree_kernel_time"] = event["dur"]  # JAX: launcher is kernel
             event["direct_kernel_count"] = int(1)
             # Note: 'dur' in 'kernel_details' is required from tree perf.
             event["kernel_details"] = [
@@ -3184,7 +2751,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 "UID": event["UID"],
                 "op category": event["gpu_kernel_op_cat"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
-                "total_subtree_kernel_time": event["total_subtree_kernel_time"],
                 "direct_kernel_count": event["direct_kernel_count"],
             }
             if id_cols:
