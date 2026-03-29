@@ -31,9 +31,28 @@ class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
         if filename_path.endswith("pb"):
-            from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+            try:
+                from xprof.convert import raw_to_tool_data as convert
+
+                converter_lib = "xprof"
+            except ImportError:
+                from tensorboard_plugin_profile.convert import (
+                    raw_to_tool_data as convert,
+                )
+
+                converter_lib = "tensorboard-plugin-profile"
+                logger.warning(
+                    "xprof not available, falling back to tensorboard-plugin-profile "
+                    "for trace conversion. Install xprof for JAX 0.8+ support."
+                )
 
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            if data is None:
+                raise RuntimeError(
+                    f"Trace conversion using '{converter_lib}' returned None for "
+                    f"{filename_path}. Ensure the file exists and the output directory "
+                    "is writable (cache files may need to be written)."
+                )
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
             import gzip
@@ -79,24 +98,27 @@ class JaxProfileProcessor:
 
     @staticmethod
     def process_protobuf_file(protobuf_file_name, module_name):
-        from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+        try:
+            from xprof.convert import raw_to_tool_data as convert
+        except ImportError:
+            from tensorboard_plugin_profile.convert import (
+                raw_to_tool_data as convert,
+            )
 
-        # look to see if the protobuf file has already been extracted
         dir_name = os.path.dirname(protobuf_file_name) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
             convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
-        # assert len(hlo_filename) == 0
         if len(hlo_filename) > 1:
-            print("Multiple matching hlo_filenames:")
-            print(hlo_filename)
+            logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
         elif len(hlo_filename) == 0:
-            print("No matching hlo_filenames:")
-            print(hlo_filename)
+            logger.warning(
+                f"No matching hlo_filenames for module '{module_name}' in {dir_name}. "
+                "HLO metadata will be unavailable."
+            )
+            return {}
 
-        # need to make sure that the pb exists and get the numerical suffix into the module name
-        # and remove '.hlo_proto.pb'
         module_name = os.path.splitext(
             os.path.splitext(os.path.basename(hlo_filename[0]))[0]
         )[0]
@@ -115,7 +137,37 @@ class JaxProfileProcessor:
         data = data.decode("utf-8").split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
+        JaxProfileProcessor._resolve_operand_references(hlo_ops)
         return hlo_ops
+
+    @staticmethod
+    def _resolve_operand_references(hlo_ops: dict):
+        """Resolve operand references that lack inline type info.
+
+        Some graph viewer backends (e.g. xprof >= 2.20.0) emit operands as bare
+        references like ``%bitcast.39.0`` instead of ``bf16[...] %bitcast.39.0``.
+        When the referenced op exists in *hlo_ops*, substitute its output type so
+        downstream consumers (parse_operands, parse_conv_metadata) see the expected
+        shape strings.
+        """
+        for op_data in hlo_ops.values():
+            operands = op_data.get("operands")
+            if not isinstance(operands, list):
+                continue
+            resolved = []
+            for operand in operands:
+                if isinstance(operand, str) and operand.startswith("%"):
+                    ref_data = hlo_ops.get(operand)
+                    if ref_data and "output" in ref_data:
+                        resolved.append(ref_data["output"])
+                        continue
+                    logger.warning(
+                        "Unable to resolve HLO operand reference '%s'; "
+                        "HLO metadata for this operand may be incomplete.",
+                        operand,
+                    )
+                resolved.append(operand)
+            op_data["operands"] = resolved
 
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
@@ -170,27 +222,26 @@ class JaxProfileProcessor:
         dict_line["computation"] = "rest"
         if metadata is not None:
             dict_line["metadata"] = metadata[0]
-            if backend_config is not None:
-                dict_line["backend_config"] = backend_config[0]
-            if custom_call_target is not None:
-                gemm_keys = ["matmul", "cublas"]
-                dict_line["custom_call_target"] = custom_call_target[0]
-                if any(k in dict_line["custom_call_target"] for k in gemm_keys):
-                    if "f8" in str(custom_call_target[0]):
-                        dict_line["type"] = "fp8"
-                        dict_line["computation"] = "gemm"
-                    else:
-                        gemm_type = JaxProfileProcessor.get_operand_type(
-                            hlo_ops, operands[0]
-                        )
-                        if not all(
-                            JaxProfileProcessor.get_operand_type(hlo_ops, o)
-                            == gemm_type
-                            for o in operands[1:]
-                        ):
-                            raise Exception("Input operand type mismatch", line)
-                        dict_line["type"] = gemm_type
-                        dict_line["computation"] = "gemm"
+        if backend_config is not None:
+            dict_line["backend_config"] = backend_config[0]
+        if custom_call_target is not None:
+            gemm_keys = ["matmul", "cublas"]
+            dict_line["custom_call_target"] = custom_call_target[0]
+            if any(k in dict_line["custom_call_target"] for k in gemm_keys):
+                if "f8" in str(custom_call_target[0]):
+                    dict_line["type"] = "fp8"
+                    dict_line["computation"] = "gemm"
+                else:
+                    gemm_type = JaxProfileProcessor.get_operand_type(
+                        hlo_ops, operands[0]
+                    )
+                    if not all(
+                        JaxProfileProcessor.get_operand_type(hlo_ops, o) == gemm_type
+                        for o in operands[1:]
+                    ):
+                        raise Exception("Input operand type mismatch", line)
+                    dict_line["type"] = gemm_type
+                    dict_line["computation"] = "gemm"
         if replica_groups is not None:
             dict_line["replica_groups"] = replica_groups["replica_string"]
 

@@ -3,3 +3,5 @@
 **.ipynb_checkpoints/
 **/build/
 **.egg-info/
+*.SSTABLE
+*.hlo_proto.pb
