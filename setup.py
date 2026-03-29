@@ -16,8 +16,21 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
+        "openpyxl",
+        "office365-rest-python-client",
+        "msal",
+        "tabulate",
         "orjson",
+        "matplotlib",
     ],
+    extras_require={
+        # To install slodels, use a custom index:
+        # pip install "slodels[openai,anthropic,google-genai]" --extra-index-url https://atlartifactory.amd.com:8443/artifactory/api/pypi/SW-SLAI-PROD-VIRTUAL/simple
+        # pip install "slodels[openai,anthropic,google-genai]"
+        "comparative": [
+            "slodels[openai,anthropic,google-genai]",
+        ],
+    },
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
@@ -39,7 +52,6 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_api = TraceLens.Reporting.generate_perf_report_pftrace_hip_api:main",
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
-            "TraceLens_compare_traces_jax_llama = TraceLens.Reporting.compare_traces_jax_llama:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
         ],
     },
