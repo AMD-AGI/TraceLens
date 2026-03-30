@@ -144,6 +144,7 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels
 ```
