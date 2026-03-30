@@ -35,6 +35,14 @@ def _xprof_tensorboard_plugin_conflict(exc: BaseException) -> bool:
     )
 
 
+def _is_xla_hlo_instruction_id_int_max_failure(exc: BaseException) -> bool:
+    """True when XLA graph viewer rejects HLO (instruction id > INT_MAX; common in JAX 0.8+)."""
+    msg = str(exc)
+    return "INT_MAX" in msg and (
+        "proto.id()" in msg or "hlo_instruction" in msg or "Instruction with id" in msg
+    )
+
+
 def _jax_pb_raw_to_tool_data_import():
     """Import xprof or tensorboard_plugin_profile raw_to_tool_data; returns (convert, lib_name)."""
     try:
@@ -161,47 +169,61 @@ class JaxProfileProcessor:
 
         dir_name = os.path.dirname(protobuf_file_name) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
-        if len(hlo_filename) != 1:
-            _, convert, lib = _xprof_call_with_tensorboard_fallback(
+        try:
+            if len(hlo_filename) != 1:
+                _, convert, lib = _xprof_call_with_tensorboard_fallback(
+                    convert,
+                    lib,
+                    lambda c: c.xspace_to_tool_names([protobuf_file_name]),
+                )
+            hlo_filename = glob.glob(
+                dir_name + os.path.sep + module_name + "*hlo_proto.pb"
+            )
+            if len(hlo_filename) > 1:
+                logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
+            elif len(hlo_filename) == 0:
+                logger.warning(
+                    f"No matching hlo_filenames for module '{module_name}' in {dir_name}. "
+                    "HLO metadata will be unavailable."
+                )
+                return {}
+
+            resolved_module = os.path.splitext(
+                os.path.splitext(os.path.basename(hlo_filename[0]))[0]
+            )[0]
+
+            hlo_ops = {}
+            graph_viewer_options = {
+                "node_name": "",
+                "module_name": resolved_module,
+                "graph_width": 2,
+                "show_metadata": True,
+                "merge_fusion": True,
+                "type": "long_txt",
+            }
+            params = {"graph_viewer_options": graph_viewer_options}
+            tool_out, _, _ = _xprof_call_with_tensorboard_fallback(
                 convert,
                 lib,
-                lambda c: c.xspace_to_tool_names([protobuf_file_name]),
+                lambda c: c.xspace_to_tool_data([dir_name], "graph_viewer^", params),
             )
-        hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
-        if len(hlo_filename) > 1:
-            logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
-        elif len(hlo_filename) == 0:
-            logger.warning(
-                f"No matching hlo_filenames for module '{module_name}' in {dir_name}. "
-                "HLO metadata will be unavailable."
-            )
-            return {}
-
-        module_name = os.path.splitext(
-            os.path.splitext(os.path.basename(hlo_filename[0]))[0]
-        )[0]
-
-        hlo_ops = {}
-        graph_viewer_options = {
-            "node_name": "",
-            "module_name": module_name,
-            "graph_width": 2,
-            "show_metadata": True,
-            "merge_fusion": True,
-            "type": "long_txt",
-        }
-        params = {"graph_viewer_options": graph_viewer_options}
-        tool_out, _, _ = _xprof_call_with_tensorboard_fallback(
-            convert,
-            lib,
-            lambda c: c.xspace_to_tool_data([dir_name], "graph_viewer^", params),
-        )
-        data, _ = tool_out
-        data = data.decode("utf-8").split("\n")
-        for line in data:
-            JaxProfileProcessor.process_line(hlo_ops, line)
-        JaxProfileProcessor._resolve_operand_references(hlo_ops)
-        return hlo_ops
+            data, _ = tool_out
+            data = data.decode("utf-8").split("\n")
+            for line in data:
+                JaxProfileProcessor.process_line(hlo_ops, line)
+            JaxProfileProcessor._resolve_operand_references(hlo_ops)
+            return hlo_ops
+        except Exception as e:
+            if _is_xla_hlo_instruction_id_int_max_failure(e):
+                logger.warning(
+                    "Skipping HLO graph viewer for module %r: XLA rejects instruction ids "
+                    "> INT_MAX (typical for JAX 0.8+). Kernel timeline still loads; "
+                    "HLO-enriched metadata will be missing. %s",
+                    module_name,
+                    e,
+                )
+                return {}
+            raise
 
     @staticmethod
     def _resolve_operand_references(hlo_ops: dict):
