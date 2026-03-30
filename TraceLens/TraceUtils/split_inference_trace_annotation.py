@@ -640,8 +640,8 @@ def find_steady_state_iterations(
                 ]
             )
     if not decode_only:
-        sub_regions_tmp = [t for t in sub_regions if t[2]>0]
-        if len(sub_regions_tmp)==0:
+        sub_regions_tmp = [t for t in sub_regions if t[2] > 0]
+        if len(sub_regions_tmp) == 0:
             print("prefilldecode step not found, selecting decode-only region")
         else:
             sub_regions = sub_regions_tmp
