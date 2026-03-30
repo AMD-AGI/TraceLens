@@ -10,9 +10,11 @@ on:
   push:
     branches:
       - main
+      - staging-public-main-with-history
   pull_request:
     branches:
       - main
+      - staging-public-main-with-history
 
 jobs:
   lint:
