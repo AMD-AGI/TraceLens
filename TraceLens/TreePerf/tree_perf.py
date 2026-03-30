@@ -29,7 +29,7 @@ from ..PerfModel.torch_op_mapping import (
     op_to_perf_model_class_map,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
-from ..Trace2Tree.trace_capture_merge import merge_capture_trace_into_graph
+from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
