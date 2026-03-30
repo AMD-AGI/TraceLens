@@ -25,28 +25,87 @@ from typing import List, Dict, Callable, Iterable, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _xprof_tensorboard_plugin_conflict(exc: BaseException) -> bool:
+    """True when xprof refuses to run because tensorboard-plugin-profile is also installed."""
+    msg = str(exc)
+    return (
+        "Installation Conflict" in msg
+        and "tensorboard-plugin-profile" in msg
+        and "xprof" in msg
+    )
+
+
+def _jax_pb_raw_to_tool_data_import():
+    """Import xprof or tensorboard_plugin_profile raw_to_tool_data; returns (convert, lib_name)."""
+    try:
+        from xprof.convert import raw_to_tool_data as convert
+
+        return convert, "xprof"
+    except ImportError:
+        from tensorboard_plugin_profile.convert import (
+            raw_to_tool_data as convert,
+        )
+
+        logger.warning(
+            "xprof not available, falling back to tensorboard-plugin-profile "
+            "for trace conversion. Install xprof for JAX 0.8+ support."
+        )
+        return convert, "tensorboard-plugin-profile"
+    except RuntimeError as e:
+        if not _xprof_tensorboard_plugin_conflict(e):
+            raise
+        logger.warning(
+            "xprof cannot run while tensorboard-plugin-profile is installed; "
+            "falling back to tensorboard-plugin-profile for trace conversion. "
+            "Alternatively: pip uninstall tensorboard-plugin-profile"
+        )
+        from tensorboard_plugin_profile.convert import (
+            raw_to_tool_data as convert,
+        )
+
+        return convert, "tensorboard-plugin-profile"
+
+
+def _xprof_call_with_tensorboard_fallback(convert, lib: str, call):
+    """Run call(convert); on xprof install conflict, retry with tensorboard_plugin_profile.
+
+    Returns (call_result, convert_used, lib_used) so callers keep the backend that worked.
+    """
+    try:
+        return call(convert), convert, lib
+    except RuntimeError as e:
+        if lib != "xprof" or not _xprof_tensorboard_plugin_conflict(e):
+            raise
+        logger.warning(
+            "xprof reported an installation conflict at conversion time; "
+            "retrying with tensorboard-plugin-profile."
+        )
+        from tensorboard_plugin_profile.convert import (
+            raw_to_tool_data as convert_tb,
+        )
+
+        return call(convert_tb), convert_tb, "tensorboard-plugin-profile"
+
+
+def _load_xplane_pb_as_trace_viewer_json(filename_path: str) -> tuple:
+    """Convert an XPlane .pb to trace_viewer JSON bytes. Returns (data, converter_lib)."""
+    convert, lib = _jax_pb_raw_to_tool_data_import()
+    tool_out, _c, lib = _xprof_call_with_tensorboard_fallback(
+        convert,
+        lib,
+        lambda c: c.xspace_to_tool_data([filename_path], "trace_viewer@^", {}),
+    )
+    data, _ = tool_out
+    return data, lib
+
+
 # generic data loader class for json, json.gz, or tensorboard pb files
 # tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
         if filename_path.endswith("pb"):
-            try:
-                from xprof.convert import raw_to_tool_data as convert
-
-                converter_lib = "xprof"
-            except ImportError:
-                from tensorboard_plugin_profile.convert import (
-                    raw_to_tool_data as convert,
-                )
-
-                converter_lib = "tensorboard-plugin-profile"
-                logger.warning(
-                    "xprof not available, falling back to tensorboard-plugin-profile "
-                    "for trace conversion. Install xprof for JAX 0.8+ support."
-                )
-
-            data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            data, converter_lib = _load_xplane_pb_as_trace_viewer_json(filename_path)
             if data is None:
                 raise RuntimeError(
                     f"Trace conversion using '{converter_lib}' returned None for "
@@ -98,17 +157,16 @@ class JaxProfileProcessor:
 
     @staticmethod
     def process_protobuf_file(protobuf_file_name, module_name):
-        try:
-            from xprof.convert import raw_to_tool_data as convert
-        except ImportError:
-            from tensorboard_plugin_profile.convert import (
-                raw_to_tool_data as convert,
-            )
+        convert, lib = _jax_pb_raw_to_tool_data_import()
 
         dir_name = os.path.dirname(protobuf_file_name) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
-            convert.xspace_to_tool_names([protobuf_file_name])
+            _, convert, lib = _xprof_call_with_tensorboard_fallback(
+                convert,
+                lib,
+                lambda c: c.xspace_to_tool_names([protobuf_file_name]),
+            )
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) > 1:
             logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
@@ -133,7 +191,12 @@ class JaxProfileProcessor:
             "type": "long_txt",
         }
         params = {"graph_viewer_options": graph_viewer_options}
-        data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
+        tool_out, _, _ = _xprof_call_with_tensorboard_fallback(
+            convert,
+            lib,
+            lambda c: c.xspace_to_tool_data([dir_name], "graph_viewer^", params),
+        )
+        data, _ = tool_out
         data = data.decode("utf-8").split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
