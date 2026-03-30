@@ -44,6 +44,11 @@ jobs:
           pip install pytest openpyxl pandas
           pytest tests/test_compare_perf_report.py
 
+      - name: Run pytest on inference perf report tests
+        run: |
+          pip install pytest openpyxl pandas
+          pytest tests/test_inference_perf_report.py
+          
       - name: Run pytest on collective analysis tests
         run: |
           pip install pytest openpyxl pandas
