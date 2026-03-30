@@ -16,7 +16,7 @@ model suitable for performance analysis.
 """
 
 import sys
-import copy
+import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 import json
@@ -28,7 +28,9 @@ import TraceLens
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 
-EXECUTE_CONTEXT_PATTERN = re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)")
+EXECUTE_CONTEXT_PATTERN = re.compile(
+    r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+)
 
 
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
@@ -42,9 +44,7 @@ def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
         if cat_filter is not None:
             if tree.event_to_category(node) in cat_filter:
                 if name_filter is not None:
-                    if any(
-                        [nf.lower() in node["name"].lower() for nf in name_filter]
-                    ):
+                    if any([nf.lower() in node["name"].lower() for nf in name_filter]):
                         list_filtered_events.append(node)
                 else:
                     list_filtered_events.append(node)
@@ -82,16 +82,22 @@ def verify_subtree_events(capture_events, graph_events):
                     )
                 )
                 return 0
-    #print(
+    # print(
     #    "Subtree events match successfully with {} events".format(len(capture_events))
-    #)
+    # )
     return 1
 
 
 def update_subtree_uids_and_timestamps(
-    capture_tree, subtree_events, subtree_filtered_events, start_uid, new_start_ts, c_root, g_root_dur
+    capture_tree,
+    subtree_events,
+    subtree_filtered_events,
+    start_uid,
+    new_start_ts,
+    c_root,
+    g_root_dur,
 ):
-    cpu_root_nodes=[]
+    cpu_root_nodes = []
     uid_mapping = {}
     for idx, event in enumerate(subtree_events):
         old_uid = event[UID]
@@ -117,7 +123,9 @@ def update_subtree_uids_and_timestamps(
                 event["parent"] = uid_mapping[parent_uid]
             else:
                 if event["name"] != c_root["name"]:
-                    print("Warning: parent UID {} not found in mapping".format(parent_uid))
+                    print(
+                        "Warning: parent UID {} not found in mapping".format(parent_uid)
+                    )
     # Update timestamps
     original_start_ts = subtree_events[0]["ts"]
     ts_offset = new_start_ts - original_start_ts
@@ -130,7 +138,7 @@ def update_subtree_uids_and_timestamps(
     for i in capture_tree.cpu_root_nodes:
         if i in uid_mapping:
             cpu_root_nodes.append(uid_mapping[i])
-    return subtree_events, subtree_filtered_events,cpu_root_nodes
+    return subtree_events, subtree_filtered_events, cpu_root_nodes
 
 
 def append_subtree_to_event(tree, subtree_events, parent_event, cpu_root_nodes):
@@ -143,40 +151,94 @@ def append_subtree_to_event(tree, subtree_events, parent_event, cpu_root_nodes):
             print("Warning: UID {} already exists in events_by_uid".format(event[UID]))
         tree.events_by_uid[event[UID]] = event
         tree.name2event_uids[
-                event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
-            ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+            event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
+        ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
     tree.cpu_root_nodes.extend(cpu_root_nodes)
     return tree
 
 
 def make_connections(graph_tree, graph_filtered_events, capture_filtered_events):
+    events_by_uid = graph_tree.events_by_uid
+
+    # Accumulate gpu_event UIDs per ancestor, then batch-apply with extend.
+    # This avoids repeated setdefault+append on the same ancestor across pairs.
+    ancestor_gpu_events: dict = {}
+
+    # Once the first pair with a non-empty parent chain is processed, we record
+    # its ancestor path so subsequent pairs can skip the shared suffix.
+    # We use an explicit boolean rather than checking `if not ancestor_chain`
+    # to correctly handle the edge case where the first c_event has no parents
+    # (which would leave ancestor_chain=[] and cause every pair to re-enter the
+    # "first pair" branch).
+    chain_built: bool = False
+    ancestor_chain: list = (
+        []
+    )  # ancestor UIDs bottom→top, grows as new ancestors are seen
+    ancestor_chain_idx: dict = (
+        {}
+    )  # uid → index in ancestor_chain for O(1) merge detection
+
     for g_event, c_event in zip(graph_filtered_events, capture_filtered_events):
-        graph_tree.events[c_event[UID]]["children"] = [g_event[UID]]
-        graph_tree.events[g_event[UID]]["parent"] = c_event[UID]
-        graph_tree.events[g_event[UID]]["args"]["correlation"] = c_event["args"].get(
+        g_uid = g_event[UID]
+
+        graph_tree.events[c_event[UID]]["children"] = [g_uid]
+        graph_tree.events[g_uid]["parent"] = c_event[UID]
+        graph_tree.events[g_uid]["args"]["correlation"] = c_event["args"].get(
             "correlation", None
         )
-        c_event.setdefault("gpu_events", []).append(
-            g_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-        )
+        c_event.setdefault("gpu_events", []).append(g_uid)
 
         parent = graph_tree.get_parent_event(c_event)
-        while parent:
-            parent.setdefault("gpu_events", []).append(
-                g_event[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-            )
-            parent = graph_tree.get_parent_event(parent)
+
+        if not chain_built:
+            # Walk to root and record every ancestor UID for future short-circuits.
+            while parent:
+                p_uid = parent[UID]
+                ancestor_chain.append(p_uid)
+                ancestor_chain_idx[p_uid] = len(ancestor_chain) - 1
+                ancestor_gpu_events.setdefault(p_uid, []).append(g_uid)
+                parent = graph_tree.get_parent_event(parent)
+            chain_built = True
+        else:
+            # Walk the private prefix until we merge with the recorded chain,
+            # then index directly into it — skipping the shared suffix walk.
+            # Private ancestors are added to ancestor_gpu_events but NOT to
+            # ancestor_chain: ancestor_chain must stay a single linear path
+            # (bottom→top) so that ancestor_chain[idx:] always yields exactly
+            # the ancestors above the merge point. Mixing in private ancestors
+            # from different paths would corrupt the slice semantics.
+            while parent:
+                p_uid = parent[UID]
+                if p_uid in ancestor_chain_idx:
+                    # Merge point: batch-add g_uid to this ancestor and everything above.
+                    for shared_uid in ancestor_chain[ancestor_chain_idx[p_uid] :]:
+                        ancestor_gpu_events.setdefault(shared_uid, []).append(g_uid)
+                    break
+                ancestor_gpu_events.setdefault(p_uid, []).append(g_uid)
+                parent = graph_tree.get_parent_event(parent)
+
+    # Single pass to flush all accumulated gpu_event lists onto ancestor events.
+    for uid, g_uids in ancestor_gpu_events.items():
+        events_by_uid[uid].setdefault("gpu_events", []).extend(g_uids)
+
+    return graph_tree
+
+
+def finalize_non_gpu_paths(graph_tree):
+    """Set/clear ``non_gpu_path`` on every non-GPU event in *graph_tree*.
+
+    Called once after all ``make_connections`` calls are complete, rather than
+    scanning the full event list inside every ``make_connections`` invocation.
+    """
+    gpu_cats = {"kernel", "gpu_memset", "gpu_memcpy"}
     for event in graph_tree.events:
-        # Skip GPU events
-        cat = event.get("cat")
-        if cat in {"kernel", "gpu_memset", "gpu_memcpy"}:
+        if event.get("cat") in gpu_cats:
             continue
-        # Now, we are dealing with non-GPU events
         if "gpu_events" not in event:
             event["non_gpu_path"] = True
         else:
             event.pop("non_gpu_path", None)
-    return graph_tree
+
 
 _CAPTURE_TREE_CACHE_MAX_SIZE = 8
 _capture_tree_cache: OrderedDict = OrderedDict()
@@ -225,65 +287,59 @@ def find_capture_roots(capture_tree):
     ]
     capture_end_ts = [event["ts"] for event in capture_end]
     for ts, te in zip(capture_begin_ts, capture_end_ts):
-        filtered = [e for e in capture_tree.events if e["ts"] >= ts and e["ts"]+e.get("dur", 0) <= te]
+        filtered = [
+            e
+            for e in capture_tree.events
+            if e["ts"] >= ts and e["ts"] + e.get("dur", 0) <= te
+        ]
         capture_roots.append(max(filtered, key=lambda e: e.get("dur", 0)))
     return capture_roots
+
 
 def find_execution_roots(graph_tree):
     """Find execution root events matching ``execute_context_*`` in the graph tree."""
     roots = [
         event
         for event in graph_tree.events
-        if EXECUTE_CONTEXT_PATTERN.match(event.get("name", "")) and event.get("cat") == "user_annotation"
+        if EXECUTE_CONTEXT_PATTERN.match(event.get("name", ""))
+        and event.get("cat") == "user_annotation"
     ]
     roots.sort(key=lambda x: x.get("ts", 0))
     return roots
 
-def find_graph_roots_under_execution(graph_tree, execution_root):
+
+def find_graph_roots_under_execution(execution_root, graphlaunch_events):
     """Return all ``graphlaunch`` events that fall within *execution_root*'s time range.
 
-    Because *execution_root* is a ``user_annotation`` event (no children in the
-    tree), we first locate the largest ``python_function`` or ``cpu_op`` whose
-    time span is contained within the execution root, then BFS from there.
+    Accepts a pre-collected list of graphlaunch events so callers can avoid
+    rescanning the full event list for every execution root.  No tree traversal
+    is needed: graphlaunch events are identified directly by name, so filtering
+    by timestamp is sufficient.
     """
     exec_ts = execution_root.get("ts", 0)
     exec_te = exec_ts + execution_root.get("dur", 0)
-
-    # Find the largest python_function / cpu_op fully inside the execution root
-    best = None
-    best_dur = -1
-    for event in graph_tree.events:
-        cat = event.get("cat", "")
-        if cat not in ("python_function", "cpu_op"):
-            continue
-        ts = event.get("ts", 0)
-        dur = event.get("dur", 0)
-        te = ts + dur
-        if ts > exec_ts and te < exec_te and dur > best_dur:
-            best = event
-            best_dur = dur
-
-    if best is None:
-        return []
-
-    graph_roots = []
-    queue = [best]
-    while queue:
-        node = queue.pop(0)
-        if "graphlaunch" in node.get("name", "").lower():
-            graph_roots.append(node)
-        for child in graph_tree.get_children_events(node):
-            queue.append(child)
+    graph_roots = [
+        e
+        for e in graphlaunch_events
+        if exec_ts <= e.get("ts", 0) and e.get("ts", 0) + e.get("dur", 0) <= exec_te
+    ]
     graph_roots.sort(key=lambda x: x.get("ts", 0))
     return graph_roots
+
 
 def build_execution_graph_root_map(graph_tree):
     """Build a list of ``(execution_root, [graph_roots])`` for the graph tree."""
     execution_roots = find_execution_roots(graph_tree)
     print("Found {} execution roots in graph tree".format(len(execution_roots)))
+
+    # Collect graphlaunch events once; reused for every execution root.
+    graphlaunch_events = [
+        e for e in graph_tree.events if "graphlaunch" in e.get("name", "").lower()
+    ]
+
     result = []
     for exec_root in execution_roots:
-        g_roots = find_graph_roots_under_execution(graph_tree, exec_root)
+        g_roots = find_graph_roots_under_execution(exec_root, graphlaunch_events)
         print(
             "  Execution root '{}': {} graph roots".format(
                 exec_root["name"], len(g_roots)
@@ -291,6 +347,7 @@ def build_execution_graph_root_map(graph_tree):
         )
         result.append((exec_root, g_roots))
     return result
+
 
 def load_capture_folder(
     capture_folder: str,
@@ -318,6 +375,9 @@ def load_capture_folder(
         filename = entry["file"]
         batch_size = entry["batch_size"]
         mode = entry["mode"]
+        if not (mode in ["FULL", "PIECEWISE"] and isinstance(batch_size, int)):
+            print("Warning: invalid batch size or mode, skipping: {}".format(entry))
+            continue
         key = "{}_{}".format(batch_size, mode)
         batch_sizes.append(int(batch_size))
         filepath = os.path.join(capture_folder, filename)
@@ -325,16 +385,20 @@ def load_capture_folder(
             print("Warning: capture file not found, skipping: {}".format(filepath))
             continue
 
-        result[key]= filepath
+        result[key] = filepath
 
     print(
-        "\nCapture folder loaded: {} unique batch_size_mode keys".format(len(result.keys()))
+        "\nCapture folder loaded: {} unique batch_size_mode keys".format(
+            len(result.keys())
+        )
     )
-
 
     return result, batch_sizes
 
-def find_closest_batch_size(batch_size: int, capture_batch_sizes: List[int]) -> Optional[int]:
+
+def find_closest_batch_size(
+    batch_size: int, capture_batch_sizes: List[int]
+) -> Optional[int]:
     """Return the smallest value in *capture_batch_sizes* that is >= *batch_size*.
 
     Returns ``None`` when *batch_size* exceeds every entry in
@@ -347,8 +411,10 @@ def find_closest_batch_size(batch_size: int, capture_batch_sizes: List[int]) -> 
 
 
 def find_execution_details(execution_root):
-    name=execution_root["name"].split("_")[1]
+    name = execution_root["name"].split("_")[1]
     return name
+
+
 def merge_capture_trace_into_graph(
     capture_folder: str,
     metadata_json_path: str,
@@ -381,57 +447,74 @@ def merge_capture_trace_into_graph(
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
     ##Use cuda graph APIs to find the root node for capture subtrees
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
-    capture_map, capture_batch_sizes = load_capture_folder(capture_folder, metadata_json_path)
+    capture_map, capture_batch_sizes = load_capture_folder(
+        capture_folder, metadata_json_path
+    )
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
+        if len(graph_roots) == 0:
+            print(
+                "No graph roots found for execution root {}".format(
+                    execution_root["name"]
+                )
+            )
+            continue
         batch_size = find_execution_details(execution_root)
-        closest_batch_size = find_closest_batch_size(int(batch_size), capture_batch_sizes)
+        closest_batch_size = find_closest_batch_size(
+            int(batch_size), capture_batch_sizes
+        )
         if closest_batch_size is None:
-            print("Warning: no capture batch size found for batch size {}".format(batch_size))
+            print(
+                "Warning: no capture batch size found for batch size {}".format(
+                    batch_size
+                )
+            )
             continue
         num_graph_roots = len(graph_roots)
         if num_graph_roots != 1:
-            mode="PIECEWISE"
+            mode = "PIECEWISE"
         else:
-            mode="FULL"
+            mode = "FULL"
         key = "{}_{}".format(closest_batch_size, mode)
         filepath = capture_map[key]
         capture_tree, capture_roots = _get_cached_capture_tree(
             key, filepath, TreePerfAnalyzer
         )
-    
+
         print(
             "Found {} capture roots and {} graph roots".format(
                 len(capture_roots), len(graph_roots)
             )
         )
-        for c_root, g_root in zip(capture_roots, graph_roots):
-            capture_events, capture_filtered_events = get_subtree_events(
-                capture_tree,
-                c_root,
-                cat_filter=["cuda_runtime", "cuda_driver"],
-                name_filter=[
-                    "Launch",
-                    "Memcpy",
-                ],
-            )
-            filtered_uids = {e[UID] for e in capture_filtered_events}
-            capture_events = copy.deepcopy(capture_events)
+        for (c_root, g_root), (cached_events, filtered_uids) in zip(
+            zip(capture_roots, graph_roots), capture_root_data
+        ):
+            # Shallow-copy each event dict: every mutation downstream replaces
+            # top-level keys (UID, ts, dur, parent, children) or adds new ones
+            # (gpu_events). No nested structure is ever mutated in-place, so a
+            # full deepcopy is unnecessary.
+            capture_events = [{**e} for e in cached_events]
+
             capture_filtered_events = [
                 e for e in capture_events if e[UID] in filtered_uids
             ]
+
             graph_events, graph_filtered_events = get_subtree_events(
                 graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
             )
-            #print(
-            #    "Verifying subtree events for capture root {} and graph root {}".format(
-            #        c_root["name"], g_root["name"]
-            #     )
-            #)
-            verify_success = verify_subtree_events(capture_filtered_events, graph_filtered_events)
+
+            verify_success = verify_subtree_events(
+                capture_filtered_events, graph_filtered_events
+            )
+
             if verify_success == 0:
-                print("Warning: subtree events verification failed for capture root {} and graph root {}".format(c_root["name"], g_root["name"]))
+                print(
+                    "Warning: subtree events verification failed for capture root {} and graph root {}".format(
+                        c_root["name"], g_root["name"]
+                    )
+                )
                 continue
+
             start_uid = graph_tree.events[-1][UID] + 1
             capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
                 capture_tree,
@@ -442,10 +525,15 @@ def merge_capture_trace_into_graph(
                 c_root,
                 g_root["dur"],
             )
+
             capture_events[0]["parent"] = g_root[UID]
             g_root["children"].append(capture_events[0][UID])
-            graph_tree = append_subtree_to_event(graph_tree, capture_events, g_root,cpu_root_nodes)
+            graph_tree = append_subtree_to_event(
+                graph_tree, capture_events, g_root, cpu_root_nodes
+            )
+
             graph_tree = make_connections(
                 graph_tree, graph_filtered_events, capture_filtered_events
             )
+    finalize_non_gpu_paths(graph_tree)
     return graph_tree

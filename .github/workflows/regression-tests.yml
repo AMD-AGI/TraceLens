@@ -41,6 +41,21 @@ jobs:
 
       - name: Run compare perf reports tests
         run: pytest tests/test_compare_perf_reports.py
+        
+      - name: Run pytest on inference perf report tests
+        run: |
+          pip install pytest openpyxl pandas
+          pytest tests/test_inference_perf_report.py
+          
+      - name: Run pytest on collective analysis tests
+        run: |
+          pip install pytest openpyxl pandas
+          pytest tests/test_collective_analysis.py
+      
+      - name: Run pytest on JAX perf report end-to-end tests
+        run: |
+          pip install pytest openpyxl pandas tensorboard-plugin-profile==2.19.0
+          pytest tests/test_jax_perf_report.py
 
       - name: Run collective analysis tests
         run: pytest tests/test_collective_analysis.py

@@ -94,7 +94,7 @@ class InferenceAttention:
         q_shape, k_shape = input_dims[0], input_dims[1]
         N_Q, H_Q, d_h_qk = q_shape
         N_KV, H_KV, d_h_v = k_shape[-3:]
-
+        dtype_Q = event["args"]["Input type"][0]
         return {
             "B": 1,
             "N_Q": N_Q,
@@ -114,6 +114,7 @@ class InferenceAttention:
             "g_sk": g_sk,
             "g_sqsq": g_sqsq,
             "g_sqsk": g_sqsk,
+            "dtype_Q": dtype_Q,
         }
 
     # ------------------------------------------------------------------
@@ -212,7 +213,7 @@ class InferenceAttention:
         raise NotImplementedError("Backward pass for attention is not defined.")
 
     def get_compute_precision(self):
-        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        dtype = self.param_details.get("dtype_Q", None)
         return torch_dtype_map(dtype) if dtype else None
 
     def get_maf_type(self):

@@ -44,12 +44,33 @@ def is_aiter_fused_moe_kernel(kernel_event: dict) -> bool:
     return is_moe_kernel_match
 
 
+def _has_cpu_op_descendant(trace_tree, event: dict) -> bool:
+    """Recursively check if any descendant of event is a cpu_op.
+    Skips subtrees marked non_gpu_path since they cannot contain cpu_ops with GPU work.
+    """
+    for child_uid in event.get("children", []):
+        child = trace_tree.get_UID2event(child_uid)
+        if child.get("cat") == "cpu_op":
+            return True
+        if not child.get("non_gpu_path", False) and _has_cpu_op_descendant(
+            trace_tree, child
+        ):
+            return True
+    return False
+
+
 def _create_pseudo_op_moe_fused_aiter(trace_tree, moe_op_event: dict):
     """Create single pseudo op for one MoE operation."""
 
     if moe_op_event.get("name") != "vllm::rocm_aiter_fused_moe":
         logger.warning(
             f"Expected vllm::rocm_aiter_fused_moe, found {moe_op_event['name']}"
+        )
+        return
+
+    if _has_cpu_op_descendant(trace_tree, moe_op_event):
+        logger.info(
+            f"Skipping pseudo op for UID {moe_op_event['UID']}: has cpu_op descendant"
         )
         return
 

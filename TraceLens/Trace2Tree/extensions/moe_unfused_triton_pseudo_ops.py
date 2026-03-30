@@ -5,6 +5,7 @@
 ###############################################################################
 
 import logging
+from weakref import finalize
 from .pseudo_ops_utils import inject_pseudo_op
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
     # Look for TopK child operation (with recursive search for Python wrappers)
     # Use native get_children_events() method
     for child_event in trace_tree.get_children_events(moe_op_event):
-        topk_value = search_for_topk(child_event)
+        topk_value = search_for_topk(child_event, max_depth=10)
         if topk_value is not None:
             return topk_value
 
@@ -180,4 +181,25 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
             strides=moe_op_event["args"].get("Input Strides"),
             concrete_inputs=moe_op_event["args"].get("Concrete Inputs"),
             extra_args=extra_args,
+        )
+    finalize_matmul_scatter_kernel = [
+        e for e in gpu_events if "matmul_scatter" in e["name"].lower()
+    ]
+    if len(finalize_matmul_scatter_kernel) > 1:
+        logger.warning(
+            f"Multiple matmul_scatter kernels found for UID {moe_op_event['UID']}"
+        )
+        return
+    if len(finalize_matmul_scatter_kernel) == 1:
+        finalize_matmul_scatter_kernel = finalize_matmul_scatter_kernel[0]
+        inject_pseudo_op(
+            trace_tree,
+            finalize_matmul_scatter_kernel,
+            "pseudo_op::moe_triton_unfused_finalize_matmul_scatter",
+            seq_num,
+            dims=moe_op_event["args"].get("Input Dims"),
+            types=moe_op_event["args"].get("Input type"),
+            strides=moe_op_event["args"].get("Input Strides"),
+            concrete_inputs=moe_op_event["args"].get("Concrete Inputs"),
+            extra_args={"MoE GEMM type": "finalize_matmul_scatter"},
         )
