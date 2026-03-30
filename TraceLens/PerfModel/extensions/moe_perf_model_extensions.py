@@ -469,7 +469,7 @@ class UnfusedMoE_Down:
         return down_flops
 
     @staticmethod
-    def bytes_func(num_tokens, hidden_dim, inter_dim, topk,
+    def bytes_func(num_tokens, hidden_dim, inter_dim, num_experts, topk,
                    input_bpe, weight_bpe, output_bpe):
         """
         Calculate bytes moved for unfused MoE down projection.

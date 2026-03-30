@@ -261,12 +261,23 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     capture_tree = capture_perf_analyzer.tree
     capture_roots = find_capture_roots(capture_tree)
 
-    _capture_tree_cache[key] = (capture_tree, capture_roots)
+    capture_root_data = []
+    for c_root in capture_roots:
+        capture_events, capture_filtered_events = get_subtree_events(
+            capture_tree,
+            c_root,
+            cat_filter=["cuda_runtime", "cuda_driver"],
+            name_filter=["Launch", "Memcpy", "Memset"],
+        )
+        filtered_uids = {e[UID] for e in capture_filtered_events}
+        capture_root_data.append((capture_events, filtered_uids))
+
+    _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
     if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
         evicted_key, _ = _capture_tree_cache.popitem(last=False)
         print("Evicted capture tree cache entry (key={})".format(evicted_key))
 
-    return capture_tree, capture_roots
+    return capture_tree, capture_roots, capture_root_data
 
 
 def find_capture_roots(capture_tree):
@@ -477,7 +488,7 @@ def merge_capture_trace_into_graph(
             mode = "FULL"
         key = "{}_{}".format(closest_batch_size, mode)
         filepath = capture_map[key]
-        capture_tree, capture_roots = _get_cached_capture_tree(
+        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath, TreePerfAnalyzer
         )
 
