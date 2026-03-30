@@ -253,6 +253,7 @@ def generate_perf_report_pytorch(
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     group_by_num_kernels: bool = False,
+    detect_recompute: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -266,6 +267,7 @@ def generate_perf_report_pytorch(
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
+        detect_recompute=detect_recompute,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -922,6 +924,12 @@ def main():
         "when overlap sheets are enabled): earliest launcher timestamp per group, "
         "relative to the minimum in the table.",
     )
+    parser.add_argument(
+        "--detect_recompute",
+        action="store_true",
+        default=False,
+        help="Mark ops under torch.utils.checkpoint recompute_fn; adds is_recompute columns.",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -945,6 +953,7 @@ def main():
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         group_by_num_kernels=args.group_by_num_kernels,
+        detect_recompute=args.detect_recompute,
     )
 
 

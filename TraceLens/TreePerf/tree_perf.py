@@ -180,10 +180,14 @@ class TreePerfAnalyzer:
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
         rebuild_tree=True,
+        detect_recompute=False,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
+        self.detect_recompute = detect_recompute
+        if detect_recompute:
+            add_python_func = True
         self.add_python_func = add_python_func
         self.arch = arch
         self.python_path = python_path
@@ -206,6 +210,9 @@ class TreePerfAnalyzer:
         if tree_postprocess_extension is not None:
             tree_postprocess_extension(self.tree)
 
+        if detect_recompute:
+            self._detect_recompute_events()
+
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
         self.dict_cat2names = dict_cat2names
@@ -215,6 +222,31 @@ class TreePerfAnalyzer:
             if event.get("cat") in {"python_func", "cpu_op"}:
                 return False
         return True
+
+    def _detect_recompute_events(self):
+        """Mark events under torch.utils.checkpoint recompute_fn as is_recompute=True."""
+        recompute_roots = []
+        for event in self.tree.events:
+            if self.event_to_category(event) != "python_function":
+                continue
+            name = event.get("name", "")
+            if "torch/utils/checkpoint.py" in name and "recompute_fn" in name:
+                recompute_roots.append(event)
+
+        marked = 0
+        for root in recompute_roots:
+            stack = [root]
+            while stack:
+                evt = stack.pop()
+                evt["is_recompute"] = True
+                marked += 1
+                for child_uid in evt.get("children", []):
+                    stack.append(self.tree.get_UID2event(child_uid))
+
+        print(
+            f"Recompute detection: found {len(recompute_roots)} recompute_fn regions, "
+            f"marked {marked} events"
+        )
 
     def agg_kernels_in_subtree(self, event, filter_func=None, verbose=False):
         if filter_func is None:
@@ -369,7 +401,12 @@ class TreePerfAnalyzer:
                 # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
                 memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
                 roofline_time_us = max(compute_time_us, memory_time_us)
+                if compute_time_us >= memory_time_us:
+                    roofline_bound = "COMPUTE_BOUND"
+                else:
+                    roofline_bound = "MEMORY_BOUND"
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
+                dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
                     (roofline_time_us / busy_kernel_time) * 100
                     if busy_kernel_time > 0
@@ -491,6 +528,8 @@ class TreePerfAnalyzer:
                 if "kernel_details" in event:
                     metrics_event["kernel_details"] = event["kernel_details"]
                     metrics_event["num_kernels"] = len(event["kernel_details"])
+            if self.detect_recompute:
+                metrics_event["is_recompute"] = event.get("is_recompute", False)
             rows.append(metrics_event)
 
         self._show_warnings(
@@ -571,6 +610,8 @@ class TreePerfAnalyzer:
         # Roofline metrics - first since they should be same for the group
         if "Roofline Time (µs)" in df_perf_metrics.columns:
             dict_agg["Roofline Time (µs)"] = "first"
+        if "Roofline Bound" in df_perf_metrics.columns:
+            dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
         if "Simulated Time (µs)" in df_perf_metrics.columns:
@@ -622,6 +663,8 @@ class TreePerfAnalyzer:
                 df_perf_metrics["overlapping_kernel_names"].apply(str)
             )
             groupby_cols.append("overlapping_kernel_names_str_repr_for_grouping")
+        if "is_recompute" in df_perf_metrics.columns:
+            groupby_cols.append("is_recompute")
         for col in param_cols:
             df_perf_metrics[col] = df_perf_metrics[col].astype(str)
         # TODO warn user if nans in the performance metrics
@@ -1000,6 +1043,8 @@ class TreePerfAnalyzer:
                 "process_labels", "Unknown"
             )
             metrics_event["thread_name"] = thread_metadata.get("thread_name", "Unknown")
+            if self.detect_recompute:
+                metrics_event["is_recompute"] = event.get("is_recompute", False)
             rows.append(metrics_event)
         df = pd.DataFrame(rows)
         return df
@@ -1067,7 +1112,10 @@ class TreePerfAnalyzer:
         }
         if "total_subtree_kernel_time" in df_temp.columns:
             agg_dict["total_subtree_kernel_time"] = ["sum"]
-        df_agg = df_temp.groupby(["name"]).agg(agg_dict)
+        groupby_cols = ["name"]
+        if "is_recompute" in df_temp.columns:
+            groupby_cols.append("is_recompute")
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(
@@ -1306,6 +1354,8 @@ class TreePerfAnalyzer:
 
         if group_by_num_kernels:
             grouping_cols_original.append("num_kernels")
+        if "is_recompute" in df_kernel_launchers.columns:
+            grouping_cols_original.append("is_recompute")
 
         # 0. Filter the DataFrame based on the event name if provided
         if event_name is not None:
@@ -1821,6 +1871,8 @@ class TreePerfAnalyzer:
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
                 "overlap_pct": event.get("overlap_pct"),
             }
+            if getattr(self, "detect_recompute", False):
+                row["is_recompute"] = event.get("is_recompute", False)
 
             if include_args:
                 row["Input Dims"] = list_to_tuple(args.get("Input Dims"))
@@ -1858,6 +1910,7 @@ class TreePerfAnalyzer:
                 "TB/s",
                 "Compute Spec",
                 "Roofline Time (µs)",
+                "Roofline Bound",
                 "Pct Roofline",
             ]
 
@@ -1951,7 +2004,7 @@ class TreePerfAnalyzer:
             col_order.extend(
                 ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
             )
-        col_order.extend(["duration_us", "has_perf_model"])
+        col_order.extend(["duration_us", "has_perf_model", "is_recompute"])
         if include_perf_metrics:
             col_order.extend(perf_cols)
             col_order.append("perf_params")
@@ -2011,6 +2064,8 @@ class TreePerfAnalyzer:
             grouping_cols.insert(1, "overlapping_kernel_names")
         if group_by_num_kernels:
             grouping_cols.append("num_kernels")
+        if "is_recompute" in df_temp.columns:
+            grouping_cols.append("is_recompute")
 
         # Convert columns to string for grouping
         str_col_names = []
@@ -2038,7 +2093,13 @@ class TreePerfAnalyzer:
             agg_dict["duration_us"] = ["sum"] + agg_metrics
 
         # Static metrics - 'first' only (same for all instances with same args)
-        static_cols = ["GFLOPS", "Data Moved (MB)", "FLOPS/Byte", "Compute Spec"]
+        static_cols = [
+            "GFLOPS",
+            "Data Moved (MB)",
+            "FLOPS/Byte",
+            "Compute Spec",
+            "Roofline Bound",
+        ]
         for col in static_cols:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
@@ -3039,12 +3100,16 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         return df_xla_events
 
     def get_GPU_kernel_launch_latency(self, event: dict) -> float:
-
-        GPU_kernel_launch_latency = event.get("ts") - self.tree.events_by_uid[
-            event.get("parent")
-        ].get("ts")
-
-        return GPU_kernel_launch_latency
+        parent_uid = event.get("parent")
+        if parent_uid is None:
+            return float("nan")
+        parent_evt = self.tree.events_by_uid.get(parent_uid)
+        if parent_evt is None or event.get("ts") is None:
+            return float("nan")
+        pts = parent_evt.get("ts")
+        if pts is None:
+            return float("nan")
+        return event["ts"] - pts
 
     def get_df_kernel_launchers(
         self,
