@@ -3046,8 +3046,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 event
             )
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event)
-            if not isinstance(event.get("args"), dict):
-                event["args"] = {}
             for _key, _val in dict_jax_metadata.items():
                 event["args"][_key] = _val
             kernel_launchers.append(event)
@@ -3294,8 +3292,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             ]
             perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event)
-            if not isinstance(event.get("args"), dict):
-                event["args"] = {}
             for _key, _val in dict_jax_metadata.items():
                 event["args"][_key] = _val
             dict_perf_metrics = None
