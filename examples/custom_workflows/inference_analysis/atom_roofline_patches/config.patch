@@ -1,0 +1,12 @@
+diff --git a/atom/config.py b/atom/config.py
+index f36d896..b283b03 100644
+--- a/atom/config.py
++++ b/atom/config.py
+@@ -549,6 +549,7 @@ class Config:
+     enable_dp_attention: bool = False
+     torch_dtype: torch.dtype = field(init=False)
+     speculative_config: Optional[SpeculativeConfig] = None
++    enable_capture_profiling: bool = False
+ 
+     def _set_cudagraph_sizes(self):
+         if self.compilation_config.cudagraph_capture_sizes:
