@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/managers/scheduler_profiler_mixin.py b/python/sglang/srt/managers/scheduler_profiler_mixin.py
-index 559997280..ce1e7359b 100644
+index 559997280..977ee1e73 100644
 --- a/python/sglang/srt/managers/scheduler_profiler_mixin.py
 +++ b/python/sglang/srt/managers/scheduler_profiler_mixin.py
 @@ -3,6 +3,7 @@ from __future__ import annotations
@@ -18,7 +18,46 @@ index 559997280..ce1e7359b 100644
  from sglang.srt.utils.profile_merger import ProfileMerger
  from sglang.srt.utils.profile_utils import ProfileManager
  
-@@ -187,6 +189,7 @@ class SchedulerProfilerMixin:
+@@ -61,6 +63,9 @@ class SchedulerProfilerMixin:
+         self.profile_in_progress: bool = False
+         self.merge_profiles = False
+ 
++        self.shape_discovery: bool = False
++        self.roofline_annotations: bool = False
++
+         # For ROCM
+         self.rpd_profiler = None
+ 
+@@ -76,7 +81,9 @@ class SchedulerProfilerMixin:
+         profile_id: str,
+         merge_profiles: bool = False,
+         profile_prefix: str = "",
+-        profile_stages: Optional[List[str]] = None,
++        shape_discovery: bool = False,
++        roofline_annotations: bool = False,
++        profile_stages: Optional[List[str]] = None
+     ) -> ProfileReqOutput:
+         if envs.SGLANG_PROFILE_V2.get():
+             return self._profile_manager.configure(
+@@ -91,6 +98,8 @@ class SchedulerProfilerMixin:
+                 merge_profiles=merge_profiles,
+                 profile_prefix=profile_prefix,
+                 profile_stages=profile_stages,
++                shape_discovery=shape_discovery,
++                roofline_annotations=roofline_annotations,
+             )
+ 
+         if self.profile_in_progress:
+@@ -113,6 +122,8 @@ class SchedulerProfilerMixin:
+         self.profiler_activities = activities
+         self.profile_id = profile_id
+         self.profile_prefix = profile_prefix
++        self.shape_discovery = shape_discovery
++        self.roofline_annotations = roofline_annotations
+ 
+         if start_step:
+             self.profiler_start_forward_ct = max(start_step, self.forward_ct + 1)
+@@ -187,6 +198,7 @@ class SchedulerProfilerMixin:
              self.rpd_profiler.start()
              self.rpd_profiler.rangePush("", "rpd profile range", "")
              self.profile_in_progress = True
@@ -26,13 +65,13 @@ index 559997280..ce1e7359b 100644
          elif torchprof_activities:
              self.torch_profiler = torch.profiler.profile(
                  activities=torchprof_activities,
-@@ -200,9 +203,15 @@ class SchedulerProfilerMixin:
+@@ -200,9 +212,15 @@ class SchedulerProfilerMixin:
                      )
                  ),
              )
 +
 +            # Enable shape metadata for Triton & FlashInfer kernels
-+            if record_shapes:
++            if record_shapes and self.shape_discovery:
 +                kernel_shape_profiler.enable()
 +
              self.torch_profiler.start()
@@ -42,17 +81,18 @@ index 559997280..ce1e7359b 100644
          if "MEM" in activities:
              torch.cuda.memory._record_memory_history(max_entries=100000)
              self.profile_in_progress = True
-@@ -332,6 +341,9 @@ class SchedulerProfilerMixin:
+@@ -332,6 +350,10 @@ class SchedulerProfilerMixin:
          self.profile_in_progress = False
          self.profiler_start_forward_ct = None
  
-+        # Disable kernel shape profiling instrumentation
-+        kernel_shape_profiler.disable()
++        if self.torch_profiler_record_shapes and self.shape_discovery:
++            # Disable kernel shape profiling instrumentation
++            kernel_shape_profiler.disable()
 +
          return ProfileReqOutput(success=True, message=f"Succeeded.{merge_message}")
  
      def _profile_batch_predicate(self: Scheduler, batch: ScheduleBatch):
-@@ -374,6 +386,116 @@ class SchedulerProfilerMixin:
+@@ -374,6 +396,116 @@ class SchedulerProfilerMixin:
              ):
                  self.start_profile()
  
@@ -87,7 +127,7 @@ index 559997280..ce1e7359b 100644
 +                and getattr(self._profile_manager, "profiler", None) is not None
 +            )
 +        )
-+        if not has_profiler:
++        if not has_profiler or not self.roofline_annotations:
 +            return nullcontext()
 +
 +        # ── Roofline aggregates ──────────────────────────────────────
@@ -169,3 +209,23 @@ index 559997280..ce1e7359b 100644
      def profile(self: Scheduler, recv_req: ProfileReq):
          if recv_req.type == ProfileReqType.START_PROFILE:
              if recv_req.profile_by_stage or recv_req.start_step:
+@@ -388,7 +520,10 @@ class SchedulerProfilerMixin:
+                     recv_req.profile_id,
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
++                    recv_req.shape_discovery,
++                    recv_req.roofline_annotations,
+                     recv_req.profile_stages,
++
+                 )
+             else:
+                 self.init_profile(
+@@ -402,6 +537,8 @@ class SchedulerProfilerMixin:
+                     recv_req.profile_id,
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
++                    recv_req.shape_discovery,
++                    recv_req.roofline_annotations,
+                 )
+                 return self.start_profile()
+         else:
