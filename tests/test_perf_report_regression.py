@@ -26,6 +26,8 @@ from conftest import (
     list_perf_report_csv_sheets,
     perf_report_csv_dirname,
     read_perf_report_csv,
+    trace_is_mi300,
+    arch_mi300_json_path,
 )
 
 
@@ -65,13 +67,17 @@ def test_perf_report_regression(dirpath, gz, report_csv_dirname, tmp_path, tol=1
     profile_path = os.path.join(dirpath, gz)
     ref_csv_dir = os.path.join(dirpath, report_csv_dirname)
     fn_csv_dir = str(tmp_path / report_csv_dirname)
-
+    if trace_is_mi300(profile_path):
+        gpu_arch_json_path = arch_mi300_json_path()
+    else:
+        gpu_arch_json_path = None
     generate_perf_report_pytorch(
         profile_json_path=profile_path,
         output_xlsx_path=None,
         output_csvs_dir=fn_csv_dir,
         kernel_summary=True,
         short_kernel_study=True,
+        gpu_arch_json_path=gpu_arch_json_path,
     )
 
     sheets = list_perf_report_csv_sheets(ref_csv_dir)

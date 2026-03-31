@@ -12,12 +12,63 @@ and test_detect_recompute.
 """
 
 import ast
+import json
 import os
 import re
+import tempfile
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_float_dtype
+
+# MI300 architecture spec for tests using traces under tests/traces/mi300/
+ARCH_MI300: Dict[str, Any] = {
+    "name": "MI300X",
+    "num_cus": 304,
+    "freq_mhz": 1200,
+    "mem_bw_gbps": 5300,
+    "max_achievable_tflops": {
+        "matrix_fp16": 654,
+        "matrix_bf16": 708,
+        "matrix_fp32": 163,
+        "matrix_fp64": 81,
+        "matrix_fp8": 1273,
+        "matrix_int8": 2600,
+        "vector_fp16": 163,
+        "vector_bf16": 163,
+        "vector_fp32": 81,
+        "vector_fp64": 40,
+    },
+    "_reference": "https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html#amd-maf-results",
+}
+
+# Temp JSON for tests that call generate_* with ``gpu_arch_json_path=`` (not checked in).
+_ARCH_MI300_JSON_PATH: Optional[str] = None
+
+
+def trace_is_mi300(profile_path: str) -> bool:
+    """Return True if the profile path is under ``.../traces/mi300/``."""
+    try:
+        from pathlib import Path
+        parts = Path(profile_path).resolve().parts
+        idx = parts.index("mi300")
+        if idx > 0 and parts[idx - 1] == "traces":
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def arch_mi300_json_path() -> str:
+    """Lazily create a temp file with :data:`ARCH_MI300` and return its path."""
+    global _ARCH_MI300_JSON_PATH
+    if _ARCH_MI300_JSON_PATH is None:
+        fd, path = tempfile.mkstemp(suffix=".json", prefix="tracelens_arch_mi300_")
+        with os.fdopen(fd, "w") as f:
+            json.dump(ARCH_MI300, f)
+        _ARCH_MI300_JSON_PATH = path
+    return _ARCH_MI300_JSON_PATH
 
 
 def perf_report_csv_dirname(trace_base: str) -> str:

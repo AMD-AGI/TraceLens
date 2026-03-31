@@ -2092,6 +2092,13 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
+        # Optional simulated metrics from perf model.
+        # Keep the flattened "_first" names in unified_perf_summary for visibility.
+        simulated_first_cols = ["Simulated Time (µs)", "Simulated TFLOPS/s"]
+        for col in simulated_first_cols:
+            if col in df_temp.columns:
+                agg_dict[col] = "first"
+
         # Time-varying metrics - mean/std (varies per instance)
         time_varying_cols = ["TB/s", "TFLOPS/s"]
         for col in time_varying_cols:

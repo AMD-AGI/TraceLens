@@ -9,9 +9,7 @@ Test that the Roofline Bound column appears in the unified_perf_summary
 and per-category sheets when a GPU arch config is provided.
 """
 
-import json
 import os
-import tempfile
 
 import pandas as pd
 import pytest
@@ -20,25 +18,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
 
-from conftest import list_perf_report_csv_sheets
-
-MI300X_ARCH = {
-    "name": "MI300X",
-    "mem_bw_gbps": 5300,
-    "max_achievable_tflops": {
-        "matrix_fp16": 654,
-        "matrix_bf16": 708,
-        "matrix_fp32": 163,
-        "matrix_fp64": 81,
-        "matrix_fp8": 1273,
-        "matrix_int8": 2600,
-        "vector_fp16": 163,
-        "vector_bf16": 163,
-        "vector_fp32": 81,
-        "vector_fp64": 40,
-    },
-    "_reference": "https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html#amd-maf-results",
-}
+from conftest import arch_mi300_json_path, list_perf_report_csv_sheets
 
 TRACE_PATH = os.path.join(
     "tests",
@@ -54,17 +34,13 @@ VALID_BOUND_VALUES = {"COMPUTE_BOUND", "MEMORY_BOUND"}
 def perf_report(tmp_path_factory):
     """Generate a perf report with GPU arch config once for the module (CSV sheets)."""
     output_dir = tmp_path_factory.mktemp("roofline_bound")
-    arch_path = str(output_dir / "mi300x.json")
     csv_dir = str(output_dir / "perf_report_csvs")
-
-    with open(arch_path, "w") as f:
-        json.dump(MI300X_ARCH, f)
 
     generate_perf_report_pytorch(
         profile_json_path=TRACE_PATH,
         output_xlsx_path=None,
         output_csvs_dir=csv_dir,
-        gpu_arch_json_path=arch_path,
+        gpu_arch_json_path=arch_mi300_json_path(),
     )
 
     return csv_dir

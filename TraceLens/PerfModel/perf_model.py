@@ -1718,6 +1718,8 @@ class SDPA:
             self.param_details[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
+        # Head dimension alias for roofline / simulation helpers (see get_simulation_time).
+        self.d_h = self.d_h_qk
 
     def get_param_details(event):
         # to be implemented in the child class
@@ -1942,24 +1944,28 @@ class SDPA:
     def get_simulation_time(self):
         simulated_time = None
         if self.arch is not None:
-            dtype = self.param_details.get("simulation_dtype")
-            if dtype is None:
-                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-            bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = True if type(self).__name__ == "flash_attention" else False
-            simulated_time = SDPA.get_simulation_time_func(
-                self.arch,
-                dtype,
-                self.python_path,
-                self.param_details["dtype_A_B"][0],
-                bytes,
-                self.B,
-                self.H_Q,
-                self.N_Q,
-                self.N_KV,
-                self.d_h,
-                fa,
-            )
+            try:
+                dtype = self.param_details.get("simulation_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+                bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
+                fa = True if type(self).__name__ == "flash_attention" else False
+                simulated_time = SDPA.get_simulation_time_func(
+                    self.arch,
+                    dtype,
+                    self.python_path,
+                    self.param_details["dtype_A_B"][0],
+                    bytes,
+                    self.B,
+                    self.H_Q,
+                    self.N_Q,
+                    self.N_KV,
+                    self.d_h,
+                    fa,
+                )
+            except Exception:
+                # Origami/GEMM may not support all dtypes on a given arch JSON; omit simulated time.
+                simulated_time = None
         return simulated_time
 
     @staticmethod
@@ -2099,25 +2105,28 @@ class SDPA:
     def get_simulation_time_bwd(self):
         simulated_time = None
         if self.arch is not None:
-            dtype = self.param_details.get("simulation_dtype")
-            if dtype is None:
-                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            try:
+                dtype = self.param_details.get("simulation_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
-            bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
-            simulated_time = SDPA.get_simulation_time_bwd_func(
-                self.arch,
-                dtype,
-                self.python_path,
-                self.param_details["dtype_A_B"][0],
-                bytes,
-                self.B,
-                self.H_Q,
-                self.N_Q,
-                self.N_KV,
-                self.d_h,
-                fa,
-            )
+                bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
+                fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
+                simulated_time = SDPA.get_simulation_time_bwd_func(
+                    self.arch,
+                    dtype,
+                    self.python_path,
+                    self.param_details["dtype_A_B"][0],
+                    bytes,
+                    self.B,
+                    self.H_Q,
+                    self.N_Q,
+                    self.N_KV,
+                    self.d_h,
+                    fa,
+                )
+            except Exception:
+                simulated_time = None
         return simulated_time
 
 
@@ -2525,6 +2534,8 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             else False
         )
 
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2536,6 +2547,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": False,
+            "dtype_A_B": dtype_A_B,
         }
 
 
@@ -2577,6 +2589,8 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
         )
         # scale = float(concrete_inputs[7]) if concrete_inputs[7] not in ('', 'None') else None
 
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2588,6 +2602,7 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": False,
+            "dtype_A_B": dtype_A_B,
         }
 
 
@@ -2626,6 +2641,8 @@ class aten__scaled_dot_product_flash_attention(SDPA):
         )
         # scale = float(concrete_inputs[5]) if concrete_inputs[5] not in ('', 'None') else None
 
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2637,6 +2654,7 @@ class aten__scaled_dot_product_flash_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
         }
 
 

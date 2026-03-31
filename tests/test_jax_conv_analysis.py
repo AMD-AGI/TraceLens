@@ -14,6 +14,8 @@ np.random.seed(42)
 
 from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
 
+from conftest import ARCH_MI300
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,10 @@ logger.info("Working directory: %s", os.getcwd())
 # Legacy JAX trace (~0.6) with .hlo_proto.pb sidecar files; full perf model (FLOPS, bytes) works.
 jax_conv_minimal_legacy = "./tests/traces/mi300/jax_conv_minimal_legacy/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb"
 assert os.path.exists(jax_conv_minimal_legacy)
-perf_analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=jax_conv_minimal_legacy)
+_MI300_ARCH = ARCH_MI300
+perf_analyzer = JaxTreePerfAnalyzer.from_file(
+    profile_filepath=jax_conv_minimal_legacy, arch=_MI300_ARCH
+)
 
 
 def profile_jax_conv(path=None):
