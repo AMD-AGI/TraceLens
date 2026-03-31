@@ -51,6 +51,7 @@ def trace_is_mi300(profile_path: str) -> bool:
     """Return True if the profile path is under ``.../traces/mi300/``."""
     try:
         from pathlib import Path
+
         parts = Path(profile_path).resolve().parts
         idx = parts.index("mi300")
         if idx > 0 and parts[idx - 1] == "traces":

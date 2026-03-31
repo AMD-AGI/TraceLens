@@ -30,7 +30,7 @@ from conftest import (
     format_diff_details,
     list_perf_report_csv_sheets,
     read_perf_report_csv,
-    trace_is_mi300
+    trace_is_mi300,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,7 @@ def find_jax_traces(root=TRACES_ROOT):
             if fname.endswith(".xplane.pb"):
                 traces.append(os.path.join(dirpath, fname))
     return sorted(traces)
+
 
 def jax_ref_perf_report_csv_dir(trace_path):
     """

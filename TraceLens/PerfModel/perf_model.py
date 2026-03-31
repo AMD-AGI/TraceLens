@@ -2111,7 +2111,10 @@ class SDPA:
                     dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
                 bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-                fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
+                fa = type(self).__name__ in (
+                    "flash_attention",
+                    "flash_attention_backward",
+                )
                 simulated_time = SDPA.get_simulation_time_bwd_func(
                     self.arch,
                     dtype,
