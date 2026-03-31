@@ -28,7 +28,7 @@ When invoked by the orchestrator, you will receive the following context:
 1. `<output_dir>/category_data/fusion_candidates.json` - Module-level candidate summaries with kernel details
 
 **Output file you must write:**
-- `<output_dir>/category_findings/kernel_fusion_findings.md`
+- `<output_dir>/system_findings/kernel_fusion_findings.md`
 
 ---
 
@@ -106,7 +106,7 @@ Then look for novel patterns:
 
 ### Step 4: Write Findings
 
-Write `<output_dir>/category_findings/kernel_fusion_findings.md` using the command prefix.
+Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
 Confidence maps directly to priority tier:
 - All HIGH confidence findings → 🔴 P1
