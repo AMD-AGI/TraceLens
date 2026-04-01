@@ -26,13 +26,15 @@ class GEMM:
     """
 
     cache_gemm_results = {}  # This is used to cache gemm results
+    _origami_import_error_printed = False
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
+        self.enable_origami = enable_origami
         kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
@@ -63,7 +65,14 @@ class GEMM:
             if dtype is None:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
             self.simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
-                arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+                arch,
+                self.M,
+                self.N,
+                self.K,
+                self.B,
+                dtype,
+                self.python_path,
+                enable_origami=enable_origami,
             )
 
     @staticmethod
@@ -141,7 +150,16 @@ class GEMM:
 
     @staticmethod
     def get_simulation_time_func(
-        arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None
+        arch,
+        M,
+        N,
+        K,
+        B,
+        dtype,
+        python_path=None,
+        force_to_l1=False,
+        num_cus=None,
+        enable_origami=False,
     ):
         if "GEMM_SIMULATOR_PATH" in os.environ:
             if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
@@ -234,6 +252,8 @@ class GEMM:
             else:
                 raise AssertionError("Failed to simulate ", cmd, stdout, stderr)
         else:
+            if not enable_origami:
+                return None, None
             # try to use Origami for estimating performance
             try:
                 # assumes this PR has completed
@@ -279,8 +299,16 @@ class GEMM:
                     f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
                 )
 
-            except ImportError:
-                # Todo: Naive simulation
+            except ImportError as e:
+                if not GEMM._origami_import_error_printed:
+                    print(
+                        "TraceLens: enable_origami is set but the 'origami' package "
+                        f"could not be imported: {e}. Install rocm-origami (or ensure "
+                        "the Origami Python bindings are on PYTHONPATH), or disable "
+                        "Origami simulation.",
+                        file=sys.stderr,
+                    )
+                    GEMM._origami_import_error_printed = True
                 return None, None
 
     def get_simulation_time(self):
@@ -290,7 +318,14 @@ class GEMM:
             if dtype is None:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
             simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
-                self.arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+                self.arch,
+                self.M,
+                self.N,
+                self.K,
+                self.B,
+                dtype,
+                self.python_path,
+                enable_origami=self.enable_origami,
             )
         return simulation_time
 
@@ -686,8 +721,8 @@ class tex_ts_te_gemm_ts(GEMM):
 
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
 
     def get_param_details(self, event):
         input_dims = event["args"]["Input Dims"]
@@ -821,7 +856,7 @@ class tev2_pseudo_gemm(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = (
@@ -1228,9 +1263,9 @@ class ConvBias_(CONV):
     # Cache to store forward pass parameters for backward pass lookup
     fwd_pass_cache = {}
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         # Call parent init first
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch, python_path, **kwargs)
 
         # Cache forward pass parameters for backward pass using sequence number
         seq_num = event["args"].get("Sequence number")
@@ -1438,9 +1473,9 @@ class ConvBiasReLU_(CONV):
     # Cache to store forward pass parameters for backward pass lookup
     fwd_pass_cache = {}
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         # Call parent init first
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch, python_path, **kwargs)
 
         # Cache forward pass parameters for backward pass using sequence number
         seq_num = event["args"].get("Sequence number")
@@ -1706,7 +1741,7 @@ class Softmax:
 # 4. Scaled Dot Product Attention
 class SDPA:
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         # S = QK^T
         # P = softmax(S)
         # O = PV
@@ -1714,6 +1749,7 @@ class SDPA:
         self.param_details = self.get_param_details(event)
         self.arch = arch
         self.python_path = python_path
+        self.enable_origami = enable_origami
         self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h_qk, self.d_h_v = (
             self.param_details[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
@@ -1877,7 +1913,18 @@ class SDPA:
 
     @staticmethod
     def get_simulation_time_func(
-        arch, dtype, python_path, dtype_A_B, bytes, B, H_Q, N_Q, N_KV, d_h, fa=True
+        arch,
+        dtype,
+        python_path,
+        dtype_A_B,
+        bytes,
+        B,
+        H_Q,
+        N_Q,
+        N_KV,
+        d_h,
+        fa=True,
+        enable_origami=False,
     ):
         force_to_l1 = False
         block_N_Q = N_Q
@@ -1905,7 +1952,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if qkt_time is None:
+            return None
         qkt_time = num_waves * qkt_time
 
         softmax_time = num_waves * Softmax.get_time(
@@ -1927,7 +1977,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if pv_time is None:
+            return None
         pv_time = num_waves * pv_time
 
         mem_time = (
@@ -1962,6 +2015,7 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
+                    enable_origami=self.enable_origami,
                 )
             except Exception:
                 # Origami/GEMM may not support all dtypes on a given arch JSON; omit simulated time.
@@ -1970,7 +2024,18 @@ class SDPA:
 
     @staticmethod
     def get_simulation_time_bwd_func(
-        arch, dtype, python_path, dtype_A_B, bytes, B, H_Q, N_Q, N_KV, d_h, fa=True
+        arch,
+        dtype,
+        python_path,
+        dtype_A_B,
+        bytes,
+        B,
+        H_Q,
+        N_Q,
+        N_KV,
+        d_h,
+        fa=True,
+        enable_origami=False,
     ):
         force_to_l1 = False
         block_N_Q = N_Q
@@ -2001,7 +2066,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if qkt_fwd_time is None:
+            return None
 
         qkt_fwd_time = num_waves * qkt_fwd_time
 
@@ -2016,7 +2084,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if pv_fwd_time is None:
+            return None
         pv_fwd_time = num_waves * pv_fwd_time
 
         if fa:
@@ -2127,6 +2198,7 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
+                    enable_origami=self.enable_origami,
                 )
             except Exception:
                 simulated_time = None
@@ -2230,8 +2302,8 @@ class flash_attention(SDPA):
 class flash_attention_backward(SDPA):
     """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.d_h = (
             self.d_h_qk
         )  # head dimension for simulation (used by get_simulation_time_bwd_func)
@@ -2290,8 +2362,8 @@ class flash_attention_backward(SDPA):
 
 
 class flash_attention_varlen_forward(SDPA):
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -2393,8 +2465,8 @@ class flash_attention_varlen_forward(SDPA):
 
 
 class flash_attention_varlen_backward(SDPA):
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -3125,7 +3197,7 @@ class evoformer_attention(SDPA):
 
 class UnaryElementwise:
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -3191,7 +3263,7 @@ class aten_unary_elementwise(UnaryElementwise):
 
 class BinaryElementwise:
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -3331,7 +3403,7 @@ class Reduce:
     Models reduction over one or more dimensions of a tensor.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path
@@ -3586,7 +3658,7 @@ class GroupedGemm:
             - Total bytes: (2*M*N) * bpe_out + (2*M*K) * bpe_in + (2*G*K*N) * bpe_in
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.arch = arch
@@ -4061,7 +4133,7 @@ class jax_conv:
         int: the number of flops
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape = self.param_details["input_shape"]
@@ -4148,7 +4220,7 @@ def parse_list(input: str, dtype):
 
 
 class Normalization:
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -4867,7 +4939,7 @@ class MoEComm:
     bytes() = num_tokens × hidden_dim × bpe (data volume moved).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path
@@ -4937,7 +5009,7 @@ class CausalConv1d:
     FLOPS = 2 × batch × channels × seq_len × kernel_size (depthwise conv).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path
@@ -5018,7 +5090,7 @@ class FusedRoPE:
     Total = 3 × num_elements (since 6 ops per 2 elements).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path
@@ -5080,7 +5152,7 @@ class CrossEntropy:
     FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path
@@ -5168,7 +5240,7 @@ class MambaSSD:
       C@h   (step 4): 2 · B · H · T · N · P
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path

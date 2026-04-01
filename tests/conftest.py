@@ -43,7 +43,8 @@ ARCH_MI300: Dict[str, Any] = {
     "_reference": "https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html#amd-maf-results",
 }
 
-# Temp JSON for tests that call generate_* with ``gpu_arch_json_path=`` (not checked in).
+# Temp JSON for tests that call generate_* with ``gpu_arch_json_path=`` and
+# ``enable_origami=True`` (JSON not checked in).
 _ARCH_MI300_JSON_PATH: Optional[str] = None
 
 

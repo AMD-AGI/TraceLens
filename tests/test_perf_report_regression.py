@@ -78,6 +78,7 @@ def test_perf_report_regression(dirpath, gz, report_csv_dirname, tmp_path, tol=1
         kernel_summary=True,
         short_kernel_study=True,
         gpu_arch_json_path=gpu_arch_json_path,
+        enable_origami=gpu_arch_json_path is not None,
     )
 
     sheets = list_perf_report_csv_sheets(ref_csv_dir)

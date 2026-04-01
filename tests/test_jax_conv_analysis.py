@@ -25,7 +25,9 @@ jax_conv_minimal_legacy = "./tests/traces/mi300/jax_conv_minimal_legacy/chi-mi30
 assert os.path.exists(jax_conv_minimal_legacy)
 _MI300_ARCH = ARCH_MI300
 perf_analyzer = JaxTreePerfAnalyzer.from_file(
-    profile_filepath=jax_conv_minimal_legacy, arch=_MI300_ARCH
+    profile_filepath=jax_conv_minimal_legacy,
+    arch=_MI300_ARCH,
+    enable_origami=True,
 )
 
 

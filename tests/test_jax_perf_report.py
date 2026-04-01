@@ -104,6 +104,7 @@ def jax_report(trace_path):
             jax_kw = dict(profile_path=trace_path, output_csvs_dir=tmpdir)
             if trace_is_mi300(trace_path):
                 jax_kw["gpu_arch_json_path"] = arch_mi300_json_path()
+                jax_kw["enable_origami"] = True
             dict_name2df = generate_perf_report_jax(**jax_kw)
         except Exception:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -181,6 +182,7 @@ def test_jax_perf_report_csv_regression(trace_path, tmp_path, tol=1e-6):
     jax_kw = dict(profile_path=trace_path, output_csvs_dir=out_dir)
     if trace_is_mi300(trace_path):
         jax_kw["gpu_arch_json_path"] = arch_mi300_json_path()
+        jax_kw["enable_origami"] = True
     generate_perf_report_jax(**jax_kw)
 
     sheets = list_perf_report_csv_sheets(ref_dir)

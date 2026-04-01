@@ -54,6 +54,12 @@ def main():
     parser.add_argument(
         "--python_path", type=str, default=None, help="Path to Python executable"
     )
+    parser.add_argument(
+        "--enable_origami",
+        action="store_true",
+        default=False,
+        help="Use Origami when GEMM_SIMULATOR_PATH is not set (requires origami installed).",
+    )
 
     # SDPA-specific
     parser.add_argument("--H_Q", type=int, help="Number of heads for Q (SDPA)")
@@ -89,11 +95,14 @@ def main():
             B=args.B,
             dtype=args.dtype,
             python_path=args.python_path,
+            enable_origami=args.enable_origami,
         )
         print(f"GEMM simulation time (us): {time}")
         flops = GEMM.flops_func(args.M, args.N, args.K, None)
         tflops_per_gpu_per_s = (
-            (flops / 1e12) / (time / 1e6) if time > 0 else float("nan")
+            (flops / 1e12) / (time / 1e6)
+            if time is not None and time > 0
+            else float("nan")
         )
         print(f"GEMM TFLOPS/GPU/s: {tflops_per_gpu_per_s}")
         print(f"Command used: {cmd}")
@@ -136,6 +145,7 @@ def main():
                 N_Q=args.N_Q,
                 N_KV=args.N_KV,
                 d_h=args.d_h,
+                enable_origami=args.enable_origami,
             )
             print(f"SDPA Backward simulated time (us): {time}")
         else:
@@ -164,10 +174,13 @@ def main():
                 N_Q=args.N_Q,
                 N_KV=args.N_KV,
                 d_h=args.d_h,
+                enable_origami=args.enable_origami,
             )
             print(f"SDPA Forward simulated time (us): {time}")
         tflops_per_gpu_per_s = (
-            (flops / 1e12) / (time / 1e6) if time > 0 else float("nan")
+            (flops / 1e12) / (time / 1e6)
+            if time is not None and time > 0
+            else float("nan")
         )
         print(f"SDPA TFLOPS/GPU/s: {tflops_per_gpu_per_s}")
 

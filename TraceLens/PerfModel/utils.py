@@ -8,6 +8,64 @@
 Utils. for perf. model.
 """
 
+import os
+
+
+def perf_model_uses_origami(perf_model) -> bool:
+    """
+    True when simulated GEMM/SDPA times use Origami (not the external GEMM simulator).
+    """
+    if not getattr(perf_model, "enable_origami", False):
+        return False
+    return not os.environ.get("GEMM_SIMULATOR_PATH")
+
+
+def add_simulation_time_columns(
+    dict_metrics,
+    perf_model,
+    simulated_time,
+    gflops,
+    bytes_moved,
+    busy_kernel_time,
+    non_origami_time_tflops=("Simulated Time (µs)", "Simulated TFLOPS/s"),
+):
+    """
+    Add Origami* columns when using Origami; otherwise add Simulated/Simulation time columns.
+
+    non_origami_time_tflops: (time_col, tflops_col) for the non-Origami backend
+    (e.g. JAX GEMM from __init__ uses "Simulation Time (µs)" / "Simulation TFLOPS/s").
+    """
+    if not simulated_time:
+        return
+    if perf_model_uses_origami(perf_model):
+        dict_metrics["Origami Time (µs)"] = simulated_time
+        dict_metrics["Origami TFLOPS/s"] = (
+            (gflops / 1e3) / (simulated_time / 1e6)
+            if simulated_time > 0
+            else float("nan")
+        )
+        if bytes_moved is not None:
+            dict_metrics["Origami TB/s"] = (
+                (bytes_moved / 1e12) / (simulated_time / 1e6)
+                if simulated_time > 0
+                else float("nan")
+            )
+        else:
+            dict_metrics["Origami TB/s"] = float("nan")
+        dict_metrics["Pct Origami"] = (
+            (simulated_time / busy_kernel_time) * 100
+            if busy_kernel_time > 0
+            else float("nan")
+        )
+    else:
+        t_us, tflops = non_origami_time_tflops
+        dict_metrics[t_us] = simulated_time
+        dict_metrics[tflops] = (
+            (gflops / 1e3) / (simulated_time / 1e6)
+            if simulated_time > 0
+            else float("nan")
+        )
+
 
 def name2bpe(name):
     """
