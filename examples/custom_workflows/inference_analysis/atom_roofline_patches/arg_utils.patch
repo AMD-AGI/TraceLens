@@ -1,0 +1,24 @@
+diff --git a/atom/model_engine/arg_utils.py b/atom/model_engine/arg_utils.py
+index ac8fc73..85ad596 100644
+--- a/atom/model_engine/arg_utils.py
++++ b/atom/model_engine/arg_utils.py
+@@ -43,6 +43,7 @@ class EngineArgs:
+     enable_dp_attention: bool = False
+     method: Optional[str] = None
+     num_speculative_tokens: int = 1
++    enable_capture_profiling: bool = False
+ 
+     @staticmethod
+     def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+@@ -138,6 +139,11 @@ class EngineArgs:
+             default=1,
+             help="Number of speculative tokens to generate per iteration (draft model runs this many times autoregressively)",
+         )
++        parser.add_argument(
++            "--enable-capture-profiling",
++            action="store_true",
++            help="Enable profiling during CUDA graph capture phase. Traces are saved to the capture_traces directory.",
++        )
+         parser.add_argument(
+             "--max-num-batched-tokens",
+             type=int,

@@ -8,7 +8,7 @@ export CONC=32
 export ISL=2048
 export OSL=32
 export RANDOM_RANGE_RATIO=0.8
-export RESULT_FILENAME="dsr1_fp8_mi300x_results.json"
+export RESULT_FILENAME="results.json"
 export PROFILE_DIR="/home/profile"
 
 check_env_vars \
@@ -80,7 +80,7 @@ run_benchmark_serving \
     --result-filename "$RESULT_FILENAME" \
     --result-dir /workspace/
 
-# Shutdown vLLM server
+# Shutdownserver
 echo "Shutting down vLLM server (PID: $SERVER_PID)..."
 kill $SERVER_PID
 wait $SERVER_PID 2>/dev/null

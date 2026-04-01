@@ -1,0 +1,27 @@
+diff --git a/atom/model_engine/engine_core.py b/atom/model_engine/engine_core.py
+index 32781f3..2131504 100644
+--- a/atom/model_engine/engine_core.py
++++ b/atom/model_engine/engine_core.py
+@@ -161,6 +161,7 @@ class EngineCore:
+         if scheduled_batch is None:
+             logger.debug(f"{self.label}: No sequences to schedule, skipping forward")
+             return False
++        self.scheduler.build_profile_annotation(scheduled_batch, seqs)
+         out = self.runner_mgr.call_func("forward", scheduled_batch, wait_out=True)
+         seqs = seqs.values()
+         # Pass stream_output_queue to postprocess for streaming callbacks
+@@ -274,12 +275,14 @@ class EngineCore:
+ 
+     def start_profiler(self):
+         if self.profile_enbaled:
++            self.scheduler.profile_active = True
+             self.runner_mgr.call_func("start_profiler")
+ 
+     def stop_profiler(self):
+         if self.profile_enbaled:
+             print("Stopping profiler...")
+             self.runner_mgr.call_func("stop_profiler", wait_out=True)
++            self.scheduler.profile_active = False
+             print("Profiler stopped.")
+ 
+ 
