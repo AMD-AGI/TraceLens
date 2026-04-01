@@ -21,6 +21,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Set up python requires lsb_release to work for now
+      # https://github.com/actions/setup-python/issues/1265
+      - name: Install lsb_release
+        run: apt update && apt install -y lsb-release
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
