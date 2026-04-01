@@ -530,12 +530,15 @@ def generate_compare_perf_reports_pytorch(
                         columns=cols_to_del_non_baseline, inplace=True, errors="ignore"
                     )
 
-            # load the baseline report to get the merge keys
-            df_roofline_ref = dfs[0]
-            cond = lambda col: col.startswith("param:")
-            merge_keys = ["name"] + [
-                col for col in df_roofline_ref.columns if cond(col)
-            ]
+            # Merge keys: name + param: columns common to all reports.
+            # - If we used only the baseline's params, a variant missing a column
+            #   raises KeyError in pd.merge.
+            # - If we used the union and padded missing keys with NA, rows no longer
+            #   match (NA != value), emptying intersect sheets (see tests).
+            cond = lambda col: str(col).startswith("param:")
+            param_sets = [{c for c in df.columns if cond(c)} for df in dfs]
+            param_cols_common = set.intersection(*param_sets) if param_sets else set()
+            merge_keys = ["name"] + sorted(param_cols_common)
             diff_cols = [
                 "Kernel Time (µs)_sum",
                 "Kernel Time (µs)_mean",
