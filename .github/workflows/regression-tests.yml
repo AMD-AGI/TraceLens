@@ -31,7 +31,7 @@ jobs:
           apt update && apt install -y python3-venv
           python -m venv .venv
           echo "activating venv"
-          source .venv/bin/activate
+          . .venv/bin/activate
           echo "updating pip"
           python -m pip install --upgrade pip
           echo "installing dependencies"
