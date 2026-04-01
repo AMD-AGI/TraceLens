@@ -27,9 +27,9 @@ jobs:
         run: apt update && apt install -y lsb-release
 
       # fix a cache bug
-    - name: Clear Python cache https://github.com/actions/setup-python/issues/719
-      run: |
-        rm -rf /__t/Python      
+      - name: Clear Python cache https://github.com/actions/setup-python/issues/719
+        run: |
+          rm -rf /__t/Python      
 
       - name: Set up Python
         uses: actions/setup-python@v5
