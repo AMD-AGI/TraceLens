@@ -94,6 +94,25 @@ bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
 
 A container with the name sglang-deepseek-mi300/355x will be created depending on the GPU type specified.
 
+##### Atom Script
+
+The build script for Atom supports Atom 0.1.1 with ROCm 7.1.1. The script takes the path to the local TraceLens-internal clone and the GPU type being used. It currently supports MI300 and MI355 and defaults to MI355 if not provided.
+
+
+| GPU Type | Base Image                                                             | Atom Version |
+| -------- | ---------------------------------------------------------------------- | ------------ |
+| `MI300`  | `rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI300x`          | 0.1.1        |
+| `MI355`  | `rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI355x`          | 0.1.1        |
+
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_atom.sh \
+    /path/to/TraceLens-internal \
+    mi355
+```
+
+A container with the name atom-deepseek-mi300/355x will be created depending on the GPU type specified.
+
 #### Option B: Apply framework patches manually
 
 If you prefer to patch an existing environment instead of building a new image, apply patches to your inference framework to:
@@ -109,11 +128,16 @@ If you prefer to patch an existing environment instead of building a new image, 
   ```bash
    python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
   ```
+  For Atom:
+  ```bash
+   python -c "import atom; import os; print(os.path.dirname(os.path.dirname(atom.__file__)))"
+  ```
 2. **Find and apply the relevant patch:**
   - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
   - Select by framework and version
-  - Apply: `cd /path/to/vllm_or_sglang/../ && git apply /path/to/patchfile`
+  - Apply: `cd /path/to/framework/../ && git apply /path/to/patchfile`
   SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
+  Atom patches are in [atom_roofline_patches](../examples/custom_workflows/inference_analysis/atom_roofline_patches/)
 
 #### Collection Parameters
 
@@ -125,7 +149,7 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
 
-Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher and SGLang v0.5.9; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
+Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher, SGLang v0.5.9, and Atom 0.1.1; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -o ./steady_state_analysis \\
@@ -134,7 +158,7 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -
 
 Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have large idle times between execution steps.
 
-Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher and SGLang v0.5.9). This is recommended if the user wants to perform analysis on an isolated execution step.
+Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher, SGLang v0.5.9, and Atom 0.1.1). This is recommended if the user wants to perform analysis on an isolated execution step.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --store-single-iteration
