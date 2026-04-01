@@ -55,7 +55,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 
 ##### vLLM Script
 
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, or `v17`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, or `v18`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
 | Version | Base Image                                                    | vLLM Version |
@@ -64,6 +64,7 @@ A unified build script is provided that supports multiple vLLM versions. It take
 | `v15`   | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130`        | v0.15.0      |
 | `v16`   | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0      |
 | `v17`   | `vllm/vllm-openai-rocm:v0.17.0`                               | v0.17.0      |
+| `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      |
 
 
 ```bash
@@ -71,6 +72,16 @@ bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
     v16 \
     /path/to/TraceLens-internal \
     -t tracelens-vllm
+```
+
+To use a custom base Docker image instead of the default for the selected version, pass `--base-image`:
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
+    v18 \
+    /path/to/TraceLens-internal \
+    --base-image my-registry/vllm:nightly \
+    -t tracelens-vllm:custom
 ```
 
 Then create a container from the image.
