@@ -597,8 +597,9 @@ The report at `<output_dir>/standalone_analysis.md` must use these exact `##` he
 3. `## Kernel Fusion Opportunities (Experimental)`
 4. `## System-Level Optimizations`
 5. `## Detailed Analysis: Compute Kernels`
-6. `## Detailed Analysis: System-Level`
-7. `## Appendix`
+6. `## Detailed Analysis: Kernel Fusion`
+7. `## Detailed Analysis: System-Level`
+8. `## Appendix`
 
 Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
 

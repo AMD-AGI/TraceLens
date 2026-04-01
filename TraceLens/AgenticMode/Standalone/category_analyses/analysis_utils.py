@@ -502,6 +502,7 @@ REQUIRED_REPORT_HEADERS = [
     "Compute Kernel Optimizations",
     "System-Level Optimizations",
     "Detailed Analysis: Compute Kernels",
+    "Detailed Analysis: Kernel Fusion",
     "Detailed Analysis: System-Level",
     "Appendix",
 ]

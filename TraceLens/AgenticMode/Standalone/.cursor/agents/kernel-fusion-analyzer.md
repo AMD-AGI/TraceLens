@@ -24,8 +24,9 @@ When invoked by the orchestrator, you will receive the following context:
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
-**Input files (pre-computed by orchestrator Step 4b):**
+**Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/fusion_candidates.json` - Module-level candidate summaries with kernel details
+2. `<output_dir>/category_data/kernel_fusion_metrics.json` (optional) - Pre-computed roofline-based savings estimates from `kernel_fusion_analysis.py`
 
 **Output file you must write:**
 - `<output_dir>/category_findings/kernel_fusion_findings.md`
@@ -53,9 +54,16 @@ Use vendor-agnostic terminology:
 
 ## Analysis Workflow
 
-### Step 1: Read Candidates
+### Step 1: Generate Metrics, Read Candidates and Impact Estimates
 
-Read `<output_dir>/category_data/fusion_candidates.json`. Each entry contains:
+Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.json`:
+
+```bash
+<prefix> python TraceLens/AgenticMode/Standalone/category_analyses/kernel_fusion_analysis.py \
+  --output-dir <output_dir>
+```
+
+Then read `<output_dir>/category_data/fusion_candidates.json`. Each entry contains:
 
 - `module_name`: Module or function name from the trace
 - `base_name`: Module type without instance index
@@ -67,6 +75,18 @@ Read `<output_dir>/category_data/fusion_candidates.json`. Each entry contains:
 - `has_fused_kernel`: Whether subtree contains a fused kernel
 - `total_kernel_time_us`: Total GPU time across all instances
 
+Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. This contains pre-computed `impact_estimates` with roofline-based savings for each candidate. Each estimate has:
+
+- `operation`: Matches `base_name` in fusion_candidates
+- `savings_ms`, `savings_ms_low`, `savings_ms_high`: Savings range (75-100% of roofline)
+- `bound_type`: "compute" or "memory"
+- `fusion_type`: "matrix_compute" or "memory_bound"
+- `confidence`: "high" or "medium"
+- `time_ms`: Total candidate time across all instances
+- `warning`: Present when some kernels lack perf models
+
+Use these estimates to populate the **Impact** field in each finding. Match by `operation` name (= `base_name`). If no matching estimate exists, use "Not quantifiable -- insufficient perf model data".
+
 ### Step 2: Classify Each Candidate
 
 For each candidate, make three decisions:
@@ -74,7 +94,7 @@ For each candidate, make three decisions:
 **Decision 1 -- Is this a fusion opportunity?** Reject candidates where:
 - The kernels are genuinely independent operations (e.g., separate projection GEMMs reading different weight matrices)
 - The module is a container (Sequential, ModuleList, full decoder/encoder layer)
-- All kernels are GEMMs (GEMM optimization is a separate concern)
+- All kernels are GEMMs
 - The module already contains a fused kernel (`has_fused_kernel: true`)
 
 **Decision 2 -- What pattern?** Check known patterns first:
@@ -102,16 +122,16 @@ Then look for novel patterns:
 
 - **high**: Module name matches a known pattern AND kernel composition confirms it
 - **medium**: Module name OR kernel composition suggests a pattern, but not both
-- **low**: Speculative -- structural analysis suggests fusion is possible
+- **low**: Speculative - structural analysis suggests fusion is possible
 
 ### Step 4: Write Findings
 
 Write `<output_dir>/category_findings/kernel_fusion_findings.md` using the command prefix.
 
 Confidence maps directly to priority tier:
-- All HIGH confidence findings → 🔴 P1
-- All MEDIUM confidence findings → 🟡 P2
-- All LOW confidence findings → 🟢 P3
+- HIGH confidence findings → 🔴 P1
+- MEDIUM confidence findings → 🟡 P2
+- LOW confidence findings → 🟢 P3
 
 Within each tier, sort by `total_kernel_time_us` descending.
 
@@ -125,23 +145,55 @@ Found N kernel fusion opportunities across M module types.
 
 ## Findings
 
-### 🔴 P1: <Pattern Name>
+### 🔴 P1: <Pattern Name> (<time_ms> ms, <instance_count> instances)
 
 **Insight:** <Module name, what it launches, how many instances, why it's fusable>
 
 **Action:** <Specific recommendation>
 
-**Confidence:** High -- <brief reason>
+**Impact:** ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) with all N kernels modelled
+
+**Confidence:** High -- <brief reason from fusion pattern classification>
+
+**Kernels:**
+
+| Kernel | Type | Duration (us) | Perf model |
+|--------|------|--------------|------------|
+| <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
+
+**Projection:**
+
+| Metric | Value |
+|--------|-------|
+| Bound type | compute / memory |
+| Fusion type | matrix_compute / memory_bound |
+| Kernels modelled | M of N |
+| Savings (low-mid-high) | X.XX - Y.YY - Z.ZZ ms |
+| E2E impact | X.XX - Z.ZZ% |
 
 ---
 
-### 🟡 P2: <Pattern Name>
+### 🟡 P2: <Pattern Name> (<time_ms> ms, <instance_count> instances)
 
 **Insight:** <Description>
 
 **Action:** <Recommendation>
 
+**Impact:** ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) with M of N kernels modelled
+
 **Confidence:** Medium -- <brief reason>
+
+**Kernels:**
+
+| Kernel | Type | Duration (us) | Perf model |
+|--------|------|--------------|------------|
+| ... | ... | ... | ... |
+
+**Projection:**
+
+| Metric | Value |
+|--------|-------|
+| ... | ... |
 ```
 
 If no fusion opportunities detected:
@@ -155,12 +207,11 @@ No kernel fusion opportunities detected.
 
 ## Key Principles
 
-1. **Detection only** -- do NOT compute savings estimates or performance impact
+1. **Include pre-computed savings** from `kernel_fusion_metrics.json` when available -- do NOT re-derive savings yourself, use the values from the metrics JSON
 2. **Let the data speak** -- classify based on module names AND kernel composition, not just one signal
 3. **Reject confidently** -- not every multi-kernel module is a fusion opportunity; independent operations under a container module are not fusable
 4. **Explain reasoning** -- especially for novel patterns, state why you believe the kernels are fusable
-5. This analysis identifies fusion opportunities. Quantifying the performance benefit requires tensor shape data and roofline modeling, which is out of scope for this experimental section.
-6. Use the **module name** to determine the user-facing operation name. If the module is `aten::conv2d` or `Conv2d`, call it "Convolution" in the finding title, not "GEMM" -- even though convolutions are implemented as GEMMs internally.
+5. Use the **module name** to determine the user-facing operation name. If the module is `aten::conv2d` or `Conv2d`, call it "Convolution" in the finding title, not "GEMM" -- even though convolutions are implemented as GEMMs internally.
 
 ---
 
@@ -174,13 +225,13 @@ No kernel fusion opportunities detected.
 | Instance count | `instance_count` field |
 | Architecture context | `parent_chain` field |
 | Already-fused status | `has_fused_kernel` field |
+| Savings estimates | `kernel_fusion_metrics.json` `impact_estimates[]` (when available) |
 
 ## What You CANNOT Infer
 
 | NOT Observable | Why | Instead Say |
 |----------------|-----|-------------|
 | Tensor shapes | Not in candidate JSON | "Cannot assess data flow from candidate data" |
-| Memory traffic savings | Would need tensor sizes | Do NOT estimate savings |
 | Whether kernels share intermediate tensors | Would need data flow analysis | "Likely fusable based on module structure" |
 | Root cause of decomposition | Could be framework, compiler, or intentional | "Module launches N separate kernels that may be fusable" |
 

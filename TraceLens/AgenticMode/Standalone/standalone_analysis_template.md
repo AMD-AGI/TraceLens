@@ -124,10 +124,10 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ## Kernel Fusion Opportunities (Experimental)
 
-> **Note:** Kernel fusion analysis is experimental. The Compute Kernel section above analyzes the individual constituent kernels of these fusion candidates independently. Joint analysis, where fusion candidate's performance is also estimated, is planned for a future release. Opportunities are ranked by confidence level. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak). Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
 <!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
-<!-- Each finding uses Insight / Action format (no Impact -- detection only). -->
+<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
 <!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
 
@@ -199,6 +199,35 @@ For each category, include total time, % of compute, average efficiency (if from
 
 ### 2. <Operation Category> (X% of compute)
 [...]
+
+---
+
+## Detailed Analysis: Kernel Fusion
+
+<!-- Tables only — extract Kernels + Projection tables from kernel_fusion_findings.md per candidate, sorted by savings descending. -->
+<!-- No narrative (Insight/Action/Impact/Confidence already in the section above). -->
+<!-- If kernel_fusion category not in manifest or findings empty, show "No fusion savings estimates available." -->
+
+### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+
+**Kernels:** List the constituent GPU kernels from fusion_candidates.json (match by operation/base_name):
+
+| Kernel | Type | Duration (us) | Perf model |
+|--------|------|--------------|------------|
+| <kernel name (truncated)> | <type> | X.X | Coverage? |
+
+**Projection:**
+
+| Metric | Value |
+|--------|-------|
+| Bound type | compute / memory |
+| Fusion type | matrix_compute / memory_bound |
+| Kernels modelled | M of N |
+| Savings (low-mid-high) | X.XX - Y.YY - Z.ZZ ms |
+| E2E impact | X.XX - Z.ZZ% |
+
+### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+[Same format as above]
 
 ---
 
