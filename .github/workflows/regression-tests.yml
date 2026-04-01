@@ -30,8 +30,11 @@ jobs:
         run: |
           apt update && apt install -y python3-venv
           python -m venv .venv
+          echo "activating venv"
           source .venv/bin/activate
+          echo "updating pip"
           python -m pip install --upgrade pip
+          echo "installing dependencies"
           pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
 
       - name: Run function-based tests
