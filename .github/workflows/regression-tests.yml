@@ -21,15 +21,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # the docker container has python 3.12 installed
-      #- name: Set up Python
-      #  uses: actions/setup-python@v5
-      #  with:
-      #    python-version: '3.12'
-      #    cache: 'pip'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
+          apt install python-is-python3
           python -m pip install --upgrade pip
           pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
 
