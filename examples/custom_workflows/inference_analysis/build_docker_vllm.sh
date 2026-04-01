@@ -4,7 +4,7 @@ set -e
 usage() {
     echo "Usage: $0 <vllm-version> <path-to-TraceLens-internal> [docker build args...]"
     echo ""
-    echo "  vllm-version    One of: v14, v15, v16, v17 (shorthand for v0.14.0, v0.15.0, v0.16.0, v0.17.0)"
+    echo "  vllm-version    One of: v14, v15, v16, v17, v18 (shorthand for v0.14.0, v0.15.0, v0.16.0, v0.17.0, v0.18.0)"
     echo ""
     echo "Examples:"
     echo "  $0 v14 /home/user/TraceLens-internal -t tracelens-vllm"
@@ -36,9 +36,13 @@ case "${VLLM_VERSION}" in
         BASE_IMAGE="vllm/vllm-openai-rocm:v0.17.0"
         PATCH_FILE="vllm_v0.17.0.patch"
         ;;
+    v18)
+        BASE_IMAGE="vllm/vllm-openai-rocm:v0.18.0"
+        PATCH_FILE="vllm_v0.18.0.patch"
+        ;;
     *)
         echo "Error: unsupported vllm version '${VLLM_VERSION}'"
-        echo "Supported versions: v14, v15, v16, v17"
+        echo "Supported versions: v14, v15, v16, v17, v18"
         exit 1
         ;;
 esac
