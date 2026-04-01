@@ -74,6 +74,16 @@ bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
     -t tracelens-vllm
 ```
 
+To use a custom base Docker image instead of the default for the selected version, pass `--base-image`:
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
+    v18 \
+    /path/to/TraceLens-internal \
+    --base-image my-registry/vllm:nightly \
+    -t tracelens-vllm:custom
+```
+
 Then create a container from the image.
 
 ##### SGLang Script

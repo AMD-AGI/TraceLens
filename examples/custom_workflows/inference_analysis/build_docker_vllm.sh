@@ -2,13 +2,15 @@
 set -e
 
 usage() {
-    echo "Usage: $0 <vllm-version> <path-to-TraceLens-internal> [docker build args...]"
+    echo "Usage: $0 <vllm-version> <path-to-TraceLens-internal> [--base-image <image>] [docker build args...]"
     echo ""
     echo "  vllm-version    One of: v14, v15, v16, v17, v18 (shorthand for v0.14.0, v0.15.0, v0.16.0, v0.17.0, v0.18.0)"
+    echo "  --base-image    Override the default base Docker image for the selected vllm version"
     echo ""
     echo "Examples:"
     echo "  $0 v14 /home/user/TraceLens-internal -t tracelens-vllm"
     echo "  $0 v16 . -t tracelens-vllm:v16 --no-cache"
+    echo "  $0 v18 . --base-image my-custom/vllm:latest -t tracelens-vllm:custom"
     exit 1
 }
 
@@ -50,6 +52,25 @@ esac
 TRACELENS_REPO="$(cd "$1" && pwd)"
 shift
 
+CUSTOM_BASE_IMAGE=""
+REMAINING_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --base-image)
+            CUSTOM_BASE_IMAGE="$2"
+            shift 2
+            ;;
+        *)
+            REMAINING_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ -n "${CUSTOM_BASE_IMAGE}" ]; then
+    BASE_IMAGE="${CUSTOM_BASE_IMAGE}"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_PATH="examples/custom_workflows/inference_analysis/${PATCH_FILE}"
 
@@ -63,7 +84,7 @@ echo "  Base image : ${BASE_IMAGE}"
 echo "  Patch file : ${PATCH_FILE}"
 echo "  TraceLens  : ${TRACELENS_REPO}"
 
-docker build "$@" -f - "${TRACELENS_REPO}" <<DOCKERFILE
+docker build "${REMAINING_ARGS[@]}" -f - "${TRACELENS_REPO}" <<DOCKERFILE
 FROM ${BASE_IMAGE}
 
 COPY . /tmp/TraceLens-internal
