@@ -2,9 +2,9 @@
 set -e
 
 usage() {
-    echo "Usage: $0 <tracelens_path> [gpu_type]"
-    echo "  tracelens_path: Absolute path to the TraceLens-internal repository"
-    echo "  gpu_type:       'mi300' or 'mi355' (default: mi355)"
+    echo "Usage: $0 <tracelens_path> [gpu_type] [docker build args...]"
+    echo "  tracelens_path: Path to the TraceLens-internal repository"
+    echo "  gpu_type:       'mi300' or 'mi350/mi355' (default: mi350)"
     exit 1
 }
 
@@ -13,70 +13,45 @@ if [ -z "$1" ]; then
 fi
 
 TRACELENS_PATH="$(realpath "$1")"
+shift
+
 if [ ! -d "${TRACELENS_PATH}" ]; then
     echo "Error: TraceLens path does not exist: ${TRACELENS_PATH}"
     exit 1
 fi
 
-GPU_TYPE="${2:-mi355}"
+GPU_TYPE="${1:-mi350}"
 case "${GPU_TYPE}" in
     mi300)
-        DOCKER_IMAGE="rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI300x"
-        CONTAINER_NAME="atom-deepseek-mi300x"
+        BASE_IMAGE="rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI300x"
         ;;
-    mi355)
-        DOCKER_IMAGE="rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI355x"
-        CONTAINER_NAME="atom-deepseek-mi355x"
+    mi350|mi355)
+        BASE_IMAGE="rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI350x"
         ;;
     *)
-        echo "Error: Invalid gpu_type '${GPU_TYPE}'. Must be 'mi300' or 'mi355'."
+        echo "Error: Invalid gpu_type '${GPU_TYPE}'. Must be 'mi300' or 'mi350/mi355'."
         usage
         ;;
 esac
+shift 2>/dev/null || true
 
-TRACELENS_MOUNT="/workspace/TraceLens-internal"
+echo "Building Atom docker image"
+echo "  Base image : ${BASE_IMAGE}"
+echo "  GPU type   : ${GPU_TYPE}"
+echo "  TraceLens  : ${TRACELENS_PATH}"
 
-echo "Using TraceLens path: ${TRACELENS_PATH}"
-echo "Using GPU type: ${GPU_TYPE} (image: ${DOCKER_IMAGE})"
-echo "Starting Docker container..."
-docker run -d \
-    --user root \
-    --name ${CONTAINER_NAME} \
-    --group-add video \
-    --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    -w /app/ \
-    --ipc=host \
-    --network=host \
-    --shm-size 64G \
-    --mount type=bind,src=/data,dst=/data \
-    --device=/dev/kfd \
-    --device=/dev/dri \
-    -e SGLANG_USE_AITER=1 \
-    -v /home:/home \
-    -v "${TRACELENS_PATH}:${TRACELENS_MOUNT}" \
-    ${DOCKER_IMAGE} \
-    tail -f /dev/null
+docker build "$@" -f - "${TRACELENS_PATH}" <<DOCKERFILE
+FROM ${BASE_IMAGE}
 
-echo "Waiting for container to start..."
-sleep 2
+COPY . /tmp/TraceLens-internal
 
-echo "Applying patches to ATOM..."
-docker exec ${CONTAINER_NAME} bash -c "
-    set -e
-    ATOM_DIR=\$(python3 -c 'import atom; import os; print(os.path.dirname(os.path.dirname(atom.__file__)))')
-    echo \"ATOM directory: \${ATOM_DIR}\"
-    cd \"\${ATOM_DIR}\"
-    echo \"Applying patches...\"
-    for patch in ${TRACELENS_MOUNT}/examples/custom_workflows/inference_analysis/atom_roofline_patches/*.patch; do
-        if [ -f \"\$patch\" ]; then
-            echo \"Applying: \$(basename \$patch)\"
-            git apply \"\$patch\" || exit 1
-        fi
-    done
-    echo \"Installing TraceLens...\"
-    pip install --no-deps ${TRACELENS_MOUNT}
-"
+RUN ATOM_DIR=/app/ATOM && \\
+    cd "\${ATOM_DIR}" && \\
+    for patch in /tmp/TraceLens-internal/examples/custom_workflows/inference_analysis/atom_roofline_patches/*.patch; do \\
+        [ -f "\$patch" ] && git apply "\$patch"; \\
+    done && \\
+    pip install --no-deps /tmp/TraceLens-internal && \\
+    rm -rf /tmp/TraceLens-internal
 
-echo "Done! Entering container..."
-docker exec -it ${CONTAINER_NAME} bash
+WORKDIR /workspace
+DOCKERFILE
