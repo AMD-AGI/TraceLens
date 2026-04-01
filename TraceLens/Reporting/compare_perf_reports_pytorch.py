@@ -530,11 +530,7 @@ def generate_compare_perf_reports_pytorch(
                         columns=cols_to_del_non_baseline, inplace=True, errors="ignore"
                     )
 
-            # Merge keys: name + param: columns common to all reports.
-            # - If we used only the baseline's params, a variant missing a column
-            #   raises KeyError in pd.merge.
-            # - If we used the union and padded missing keys with NA, rows no longer
-            #   match (NA != value), emptying intersect sheets (see tests).
+            # Merge keys: name + "param:" columns common to both reports.
             cond = lambda col: str(col).startswith("param:")
             param_sets = [{c for c in df.columns if cond(c)} for df in dfs]
             param_cols_common = set.intersection(*param_sets) if param_sets else set()
