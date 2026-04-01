@@ -30,36 +30,51 @@ jobs:
         run: |
           apt update && apt install -y python3-venv git
           python -m venv .venv
-          echo "activating venv"
           . .venv/bin/activate
-          echo "updating pip"
           python -m pip install --upgrade pip
-          echo "installing dependencies"
           pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
 
       - name: Run function-based tests
-        run: pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
 
       - name: Run rocprof report tests
-        run: pytest tests/test_rocprof_perf_report.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_rocprof_perf_report.py
 
       - name: Run perf report regression tests
-        run: pytest tests/test_perf_report_regression.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_perf_report_regression.py
 
       - name: Run compare perf reports tests
-        run: pytest tests/test_compare_perf_reports.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_compare_perf_reports.py
 
       - name: Run collective analysis tests
-        run: pytest tests/test_collective_analysis.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_collective_analysis.py
 
       - name: Run all2allv summary tests
-        run: pytest tests/test_all2allv_summary.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_all2allv_summary.py
 
       - name: Run JAX perf report tests
-        run: pytest tests/test_jax_perf_report.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_jax_perf_report.py
 
       - name: Run detect recompute tests
-        run: pytest tests/test_detect_recompute.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_detect_recompute.py
 
       - name: Run copyright header checks
-        run: pytest tests/test_copyright_headers.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_copyright_headers.py
