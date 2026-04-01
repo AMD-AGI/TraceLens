@@ -126,7 +126,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 > **Note:** Kernel fusion analysis is experimental. The Compute Kernel section above analyzes the individual constituent kernels of these fusion candidates independently. Joint analysis, where fusion candidate's performance is also estimated, is planned for a future release. Opportunities are ranked by confidence level. Actual savings depend on implementation feasibility and interaction effects.
 
-<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action format (no Impact -- detection only). -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
 <!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
