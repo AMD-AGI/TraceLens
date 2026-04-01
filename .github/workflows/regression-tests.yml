@@ -28,7 +28,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt update && apt install -y python3-venv
+          apt update && apt install -y python3-venv git
           python -m venv .venv
           echo "activating venv"
           . .venv/bin/activate
