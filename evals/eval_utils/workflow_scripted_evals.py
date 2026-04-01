@@ -112,9 +112,13 @@ def _check_findings_exist(output_dir: str) -> tuple[str, str]:
     manifest = _load_manifest(output_dir)
     if manifest is None:
         return "FAIL", "category_manifest.json not found"
+    gpu_util = manifest.get("gpu_utilization", {})
+    idle_pct = gpu_util.get("idle_time_percent", 0)
     missing = []
     for cat in manifest.get("categories", []):
         name = cat["name"]
+        if name == "cpu_idle" and idle_pct <= 15:
+            continue
         tier = cat.get("tier", "compute_kernel")
         subdir = "system_findings" if tier == "system" else "category_findings"
         path = os.path.join(output_dir, subdir, f"{name}_findings.md")
@@ -129,9 +133,13 @@ def _check_findings_placement(output_dir: str) -> tuple[str, str]:
     manifest = _load_manifest(output_dir)
     if manifest is None:
         return "FAIL", "category_manifest.json not found"
+    gpu_util = manifest.get("gpu_utilization", {})
+    idle_pct = gpu_util.get("idle_time_percent", 0)
     misplaced = []
     for cat in manifest.get("categories", []):
         name = cat["name"]
+        if name == "cpu_idle" and idle_pct <= 15:
+            continue
         tier = cat.get("tier", "compute_kernel")
         correct_dir = "system_findings" if tier == "system" else "category_findings"
         wrong_dir = "category_findings" if tier == "system" else "system_findings"

@@ -282,41 +282,9 @@ Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait betwe
 - `kernel_fusion` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/kernel-fusion-analyzer.md` (invoke if `kernel_fusion` category exists in manifest)
 
 **Invocation conditions:**
-- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. Only invoke the subagent if `idle_time_percent > 15`. If `idle_time_percent <= 15`, **skip the subagent** but **write a stub findings file** to `system_findings/cpu_idle_findings.md` using `<prefix>` (see below).
+- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 - **Kernel Fusion**: `kernel_fusion` category exists in manifest
-
-**CPU/Idle stub findings (when idle <= 15%):**
-
-When skipping the cpu_idle subagent, the orchestrator must still write `system_findings/cpu_idle_findings.md` so that report assembly and eval checks succeed. Read the `gpu_utilization` block from `category_data/category_manifest.json` and write the following using `<prefix>`, substituting actual values:
-
-~~~markdown
-# CPU/Idle Time Analysis Findings
-
-> **Note:** This analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
-
-**Status**: SKIPPED
-**Idle Time**: {idle_time_percent}% ({idle_time_ms} ms out of {total_time_ms} ms total)
-
-GPU idle time is within acceptable range (<=15%). No further analysis required.
-
-## Utilization Breakdown
-
-| Metric | Value |
-|--------|-------|
-| Computation | {computation_time_percent}% |
-| Idle | {idle_time_percent}% |
-| Communication | {exposed_comm_time_percent}% |
-| MemCpy | {exposed_memcpy_time_percent}% |
-
-## Recommendations
-
-No action needed. GPU idle time is within the 15% threshold.
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-~~~
 
 **Task prompt structure for each subagent:**
 
