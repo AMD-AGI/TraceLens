@@ -1315,6 +1315,9 @@ class TreePerfAnalyzer:
                     # --- CHANGE: Use the consistent metric name directly ---
                     kernel_summary[metric_name] = agg_func(dur_arr)
 
+        summary_list.sort(
+            key=lambda k: (-k.get("total_duration_us", 0), k.get("name", ""))
+        )
         return summary_list
 
     @staticmethod
