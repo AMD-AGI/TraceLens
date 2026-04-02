@@ -309,7 +309,29 @@ def find_capture_roots(capture_tree):
             for e in capture_tree.events
             if e["ts"] >= ts and e["ts"] + e.get("dur", 0) <= te
         ]
-        capture_roots.append(max(filtered, key=lambda e: e.get("dur", 0)))
+        filtered_uids = {e[UID] for e in filtered}
+        root_events = [
+            e
+            for e in filtered
+            if e.get("parent", None) not in filtered_uids
+            and e.get("parent", None) is not None
+            and (e.get("cat", "") == "cpu_op" or e.get("cat", "") == "python_function")
+        ]
+        new_uid = max(capture_tree.events_by_uid.keys()) + 1
+        dummy = {
+            UID: new_uid,
+            "name": "CaptureRoot",
+            "ts": ts,
+            "dur": te - ts,
+            "cat": "cuda_runtime",
+            "children": [e[UID] for e in root_events],
+            "args": {},
+        }
+        capture_tree.events_by_uid[new_uid] = dummy
+        capture_roots.append(dummy)
+        capture_tree.events.append(dummy)
+        for e in root_events:
+            e["parent"] = new_uid
     return capture_roots
 
 

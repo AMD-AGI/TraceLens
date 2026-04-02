@@ -23,10 +23,10 @@ fi
 GPU_TYPE="${1:-mi350}"
 case "${GPU_TYPE}" in
     mi300)
-        BASE_IMAGE="lmsysorg/sglang:v0.5.9-rocm700-mi30x"
+        BASE_IMAGE="rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI300x"
         ;;
     mi350|mi355)
-        BASE_IMAGE="lmsysorg/sglang:v0.5.9-rocm700-mi35x"
+        BASE_IMAGE="rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI350x"
         ;;
     *)
         echo "Error: Invalid gpu_type '${GPU_TYPE}'. Must be 'mi300' or 'mi350/mi355'."
@@ -35,7 +35,7 @@ case "${GPU_TYPE}" in
 esac
 shift 2>/dev/null || true
 
-echo "Building SGLang docker image"
+echo "Building Atom docker image"
 echo "  Base image : ${BASE_IMAGE}"
 echo "  GPU type   : ${GPU_TYPE}"
 echo "  TraceLens  : ${TRACELENS_PATH}"
@@ -45,9 +45,9 @@ FROM ${BASE_IMAGE}
 
 COPY . /tmp/TraceLens-internal
 
-RUN SGLANG_DIR=\$(pip show sglang | grep "Editable project location" | cut -d' ' -f4 | xargs dirname) && \\
-    cd "\${SGLANG_DIR}" && \\
-    for patch in /tmp/TraceLens-internal/examples/custom_workflows/inference_analysis/sglang_roofline_patches/*.patch; do \\
+RUN ATOM_DIR=/app/ATOM && \\
+    cd "\${ATOM_DIR}" && \\
+    for patch in /tmp/TraceLens-internal/examples/custom_workflows/inference_analysis/atom_roofline_patches/*.patch; do \\
         [ -f "\$patch" ] && git apply "\$patch"; \\
     done && \\
     pip install --no-deps /tmp/TraceLens-internal && \\

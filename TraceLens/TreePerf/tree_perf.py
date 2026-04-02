@@ -1470,6 +1470,7 @@ class TreePerfAnalyzer:
             collected_gpu_uids.update(evt.get("gpu_events", []))
 
         orphan_kernels = []
+        kernels_with_cpu_op = []
         for evt in self.tree.events:
             if self.event_to_category(evt) not in {
                 "kernel",
@@ -1487,6 +1488,7 @@ class TreePerfAnalyzer:
             while parent is not None:
                 if self.event_to_category(parent) == "cpu_op":
                     has_cpu_op = True
+                    kernels_with_cpu_op.append((evt, parent))
                     break
                 parent = self.tree.get_parent_event(parent)
 
@@ -1500,16 +1502,27 @@ class TreePerfAnalyzer:
             parent_uid = parent["UID"] if parent else None
             parent_to_orphans[parent_uid].append(kernel)
 
+        next_uid = max(self.tree.events_by_uid.keys()) + 1
         for parent_uid, kernels in parent_to_orphans.items():
             if parent_uid is None:
                 continue
             parent_evt = self.tree.get_UID2event(parent_uid)
             for kernel in kernels:
                 synthetic = dict(parent_evt)
-                synthetic["name"] = f"{parent_evt['name']}::{kernel['name']}"
+                synthetic["UID"] = next_uid
+                next_uid += 1
+                synthetic["name"] = (
+                    f"{parent_evt['name']}->{kernel['name']} (Synthetic Op)"
+                )
                 synthetic["gpu_events"] = [kernel["UID"]]
                 collected.append(synthetic)
-
+        for evt, parent in kernels_with_cpu_op:
+            synthetic = dict(parent)
+            synthetic["UID"] = next_uid
+            next_uid += 1
+            synthetic["name"] = f"{parent['name']}->{evt['name']} (Synthetic Op)"
+            synthetic["gpu_events"] = [evt["UID"]]
+            collected.append(synthetic)
         return collected
 
     def build_df_unified_perf_table(
