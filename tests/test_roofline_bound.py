@@ -71,10 +71,10 @@ def perf_report(tmp_path_factory):
     return csv_dir
 
 
-def _find_roofline_bound_col(df):
+def _find_col(df, prefix):
     """Find the Roofline Bound column, which may have an aggregation suffix."""
     for col in df.columns:
-        if col == "Roofline Bound" or col.startswith("Roofline Bound"):
+        if col.startswith(prefix):
             return col
     return None
 
@@ -82,13 +82,25 @@ def _find_roofline_bound_col(df):
 def test_roofline_bound_in_unified_perf_summary(perf_report):
     """Roofline Bound column must appear in unified_perf_summary."""
     df = pd.read_csv(os.path.join(perf_report, "unified_perf_summary.csv"))
-    bound_col = _find_roofline_bound_col(df)
+    bound_col = _find_col(df, "Roofline Bound")
     assert bound_col is not None, (
         f"'Roofline Bound' missing from unified_perf_summary. "
         f"Columns: {list(df.columns)}"
     )
     bound_vals = set(df[bound_col].dropna().unique())
     assert bound_vals <= VALID_BOUND_VALUES, f"Unexpected values: {bound_vals}"
+
+
+def test_origami_time_in_unified_perf_summary(perf_report):
+    """Origami Time (µs) column must appear in unified_perf_summary."""
+    # this test does not test the functionality of the Origami time column,
+    # it only tests that the column appears in the perf report, because we do not control Origami
+    df = pd.read_csv(os.path.join(perf_report, "unified_perf_summary.csv"))
+    bound_col = _find_col(df, "Origami Time (µs)")
+    assert bound_col is not None, (
+        f"'Origami Time (µs)' missing from unified_perf_summary. "
+        f"Columns: {list(df.columns)}"
+    )
 
 
 def test_roofline_bound_in_category_sheets(perf_report):
@@ -99,7 +111,7 @@ def test_roofline_bound_in_category_sheets(perf_report):
         roofline_time_cols = [c for c in df.columns if c.startswith("Roofline Time")]
         if roofline_time_cols:
             sheets_with_roofline.append(sheet)
-            bound_col = _find_roofline_bound_col(df)
+            bound_col = _find_col(df, "Roofline Bound")
             assert bound_col is not None, (
                 f"Sheet '{sheet}' has roofline time but missing "
                 f"'Roofline Bound'. Columns: {list(df.columns)}"
