@@ -43,10 +43,7 @@ SHEETS_WITH_RECOMPUTE = [
     "ops_unique_args",
     "unified_perf_summary",
 ]
-# These sheets differ when detect_recompute=True (extra is_recompute column / split rows).
-# Golden CSVs in REF_CSV_DIR are shared with the pre-split layout; validate them only
-# via SHEETS_WITH_RECOMPUTE assertions on generated output, not full numeric compare.
-SHEETS_SKIP_REF_NUMERIC_COMPARE = frozenset({"gpu_timeline", "ops_summary_by_category"})
+
 PERF_METRICS_SHEETS = [
     "GEMM",
     "SDPA_fwd",
@@ -87,8 +84,6 @@ def test_detect_recompute_e2e(tmp_path):
 
     sheets = list_perf_report_csv_sheets(REF_CSV_DIR)
     for sheet in sheets:
-        if sheet in SHEETS_SKIP_REF_NUMERIC_COMPARE:
-            continue
         df_ref = read_perf_report_csv(REF_CSV_DIR, sheet)
         df_test = read_perf_report_csv(fn_csv_dir, sheet)
         if df_ref.empty:
