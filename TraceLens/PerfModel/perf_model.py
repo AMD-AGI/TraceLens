@@ -5123,6 +5123,24 @@ class EPComm:
     Primus Turbo Deep EP).  They move token tensors between GPU ranks; there is
     no matrix multiply, so flops() = 0 and bytes() = token-tensor volume.
 
+    Known limitations / TODOs
+    -------------------------
+    1. **Effective vs true interconnect BW** — The current TB/s is *effective*
+       throughput (bytes / total kernel time), which includes straggler
+       sync/wait time.  True interconnect BW (excluding sync overhead)
+       requires tree-perf / NCCL-analyzer integration (planned follow-up).
+
+    2. **Label as interconnect BW, not HBM** — These ops move data over the
+       interconnect, not HBM.  The report should expose an
+       "Effective Interconnect TB/s" column to distinguish from the HBM-based
+       TB/s used by compute ops.  "Effective" signals that the link isn't
+       active for the full kernel duration (straggler wait, sync overhead).
+
+    3. **bytes() may be an upper bound** — bytes() assumes every token crosses
+       the interconnect, but tokens routed to a local expert stay on-rank and
+       do not incur interconnect traffic.  Need to check what routing metadata
+       is actually available in real trace event args.
+
     Placement note
     --------------
     EPComm lives in perf_model.py so that DeepEP ops surface in the TraceLens
