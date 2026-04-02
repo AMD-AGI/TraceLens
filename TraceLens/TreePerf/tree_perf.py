@@ -327,7 +327,7 @@ class TreePerfAnalyzer:
                 "dur": kernel["dur"],
                 "stream": kernel.get("args", {}).get("stream", None),
             }
-            for kernel in list_kernels
+            for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -864,6 +864,7 @@ class TreePerfAnalyzer:
             key=lambda uid: self.tree.get_UID2event(uid).get("ts", 0),
         )
 
+        events_by_uid = self.tree.events_by_uid
         for launcher_uid in sorted_launcher_uids:
             kernels = launcher_to_kernels[launcher_uid]
             event = self.tree.get_UID2event(launcher_uid)
@@ -871,8 +872,15 @@ class TreePerfAnalyzer:
             event["total_direct_kernel_time"] = self.GPUEventAnalyser(
                 kernels
             ).compute_metrics()["busy_time"]
-            event["total_subtree_kernel_time"] = self._compute_subtree_kernel_time_us(
-                event
+            # add_gpu_ops_to_tree() propagates every GPU kernel UID up to all
+            # CPU/runtime ancestors via event["gpu_events"], making subtree
+            # kernel lookup O(1) instead of a recursive traversal.
+            subtree_kernel_uids = event.get("gpu_events", [])
+            subtree_kernels = [events_by_uid[uid] for uid in subtree_kernel_uids]
+            event["total_subtree_kernel_time"] = (
+                self.GPUEventAnalyser(subtree_kernels).compute_metrics()["busy_time"]
+                if subtree_kernels
+                else 0
             )
             event["direct_kernel_count"] = len(kernels)
             event["kernel_details"] = [
@@ -881,7 +889,7 @@ class TreePerfAnalyzer:
                     "dur": kernel["dur"],
                     "stream": kernel.get("args", {}).get("stream", None),
                 }
-                for kernel in kernels
+                for kernel in sorted(kernels, key=lambda k: k.get("ts", 0))
             ]
             event["op category"] = self.op_categorizer(event)
             self._compute_overlap_info(event, kernels)
@@ -1307,6 +1315,9 @@ class TreePerfAnalyzer:
                     # --- CHANGE: Use the consistent metric name directly ---
                     kernel_summary[metric_name] = agg_func(dur_arr)
 
+        summary_list.sort(
+            key=lambda k: (k.get("total_duration_us", 0), k.get("name", ""))
+        )
         return summary_list
 
     @staticmethod

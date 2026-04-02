@@ -695,16 +695,40 @@ class TraceToTree(BaseTraceToTree):
             #     if python_id is not None:
             #         self.dict_pythonID2UID[python_id] = event[UID]
 
+        # Build CPU pid → GPU pid mapping from ac2g flow event pairs.
+        # In merged multi-rank traces each rank produces overlapping correlation
+        # IDs, so _get_graph_gpu_events must filter GPU events to the correct
+        # rank.  ac2g "start" events carry the CPU pid; their matching "end"
+        # events carry the GPU pid — giving us the per-rank CPU↔GPU pid link.
+        self.cpu_pid_to_gpu_pids = defaultdict(set)
+        for link_id, start_evt in self.ac2g_event_map["start"].items():
+            end_evt = self.ac2g_event_map["end"].get(link_id)
+            if end_evt is not None:
+                cpu_pid = start_evt.get(PID)
+                gpu_pid = end_evt.get(PID)
+                if cpu_pid is not None and gpu_pid is not None:
+                    self.cpu_pid_to_gpu_pids[cpu_pid].add(gpu_pid)
+
     def _nn_module_stack_name_for_event(self, event: Dict[str, Any]) -> str:
         name = event.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "")
         return re.sub(r"_\d+$", "", name)
 
     def add_gpu_ops_to_tree(self):
+        import gc
+        from collections import deque
+
         UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
         Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
         events_by_uid = self.events_by_uid
         name2event_uids = self.name2event_uids
         graph_launch_names = {"cudaGraphLaunch", "hipGraphLaunch"}
+
+        # ── Phase B: link each GPU kernel to its immediate runtime parent ──────
+        # Iterates only runtime_event_uids (pre-filtered in _preprocess_and_index_events)
+        # rather than all self.events.  _get_graph_gpu_events now uses the
+        # pre-built linking_id_to_gpu_events index (O(1) per graph launch) and
+        # filters by rank via cpu_pid_to_gpu_pids to avoid cross-rank attribution
+        # in merged multi-rank traces.
         for runtime_uid in self.runtime_event_uids:
             runtime_event = events_by_uid[runtime_uid]
             if runtime_event["name"] in graph_launch_names:
@@ -720,12 +744,58 @@ class TraceToTree(BaseTraceToTree):
                 name2event_uids[gpu_evt[Name]].append(gpu_evt_uid)
                 runtime_event.setdefault("gpu_events", []).append(gpu_evt_uid)
 
-                # Walk parent chain to propagate gpu_events
-                parent_uid = runtime_event.get("parent")
-                while parent_uid is not None:
-                    parent = events_by_uid[parent_uid]
-                    parent.setdefault("gpu_events", []).append(gpu_evt_uid)
-                    parent_uid = parent.get("parent")
+        # ── Phase C: single bottom-up propagation of gpu_events ───────────────
+        # Replace the per-kernel O(depth) ancestor walk with a single BFS
+        # topological sort followed by a reverse-order list.extend() pass.
+        # C-level list.extend() is 10-50× faster than individual append() calls
+        # and avoids the GC pressure of millions of per-kernel allocations.
+        #
+        # BFS seeds: self.cpu_root_nodes is already populated by
+        # build_host_call_stack_tree — no O(N_all) scan needed.
+        #
+        # Visited set: in merged multi-rank traces, Phase B can (for any
+        # remaining cross-rank duplicates) add a GPU event as a child of
+        # multiple runtime parents.  Without a visited set the BFS enqueues
+        # each such event K times, making traversal O(K² × N_gpu) — a definite
+        # hang for large merged traces.  The visited set reduces this to O(N).
+        topo_order: list = []
+        visited: set = set()
+        q: deque = deque(
+            events_by_uid[uid] for uid in self.cpu_root_nodes if uid in events_by_uid
+        )
+        while q:
+            ev = q.popleft()
+            ev_uid = ev[UID]
+            if ev_uid in visited:
+                continue
+            visited.add(ev_uid)
+            topo_order.append(ev)
+            for child_uid in ev.get("children", ()):
+                if child_uid not in visited:
+                    child = events_by_uid.get(child_uid)
+                    if child is not None:
+                        q.append(child)
+
+        gc.disable()
+        try:
+            for event in reversed(topo_order):
+                my_gpu = event.get("gpu_events")
+                if not my_gpu:
+                    continue
+                parent_uid = event.get("parent")
+                if parent_uid is None:
+                    continue
+                parent = events_by_uid.get(parent_uid)
+                if parent is None:
+                    continue
+                parent_gpu = parent.get("gpu_events")
+                if parent_gpu is None:
+                    parent["gpu_events"] = list(my_gpu)
+                else:
+                    parent_gpu.extend(my_gpu)
+        finally:
+            gc.enable()
+            gc.collect()
 
     def build_tree(self, add_python_func=False, link_fwd_bwd=True) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
@@ -1136,7 +1206,22 @@ class TraceToTree(BaseTraceToTree):
         ).get(self.linking_key)
         if corr is None:
             return []
-        return self.linking_id_to_gpu_events.get(corr, [])
+        all_gpu_events = self.linking_id_to_gpu_events.get(corr, [])
+        # In merged multi-rank traces, correlation IDs restart from the same
+        # range for every rank, so linking_id_to_gpu_events[corr] can contain
+        # GPU kernels from all K ranks.  Use the CPU↔GPU pid mapping derived
+        # from ac2g flow events to restrict results to the rank that issued
+        # this graph launch.  Fall back to returning all matches when no
+        # mapping is available (e.g. traces with no regular kernel launches).
+        cpu_pid = graph_launch_evt.get(TraceLens.util.TraceEventUtils.TraceKeys.PID)
+        gpu_pids = self.cpu_pid_to_gpu_pids.get(cpu_pid)
+        if not gpu_pids:
+            return all_gpu_events
+        return [
+            evt
+            for evt in all_gpu_events
+            if evt.get(TraceLens.util.TraceEventUtils.TraceKeys.PID) in gpu_pids
+        ]
 
     def _find_corresponding_output_event(self, input_event):
         # 1. Get the linking id from the input event
