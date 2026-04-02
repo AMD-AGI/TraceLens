@@ -237,6 +237,7 @@ Do not look up peaks independently from the metadata dict.
 4. **Do NOT analyze communication kernels** -- They are filtered out by the analysis script; direct users to TraceLens's NCCL Analyzer
 5. **Do NOT duplicate system-level findings** -- Memcpy and sync are covered elsewhere
 6. **Provide BOTH recommendation types** -- Algorithmic and kernel-level
+7. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

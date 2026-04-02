@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # 🚀 TraceLens Inference Performance Analysis
 
-TraceLens-internal extends the open-source TraceLens tooling to provide comprehensive support for inference use cases, with a focus on InferenceMax optimization. This documentation covers:
+TraceLens-internal extends the open-source TraceLens tooling to provide comprehensive support for inference use cases, with a focus on inference serving optimization. This documentation covers:
 
 - 📋 **Overview** - New features for inference trace analysis
 - 🔧 **Trace Collection** - Methodologies and setup
@@ -15,25 +15,29 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 
 ## ✨ Key Features
 
-| Feature                     | Description                                                                                                                      |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+
+| Feature               | Description                                                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | **Agentic Analysis**  | Agentic workflows for standalone trace (single trace) and comparative trace analysis for performance improvement recommendations |
 | **TraceDiff**         | Extended to support inference traces with Lowest Common Ancestor (LCA) analysis for kernel correlation across platforms          |
 | **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations.      |
 | **Trace Splitting**   | Splitting of large tracefiles into steady-state regions, per-iteration traces, and phase-specific analyses                       |
 
+
 ## Supported Frameworks and Execution Modes
 
-TraceLens features for inference analysis have been primarily tested with vLLM, with active efforts underway to extend support to other frameworks such as SGLang and Atom. Here is the summary of different execution modes and supported features.
+TraceLens features for inference analysis have been primarily tested with vLLM, with active efforts underway to extend support to other frameworks such as SGLang and Atom. Here is a summary of the different execution modes and supported features.
 
-| Mode                                  | Shapes/Roofline analysis | Standalone Analysis                                                                              | Comparative Analysis | Limitations                                                                                                                                                |
-| ------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Eager only                            | Yes                      | Supported, proposed patches recommended to include roofline information for attention operations | Yes                  | Eager mode execution may employ different compilation strategies, which can result in differences in kernels and fusions compared to graph execution mode. |
-| Graph execution only                  | Non‑graph kernels       | Limited                                                                                          | Limited              | Categorization, call stack and shapes are available only for attention kernels if full_and_piecewise mode is used                                          |
-| Graph execution + eager mode trace    | Limited                  | Planned                                                                                          | Planned              | Kernel categorization might not be as accurate as eager or graph+capture                                                                                   |
+
+| Mode                                | Shapes/Roofline analysis | Standalone Analysis                                                                              | Comparative Analysis | Limitations                                                                                                                                                |
+| ----------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Eager only                          | Yes                      | Supported; proposed patches are recommended to include roofline information for attention operations | Yes                  | Eager mode execution may employ different compilation strategies, which can result in differences in kernels and fusions compared to graph execution mode. |
+| Graph execution only                | Non‑graph kernels        | Limited                                                                                          | Limited              | Categorization, call stacks, and shapes are available only for attention kernels if full_and_piecewise mode is used                                          |
+| Graph execution + eager mode trace  | Limited                  | Planned                                                                                          | Planned              | Kernel categorization might not be as accurate as eager or graph+capture                                                                                   |
 | Graph execution + Graph capture$^1$ | Yes                      | Yes (proposed patches required)                                                                  | Planned              |                                                                                                                                                            |
 
-  $^1$ Graph mode analysis using graph capture and graph replay traces is supported for vLLM (proposed patches to vLLM required), and similar support for other inference engines are coming soon.
+
+  $^1$ Graph mode analysis using graph capture and graph replay traces is supported for vLLM (proposed patches to vLLM required), and similar support for other inference engines is coming soon.
 
 ## 📖 Quickstart Guide
 
@@ -50,14 +54,17 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 #### Option A: Build a Docker image using the [provided scripts](../examples/custom_workflows/inference_analysis/) (recommended)
 
 ##### vLLM Script
+
 A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, or `v17`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
-| Version | Base Image | vLLM Version |
-|---------|-----------|--------------|
-| `v14` | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` | v0.14.0 |
-| `v15` | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` | v0.15.0 |
-| `v16` | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0 |
-| `v17` | `vllm/vllm-openai-rocm:v0.17.0` | v0.17.0 |
+
+| Version | Base Image                                                    | vLLM Version |
+| ------- | ------------------------------------------------------------- | ------------ |
+| `v14`   | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120`        | v0.14.0      |
+| `v15`   | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130`        | v0.15.0      |
+| `v16`   | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0      |
+| `v17`   | `vllm/vllm-openai-rocm:v0.17.0`                               | v0.17.0      |
+
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
@@ -69,21 +76,26 @@ bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
 Then create a container from the image.
 
 ##### SGLang Script
-The build script for SGLang supports SGLang 0.5.9 with rocm 7. The script takes in the path to the local TraceLens-internal clone and the GPU type that is being run on. It currently supports MI300 and MI355 and defaults to MI355 if not provided.
 
-| GPU Type | Base Image | SGLang Version |
-|----------|------------|----------------|
-|`MI300` | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9 | 
-|`MI355` | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9 |
+The build script for SGLang supports SGLang 0.5.9 with ROCm 7. The script takes the path to the local TraceLens-internal clone and the GPU type being used. It currently supports MI300 and MI355 and defaults to MI355 if not provided.
+
+
+| GPU Type | Base Image                             | SGLang Version |
+| -------- | -------------------------------------- | -------------- |
+| `MI300`  | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9         |
+| `MI355`  | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9         |
+
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
     /path/to/TraceLens-internal \
     mi355
 ```
+
 A container with the name sglang-deepseek-mi300/355x will be created depending on the GPU type specified.
 
-#### Option B: Apply framework patches manually 
+#### Option B: Apply framework patches manually
+
 If you prefer to patch an existing environment instead of building a new image, apply patches to your inference framework to:
 
 - Add custom annotations with request packing information (See [roofline conceptual details](#roofline-analysis))
@@ -92,32 +104,22 @@ If you prefer to patch an existing environment instead of building a new image, 
 **Steps:**
 
 1. **Locate your inference engine:**
-
   For vllm: 
-
-   ```bash
-   python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
-   ```
-
   For SGLang:
-
   ```bash
    python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
-   ```
-
+  ```
 2. **Find and apply the relevant patch:**
-
-   - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
-   - Select by framework and version
-   - Apply: `cd /path/to/vllm_or_sglang/../ && git apply /path/to/patchfile`
-
-    SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
+  - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
+  - Select by framework and version
+  - Apply: `cd /path/to/vllm_or_sglang/../ && git apply /path/to/patchfile`
+  SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
 
 #### Collection Parameters
 
-- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. InferenceMax uses `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio (R) = 0.8. We recommend tracing 1.6–2.0 OSL execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details.
+- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. Most inference serving benchmarks use `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio R. We recommend tracing `(((R+1)/2) * 5 * OSL) ± (16 * OSL / CONC)` execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details.
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
-- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh) and to run DSR-1 model using InferenceX is present [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh).
+- **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh), and an example to run the DSR-1 model using InferenceX can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh).
 
 ### Step 3: Trace Preparation (Optional)
 
@@ -130,9 +132,9 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -
      --find-steady-state --num-steps 256
 ```
 
-Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have huge idle time between execution steps.
+Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have large idle times between execution steps.
 
-Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher and SGLang v0.5.9). This is recommended if the user wants to perform analysis on isolated execution step.
+Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher and SGLang v0.5.9). This is recommended if the user wants to perform analysis on an isolated execution step.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --store-single-iteration
@@ -175,10 +177,12 @@ python -m TraceLens.Reporting.generate_perf_report_pytorch_inference \
 
 **Additional options:**
 
-| Flag | Description |
-|------|-------------|
-| `--output_csvs_dir DIR` | Write per-sheet CSV files instead of a single Excel workbook |
-| `--gpu_arch_json_path PATH` | Provide a GPU architecture spec for roofline analysis |
+
+| Flag                        | Description                                                  |
+| --------------------------- | ------------------------------------------------------------ |
+| `--output_csvs_dir DIR`     | Write per-sheet CSV files instead of a single Excel workbook |
+| `--gpu_arch_json_path PATH` | Provide a GPU architecture spec for roofline analysis        |
+
 
 ### Step 5: Compare Traces with TraceDiff (Eager-mode only)
 
@@ -211,7 +215,7 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 ### Step 6: Agentic Trace Analysis (Skip Step 4 and 5)
 
-Generate performance analysis and comparison report (if comparing two traces), along with optimization opportunity analysis automatically using an LLM agent.
+Generate a performance analysis and comparison report (if comparing two traces), along with optimization opportunity analysis, automatically using an LLM agent.
 
 - Standalone performance analysis: This is the recommended first step, and it leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
 - Comparative analysis: This is an optional step for comparing two traces. Please follow [these instructions](../TraceLens/AgenticMode/Comparative/README.md).
@@ -224,16 +228,18 @@ Please include the following details when reporting an issue. Please use the Tra
 
 1. 🖥️ Environment Details
 
-| Item                                   | Details                             |
-| -------------------------------------- | ----------------------------------- |
+
+| Item                             | Details                             |
+| -------------------------------- | ----------------------------------- |
 | **Inference Engine and Version** | (e.g., vLLM, SGLang)                |
 | **Execution Mode**               | (e.g., Eager, Graph, Graph+Capture) |
 | **Hardware**                     | (e.g., GPU model)                   |
 | **Profiler Config**              | (e.g. Torch profiler config)        |
 
-1. ▶️ Scripts/Commands Used
 
-The scripts and commands used to generate a performance analysis report using TraceLens for reproducing the issue.
+2. ▶️ Scripts/Commands Used
+
+The scripts and commands used to generate a performance analysis report using TraceLens to reproduce the issue.
 
 3. ❗ Error/Unexpected Behavior
 4. 📂 Trace Files Used for Analysis
@@ -264,7 +270,7 @@ When comparing two execution traces from different platforms, frameworks, or con
 
 #### The Solution: Lowest Common Ancestor
 
-The **Lowest Common Ancestor** is the nearest parent CPU operation or Python function that is **common to both traces** in the merged execution tree. A combination of **position** and **name** based comparison rules are used to match two operations or functions. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
+The **Lowest Common Ancestor** is the nearest parent CPU operation or Python function that is **common to both traces** in the merged execution tree. A combination of **position**- and **name**-based comparison rules is used to match two operations or functions. It serves as an anchor point for correlating GPU kernels and operations that differ between traces.
 
 **Key Insight:** If two GPU kernels have the same LCA, they likely serve the same computational purpose, even if their implementations differ.
 
@@ -314,8 +320,7 @@ The `attention` operation is the **LCA** for all four GPU kernels, indicating th
 
 5. LCA example:
 
-<details>
-  <summary>Example snippet</summary>
+Example snippet
 
 ```
 ├── nn.Module: Attention_0
@@ -338,22 +343,22 @@ The `attention` operation is the **LCA** for all four GPU kernels, indicating th
 │           │                       │               └── << trace2: void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*, unsigned char*, long const*, long, long, long, long, long, int, int, int, float const*, float const*)
 ```
 
-</details>
-
 #### Output: TraceDiff Report
 
 The generated report includes:
 
-| Column                                    | Description                          |
-| ----------------------------------------- | ------------------------------------ |
-| `name`                                  | GPU kernel name                      |
-| `cpu_op_name`                           | Immediate parent CPU operation       |
-| `source`                                | `trace1` or `trace2`             |
-| `Input Dims`                            | Tensor shapes at CPU operation level |
-| `kernel_time`                           | GPU kernel execution time (μs)      |
-| **`lowest_common_ancestor_name`** | **Name of the LCA operation**  |
-| **`lowest_common_ancestor_id`**   | **Merged tree ID of the LCA**  |
-| `nn_module_stack`                       | PyTorch module hierarchy             |
+
+| Column                            | Description                          |
+| --------------------------------- | ------------------------------------ |
+| `name`                            | GPU kernel name                      |
+| `cpu_op_name`                     | Immediate parent CPU operation       |
+| `source`                          | `trace1` or `trace2`                 |
+| `Input Dims`                      | Tensor shapes at CPU operation level |
+| `kernel_time`                     | GPU kernel execution time (μs)       |
+| `**lowest_common_ancestor_name**` | **Name of the LCA operation**        |
+| `**lowest_common_ancestor_id`**   | **Merged tree ID of the LCA**        |
+| `nn_module_stack`                 | PyTorch module hierarchy             |
+
 
 ### [Roofline Analysis](#roofline-analysis)
 
@@ -362,19 +367,21 @@ The generated report includes:
 In inference serving, multiple requests are batched together. Each request has its own sequence lengths (N_Q, N_KV).
 **Notation:**
 
-| Symbol            | Description                                                          |
-| ----------------- | -------------------------------------------------------------------- |
-| B                 | Batch size (1 per request in paged attention)                        |
-| N_Q               | Number of query tokens                                               |
-| N_KV              | Number of key/value tokens (context length)                          |
-| H_Q               | Number of query heads                                                |
+
+| Symbol            | Description                                                         |
+| ----------------- | ------------------------------------------------------------------- |
+| B                 | Batch size (1 per request in paged attention)                       |
+| N_Q               | Number of query tokens                                              |
+| N_KV              | Number of key/value tokens (context length)                         |
+| H_Q               | Number of query heads                                               |
 | H_KV              | Number of KV heads (H_KV ≤ H_Q; equal for MHA, smaller for GQA/MQA) |
-| d_h_qk            | Head dimension for queries and keys                                  |
-| d_h_v             | Head dimension for values                                            |
-| R_C               | Number of context (prefill) requests in the batch                    |
-| R_G               | Number of generation (decode) requests in the batch                  |
-| R                 | Total number of requests (R = R_C + R_G)                             |
-| N_Q^(i), N_KV^(i) | Query and KV token counts for the i-th request                       |
+| d_h_qk            | Head dimension for queries and keys                                 |
+| d_h_v             | Head dimension for values                                           |
+| R_C               | Number of context (prefill) requests in the batch                   |
+| R_G               | Number of generation (decode) requests in the batch                 |
+| R                 | Total number of requests (R = R_C + R_G)                            |
+| N_Q^(i), N_KV^(i) | Query and KV token counts for the i-th request                      |
+
 
 **Standard SDPA Attention (Single Request)**
 
@@ -518,13 +525,15 @@ Note that B = 1 per request in paged attention, so the batch dimension is absorb
 
 Importantly, we do **not** need the details of individual requests to perform roofline analysis. Inspecting the formulas above, the only per-request quantities that appear are `N_Q(i)`, `N_KV(i)`, and their products. The full FLOPS and memory traffic expressions can be evaluated using just these **aggregate statistics**, computed separately for context and generation requests:
 
-| Aggregate       | Used in                                              |
-| --------------- | ---------------------------------------------------- |
-| R_C, R_G        | Request counts                                       |
+
+| Aggregate      | Used in                                              |
+| -------------- | ---------------------------------------------------- |
+| R_C, R_G       | Request counts                                       |
 | Σ N_Q          | Elements moved (Q read, Output write)                |
 | Σ N_KV         | Elements moved (K read, V read)                      |
 | Σ (N_Q * N_KV) | FLOPS (full rectangle term)                          |
-| Σ (N_Q²)      | FLOPS (causal self-attention correction for prefill) |
+| Σ (N_Q²)       | FLOPS (causal self-attention correction for prefill) |
+
 
 We obtain these aggregates by applying `torch.record_function(annotation)` to vLLM's execution steps. A single execution step can contain a mix of both context (prefill) and generation (decode) requests, so the annotation encodes the aggregate statistics **separately** for context and generation requests within that step (e.g., R_C, R_G, Σ N_Q for context, Σ N_Q for generation, etc.). These annotations are stored as `user_annotation` events in the PyTorch profiler trace, making roofline analysis possible directly from the trace without any additional instrumentation or runtime logging.
 
@@ -532,28 +541,27 @@ We obtain these aggregates by applying `torch.record_function(annotation)` to vL
 
 Inference serving execution consists of three phases:
 
-1. **Ramp‑up** Initial few steps where one or more requests are batching.
-2. **Ramp‑down** The last few tailing steps where the final batch of requests finishes.
-3. **Steady state** Defined as the execution steps with the highest concurrency. Once steady state is reached, execution consists of:
-
-   - Decode‑only steps
-   - Prefill‑decode steps, typically containing one prefill request packed with ~CONC−1 decode requests.
+1. **Ramp-up:** The initial few steps where one or more requests are being batched.
+2. **Ramp-down:** The last few trailing steps where the final batch of requests finishes.
+3. **Steady state:** Defined as the execution steps with the highest concurrency. Once steady state is reached, execution consists of:
+  - Decode‑only steps
+  - Prefill‑decode steps, typically containing one prefill request packed with ~CONC−1 decode requests.
 
 For performance analysis, we are interested in profiling only the steady‑state steps:
 
 1. Prefill‑decode steps
 2. Decode‑only steps with large context sizes (towards the end of a request)
 
-**Parameters Relevant to InferenceMax**
+**Parameters Relevant to Inference Serving**
 
 - **NUM_PROMPTS**: typically `10 × CONC`
 - **CONC**: number of concurrent requests that can be batched together
 - **R**: Random‑range ratio used for sampling ISL and OSL
-- **OSL**: Maximum output sequence length Output sequence length per request is sampled uniformly in:
-  `  [ R × OSL , OSL ]`
+- **OSL**: Maximum output sequence length. Output sequence length per request is sampled uniformly in:
+`[ R × OSL , OSL ]`
 - **ISL**: assumed to be lower than the chunk size
 
-InferenceMax can schedule requests at infinite rate, but we conservatively treat the first **CONC** steps as the *ramp‑up* phase.
+We assume inference serving benchmark schedules requests at an infinite rate, and conservatively treat the first **CONC** steps as the *ramp‑up* phase.
 
 With these parameters, execution step ranges where groups of CONC requests complete:
 
@@ -574,11 +582,13 @@ TOTAL_PrefillDecode_Steps = NUM_PROMPTS
 TOTAL_DecodeOnly_Steps= NUM_PROMPTS × ( (Avg(OSL) − CONC) / CONC )
 ```
 
-Since InferenceMax commonly uses `R = 0.8`, the most useful steady‑state profiling window lies in:
+Since inference serving benchmarks commonly use `R = Random Range Ratio` to sample output sequence lengths from `[R * OSL, OSL]`, the most useful steady‑state profiling window lies in:
 
 ```
-1.6 OSL – 2 OSL
+5 * R * OSL – 5 * OSL
 ```
+
+Here, the probability distribution of a request finishing at step t is non-uniform, with the highest probability at ((R+1)/2) * 5 * OSL.
 
 This region exhibits:
 
@@ -586,7 +596,13 @@ This region exhibits:
 - Representative mix of decode-only and prefill-decode steps
 - Minimal warm-up or tail artifacts
 
-This makes it the recommended window for performance profiling.
+This makes the recommended window for performance profiling:
+
+```
+max_iters = ( 16 * OSL/CONC ) # The number of execution steps to be profiled. The multiplier 16 is used to ensure that the profiling window has ~16 execution steps with prefill+decode mix requests. The max_iters value might need clamping for extreme values of OSL/CONC. 
+
+delay_iters = ( ((R+1)/2) * 5 * OSL ) - (max_iters/2) # The execution step where profiler starts. 
+```
 
 #### Trace Splitting
 
@@ -606,15 +622,15 @@ Balancing complete trace capture versus analysis complexity.
 
 ### 🔄 In Progress
 
-- [ ] Extend graph execution analysis using TraceDiff reports from eager phase.
-- [ ] Improve roofline analysis for sparse attention to use model architecture information
-- [ ] Extending support for other inference engines
+- Extend graph execution analysis using TraceDiff reports from the eager phase.
+- Improve roofline analysis for sparse attention to use model architecture information
+- Extend support for other inference engines
 
 ### 🚀 Future Improvements
 
-- [ ] Unified interface for performance analysis
-- [ ] Critical path analysis for accurate end-to-end performance projection
-- [ ] Integration with performance projection tools
+- Unified interface for performance analysis
+- Critical path analysis for accurate end-to-end performance projection
+- Integration with performance projection tools
 
 ---
 

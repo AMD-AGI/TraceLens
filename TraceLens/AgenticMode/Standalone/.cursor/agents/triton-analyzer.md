@@ -124,3 +124,4 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 2. **No impact estimates** -- the metrics JSON contains an empty `impact_estimates` list by design
 3. **No recommendations** -- do not suggest algorithmic or kernel-level optimizations
 4. **Empty Impact Summary** -- the table header must exist (for orchestrator parsing) but must have zero rows
+5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization

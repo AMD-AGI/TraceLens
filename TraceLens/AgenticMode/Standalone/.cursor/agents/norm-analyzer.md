@@ -167,6 +167,7 @@ The findings file **must** end with an Impact Summary section:
 3. **Native kernels** - Uses PyTorch native, not vendor BLAS
 4. **Alternatives exist** - LayerNorm/GroupNorm may perform better
 5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

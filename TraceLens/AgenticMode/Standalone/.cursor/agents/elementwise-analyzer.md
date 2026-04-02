@@ -170,6 +170,7 @@ The findings file **must** end with an Impact Summary section:
 2. **Memory-bound** - Elementwise ops should hit peak HBM BW
 3. **Fusion is primary algorithmic optimization** - Look for chains of ops
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

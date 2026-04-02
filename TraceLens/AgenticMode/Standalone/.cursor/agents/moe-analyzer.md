@@ -203,6 +203,7 @@ Do not look up peaks independently from the metadata dict.
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
 5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**. When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
 6. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution -- these are not observable from kernel-level trace data
+7. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

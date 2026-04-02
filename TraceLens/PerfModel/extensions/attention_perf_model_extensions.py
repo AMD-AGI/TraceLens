@@ -25,9 +25,21 @@ class InferenceAttention:
     """
 
     REQUIRED_PARAM_KEYS = (
-        "B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v",
-        "c_sq", "c_sk", "c_sqsq", "c_sqsk",
-        "g_sq", "g_sk", "g_sqsq", "g_sqsk",
+        "B",
+        "N_Q",
+        "H_Q",
+        "N_KV",
+        "H_KV",
+        "d_h_qk",
+        "d_h_v",
+        "c_sq",
+        "c_sk",
+        "c_sqsq",
+        "c_sqsk",
+        "g_sq",
+        "g_sk",
+        "g_sqsq",
+        "g_sqsk",
     )
 
     def __init__(self, event, arch=None, python_path=None):
@@ -82,7 +94,7 @@ class InferenceAttention:
         q_shape, k_shape = input_dims[0], input_dims[1]
         N_Q, H_Q, d_h_qk = q_shape
         N_KV, H_KV, d_h_v = k_shape[-3:]
-
+        dtype_Q = event["args"]["Input type"][0]
         return {
             "B": 1,
             "N_Q": N_Q,
@@ -102,6 +114,7 @@ class InferenceAttention:
             "g_sk": g_sk,
             "g_sqsq": g_sqsq,
             "g_sqsk": g_sqsk,
+            "dtype_Q": dtype_Q,
         }
 
     # ------------------------------------------------------------------
@@ -134,8 +147,9 @@ class InferenceAttention:
         return ctx_flops_qk + ctx_flops_pv + gen_flops_qk + gen_flops_pv
 
     @staticmethod
-    def bytes_func(B, H_Q, H_KV, d_h_qk, d_h_v,
-                   c_sq, c_sk, g_sq, g_sk, bytes_per_element):
+    def bytes_func(
+        B, H_Q, H_KV, d_h_qk, d_h_v, c_sq, c_sk, g_sq, g_sk, bytes_per_element
+    ):
         """Calculate bytes moved for attention (context + generation).
 
         Args:
@@ -147,10 +161,10 @@ class InferenceAttention:
             bytes_per_element: Bytes per tensor element.
         """
         ctx_elems = (
-            B * c_sq * H_Q * d_h_qk        # Q read
-            + B * c_sk * H_KV * d_h_qk     # K read
-            + B * c_sk * H_KV * d_h_v       # V read
-            + B * c_sq * H_Q * d_h_v        # output write
+            B * c_sq * H_Q * d_h_qk  # Q read
+            + B * c_sk * H_KV * d_h_qk  # K read
+            + B * c_sk * H_KV * d_h_v  # V read
+            + B * c_sq * H_Q * d_h_v  # output write
         )
         gen_elems = (
             B * g_sq * H_Q * d_h_qk
@@ -170,7 +184,9 @@ class InferenceAttention:
                 "Attention perf model for decode phase requires custom annotations"
             )
         return self.flops_func(
-            self.H_Q, self.d_h_qk, self.d_h_v,
+            self.H_Q,
+            self.d_h_qk,
+            self.d_h_v,
             self.param_details["c_sqsk"],
             self.param_details["c_sqsq"],
             self.param_details["g_sqsk"],
@@ -178,9 +194,15 @@ class InferenceAttention:
 
     def bytes(self, bytes_per_element=2):
         return self.bytes_func(
-            self.B, self.H_Q, self.H_KV, self.d_h_qk, self.d_h_v,
-            self.param_details["c_sq"], self.param_details["c_sk"],
-            self.param_details["g_sq"], self.param_details["g_sk"],
+            self.B,
+            self.H_Q,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["c_sq"],
+            self.param_details["c_sk"],
+            self.param_details["g_sq"],
+            self.param_details["g_sk"],
             bytes_per_element,
         )
 
@@ -191,7 +213,7 @@ class InferenceAttention:
         raise NotImplementedError("Backward pass for attention is not defined.")
 
     def get_compute_precision(self):
-        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        dtype = self.param_details.get("dtype_Q", None)
         return torch_dtype_map(dtype) if dtype else None
 
     def get_maf_type(self):
@@ -200,11 +222,13 @@ class InferenceAttention:
 
 class vllm_unified_attention_with_output(InferenceAttention):
     """Attention perf model for vLLM unified_attention_with_output events."""
+
     pass
 
 
 class mha_varlen_fwd(InferenceAttention):
     pass
+
 
 class mla_decode_fwd(InferenceAttention):
     pass
