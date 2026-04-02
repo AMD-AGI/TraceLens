@@ -540,7 +540,6 @@ class JaxAnalyses:
         if hasattr(perf_model, "get_simulation_time"):
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model,
                 perf_model.get_simulation_time(),
                 gflops,
                 bytes_moved,

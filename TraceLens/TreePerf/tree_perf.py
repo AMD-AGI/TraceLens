@@ -416,7 +416,6 @@ class TreePerfAnalyzer:
         if hasattr(perf_model, "get_simulation_time") and not bwd:
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model,
                 perf_model.get_simulation_time(),
                 gflops,
                 bytes_moved,
@@ -426,7 +425,6 @@ class TreePerfAnalyzer:
         if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model,
                 perf_model.get_simulation_time_bwd(),
                 gflops,
                 bytes_moved,
@@ -606,10 +604,6 @@ class TreePerfAnalyzer:
             dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
-        if "Simulated Time (µs)" in df_perf_metrics.columns:
-            # first since it should be same for the group
-            dict_agg["Simulated Time (µs)"] = "first"
-            dict_agg["Simulated TFLOPS/s"] = "first"
         if "Origami Time (µs)" in df_perf_metrics.columns:
             dict_agg["Origami Time (µs)"] = "first"
             dict_agg["Origami TFLOPS/s"] = "first"
@@ -1914,10 +1908,6 @@ class TreePerfAnalyzer:
                 "Roofline Time (µs)",
                 "Roofline Bound",
                 "Pct Roofline",
-                "Simulated Time (µs)",
-                "Simulated TFLOPS/s",
-                "Simulation Time (µs)",
-                "Simulation TFLOPS/s",
                 "Origami Time (µs)",
                 "Origami TFLOPS/s",
                 "Origami TB/s",
@@ -2109,14 +2099,6 @@ class TreePerfAnalyzer:
 
         # Optional simulated metrics from perf model.
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
-        simulated_first_cols = ["Simulated Time (µs)", "Simulated TFLOPS/s"]
-        for col in simulated_first_cols:
-            if col in df_temp.columns:
-                agg_dict[col] = "first"
-        simulation_first_cols = ["Simulation Time (µs)", "Simulation TFLOPS/s"]
-        for col in simulation_first_cols:
-            if col in df_temp.columns:
-                agg_dict[col] = "first"
         origami_static_cols = ["Origami Time (µs)", "Origami TFLOPS/s"]
         for col in origami_static_cols:
             if col in df_temp.columns:
@@ -3238,25 +3220,19 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_metrics["FLOPS/Byte"] = float("nan")
             dict_metrics["TB/s"] = float("nan")
 
-        # JaxGemm (constructor may set simulation_time from GEMM simulator or Origami)
+        # JaxGemm (constructor may set simulation_time from Origami)
         if hasattr(perf_model, "simulation_time"):
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model,
                 perf_model.simulation_time,
                 gflops,
                 bytes_moved,
                 busy_kernel_time,
-                non_origami_time_tflops=(
-                    "Simulation Time (µs)",
-                    "Simulation TFLOPS/s",
-                ),
             )
 
         if hasattr(perf_model, "get_simulation_time") and not bwd:
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model,
                 perf_model.get_simulation_time(),
                 gflops,
                 bytes_moved,
@@ -3266,7 +3242,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model,
                 perf_model.get_simulation_time_bwd(),
                 gflops,
                 bytes_moved,
