@@ -321,8 +321,8 @@ def build_operation_metrics(
             if field in row and not pd.isna(row[field]):
                 op_metric[field] = row[field]
 
-        # Kernel time variance detection
-        if count > 1:
+        # Kernel time variance detection (require 10+ samples for reliable CoV)
+        if count > 10:
             std_val = row.get("Kernel Time (µs)_std")
             mean_val = row.get("Kernel Time (µs)_mean")
             if std_val is not None and mean_val is not None and not pd.isna(std_val) and not pd.isna(mean_val) and mean_val > 0:
