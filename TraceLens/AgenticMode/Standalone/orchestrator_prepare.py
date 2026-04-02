@@ -25,6 +25,7 @@ from typing import Any
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
 from utils.arch_utils import list_platforms, load_arch
 from utils.category_utils import CATEGORY_SKILL_MAP, get_enhanced_category
 
@@ -72,9 +73,9 @@ def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
 
 
 def _build_kernel_perf_lookup(csv_path):
-    """GPU kernel name -> {op_category, data_in_mb, data_out_mb} from perf CSV."""
+    """GPU kernel name -> {shape -> {op_category, data_in_mb, data_out_mb}} from perf CSV."""
     df = pd.read_csv(csv_path)
-    lookup = {}
+    lookup = defaultdict(dict)
     for _, row in df.iterrows():
         kd = row.get("kernel_details_summary", "")
         if pd.isna(kd):
@@ -86,14 +87,15 @@ def _build_kernel_perf_lookup(csv_path):
         if pd.isna(pp):
             pp = ""
         data_in, data_out = _compute_data_in_out(cat, pp, dm)
+        shape = parse_first_shape(row.get("Input Dims"))
         for kn in re.findall(r"'name':\s*'([^']+)'", str(kd)):
-            if kn not in lookup:
-                lookup[kn] = {
+            if shape not in lookup[kn]:
+                lookup[kn][shape] = {
                     "op_category": cat,
                     "data_in_mb": data_in,
                     "data_out_mb": data_out,
                 }
-    return lookup
+    return dict(lookup)
 
 
 def _extract_attention_core(kernels, perf_lookup):
@@ -101,7 +103,8 @@ def _extract_attention_core(kernels, perf_lookup):
     name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
 
     def is_gemm(k):
-        return perf_lookup.get(k.get(name_key, ""), {}).get("op_category") == "GEMM"
+        entries = perf_lookup.get(k.get(name_key, ""), {})
+        return any(e.get("op_category") == "GEMM" for e in entries.values())
 
     for i, k in enumerate(kernels):
         if "softmax" not in k.get(name_key, "").lower():
@@ -595,6 +598,7 @@ def main():
                     "kernel_type_summary": type_summary,
                     "has_fused_kernel": _has_fused_kernel(kernels),
                     "total_kernel_time_us": sum(k["dur_us"] for k in kernels),
+                    "input_dims": ev.get("args", {}).get("Input Dims"),
                 }
                 seen_base[base] = entry
                 base_order.append(base)
@@ -650,6 +654,7 @@ def main():
                     "kernel_type_signature": [c["kernel_type"] for c in children],
                     "total_time_us": sum(c["dur_us"] for c in children),
                     "instance_count": 1,
+                    "input_dims": parent_evt.get("args", {}).get("Input Dims"),
                 }
                 seen_sibling_bases[sbase] = entry
                 sibling_seqs.append(entry)
@@ -679,6 +684,7 @@ def main():
                         "has_fused_kernel": False,
                         "total_kernel_time_us": s["total_time_us"],
                         "source": "sibling_sequence",
+                        "input_dims": s.get("input_dims"),
                     }
                 )
 
@@ -722,7 +728,7 @@ def main():
                 for c in fusion_candidates:
                     for k in c.get("kernels", []):
                         kname = k.get("name", k.get("kernel_name", ""))
-                        entry = perf_lookup.get(kname, {})
+                        entry = shape_aware_lookup(perf_lookup, kname, c.get("input_dims"))
                         if entry.get("data_in_mb") is not None:
                             k["data_in_mb"] = entry["data_in_mb"]
                             k["data_out_mb"] = entry["data_out_mb"]

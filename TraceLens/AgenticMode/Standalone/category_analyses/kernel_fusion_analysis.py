@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from typing import Any, Dict, List
 
 import numpy as np
@@ -24,7 +25,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import write_metrics_json
+from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
 
 MAX_FUSION_KERNEL_COUNT = 15
 TARGET_HIGH = 100.0
@@ -42,22 +43,23 @@ _NORM_TYPES = frozenset({
 })
 
 
-def build_kernel_perf_lookup(csv_path: str) -> Dict[str, dict]:
+def build_kernel_perf_lookup(csv_path: str) -> Dict[str, Dict]:
     """
-    Build GPU kernel name -> perf metrics lookup from unified_perf_summary.csv.
+    Build GPU kernel name -> {shape -> perf metrics} lookup from unified_perf_summary.csv.
 
-    Maps raw GPU kernel names (found in kernel_details_summary) to their
-    per-invocation perf data (Data Moved, GFLOPS, FLOPS/Byte, Compute Spec).
+    Keyed by (kernel_name, input_shape) so the same kernel launched with
+    different tensor shapes gets separate perf entries.
     """
     df = pd.read_csv(csv_path)
-    lookup: Dict[str, dict] = {}
+    lookup: Dict[str, Dict] = defaultdict(dict)
     for _, row in df.iterrows():
         kd = row.get("kernel_details_summary", "")
         if pd.isna(kd):
             continue
         kernel_names = re.findall(r"'name':\s*'([^']+)'", str(kd))
+        shape = parse_first_shape(row.get("Input Dims"))
         for kn in kernel_names:
-            if kn in lookup:
+            if shape in lookup[kn]:
                 continue
             entry = {}
             for col in ("Data Moved (MB)", "GFLOPS", "FLOPS/Byte", "Compute Spec"):
@@ -66,8 +68,8 @@ def build_kernel_perf_lookup(csv_path: str) -> Dict[str, dict]:
                     entry[col] = val
                 else:
                     entry[col] = None
-            lookup[kn] = entry
-    return lookup
+            lookup[kn][shape] = entry
+    return dict(lookup)
 
 
 def _is_matrix_op(kernel_info: dict) -> bool:
@@ -196,7 +198,7 @@ def compute_fusion_impact_estimates(
         for k in kernels:
             kname = k.get("name", k.get("kernel_name", ""))
             dur_us = k.get("dur_us", 0)
-            perf = kernel_lookup.get(kname, {})
+            perf = shape_aware_lookup(kernel_lookup, kname, candidate.get("input_dims"))
             dm = perf.get("Data Moved (MB)")
             gf = perf.get("GFLOPS")
             has_data = dm is not None
