@@ -1316,7 +1316,7 @@ class TreePerfAnalyzer:
                     kernel_summary[metric_name] = agg_func(dur_arr)
 
         summary_list.sort(
-            key=lambda k: (-k.get("total_duration_us", 0), k.get("name", ""))
+            key=lambda k: (k.get("total_duration_us", 0), k.get("name", ""))
         )
         return summary_list
 
