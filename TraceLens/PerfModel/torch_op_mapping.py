@@ -209,6 +209,12 @@ def categorize_torch_op(row):
         return "MoE_unfused"
     elif row["name"] in dict_cat2names.get("InferenceAttention", []):
         return "InferenceAttention"
+    elif row["name"] in dict_cat2names.get("UnaryElementwise", []):
+        return "UnaryElemwise"
+    elif row["name"] in dict_cat2names.get("RMSNorm", []):
+        return "RMSNorm"
+    elif row["name"] in dict_cat2names.get("Collective", []):
+        return "Collective"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
         # else:

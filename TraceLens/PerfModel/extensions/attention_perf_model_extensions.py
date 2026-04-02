@@ -245,3 +245,6 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
         else:
             params["d_h_v"] = int(concrete[4])
         return params
+
+class vllm_unified_mla_attention_with_output(InferenceAttention):
+    pass

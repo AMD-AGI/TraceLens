@@ -8,7 +8,13 @@
 Utils. for perf. model pseudo-op extensions.
 """
 
-from . import moe_perf_model_extensions, attention_perf_model_extensions, perf_model_extensions
+from . import (
+    moe_perf_model_extensions,
+    attention_perf_model_extensions,
+    perf_model_extensions,
+    rmsnorm_perf_model_extensions,
+    collectives_perf_model_extensions,
+)
 
 
 def get_pseudo_op_mappings():
@@ -46,6 +52,21 @@ def get_pseudo_op_mappings():
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_464": perf_model_extensions.batched_gemm_a8w8,
+        ## Cache ops
+        ##"_C_cache_ops::concat_and_cache_mla": perf_model_extensions.concat_and_cache_mla,
+        ## Quantization ops
+        ##"vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
+        ## Activation ops
+        "aiter::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
+        ## MoE ops
+        ##"aiter::moe_sorting_fwd": perf_model_extensions.aiter_moe_sorting_fwd,
+        ## RMSNorm ops
+        "aiter::rms_norm": rmsnorm_perf_model_extensions.aiter_rms_norm,
+        "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
+        "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
+        ## Collective ops
+        "aiter::fused_allreduce_rmsnorm": collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
+        "_C_custom_ar::all_reduce": collectives_perf_model_extensions.custom_ar_all_reduce,
     }
 
     return pseudo_op_mappings
@@ -67,9 +88,11 @@ def get_pseudo_op_categories():
         perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
         perf_model_extensions.batched_gemm_a16wfp4: "GEMM",
         attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
-        perf_model_extensions.per_group_quant: "BinaryElementwise",
+        perf_model_extensions.GroupQuant: "GroupQuant",
         perf_model_extensions.gemm_a16w16_atomic_: "GEMM",
         perf_model_extensions.batched_gemm_a8w8: "GEMM",
+        rmsnorm_perf_model_extensions.RMSNorm: "RMSNorm",
+        collectives_perf_model_extensions.Collective: "Collective",
     }
     
     return pseudo_op_categories

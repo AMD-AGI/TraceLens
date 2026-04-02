@@ -10,7 +10,7 @@ Performance models for pseudo-op extensions.
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 import re
-from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise
+from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise, UnaryElementwise
 from math import prod
 
 
@@ -369,8 +369,26 @@ class gemm_a16w16_atomic_(GEMM):
             bpe_output=self.bpe_output,
         )
 
+class GroupQuant(BinaryElementwise):
+    """
+    Performance model for group quantization.
+    """
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.nelems_in1 = prod(self.param_details["shape_in1"])
+        self.nelems_in2 = prod(self.param_details["shape_in2"])
+        self.nelems_out = prod(self.param_details["shape_out"])
+        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
+        self.stride_input1 = self.param_details["stride_input1"]
+        self.stride_input2 = self.param_details["stride_input2"]
+        self.stride_output = self.param_details["stride_output"]
+        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
+        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
+        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
 
-class per_group_quant(BinaryElementwise):
+class per_group_quant(GroupQuant):
     """
     Performance model for aiter::dynamic_per_token_scaled_quant.
     Performs dynamic per-token quantization: each row of the input is
@@ -385,27 +403,6 @@ class per_group_quant(BinaryElementwise):
     Expected Input type format:
     [dtype_out, dtype_input, dtype_scales, ...]
     """
-
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-        self.nelems_in1 = prod(self.param_details["shape_in1"])
-        self.nelems_in2 = prod(self.param_details["shape_in2"])
-        self.nelems_out = prod(self.param_details["shape_out"])
-        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
-        self.stride_input1 = self.param_details["stride_input1"]
-        self.stride_input2 = self.param_details["stride_input2"]
-        self.stride_output = self.param_details["stride_output"]
-
-        dtype_in1, dtype_in2, dtype_out = self.dtype_in1_in2_out
-        self.bpe_in1 = name2bpe(dtype_in1)
-        self.bpe_in2 = name2bpe(dtype_in2)
-        if dtype_out is not None:
-            self.bpe_out = name2bpe(dtype_out)
-        else:
-            self.bpe_out = None
-
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -448,3 +445,105 @@ class per_group_quant(BinaryElementwise):
         # Use first input dtype as the compute precision
         dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
+
+
+class aiter_moe_sorting_fwd(BinaryElementwise):
+    """Performance model for aiter::moe_sorting_fwd."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        pass
+
+    def flops(self):
+        pass
+
+    def bytes(self):
+        pass
+
+
+class concat_and_cache_mla(BinaryElementwise):
+    """Performance model for _C_cache_ops::concat_and_cache_mla."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        pass
+
+    def flops(self):
+        pass
+
+    def bytes(self):
+        pass
+
+
+class vllm_triton_per_token_group_quant_fp8(GroupQuant):
+    """Performance model for vllm::triton_per_token_group_quant_fp8."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        pass
+
+    def flops(self):
+        pass
+
+    def bytes(self):
+        pass
+
+    def get_compute_precision(self):
+        return None
+
+
+class aiter_silu_and_mul(UnaryElementwise):
+    """
+    Performance model for aiter::silu_and_mul.
+
+    Computes the gated SiLU activation used after MoE stage-1 GEMM (split-K path):
+        out[..., :inter_dim] = silu(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    AITER signature: silu_and_mul(out: Tensor, input: Tensor) -> None
+        out   — shape [..., inter_dim],     dtype BFloat16
+        input — shape [..., 2 * inter_dim], dtype FP32 (split-K accumulation) or BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+        e.g. [(4, 9, 256), (4, 9, 512)]  →  op_shape=(4,9,256), 2*inter_dim=512
+
+    Expected Input type from trace:
+        [dtype_out, dtype_input]  (note: reversed — out is arg 0, input is arg 1)
+    """
+    @staticmethod
+    def get_param_details(event):
+        # Input Dims[0] = out (shape [..., inter_dim])
+        # Input Dims[1] = input (shape [..., 2 * inter_dim], gate+up concatenated)
+        op_shape = tuple(event["args"]["Input Dims"][0])
+        dtype_in = event["args"]["Input type"][1]   # input (gate+up) dtype
+        dtype_out = event["args"]["Input type"][0]  # output dtype
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        stride_output = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+        }
+
+    def flops(self):
+        return 5 * prod(self.param_details["op_shape"])
+
+
+    def bytes(self):
+        return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
