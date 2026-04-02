@@ -25,12 +25,10 @@ import pytest
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
 
 from conftest import (
-    arch_mi300_json_path,
     compare_cols,
     format_diff_details,
     list_perf_report_csv_sheets,
     read_perf_report_csv,
-    trace_is_mi300,
 )
 
 # ---------------------------------------------------------------------------
@@ -97,15 +95,13 @@ def _cleanup_report_cache():
 @pytest.fixture()
 def jax_report(trace_path):
     """Run generate_perf_report_jax once per trace_path and cache the results."""
-
     if trace_path not in _report_cache:
         tmpdir = tempfile.mkdtemp()
         try:
-            jax_kw = dict(profile_path=trace_path, output_csvs_dir=tmpdir)
-            if trace_is_mi300(trace_path):
-                jax_kw["gpu_arch_json_path"] = arch_mi300_json_path()
-                jax_kw["enable_origami"] = True
-            dict_name2df = generate_perf_report_jax(**jax_kw)
+            dict_name2df = generate_perf_report_jax(
+                profile_path=trace_path,
+                output_csvs_dir=tmpdir,
+            )
         except Exception:
             shutil.rmtree(tmpdir, ignore_errors=True)
             raise
@@ -179,11 +175,7 @@ def test_jax_perf_report_csv_regression(trace_path, tmp_path, tol=1e-6):
     if not os.path.isdir(ref_dir):
         pytest.skip(f"No CSV reference directory: {ref_dir}")
     out_dir = str(tmp_path / "jax_perf_report_csvs")
-    jax_kw = dict(profile_path=trace_path, output_csvs_dir=out_dir)
-    if trace_is_mi300(trace_path):
-        jax_kw["gpu_arch_json_path"] = arch_mi300_json_path()
-        jax_kw["enable_origami"] = True
-    generate_perf_report_jax(**jax_kw)
+    generate_perf_report_jax(profile_path=trace_path, output_csvs_dir=out_dir)
 
     sheets = list_perf_report_csv_sheets(ref_dir)
     assert sheets, f"Reference directory has no CSV files: {ref_dir}"
