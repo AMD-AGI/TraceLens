@@ -58,7 +58,7 @@ def main():
         "--enable_origami",
         action="store_true",
         default=False,
-        help="Use Origami when GEMM_SIMULATOR_PATH is not set (requires origami installed).",
+        help="Use Origami to generate GEMM rooflines (requires origami installed).",
     )
 
     # SDPA-specific

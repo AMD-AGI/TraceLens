@@ -231,8 +231,7 @@ def main():
         "--enable-origami",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided "
-        "(no effect if GEMM_SIMULATOR_PATH is set).",
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
     )
 
     args = parser.parse_args()

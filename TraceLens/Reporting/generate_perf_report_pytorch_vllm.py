@@ -713,11 +713,10 @@ def main():
         help="Path to the GPU architecture JSON file",
     )
     parser.add_argument(
-        "--enable_origami",
+        "--enable-origami",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided "
-        "(no effect if GEMM_SIMULATOR_PATH is set).",
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
     )
 
     args = parser.parse_args()

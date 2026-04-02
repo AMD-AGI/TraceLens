@@ -15,9 +15,7 @@ def perf_model_uses_origami(perf_model) -> bool:
     """
     True when simulated GEMM/SDPA times use Origami (not the external GEMM simulator).
     """
-    if not getattr(perf_model, "enable_origami", False):
-        return False
-    return not os.environ.get("GEMM_SIMULATOR_PATH")
+    return getattr(perf_model, "enable_origami", False)
 
 
 def add_simulation_time_columns(
