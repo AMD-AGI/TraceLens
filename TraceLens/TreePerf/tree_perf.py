@@ -330,7 +330,7 @@ class TreePerfAnalyzer:
                 "dur": kernel["dur"],
                 "stream": kernel.get("args", {}).get("stream", None),
             }
-            for kernel in list_kernels
+            for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
 
         # Select the appropriate dictionary for FLOPS and memory functions
@@ -890,7 +890,7 @@ class TreePerfAnalyzer:
                     "dur": kernel["dur"],
                     "stream": kernel.get("args", {}).get("stream", None),
                 }
-                for kernel in kernels
+                for kernel in sorted(kernels, key=lambda k: k.get("ts", 0))
             ]
             event["op category"] = self.op_categorizer(event)
             self._compute_overlap_info(event, kernels)
