@@ -187,6 +187,7 @@ The findings file **must** end with an Impact Summary section:
 2. **Generally memory-bound** - But no dedicated performance model; treat efficiency as approximate (see [Performance Model Limitation](#performance-model-limitation))
 3. **Fusion primary algorithmic** - Fusing softmax with attention is high impact
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

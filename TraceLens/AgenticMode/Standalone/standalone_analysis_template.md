@@ -7,7 +7,7 @@ See LICENSE for license information.
 <!--
 === FORMATTING RULES (for the agent filling in this template) ===
 
-1. Warnings section: Only include if there were errors; omit entirely if all succeeded.
+1. Warnings section: Only include if there were errors or high-variance operations; omit entirely if all succeeded and no variance flags.
 2. Executive Summary: Max ~20 lines.
 3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 10.2 with a base64-embedded
    PNG data URI (![Performance Improvement](data:image/png;base64,...)). This makes the report
@@ -60,8 +60,9 @@ See LICENSE for license information.
 
 ## Warnings
 
-**Include this section ONLY if any subagent failed:**
+**Include this section ONLY if any subagent failed OR any operation has high_variance: true in *_metrics.json:**
 
+<!-- Subagent failures (if any): -->
 The following analyses could not be completed due to script failures:
 
 | Analysis | Tier | Error Summary |
@@ -69,6 +70,13 @@ The following analyses could not be completed due to script failures:
 | <name> | System / Compute Kernel | <brief error description> |
 
 These are excluded from the recommendations below.
+
+<!-- Data quality warnings (if any operation has high_variance: true in *_metrics.json): -->
+**Data Quality:** The following operations have unreliable kernel time measurements (CoV > 1.0, indicating extreme variance across instances — likely a profiler timing artifact):
+
+| Operation | Category | CoV | Reported Time (ms) |
+|-----------|----------|-----|-------------------|
+| <name> | <category> | X.X | Y.Y |
 
 ---
 
