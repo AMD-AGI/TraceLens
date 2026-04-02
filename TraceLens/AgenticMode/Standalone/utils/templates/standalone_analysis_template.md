@@ -135,10 +135,10 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ## Kernel Fusion Opportunities (Experimental)
 
-> **Note:** Kernel fusion analysis is experimental. The Compute Kernel section above analyzes the individual constituent kernels of these fusion candidates independently. Joint analysis, where fusion candidate's performance is also estimated, is planned for a future release. Opportunities are ranked by confidence level. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak). Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
-<!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
-<!-- Each finding uses Insight / Action format (no Impact -- detection only). -->
+<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
 <!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
 
@@ -202,7 +202,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 ## Detailed Analysis
 
 <!-- Paste reasoning blocks from sub-agent findings, renaming headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
-<!-- Each P-block uses five required labels: **Identification:**, **Data:**, **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:** -->
+<!-- Each P-block (Compute Kernel and System-Level) uses five required labels: **Identification:**, **Data:**, **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:** -->
 <!-- Impact estimate bullets are rendered by each sub-agent from metadata/*.json → impact_estimates (same source as card Impact). -->
 
 ### Compute Kernel Insights
@@ -222,6 +222,32 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Reasoning for Slowdown:** [2-3 sentences - Why the workload is slow as the trace shows. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps — not merely restating what to do.]
 **Impact estimate:** [Rendered from metadata → impact_estimates]
+
+### Kernel Fusion Insights
+
+**REQUIRED: For each candidate in kernel_fusion_findings.md, include BOTH the Kernels table AND the Projection table below, sorted by savings descending. Do NOT summarize into a single table. If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available."**
+
+#### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+
+**Kernels:**
+
+| Kernel | Type | Duration (us) | Perf model |
+|--------|------|--------------|------------|
+| <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
+
+**Projection:**
+
+| Metric | Value |
+|--------|-------|
+| Bound type | compute / memory |
+| Fusion type | matrix_compute / memory_bound |
+| Kernels modelled | M of N |
+| Savings (low-mid-high) | X.XX - Y.YY - Z.ZZ ms |
+| E2E impact | X.XX - Z.ZZ% |
+
+#### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+
+*Repeat the same Kernels + Projection format for each candidate.*
 
 ### System-Level Insights
 

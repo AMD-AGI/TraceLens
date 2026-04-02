@@ -506,6 +506,24 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
     return out_path
 
 
+def parse_first_shape(dims_str):
+    """Extract first input tensor shape as a hashable tuple from an Input Dims string."""
+    if dims_str is None or (isinstance(dims_str, float) and pd.isna(dims_str)):
+        return None
+    try:
+        parsed = ast.literal_eval(str(dims_str))
+        return tuple(parsed[0]) if parsed and isinstance(parsed[0], (list, tuple)) else None
+    except Exception:
+        return None
+
+
+def shape_aware_lookup(table, kname, input_dims=None):
+    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name."""
+    shapes = table.get(kname, {})
+    shape_key = parse_first_shape(input_dims) if input_dims else None
+    return shapes.get(shape_key) or next(iter(shapes.values()), {})
+
+
 REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",

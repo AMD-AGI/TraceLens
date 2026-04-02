@@ -59,18 +59,6 @@ def get_enhanced_category(row):
         return category_name, display_name
 
 
-def _count_reasoning_candidates(findings_path: str) -> int:
-    if not os.path.isfile(findings_path):
-        return 0
-    with open(findings_path) as f:
-        return len(re.findall(r"<!-- reasoning-candidate", f.read()))
-
-
-def _findings_path(output_dir: str, category: str, tier: str) -> str:
-    subdir = "system_findings" if tier == "system" else "category_findings"
-    return os.path.join(output_dir, subdir, f"{category}_findings.md")
-
-
 def write_impact_estimates(output_dir: str, category: str, tier: str) -> None:
     """Write ``impact_estimates`` to metadata JSON for a category.
 
@@ -84,8 +72,13 @@ def write_impact_estimates(output_dir: str, category: str, tier: str) -> None:
     with open(meta_path) as f:
         meta = json.load(f)
 
-    findings = _findings_path(output_dir, category, tier)
-    n_candidates = _count_reasoning_candidates(findings)
+    subdir = "system_findings" if tier == "system" else "category_findings"
+    findings_path = os.path.join(output_dir, subdir, f"{category}_findings.md")
+    if os.path.isfile(findings_path):
+        with open(findings_path) as f:
+            n_candidates = len(re.findall(r"<!-- reasoning-candidate", f.read()))
+    else:
+        n_candidates = 0
 
     if tier == "system":
         entry = {
