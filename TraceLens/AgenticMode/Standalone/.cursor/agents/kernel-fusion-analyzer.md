@@ -43,12 +43,13 @@ When invoked by the orchestrator, you will receive the following context:
 
 ## Language Guidelines
 
-Use vendor-agnostic terminology:
+Use vendor-agnostic terminology in all narrative text (Insight, Action, Impact):
 - "GPU kernels" not vendor-specific kernel names
-- "fused kernel" not vendor-specific fusion implementations
+- "fused kernel" or "custom fused kernel" — never mention specific frameworks
+- "compiler fusion" or "graph-level fusion" — not "torch.compile", "Inductor", or other framework-specific names
 - Focus on operation semantics, not vendor implementation details
 
-**Exception:** When quoting kernel names from the candidates for identification, use the actual name.
+**Exception:** When quoting kernel names from the candidates for identification in the Kernels table, use the actual name as-is.
 
 ---
 
@@ -95,6 +96,8 @@ For each candidate, make three decisions:
 - The kernels are genuinely independent operations (e.g., separate projection GEMMs reading different weight matrices)
 - The module is a container (Sequential, ModuleList, full decoder/encoder layer)
 - All kernels are GEMMs
+- The non-GEMM kernels are all normalization ops (GEMM + LayerNorm/Norm sequences are not fusable)
+- Any kernel is a Triton-compiled fused kernel (`triton_` prefix)
 - The module already contains a fused kernel (`has_fused_kernel: true`)
 
 **Decision 2 -- What pattern?** Check known patterns first:

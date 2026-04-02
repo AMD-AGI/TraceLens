@@ -204,17 +204,15 @@ For each category, include total time, % of compute, average efficiency (if from
 
 ## Detailed Analysis: Kernel Fusion
 
-<!-- Tables only — extract Kernels + Projection tables from kernel_fusion_findings.md per candidate, sorted by savings descending. -->
-<!-- No narrative (Insight/Action/Impact/Confidence already in the section above). -->
-<!-- If kernel_fusion category not in manifest or findings empty, show "No fusion savings estimates available." -->
+**REQUIRED: For each candidate in kernel_fusion_findings.md, include BOTH the Kernels table AND the Projection table below, sorted by savings descending. Do NOT summarize into a single table. If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available."**
 
 ### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-**Kernels:** List the constituent GPU kernels from fusion_candidates.json (match by operation/base_name):
+**Kernels:**
 
 | Kernel | Type | Duration (us) | Perf model |
 |--------|------|--------------|------------|
-| <kernel name (truncated)> | <type> | X.X | Coverage? |
+| <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
 
 **Projection:**
 
@@ -227,7 +225,8 @@ For each category, include total time, % of compute, average efficiency (if from
 | E2E impact | X.XX - Z.ZZ% |
 
 ### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
-[Same format as above]
+
+*Repeat the same Kernels + Projection format for each candidate.*
 
 ---
 

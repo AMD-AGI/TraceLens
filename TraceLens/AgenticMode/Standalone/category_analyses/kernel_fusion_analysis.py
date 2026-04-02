@@ -30,10 +30,15 @@ MAX_FUSION_KERNEL_COUNT = 15
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
 TARGET_MID = 87.5
+MIN_E2E_PCT = 2.0
 
 _MATRIX_SPECS = frozenset({
     "matrix_fp16", "matrix_bf16", "matrix_fp32", "matrix_fp64",
     "matrix_fp8", "matrix_int8",
+})
+
+_NORM_TYPES = frozenset({
+    "LayerNorm", "BatchNorm", "GroupNorm", "InstanceNorm", "Norm",
 })
 
 
@@ -74,6 +79,83 @@ def _is_matrix_op(kernel_info: dict) -> bool:
     return "GEMM" in ktype or "CONV" in ktype
 
 
+def _split_into_subgroups(enriched_kernels):
+    """Split kernel sequence at GEMM boundaries into fusable sub-groups.
+
+    Returns list of (subgroup_type, kernels) where subgroup_type is:
+      "gemm_epilogue" - GEMM followed by elementwise ops
+      "elementwise"   - consecutive non-GEMM ops
+      "gemm_only"     - standalone GEMM with no trailing elementwise
+    """
+    subgroups = []
+    current = []
+    for k in enriched_kernels:
+        if _is_matrix_op(k) and current:
+            subgroups.append(current)
+            current = [k]
+        else:
+            current.append(k)
+    if current:
+        subgroups.append(current)
+
+    typed = []
+    for sg in subgroups:
+        has_gemm = any(_is_matrix_op(k) for k in sg)
+        has_non_gemm = any(not _is_matrix_op(k) for k in sg)
+        if has_gemm and has_non_gemm:
+            typed.append(("gemm_epilogue", sg))
+        elif has_gemm:
+            typed.append(("gemm_only", sg))
+        else:
+            typed.append(("elementwise", sg))
+    return typed
+
+
+def _roofline_savings_us(
+    enriched, peak_bw_bytes_s, vector_maf, matrix_maf, target_pct
+):
+    """Compute roofline-projected savings for an elementwise sub-group."""
+    modeled = [e for e in enriched if e["has_perf_data"]]
+    if not modeled:
+        return 0.0
+
+    first = modeled[0]
+    last = modeled[-1]
+    data_in_mb = first.get("data_in_mb")
+    if data_in_mb is None:
+        data_in_mb = first["data_moved_mb"] / 2.0
+    data_out_mb = last.get("data_out_mb")
+    if data_out_mb is None:
+        data_out_mb = last["data_moved_mb"] / 2.0
+    total_ext_data_bytes = (data_in_mb + data_out_mb) * 1e6
+
+    vector_gflops = sum(
+        e["gflops"] for e in modeled if e["gflops"] and not _is_matrix_op(e)
+    )
+    matrix_gflops = sum(
+        e["gflops"] for e in modeled if e["gflops"] and _is_matrix_op(e)
+    )
+
+    if total_ext_data_bytes <= 0:
+        return 0.0
+
+    frac = target_pct / 100.0
+    memory_time_us = total_ext_data_bytes / (peak_bw_bytes_s * frac) * 1e6
+    matrix_time_us = (
+        (matrix_gflops * 1e9) / (matrix_maf * 1e12 * frac) * 1e6
+        if matrix_gflops > 0 else 0.0
+    )
+    vector_time_us = (
+        (vector_gflops * 1e9) / (vector_maf * 1e12 * frac) * 1e6
+        if vector_gflops > 0 else 0.0
+    )
+    fused_time_us = max(memory_time_us, max(matrix_time_us, vector_time_us))
+
+    unmodeled_time_us = sum(e["dur_us"] for e in enriched if not e["has_perf_data"])
+    current_us = sum(e["dur_us"] for e in enriched)
+    return max(0.0, current_us - fused_time_us - unmodeled_time_us)
+
+
 def compute_fusion_impact_estimates(
     candidates: List[dict],
     kernel_lookup: Dict[str, dict],
@@ -85,14 +167,10 @@ def compute_fusion_impact_estimates(
     """
     Deterministically compute kernel_fusion savings via roofline projection.
 
-    Models the fused kernel as a single operation and projects its time:
-      Total_Data = Data_In(first_op) + Data_Out(last_op)
-      Total_FLOPs = Sum(GFLOPS_i) across all constituent kernels
-      Bound type determined by arithmetic intensity vs ridge point.
-
-    FLOPs are split by compute type (matrix vs vector) and projected at
-    the appropriate peak MAF for each. Fused time is the max of compute
-    time and memory time.
+    Multi-GEMM candidates are split at GEMM boundaries into sub-groups:
+      - GEMM + elementwise: savings = sum of elementwise dur_us (epilogue fusion)
+      - Elementwise-only: roofline projection using data_in/data_out
+      - Single GEMM: no fusion benefit (skipped)
 
     Kernels without perf models use their measured trace time as-is
     and a warning is emitted.
@@ -127,6 +205,8 @@ def compute_fusion_impact_estimates(
                 "type": k.get("type", k.get("kernel_type", "Unknown")),
                 "dur_us": dur_us,
                 "data_moved_mb": float(dm) if dm is not None else None,
+                "data_in_mb": k.get("data_in_mb"),
+                "data_out_mb": k.get("data_out_mb"),
                 "gflops": float(gf) if gf is not None else None,
                 "compute_spec": perf.get("Compute Spec"),
                 "has_perf_data": has_data,
@@ -141,74 +221,54 @@ def compute_fusion_impact_estimates(
         if all(_is_matrix_op(e) for e in enriched):
             continue
 
-        modeled_frac = len(modeled) / len(enriched)
-        if modeled_frac < 0.75:
+        if any(e["name"].startswith("triton_") for e in enriched):
             continue
 
-        unmodeled_time_us = sum(
-            e["dur_us"] for e in enriched if not e["has_perf_data"]
-        )
+        non_matrix = [e for e in enriched if not _is_matrix_op(e)]
+        if non_matrix and any(_is_matrix_op(e) for e in enriched):
+            if all(e["type"] in _NORM_TYPES for e in non_matrix):
+                continue
+
+        modeled_frac = len(modeled) / len(enriched)
+        min_frac = 0.5 if len(enriched) < 5 else 0.75
+        if modeled_frac < min_frac:
+            continue
+
         current_per_instance_us = sum(e["dur_us"] for e in enriched)
         if current_per_instance_us <= 0:
             continue
 
-        first_dm = modeled[0]["data_moved_mb"]
-        last_dm = modeled[-1]["data_moved_mb"]
-
-        # TO DO: Approximate data movement model for the first and last kernel.
-        data_in_mb = first_dm / 2.0
-        data_out_mb = last_dm / 2.0
-        total_ext_data_bytes = (data_in_mb + data_out_mb) * 1e6
-
-        matrix_gflops = sum(
-            e["gflops"] for e in modeled
-            if e["gflops"] and _is_matrix_op(e)
-        )
-        vector_gflops = sum(
-            e["gflops"] for e in modeled
-            if e["gflops"] and not _is_matrix_op(e)
-        )
-        total_flops = (matrix_gflops + vector_gflops) * 1e9
-
-        has_matrix_ops = matrix_gflops > 0
-
-        if total_ext_data_bytes > 0 and total_flops > 0:
-            ai = total_flops / total_ext_data_bytes
-            effective_peak_flops_s = (
-                matrix_maf * 1e12 if has_matrix_ops else vector_maf * 1e12
-            )
-            ridge = effective_peak_flops_s / peak_bw_bytes_s
-            bound_type = "compute" if ai > ridge else "memory"
-        elif total_ext_data_bytes > 0:
-            bound_type = "memory"
-        else:
-            continue
+        subgroups = _split_into_subgroups(enriched)
+        has_matrix_ops = any(_is_matrix_op(e) for e in enriched)
 
         savings_by_target = {}
+        bound_type = "memory"
         for target_pct, label in [
             (TARGET_HIGH, "high"),
             (TARGET_MID, "mid"),
             (TARGET_LOW, "low"),
         ]:
-            frac = target_pct / 100.0
-            matrix_time_us = (
-                (matrix_gflops * 1e9) / (matrix_maf * 1e12 * frac) * 1e6
-                if matrix_gflops > 0 else 0.0
-            )
-            vector_time_us = (
-                (vector_gflops * 1e9) / (vector_maf * 1e12 * frac) * 1e6
-                if vector_gflops > 0 else 0.0
-            )
-            compute_time_us = max(matrix_time_us, vector_time_us)
-            memory_time_us = (
-                total_ext_data_bytes / (peak_bw_bytes_s * frac) * 1e6
-            )
+            total_savings_us = 0.0
+            for sg_type, sg_kernels in subgroups:
+                if sg_type == "gemm_epilogue":
+                    non_gemm_time = sum(
+                        e["dur_us"] for e in sg_kernels if not _is_matrix_op(e)
+                    )
+                    total_savings_us += non_gemm_time
+                elif sg_type == "elementwise":
+                    sg_savings = _roofline_savings_us(
+                        sg_kernels, peak_bw_bytes_s, vector_maf, matrix_maf,
+                        target_pct,
+                    )
+                    total_savings_us += sg_savings
+            savings_by_target[label] = total_savings_us
 
-            fused_time_us = max(compute_time_us, memory_time_us)
-            projected_us = fused_time_us + unmodeled_time_us
-            savings_by_target[label] = max(
-                0.0, current_per_instance_us - projected_us
-            )
+        if savings_by_target["high"] > 0:
+            sg_types = [t for t, _ in subgroups]
+            if "elementwise" in sg_types:
+                bound_type = "memory"
+            elif "gemm_epilogue" in sg_types:
+                bound_type = "compute"
 
         savings_mid = savings_by_target["mid"] * instance_count / 1000
         savings_high = savings_by_target["high"] * instance_count / 1000
@@ -249,12 +309,13 @@ def compute_fusion_impact_estimates(
             )
 
         if baseline_ms > 0:
+            e2e_pct_high = savings_high / baseline_ms * 100
+            if e2e_pct_high < MIN_E2E_PCT:
+                continue
             estimate["e2e_pct_low"] = round(
                 savings_low / baseline_ms * 100, 2
             )
-            estimate["e2e_pct_high"] = round(
-                savings_high / baseline_ms * 100, 2
-            )
+            estimate["e2e_pct_high"] = round(e2e_pct_high, 2)
 
         estimates.append(estimate)
 
