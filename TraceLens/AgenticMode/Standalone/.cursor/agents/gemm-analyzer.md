@@ -203,6 +203,7 @@ Do not look up peaks independently from the metadata dict.
 3. **Be specific** - Include M/N/K shapes, batch sizes, data types
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
+6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

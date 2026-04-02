@@ -270,6 +270,7 @@ Do not look up peaks independently from the metadata dict.
 4. **Unfused attention is a major opportunity** - migrate to Flash Attention
 5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 6. **Context ratio determines optimization focus** - Prefill kernel vs paged attention kernel
+7. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

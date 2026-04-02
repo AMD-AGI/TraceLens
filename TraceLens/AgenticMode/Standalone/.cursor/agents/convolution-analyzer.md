@@ -193,6 +193,7 @@ Do not look up peaks independently from the metadata dict.
 2. **Transpose indicates mismatch** - Check for batched_transpose kernels
 3. **Vendor libraries are good** - Convolution kernels are well-optimized
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 
