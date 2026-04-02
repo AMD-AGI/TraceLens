@@ -50,10 +50,10 @@ See LICENSE for license information.
 
 | Metric | Value |
 |--------|-------|
-| Total Compute Time | X ms |
-| Computation | Y% |
-| Idle Time | Z% |
-| Exposed Communication | W% |
+| Total Time | X ms |
+| Compute % | Y% |
+| Idle % | Z% |
+| Exposed Communication % | W% |
 | Top Bottleneck Category | Category (V%) |
 
 {{PERF_PLOT}}
