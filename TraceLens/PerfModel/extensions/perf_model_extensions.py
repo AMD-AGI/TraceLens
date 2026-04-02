@@ -13,6 +13,7 @@ import re
 from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise
 from math import prod
 
+
 class gemm_a8w8_blockscale(GEMM):
     """
     Performance model for AITER's gemm_a8w8_blockscale kernel.
@@ -27,7 +28,7 @@ class gemm_a8w8_blockscale(GEMM):
         The kernel tiles the K dimension into blocks of size BLOCK_SIZE_K.
         Within each block, INT8 values from X and W are multiplied to produce
         INT32 partial products, then rescaled by (x_scale * w_scale) for that
-        block before accumulating into FP32. 
+        block before accumulating into FP32.
 
     Roofline calculation -- FLOPs:
         FLOPs = 2 * M * N * K  (inherited from GEMM base class)
@@ -58,6 +59,7 @@ class gemm_a8w8_blockscale(GEMM):
     Expected Input type from trace:
         [dtype_x, dtype_w, dtype_x_scale, dtype_w_scale, ...]
     """
+
     @staticmethod
     def get_param_details(event):
         return {
@@ -66,14 +68,19 @@ class gemm_a8w8_blockscale(GEMM):
             "N": event["args"]["Input Dims"][1][0],
             "K": event["args"]["Input Dims"][0][1],
             "bias": False,
-            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1],"c10::bfloat16"),
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                "c10::bfloat16",
+            ),
         }
+
     def bytes(self):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_output = name2bpe(dtype_A_B[2])
-        self.bpe_bias = name2bpe(dtype_A_B[2]) # dummy since bias is not used
+        self.bpe_bias = name2bpe(dtype_A_B[2])  # dummy since bias is not used
 
         return super().bytes(
             bpe_mat1=self.bpe_mat1,
@@ -81,6 +88,7 @@ class gemm_a8w8_blockscale(GEMM):
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+
 
 class vllm_rocm_unquantized_gemm(GEMM):
     """
@@ -96,28 +104,44 @@ class vllm_rocm_unquantized_gemm(GEMM):
     Expected Input type format:
     [dtype_x, dtype_weight, dtype_bias]
     """
+
     @staticmethod
     def get_param_details(event):
+        is_bias = (
+            len(event["args"]["Input Dims"]) > 2
+            and len(event["args"]["Input Dims"][2]) > 0
+        )
         return {
             "M": event["args"]["Input Dims"][0][0],
             "N": event["args"]["Input Dims"][1][0],
             "K": event["args"]["Input Dims"][0][1],
-            "bias": True,
-            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], event["args"]["Input type"][2]),
+            "bias": is_bias,
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                (
+                    event["args"]["Input type"][2]
+                    if len(event["args"]["Input type"]) > 2
+                    else ""
+                ),
+            ),
         }
+
     def bytes(self):
         dtype_A_B = self.param_details["dtype_A_B"]
+        bias = self.param_details["bias"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
-        self.bpe_output = name2bpe(dtype_A_B[2])
-        self.bpe_bias = name2bpe(dtype_A_B[2]) 
-
+        self.bpe_output = name2bpe(dtype_A_B[2]) if bias else name2bpe(dtype_A_B[1])
+        self.bpe_bias = name2bpe(dtype_A_B[2]) if bias else name2bpe(dtype_A_B[1])
         return super().bytes(
             bpe_mat1=self.bpe_mat1,
             bpe_mat2=self.bpe_mat2,
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+
+
 class batched_gemm_a16wfp4(GEMM):
     """
     Performance model for AITER's batched_gemm_a16wfp4_ kernel.
@@ -159,6 +183,7 @@ class batched_gemm_a16wfp4(GEMM):
     Expected Input type from trace:
         [dtype_x, dtype_w_packed, dtype_w_scales, ...]
     """
+
     @staticmethod
     def get_param_details(event):
         return {
@@ -167,7 +192,11 @@ class batched_gemm_a16wfp4(GEMM):
             "N": event["args"]["Input Dims"][1][1],
             "K": event["args"]["Input Dims"][0][2],
             "bias": False,
-            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], "c10::bfloat16"),
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                "c10::bfloat16",
+            ),
         }
 
     def flops(self):
@@ -191,6 +220,8 @@ class batched_gemm_a16wfp4(GEMM):
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         return torch_dtype_map("mxfp4")
+
+
 class batched_gemm_a8w8(GEMM):
     """
     Performance model for AITER's batched_gemm_a8w8 kernel.
@@ -230,6 +261,7 @@ class batched_gemm_a8w8(GEMM):
     Expected Input type from trace:
         [dtype_x, dtype_wq, dtype_w_scale, ...]
     """
+
     @staticmethod
     def get_param_details(event):
         x_shape = event["args"]["Input Dims"][0]
@@ -244,7 +276,11 @@ class batched_gemm_a8w8(GEMM):
             "N": N,
             "K": K,
             "bias": False,
-            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], "c10::bfloat16"),
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                "c10::bfloat16",
+            ),
         }
 
     def flops(self):
@@ -264,8 +300,10 @@ class batched_gemm_a8w8(GEMM):
             bpe_output=self.bpe_output,
         )
         return None if per_batch is None else self.B * per_batch
+
     def get_compute_precision(self):
         return torch_dtype_map(self.param_details["dtype_A_B"][1])
+
 
 class gemm_a16w16_atomic_(GEMM):
     """
@@ -297,6 +335,7 @@ class gemm_a16w16_atomic_(GEMM):
     Expected Input type from trace:
         [dtype_x, dtype_w, ...]
     """
+
     @staticmethod
     def get_param_details(event):
         return {
@@ -305,7 +344,15 @@ class gemm_a16w16_atomic_(GEMM):
             "N": event["args"]["Input Dims"][1][0],
             "K": event["args"]["Input Dims"][0][1],
             "bias": False,
-            "dtype_A_B": (event["args"]["Input type"][0], event["args"]["Input type"][1], event["args"]["Input type"][3] if len(event["args"]["Input type"]) > 3 else "c10::bfloat16"),
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                (
+                    event["args"]["Input type"][3]
+                    if len(event["args"]["Input type"]) > 3
+                    else "c10::bfloat16"
+                ),
+            ),
         }
 
     def bytes(self):
@@ -358,11 +405,12 @@ class per_group_quant(BinaryElementwise):
             self.bpe_out = name2bpe(dtype_out)
         else:
             self.bpe_out = None
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         shape_in1 = tuple(args_input_dims[1])
-        shape_in2 = tuple(args_input_dims[2]) 
+        shape_in2 = tuple(args_input_dims[2])
         shape_out = tuple(args_input_dims[0])
         dtype_in1 = event["args"]["Input type"][1]
         dtype_in2 = event["args"]["Input type"][2]
@@ -379,15 +427,22 @@ class per_group_quant(BinaryElementwise):
             "stride_input2": stride_input2,
             "stride_output": stride_output,
         }
+
     def bytes(self):
-        bytes= prod(self.param_details["shape_out"]) * name2bpe(self.param_details["dtype_in1_in2_out"][2])
-        bytes+= prod(self.param_details["shape_in1"]) * name2bpe(self.param_details["dtype_in1_in2_out"][0])
-        bytes+= prod(self.param_details["shape_in2"]) * name2bpe(self.param_details["dtype_in1_in2_out"][1])
+        bytes = prod(self.param_details["shape_out"]) * name2bpe(
+            self.param_details["dtype_in1_in2_out"][2]
+        )
+        bytes += prod(self.param_details["shape_in1"]) * name2bpe(
+            self.param_details["dtype_in1_in2_out"][0]
+        )
+        bytes += prod(self.param_details["shape_in2"]) * name2bpe(
+            self.param_details["dtype_in1_in2_out"][1]
+        )
         return bytes
 
     def flops(self):
-        return self.nelems_out * 2.59375 # Based on the rocprof counter values
-    
+        return self.nelems_out * 2.59375  # Based on the rocprof counter values
+
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         # Use first input dtype as the compute precision

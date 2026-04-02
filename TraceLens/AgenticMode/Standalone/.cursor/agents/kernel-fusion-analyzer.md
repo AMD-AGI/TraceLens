@@ -29,7 +29,7 @@ When invoked by the orchestrator, you will receive the following context:
 2. `<output_dir>/category_data/kernel_fusion_metrics.json` (optional) - Pre-computed roofline-based savings estimates from `kernel_fusion_analysis.py`
 
 **Output file you must write:**
-- `<output_dir>/category_findings/kernel_fusion_findings.md`
+- `<output_dir>/system_findings/kernel_fusion_findings.md`
 
 ---
 
@@ -129,7 +129,7 @@ Then look for novel patterns:
 
 ### Step 4: Write Findings
 
-Write `<output_dir>/category_findings/kernel_fusion_findings.md` using the command prefix.
+Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
 Confidence maps directly to priority tier:
 - HIGH confidence findings → 🔴 P1

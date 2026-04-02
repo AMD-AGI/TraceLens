@@ -225,7 +225,7 @@ def main():
     parser.add_argument(
         "--category",
         default="sdpa_fwd",
-        choices=["sdpa_fwd", "sdpa_bwd"],
+        choices=["sdpa_fwd", "sdpa_bwd", "inferenceattention"],
         help="SDPA category to analyze (default: sdpa_fwd)",
     )
     args = parser.parse_args()
