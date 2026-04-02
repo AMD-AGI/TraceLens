@@ -25,9 +25,7 @@ def add_simulation_time_columns(
         return
     dict_metrics["Origami Time (µs)"] = simulated_time
     dict_metrics["Origami TFLOPS/s"] = (
-        (gflops / 1e3) / (simulated_time / 1e6)
-        if simulated_time > 0
-        else float("nan")
+        (gflops / 1e3) / (simulated_time / 1e6) if simulated_time > 0 else float("nan")
     )
     if bytes_moved is not None:
         dict_metrics["Origami TB/s"] = (
