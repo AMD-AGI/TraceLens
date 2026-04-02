@@ -761,9 +761,7 @@ class TraceToTree(BaseTraceToTree):
         topo_order: list = []
         visited: set = set()
         q: deque = deque(
-            events_by_uid[uid]
-            for uid in self.cpu_root_nodes
-            if uid in events_by_uid
+            events_by_uid[uid] for uid in self.cpu_root_nodes if uid in events_by_uid
         )
         while q:
             ev = q.popleft()
@@ -1220,7 +1218,8 @@ class TraceToTree(BaseTraceToTree):
         if not gpu_pids:
             return all_gpu_events
         return [
-            evt for evt in all_gpu_events
+            evt
+            for evt in all_gpu_events
             if evt.get(TraceLens.util.TraceEventUtils.TraceKeys.PID) in gpu_pids
         ]
 
