@@ -510,13 +510,14 @@ REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
     "System-Level Optimizations",
-    "Detailed Analysis: Compute Kernels",
-    "Detailed Analysis: System-Level",
+    "Detailed Analysis",
     "Appendix",
 ]
 
 
-def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
+def validate_report(
+    output_dir: str,
+) -> Tuple[bool, List[str]]:
     """
     Validate that standalone_analysis.md contains all required ## section headers.
 
@@ -524,7 +525,7 @@ def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
         output_dir: Base output directory containing standalone_analysis.md
 
     Returns:
-        Tuple of (passed: bool, missing_sections: list of missing header names)
+        Tuple of (passed: bool, missing: list of error/missing-section strings)
     """
     report_path = os.path.join(output_dir, "standalone_analysis.md")
     if not os.path.exists(report_path):
@@ -536,7 +537,14 @@ def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
     if len(content.strip()) < 100:
         return False, ["<report is empty or too short>"]
 
-    missing = [h for h in REQUIRED_REPORT_HEADERS if f"## {h}" not in content]
+    missing: List[str] = []
+
+    missing.extend(
+        f"Missing section: {h}"
+        for h in REQUIRED_REPORT_HEADERS
+        if f"## {h}" not in content
+    )
+
     return len(missing) == 0, missing
 
 

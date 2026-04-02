@@ -141,7 +141,9 @@ The findings file **must** include the performance model caveat after the Status
 > **Note:** TraceLens does not currently have dedicated performance models for reduce kernels. Memory bandwidth utilization is reported as a general indicator but should not be used to draw kernel efficiency conclusions. Algorithmic recommendations (e.g., Flash Attention for unfused softmax) remain valid.
 ```
 
-The findings file **must** end with an Impact Summary section:
+The findings file **must** include **Impact Summary** followed by **Detailed Analysis**.
+
+Impact Summary template:
 
 ```markdown
 ## Impact Summary
@@ -150,7 +152,17 @@ The findings file **must** end with an Impact Summary section:
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 ```
 
+**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
+
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/reduce_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
+
+### Step 7.5: Write Impact Estimates to Metadata
+
+Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+
+```bash
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'reduce', 'compute')"
+```
 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)

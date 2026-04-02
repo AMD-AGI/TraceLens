@@ -584,22 +584,22 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 
 ## Step 10: Generate Final Report (<output_dir>/standalone_analysis.md)
 
-1. **Read** the report template: `TraceLens/AgenticMode/Standalone/standalone_analysis_template.md`
+1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
 2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
-   - `category_findings/*.md` (compute kernel P-items, detailed analysis)
-   - `system_findings/*.md` (system-level P-items, detailed analysis)
+   - `category_findings/*.md` (compute kernel P-items)
+   - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
+4. **Paste `## Detailed Analysis`:** For each P-item in priority order, take the `## Detailed Analysis` candidate from the matching `category_findings/*.md` or `system_findings/*.md` file and place it in the report.
 
 The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
 2. `## Compute Kernel Optimizations`
 3. `## Kernel Fusion Opportunities (Experimental)`
 4. `## System-Level Optimizations`
-5. `## Detailed Analysis: Compute Kernels`
-6. `## Detailed Analysis: System-Level`
-7. `## Appendix`
+5. `## Detailed Analysis`
+6. `## Appendix`
 
 Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
 
@@ -617,7 +617,9 @@ import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
 passed, missing = validate_report(sys.argv[1])
 if not passed:
-    print('FAIL: Missing sections: ' + ', '.join(missing))
+    print('FAIL:')
+    for m in missing:
+        print('  - ' + m)
     sys.exit(1)
 print('PASS: All required sections present')
 \" '<output_dir>'
