@@ -971,12 +971,17 @@ def find_steady_state_window(
         )
 
     elif mode == "decode_only":
-        # Find the longest contiguous run of pure decode-only steps (no context
-        # requests at all) in the largest steady-state region, capped at num_steps.
+        # Find the longest contiguous run of pure decode-only steps (active
+        # generation with no context requests) in the largest steady-state
+        # region, capped at num_steps.
         do_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
         run_start: Optional[int] = None
         for idx in range(largest_start, largest_end):
-            is_do = iter_details[idx].get("context_requests", 0) == 0
+            step_info = iter_details[idx]
+            is_do = (
+                step_info.get("generation_requests", 0) > 0
+                and step_info.get("context_requests", 0) == 0
+            )
             if is_do:
                 if run_start is None:
                     run_start = idx
