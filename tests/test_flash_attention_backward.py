@@ -50,7 +50,9 @@ _STRIDE = (512 * 16 * 64, 16 * 64, 64, 1)
 _CONCRETE = ["", "", "", "", "", "", "", "", "0.0", "", "True", "True"]
 
 
-def _bwd_event(concrete=None, q_shape=None, k_shape=None, v_shape=None, dtype="c10::BFloat16"):
+def _bwd_event(
+    concrete=None, q_shape=None, k_shape=None, v_shape=None, dtype="c10::BFloat16"
+):
     """Build a minimal flash_attn::_flash_attn_backward profiler event dict."""
     q = q_shape or _Q_SHAPE
     k = k_shape or _K_SHAPE
@@ -87,7 +89,10 @@ def _fwd_event():
 
 
 def test_flash_attn_backward_is_mapped():
-    assert op_to_perf_model_class_map["flash_attn::_flash_attn_backward"] is flash_attention_backward
+    assert (
+        op_to_perf_model_class_map["flash_attn::_flash_attn_backward"]
+        is flash_attention_backward
+    )
 
 
 def test_flash_attn_backward_categorizes_as_sdpa_bwd():
