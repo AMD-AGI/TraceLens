@@ -14,10 +14,50 @@ and test_detect_recompute.
 import ast
 import os
 import re
+import shutil
 
 import numpy as np
 import pandas as pd
+import pytest
 from pandas.api.types import is_float_dtype
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--update-references",
+        action="store_true",
+        default=False,
+        help="Update reference CSV directories with freshly generated outputs "
+        "instead of comparing against them. Can also be enabled by setting "
+        "the UPDATE_REFERENCE_TRACES=1 environment variable.",
+    )
+
+
+@pytest.fixture
+def update_references(request):
+    """Return True when reference traces should be overwritten with new outputs.
+
+    Enabled by either the ``--update-references`` CLI flag or the
+    ``UPDATE_REFERENCE_TRACES`` environment variable (any truthy value).
+    """
+    from_cli = request.config.getoption("--update-references", default=False)
+    from_env = os.environ.get("UPDATE_REFERENCE_TRACES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    return from_cli or from_env
+
+
+def update_reference_csvs(generated_dir, reference_dir):
+    """Replace *reference_dir* contents with the CSVs from *generated_dir*.
+
+    The reference directory is removed and recreated so that stale sheets
+    that no longer exist in the generated output are cleaned up.
+    """
+    if os.path.isdir(reference_dir):
+        shutil.rmtree(reference_dir)
+    shutil.copytree(generated_dir, reference_dir)
 
 
 def perf_report_csv_dirname(trace_base: str) -> str:

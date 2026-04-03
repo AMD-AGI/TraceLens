@@ -28,6 +28,7 @@ from conftest import (
     list_perf_report_csv_sheets,
     perf_report_csv_dirname,
     read_perf_report_csv,
+    update_reference_csvs,
 )
 
 TRACE_DIR = os.path.join(os.path.dirname(__file__), "traces", "mi300")
@@ -57,12 +58,15 @@ COLS_IGNORE = [
 ]
 
 
-def test_detect_recompute_e2e(tmp_path):
-    """Generate perf report with detect_recompute=True and compare to reference CSVs."""
+def test_detect_recompute_e2e(tmp_path, update_references):
+    """Generate perf report with detect_recompute=True and compare to reference CSVs.
+
+    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
+    """
     if not os.path.exists(TRACE_PATH):
         pytest.skip(f"Test trace not found: {TRACE_PATH}")
-    if not os.path.isdir(REF_CSV_DIR):
-        pytest.skip(f"Reference CSV directory not found: {REF_CSV_DIR}")
 
     fn_csv_dir = str(tmp_path / "recompute_perf_report_csvs")
 
@@ -74,6 +78,14 @@ def test_detect_recompute_e2e(tmp_path):
     )
 
     assert os.path.isdir(fn_csv_dir), "Generated report directory not created"
+
+    if update_references:
+        update_reference_csvs(fn_csv_dir, REF_CSV_DIR)
+        pytest.skip(f"Updated reference: {REF_CSV_DIR}")
+        return
+
+    if not os.path.isdir(REF_CSV_DIR):
+        pytest.skip(f"Reference CSV directory not found: {REF_CSV_DIR}")
 
     sheets = list_perf_report_csv_sheets(REF_CSV_DIR)
     for sheet in sheets:
@@ -92,7 +104,6 @@ def test_detect_recompute_e2e(tmp_path):
             not diff_cols
         ), f"Sheet '{sheet}' has differences: {format_diff_details(diff_cols)}"
 
-    # Verify is_recompute column exists in the expected sheets
     for sheet_name in SHEETS_WITH_RECOMPUTE:
         df = read_perf_report_csv(fn_csv_dir, sheet_name)
         assert (
@@ -103,7 +114,6 @@ def test_detect_recompute_e2e(tmp_path):
             "is_recompute"
         ].all(), f"All rows marked as recompute in {sheet_name} — expected a mix"
 
-    # Verify is_recompute propagates to perf metrics sheets (build_df_perf_metrics)
     all_sheets = list_perf_report_csv_sheets(fn_csv_dir)
     for sheet_name in PERF_METRICS_SHEETS:
         if sheet_name in all_sheets:

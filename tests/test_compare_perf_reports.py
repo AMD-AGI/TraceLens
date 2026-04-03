@@ -28,6 +28,7 @@ from conftest import (
     format_diff_details,
     list_perf_report_csv_sheets,
     read_perf_report_csv,
+    update_reference_csvs,
 )
 
 
@@ -80,13 +81,22 @@ def find_compare_test_cases(root="tests/traces"):
     find_compare_test_cases(),
 )
 def test_compare_perf_reports(
-    test_dir, report1, report2, ref_csv_dir, names, input_sheets, tol=1e-6
+    test_dir,
+    report1,
+    report2,
+    ref_csv_dir,
+    names,
+    input_sheets,
+    update_references,
+    tol=1e-6,
 ):
     """
     Generate a comparison report and validate against reference CSVs.
-    """
-    ref_output_sheets = list_perf_report_csv_sheets(ref_csv_dir)
 
+    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
+    """
     fn_root = os.path.join(test_dir, "pytest_output")
     os.makedirs(fn_root, exist_ok=True)
 
@@ -103,6 +113,13 @@ def test_compare_perf_reports(
         assert os.path.isdir(
             fn_comparison_dir
         ), f"Comparison output directory not created: {fn_comparison_dir}"
+
+        if update_references:
+            update_reference_csvs(fn_comparison_dir, ref_csv_dir)
+            pytest.skip(f"Updated reference: {ref_csv_dir}")
+            return
+
+        ref_output_sheets = list_perf_report_csv_sheets(ref_csv_dir)
 
         for sheet in ref_output_sheets:
             try:
@@ -214,20 +231,25 @@ def generated_reports(tmp_path_factory):
     return {"h100": h100_csv_dir, "mi300": mi300_csv_dir, "output_dir": output_dir}
 
 
-def test_individual_reports_match_reference(generated_reports):
+def test_individual_reports_match_reference(generated_reports, update_references):
     """Verify that generated perf reports match reference CSV outputs."""
     for tag, ref_path in [
         ("h100", E2E_REF_H100_CSVS),
         ("mi300", E2E_REF_MI300_CSVS),
     ]:
+        gen_path = generated_reports[tag]
+        if update_references:
+            update_reference_csvs(gen_path, ref_path)
+            continue
         if not os.path.isdir(ref_path):
             pytest.skip(f"Reference not found: {ref_path}")
-        gen_path = generated_reports[tag]
         errors = _validate_report_against_reference(gen_path, ref_path)
         assert not errors, f"{tag} report differences:\n" + "\n".join(errors)
+    if update_references:
+        pytest.skip("Updated individual report references")
 
 
-def test_compare_report_sheets_present(generated_reports):
+def test_compare_report_sheets_present(generated_reports, update_references):
     """Verify the comparison report contains all expected sheets."""
     output_dir = generated_reports["output_dir"]
     compare_dir = str(output_dir / "compare_reports_csvs")
@@ -240,6 +262,11 @@ def test_compare_report_sheets_present(generated_reports):
         sheets=["all"],
     )
 
+    if update_references:
+        update_reference_csvs(compare_dir, E2E_REF_COMPARE_CSVS)
+        pytest.skip(f"Updated reference: {E2E_REF_COMPARE_CSVS}")
+        return
+
     if not os.path.isdir(E2E_REF_COMPARE_CSVS):
         pytest.skip(f"Reference not found: {E2E_REF_COMPARE_CSVS}")
 
@@ -250,10 +277,23 @@ def test_compare_report_sheets_present(generated_reports):
     assert not missing, f"Missing sheets in compare report: {missing}"
 
 
-def test_compare_report_matches_reference(generated_reports):
+def test_compare_report_matches_reference(generated_reports, update_references):
     """Validate comparison report contents against reference CSVs."""
     output_dir = generated_reports["output_dir"]
     compare_dir = str(output_dir / "compare_reports_csvs")
+
+    if update_references:
+        if not os.path.isdir(compare_dir):
+            generate_compare_perf_reports_pytorch(
+                reports=[generated_reports["h100"], generated_reports["mi300"]],
+                output=None,
+                output_csvs_dir=compare_dir,
+                names=["h100", "mi300"],
+                sheets=["all"],
+            )
+        update_reference_csvs(compare_dir, E2E_REF_COMPARE_CSVS)
+        pytest.skip(f"Updated reference: {E2E_REF_COMPARE_CSVS}")
+        return
 
     if not os.path.isdir(E2E_REF_COMPARE_CSVS):
         pytest.skip(f"Reference not found: {E2E_REF_COMPARE_CSVS}")

@@ -12,7 +12,7 @@ import subprocess
 import pandas as pd
 import pytest
 
-from conftest import compare_cols, format_diff_details
+from conftest import compare_cols, format_diff_details, update_reference_csvs
 
 
 def generate_nccl_report(trace_pattern, world_size, report_csv_dir):
@@ -34,24 +34,23 @@ def generate_nccl_report(trace_pattern, world_size, report_csv_dir):
     return True
 
 
-def test_collective_analysis(tol=1e-6):
+def test_collective_analysis(update_references, tol=1e-6):
     """
     Test NCCL collective analysis report generation.
     Compares generated report against reference for nccl_summary_implicit_sync sheet.
+
+    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
     """
     test_dir = "tests/traces/mi300/llama_70b_fsdp"
     trace_pattern = "rank*_trace_no_pyfn.json.gz"
 
     ref_report_dir = os.path.join(test_dir, "nccl_analysis_report_csvs")
-    if not os.path.isdir(ref_report_dir):
-        pytest.skip(f"Reference CSV directory not found: {ref_report_dir}")
-
     trace_pattern_full = os.path.join(test_dir, trace_pattern)
 
-    # Count world size from actual files
     world_size = len(glob.glob(trace_pattern_full))
 
-    # Generate a temp output directory for this test
     fn_root = os.path.join(test_dir, "pytest_reports")
     os.makedirs(fn_root, exist_ok=True)
 
@@ -59,7 +58,14 @@ def test_collective_analysis(tol=1e-6):
         fn_csv_dir = os.path.join(fn_root, "nccl_csvs")
         generate_nccl_report(trace_pattern_full, world_size, fn_csv_dir)
 
-        # Compare the nccl_summary_implicit_sync sheet
+        if update_references:
+            update_reference_csvs(fn_csv_dir, ref_report_dir)
+            pytest.skip(f"Updated reference: {ref_report_dir}")
+            return
+
+        if not os.path.isdir(ref_report_dir):
+            pytest.skip(f"Reference CSV directory not found: {ref_report_dir}")
+
         sheet = "nccl_summary_implicit_sync"
         df_ref = pd.read_csv(os.path.join(ref_report_dir, f"{sheet}.csv"))
         df_fn = pd.read_csv(os.path.join(fn_csv_dir, f"{sheet}.csv"))
@@ -70,7 +76,6 @@ def test_collective_analysis(tol=1e-6):
             ), f"Reference is empty but generated report has {len(df_fn)} rows"
             return
 
-        # Compare all columns
         cols = df_ref.columns.tolist()
         diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
         assert (
@@ -78,6 +83,5 @@ def test_collective_analysis(tol=1e-6):
         ), f"Sheet '{sheet}' has differences in {test_dir}:{format_diff_details(diff_cols)}"
 
     finally:
-        # Cleanup: remove generated report
         if os.path.exists(fn_root):
             shutil.rmtree(fn_root)
