@@ -922,7 +922,7 @@ def find_steady_state_window(
     print(f"\n --------------------------------")
     # ---------------------------------------------------------------------------
 
-    divider = min(int(num_steps / 2), 10)
+    divider = max(1, min(int(num_steps / 2), 10))
     step = max(1, num_steps // divider)
 
     # Build candidate sub-windows from the largest region
