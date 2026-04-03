@@ -142,6 +142,7 @@ def generate_perf_report_jax(
     output_csvs_dir: Optional[str] = None,
     kernel_metadata_keyword_filters=None,
     gpu_arch_json_path: Optional[str] = None,
+    enable_origami: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -153,6 +154,7 @@ def generate_perf_report_jax(
         profile_path,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
         arch=gpu_arch_json,
+        enable_origami=enable_origami,
     )
 
     # Write all DataFrames to separate sheets in an Excel workbook
@@ -225,6 +227,12 @@ def main():
         default=None,
         help="Path to the GPU architecture JSON file",
     )
+    parser.add_argument(
+        "--enable-origami",
+        action="store_true",
+        default=False,
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
 
     args = parser.parse_args()
 
@@ -234,6 +242,7 @@ def main():
         output_csvs_dir=args.output_csvs_dir,
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        enable_origami=args.enable_origami,
     )
 
 
