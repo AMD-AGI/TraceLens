@@ -321,6 +321,21 @@ def build_operation_metrics(
             if field in row and not pd.isna(row[field]):
                 op_metric[field] = row[field]
 
+        # Kernel time variance detection (require 10+ samples for reliable CoV)
+        if count > 10:
+            std_val = row.get("Kernel Time (µs)_std")
+            mean_val = row.get("Kernel Time (µs)_mean")
+            if (
+                std_val is not None
+                and mean_val is not None
+                and not pd.isna(std_val)
+                and not pd.isna(mean_val)
+                and mean_val > 0
+            ):
+                cov = round(float(std_val) / float(mean_val), 3)
+                op_metric["cov"] = cov
+                op_metric["high_variance"] = cov > 1.0
+
         # Apply operation classifier if provided
         classifier = category_config.get("operation_classifier")
         if classifier:
@@ -497,17 +512,40 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
     return out_path
 
 
+def parse_first_shape(dims_str):
+    """Extract first input tensor shape as a hashable tuple from an Input Dims string."""
+    if dims_str is None or (isinstance(dims_str, float) and pd.isna(dims_str)):
+        return None
+    try:
+        parsed = ast.literal_eval(str(dims_str))
+        return (
+            tuple(parsed[0])
+            if parsed and isinstance(parsed[0], (list, tuple))
+            else None
+        )
+    except Exception:
+        return None
+
+
+def shape_aware_lookup(table, kname, input_dims=None):
+    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name."""
+    shapes = table.get(kname, {})
+    shape_key = parse_first_shape(input_dims) if input_dims else None
+    return shapes.get(shape_key) or next(iter(shapes.values()), {})
+
+
 REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
     "System-Level Optimizations",
-    "Detailed Analysis: Compute Kernels",
-    "Detailed Analysis: System-Level",
+    "Detailed Analysis",
     "Appendix",
 ]
 
 
-def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
+def validate_report(
+    output_dir: str,
+) -> Tuple[bool, List[str]]:
     """
     Validate that standalone_analysis.md contains all required ## section headers.
 
@@ -515,7 +553,7 @@ def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
         output_dir: Base output directory containing standalone_analysis.md
 
     Returns:
-        Tuple of (passed: bool, missing_sections: list of missing header names)
+        Tuple of (passed: bool, missing: list of error/missing-section strings)
     """
     report_path = os.path.join(output_dir, "standalone_analysis.md")
     if not os.path.exists(report_path):
@@ -527,7 +565,14 @@ def validate_report(output_dir: str) -> Tuple[bool, List[str]]:
     if len(content.strip()) < 100:
         return False, ["<report is empty or too short>"]
 
-    missing = [h for h in REQUIRED_REPORT_HEADERS if f"## {h}" not in content]
+    missing: List[str] = []
+
+    missing.extend(
+        f"Missing section: {h}"
+        for h in REQUIRED_REPORT_HEADERS
+        if f"## {h}" not in content
+    )
+
     return len(missing) == 0, missing
 
 

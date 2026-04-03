@@ -13,16 +13,19 @@ TO DO: Prune out unnecessary segments
 """
 
 import argparse
+import ast
 import json
 import os
 import re
 import sys
 import traceback
 from collections import defaultdict
+from typing import Any
 
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
 from utils.arch_utils import list_platforms, load_arch
 from utils.category_utils import CATEGORY_SKILL_MAP, get_enhanced_category
 
@@ -46,6 +49,74 @@ FUSION_ALREADY_FUSED = [
     "SiluAndMul",
 ]
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
+
+
+def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
+    """Split Data Moved into (data_in_mb, data_out_mb) using op type and shapes."""
+    half = (data_moved_mb / 2, data_moved_mb / 2) if data_moved_mb else (None, None)
+    try:
+        params = ast.literal_eval(str(perf_params_str)) if perf_params_str else {}
+    except Exception:
+        return half
+    if data_moved_mb is None:
+        return half
+    if op_category == "GEMM":
+        M, N, K = params.get("M"), params.get("N"), params.get("K")
+        if all((M, N, K)):
+            total = M * K + K * N + M * N
+            return (
+                data_moved_mb * (M * K + K * N) / total,
+                data_moved_mb * M * N / total,
+            )
+    elif op_category == "reduce":
+        return data_moved_mb, 0.0
+    elif op_category == "elementwise" and "shape_in1" in params:
+        return data_moved_mb * 2 / 3, data_moved_mb / 3
+    return half
+
+
+def _build_kernel_perf_lookup(csv_path):
+    """GPU kernel name -> {shape -> {op_category, data_in_mb, data_out_mb}} from perf CSV."""
+    df = pd.read_csv(csv_path)
+    lookup = defaultdict(dict)
+    for _, row in df.iterrows():
+        kd = row.get("kernel_details_summary", "")
+        if pd.isna(kd):
+            continue
+        cat = row.get("op category", "")
+        dm = row.get("Data Moved (MB)")
+        dm = float(dm) if dm is not None and not pd.isna(dm) else None
+        pp = row.get("perf_params", "")
+        if pd.isna(pp):
+            pp = ""
+        data_in, data_out = _compute_data_in_out(cat, pp, dm)
+        shape = parse_first_shape(row.get("Input Dims"))
+        for kn in re.findall(r"'name':\s*'([^']+)'", str(kd)):
+            if shape not in lookup[kn]:
+                lookup[kn][shape] = {
+                    "op_category": cat,
+                    "data_in_mb": data_in,
+                    "data_out_mb": data_out,
+                }
+    return dict(lookup)
+
+
+def _extract_attention_core(kernels, perf_lookup):
+    """If kernels contain unfused attention (softmax), return just QKt+softmax+PV."""
+    name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
+
+    def is_gemm(k):
+        entries = perf_lookup.get(k.get(name_key, ""), {})
+        return any(e.get("op_category") == "GEMM" for e in entries.values())
+
+    for i, k in enumerate(kernels):
+        if "softmax" not in k.get(name_key, "").lower():
+            continue
+        qk = next((j for j in range(i - 1, -1, -1) if is_gemm(kernels[j])), None)
+        pv = next((j for j in range(i + 1, len(kernels)) if is_gemm(kernels[j])), None)
+        if qk is not None and pv is not None:
+            return kernels[qk : pv + 1]
+    return None
 
 
 def main():
@@ -530,6 +601,7 @@ def main():
                     "kernel_type_summary": type_summary,
                     "has_fused_kernel": _has_fused_kernel(kernels),
                     "total_kernel_time_us": sum(k["dur_us"] for k in kernels),
+                    "input_dims": ev.get("args", {}).get("Input Dims"),
                 }
                 seen_base[base] = entry
                 base_order.append(base)
@@ -585,6 +657,7 @@ def main():
                     "kernel_type_signature": [c["kernel_type"] for c in children],
                     "total_time_us": sum(c["dur_us"] for c in children),
                     "instance_count": 1,
+                    "input_dims": parent_evt.get("args", {}).get("Input Dims"),
                 }
                 seen_sibling_bases[sbase] = entry
                 sibling_seqs.append(entry)
@@ -614,8 +687,55 @@ def main():
                         "has_fused_kernel": False,
                         "total_kernel_time_us": s["total_time_us"],
                         "source": "sibling_sequence",
+                        "input_dims": s.get("input_dims"),
                     }
                 )
+
+            # Post-process: attention narrowing + data movement enrichment
+            csv_path = f"{output_dir}/perf_report_csvs/unified_perf_summary.csv"
+            if os.path.exists(csv_path):
+                perf_lookup = _build_kernel_perf_lookup(csv_path)
+
+                for c in fusion_candidates:
+                    core = _extract_attention_core(c.get("kernels", []), perf_lookup)
+                    if core is not None:
+                        c["kernels"] = core
+                        c["kernel_count"] = len(core)
+                        c["eligible_kernel_count"] = len(core)
+                        c["kernel_type_signature"] = [
+                            k.get("type", k.get("kernel_type", "Unknown")) for k in core
+                        ]
+                        c["total_kernel_time_us"] = sum(
+                            k.get("dur_us", 0) for k in core
+                        ) * c.get("instance_count", 1)
+
+                # Dedup candidates with the same kernel set: prefer nn.Module, then deepest
+                def _dedup_score(c):
+                    return (
+                        c.get("module_name", "").startswith("nn.Module:"),
+                        len(c.get("parent_chain", [])),
+                    )
+
+                seen_ksets = {}
+                for c in fusion_candidates:
+                    nk = (
+                        "name" if "name" in c.get("kernels", [{}])[0] else "kernel_name"
+                    )
+                    kset = tuple(k.get(nk, "") for k in c.get("kernels", []))
+                    prev = seen_ksets.get(kset)
+                    if prev is None or _dedup_score(c) > _dedup_score(prev):
+                        seen_ksets[kset] = c
+                fusion_candidates = list(seen_ksets.values())
+
+                for c in fusion_candidates:
+                    for k in c.get("kernels", []):
+                        kname = k.get("name", k.get("kernel_name", ""))
+                        entry = shape_aware_lookup(
+                            perf_lookup, kname, c.get("input_dims")
+                        )
+                        if entry.get("data_in_mb") is not None:
+                            k["data_in_mb"] = entry["data_in_mb"]
+                            k["data_out_mb"] = entry["data_out_mb"]
 
             fusion_candidates.sort(
                 key=lambda c: c.get("total_kernel_time_us", 0), reverse=True
