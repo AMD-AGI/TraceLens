@@ -64,7 +64,10 @@ def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
         M, N, K = params.get("M"), params.get("N"), params.get("K")
         if all((M, N, K)):
             total = M * K + K * N + M * N
-            return data_moved_mb * (M * K + K * N) / total, data_moved_mb * M * N / total
+            return (
+                data_moved_mb * (M * K + K * N) / total,
+                data_moved_mb * M * N / total,
+            )
     elif op_category == "reduce":
         return data_moved_mb, 0.0
     elif op_category == "elementwise" and "shape_in1" in params:
@@ -694,16 +697,13 @@ def main():
                 perf_lookup = _build_kernel_perf_lookup(csv_path)
 
                 for c in fusion_candidates:
-                    core = _extract_attention_core(
-                        c.get("kernels", []), perf_lookup
-                    )
+                    core = _extract_attention_core(c.get("kernels", []), perf_lookup)
                     if core is not None:
                         c["kernels"] = core
                         c["kernel_count"] = len(core)
                         c["eligible_kernel_count"] = len(core)
                         c["kernel_type_signature"] = [
-                            k.get("type", k.get("kernel_type", "Unknown"))
-                            for k in core
+                            k.get("type", k.get("kernel_type", "Unknown")) for k in core
                         ]
                         c["total_kernel_time_us"] = sum(
                             k.get("dur_us", 0) for k in core
@@ -718,7 +718,9 @@ def main():
 
                 seen_ksets = {}
                 for c in fusion_candidates:
-                    nk = "name" if "name" in c.get("kernels", [{}])[0] else "kernel_name"
+                    nk = (
+                        "name" if "name" in c.get("kernels", [{}])[0] else "kernel_name"
+                    )
                     kset = tuple(k.get(nk, "") for k in c.get("kernels", []))
                     prev = seen_ksets.get(kset)
                     if prev is None or _dedup_score(c) > _dedup_score(prev):
@@ -728,7 +730,9 @@ def main():
                 for c in fusion_candidates:
                     for k in c.get("kernels", []):
                         kname = k.get("name", k.get("kernel_name", ""))
-                        entry = shape_aware_lookup(perf_lookup, kname, c.get("input_dims"))
+                        entry = shape_aware_lookup(
+                            perf_lookup, kname, c.get("input_dims")
+                        )
                         if entry.get("data_in_mb") is not None:
                             k["data_in_mb"] = entry["data_in_mb"]
                             k["data_out_mb"] = entry["data_out_mb"]
