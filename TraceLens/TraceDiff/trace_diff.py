@@ -238,9 +238,7 @@ class TraceDiff:
                 if current is not root:
                     children = current.get("children", [])
                     root["children"] = children
-                    root_uid = root.get(
-                        TraceLens.util.TraceEventUtils.TraceKeys.UID
-                    )
+                    root_uid = root.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
                     for child_uid in children:
                         child_event = tree.get_UID2event(child_uid)
                         child_event["parent"] = root_uid
