@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-🚀 vLLM/SGLang Trace Splitting and Analysis Tool
+vLLM/SGLang/ATOM Trace Splitting and Analysis Tool
 
 This script splits large vLLM and SGLang inference traces into smaller, analyzable components:
 - Individual execution iterations
@@ -17,94 +17,126 @@ This enables efficient performance analysis and comparison without processing ma
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-📋 BASIC USAGE
+BASIC USAGE
 ───────────────────────────────────────────────────────────────────────────────
-    python split_vllm_trace_annotation.py <trace_path> -o <output_dir> [OPTIONS]
+    python split_inference_trace_annotation.py <trace_path> -o <output_dir> [OPTIONS]
 
-🔧 REQUIRED ARGUMENTS
+REQUIRED ARGUMENTS
 ───────────────────────────────────────────────────────────────────────────────
     trace_path              Path to input trace file (.json, .json.gz, or .zip)
     -o, --output-dir        Directory where split traces will be saved
 
-📊 OPTIONAL ARGUMENTS
-───────────────────────────────────────────────────────────────────────────────    
+OPTIONAL ARGUMENTS
+───────────────────────────────────────────────────────────────────────────────
     -i, --iterations        Iteration range to extract (default: 'all'):
-                           'START:END'  - Extract iterations START through END-1
-    
+                            'all'        - All iterations
+                            'N'          - Single iteration N
+                            'START:END'  - Iterations START through END-1
+
     -d, --dummy             Dummy run range (default: 'all'):
-                           'START:END'  - Extract dummy runs START through END-1
-    
-    --store-single-iteration  Store each iteration/dummy run as individual file
-                             
+                            'all'        - All dummy runs
+                            'N'          - Single dummy run N
+                            'START:END'  - Dummy runs START through END-1
+
+    --store-single-iteration  Store each iteration/dummy run as an individual file
+
     --find-steady-state      Automatically detect steady-state and extract three
-                            representative contiguous windows (no idle gaps):
-                            - Mixed window: representative DO:PD ratio matched
-                              to the overall steady-state distribution
-                            - Decode-only window: Pure decode steps
-                            - Biggest prefill-decode window: Prefilldecode-mix steps only
+                             representative contiguous windows (no idle gaps):
+                             - mixed_steady_state_*        : representative DO:PD mix
+                             - decode_only_steady_state_*  : fewest prefill-decode steps
+                             - prefilldecode_steady_state_*: most prefill-decode steps
+
+    --divide-phases          Find all steady-state regions and store each individual
+                             step into phase-specific sub-folders:
+                             output_dir/prefilldecodemix/ and output_dir/decode_only/.
+                             Each step is written as a separate trace file.
 
     --num-steps             Number of iterations to extract for steady-state (default: 32)
-💡 QUICK EXAMPLES
+
+    --CONC                  Expected peak concurrency (number of concurrent requests).
+                            A warning is printed if the trace peak differs from this value.
+
+    --OSL                   Average output sequence length (decode tokens per request).
+                            Used with --R to compute the ideal PD ratio for mixed-window
+                            selection under --find-steady-state.
+
+    --R                     OSL window ratio in [0, 1]. OSL per request is sampled from
+                            [R*OSL, OSL], giving mean OSL = OSL*(1+R)/2.
+                            R=0 means all requests have exactly OSL tokens;
+                            R=1 means OSL is uniform in [0, OSL].
+
+QUICK EXAMPLES
 ───────────────────────────────────────────────────────────────────────────────
 
-1. DEFAULT: Extract all iterations separately
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
-   
-   → Individual trace files for each iteration (e.g. trace_annotation )
+1. EXTRACT ALL ITERATIONS SEPARATELY
+
+   $ python split_inference_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
+
+   → One trace file per iteration in ./output/
 
 ─────────────────────────────────────────────────────────────────────────────
 
 2. EXTRACT SPECIFIC ITERATION RANGE (combined)
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz \\
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
      -o ./output \\
      --iterations 10:20
-   
-   → Single trace file containing iterations 10-19 with prefill-decode and decode-only phases separated to two different tracefiles
-   
+
+   → Single combined trace file containing iterations 10-19
 
 ─────────────────────────────────────────────────────────────────────────────
 
-3. FIND AND EXTRACT STEADY STATE REGION ⭐ RECOMMENDED
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz \\
+3. FIND AND EXTRACT STEADY STATE REGION (recommended)
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
      -o ./steady_state_analysis \\
      --find-steady-state
-   
+
    This automatically:
    • Identifies all steady-state regions across the trace
    • Computes the PD/total ratio for every region and derives a reference
      ratio (largest region, cross-checked against the median of all regions)
    • Extracts THREE separate contiguous windows — no idle gaps:
-     - mixed_steady_state_*     : representative DO:PD mix
-     - decode_only_steady_state_*: fewest prefill-decode steps
+     - mixed_steady_state_*        : representative DO:PD mix
+     - decode_only_steady_state_*  : fewest prefill-decode steps
      - prefilldecode_steady_state_*: most prefill-decode steps
-     - execution_details.json with metadata for all three
+
 ─────────────────────────────────────────────────────────────────────────────
 
-4. EXTRACT DUMMY RUNS (Graph Capture Phases)
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz \\
+4. SPLIT STEADY-STATE STEPS BY PHASE
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
+     -o ./phase_split \\
+     --divide-phases
+
+   → Writes each steady-state step into phase-specific sub-folders:
+       ./phase_split/prefilldecodemix/
+       ./phase_split/decode_only/
+
+─────────────────────────────────────────────────────────────────────────────
+
+5. EXTRACT DUMMY RUNS (Graph Capture Phases)
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
      -o ./dummy_runs --store-single-iteration
-   
-   → Tracefile per specified dummy run
+
+   → One trace file per dummy run in ./dummy_runs/
 
 ─────────────────────────────────────────────────────────────────────────────
-
-───────────────────────────────────────────────────────────────────────────────
 
 Generated outputs:
 
   ✓ Individual .json.gz trace files in output directory
   ✓ execution_details.json - Metadata about extracted traces
+  ✓ execution_details.csv  - Flat CSV version of the same metadata
 
 Example file structure (--find-steady-state):
   output/
   ├── mixed_steady_state_prefilldecode_5_decode_27_bs32_conc18_{base}.json.gz
   ├── decode_only_steady_state_prefilldecode_0_decode_32_bs30_conc16_{base}.json.gz
   ├── prefilldecode_steady_state_prefilldecode_12_decode_20_bs48_conc20_{base}.json.gz
-  └── execution_details.json
+  ├── execution_details.json
+  └── execution_details.csv
 
 Example execution_details.json entry:
 {
@@ -123,7 +155,7 @@ Example execution_details.json entry:
   }
 }
 
-🔗 RELATED TOOLS
+RELATED TOOLS
 ───────────────────────────────────────────────────────────────────────────────
 
 After splitting traces, analyze them with:
@@ -426,7 +458,7 @@ def extract_and_save(
     default ``{base_name}_{prefix}_{idx}_{name_append}.json.gz``.
     """
     extraction_summary = []
-    #print(f"roots: {roots}")
+    # print(f"roots: {roots}")
     if len(roots) == 0 or len(roots[0]) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
@@ -555,8 +587,15 @@ def extract_phases_and_save(
                 get_iter_details_from_name(r["name"], prefix) for r in decode_steps
             ]
             phase_details = find_phase_from_window(iter_details)
-            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
-                decode_steps, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
+            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
+                extract_iteration(
+                    decode_steps,
+                    events,
+                    trace_json,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                )
             )
             name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
@@ -612,7 +651,11 @@ def identify_steady_state_regions(
             steady_state_started = True
             start_index = i - prev_events_in_steady + 1
 
-        if prev_events_in_steady <= 0 and steady_state_started and not steady_state_ended:
+        if (
+            prev_events_in_steady <= 0
+            and steady_state_started
+            and not steady_state_ended
+        ):
             print(f"Steady state ended at index {i}")
             steady_state_ended = True
             regions.append((start_index, i))
@@ -649,44 +692,29 @@ def compute_reference_pd_ratio(
     median is used instead and a warning is printed.
     """
     region_stats = []
+    total_steps = 0
+    total_pd_steps = 0
     for s, e in regions:
         window = iter_details[s:e]
         total = len(window)
+        total_steps += total
         pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+        total_pd_steps += pd_count
         ratio = pd_count / total if total > 0 else 0.0
         region_stats.append({"start": s, "end": e, "size": total, "pd_ratio": ratio})
         print(
             f"  Region [{s}, {e}): size={total}, "
-            f"prefilldecodemix_steps={pd_count}, prefilldecodemix_ratio={ratio:.3f}"
+            f"prefilldecodemix_steps={pd_count}, prefilldecodemix_to_totalsteps_ratio={ratio:.3f}"
         )
 
     largest = max(region_stats, key=lambda x: x["size"])
-    ratios = [r["pd_ratio"] for r in region_stats]
-    sorted_ratios = sorted(ratios)
-    mid = len(sorted_ratios) // 2
-    median_ratio = (
-        sorted_ratios[mid]
-        if len(sorted_ratios) % 2 == 1
-        else (sorted_ratios[mid - 1] + sorted_ratios[mid]) / 2
-    )
-
-    reference_ratio = largest["pd_ratio"]
-    if median_ratio > 0:
-        relative_deviation = abs(reference_ratio - median_ratio) / median_ratio
-        if relative_deviation > 0.5:
-            print(
-                f"Warning: largest region prefilldecodemix_ratio={reference_ratio:.3f} deviates "
-                f"{relative_deviation:.0%} from median={median_ratio:.3f} across all regions. "
-                f"Using median as reference prefilldecodemix_ratio."
-            )
-            reference_ratio = median_ratio
-
+    average_ratio = total_pd_steps / total_steps if total_steps > 0 else 0.0
+    largest_window_ratio = largest["pd_ratio"]
     print(
-        f"Reference prefilldecodemix_ratio={reference_ratio:.3f} "
-        f"(largest region [{largest['start']}, {largest['end']}), "
-        f"median across all regions={median_ratio:.3f})"
+        f"Reference prefilldecodemix_to_totalsteps_ratio={largest_window_ratio:.3f} (largest region [{largest['start']}, {largest['end']}), Average across all regions={average_ratio:.3f})"
     )
-    return (largest["start"], largest["end"]), reference_ratio, median_ratio
+
+    return (largest["start"], largest["end"]), average_ratio, largest_window_ratio
 
 
 def divide_phases_and_save(
@@ -698,8 +726,7 @@ def divide_phases_and_save(
     gpu_corr_map: dict,
     flow_corr_map: dict,
     meta_events: List[dict],
-    num_steps: int = 32,
-    forced_regions: Optional[List[Tuple[int, int]]] = None,
+    steady_state_regions: List[Tuple[int, int]],
 ) -> List[dict]:
     """
     Group contiguous steps of the same phase within steady-state regions and
@@ -713,17 +740,13 @@ def divide_phases_and_save(
 
     Parameters
     ----------
-    forced_regions
-        When provided, used directly as the steady-state region list, bypassing
-        ``identify_steady_state_regions``.  Pass ``[(0, len(iteration_roots))]``
-        to treat the entire ``iteration_roots`` slice as steady state.
+    steady_state_regions
+        Pre-computed steady-state region list as ``(start, end)`` index pairs.
+        Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady state.
     """
     iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
-    if forced_regions is not None:
-        regions = forced_regions
-        print(f"[divide-phases] Using forced regions: {regions}")
-    else:
-        regions, _ = identify_steady_state_regions(iter_details, num_steps)
+    regions = steady_state_regions
+    print(f"[divide-phases] Steady-state regions: {regions}")
 
     # Build an ordered list of (phase_label, root) for all steady-state steps
     steady_steps: List[Tuple[str, dict]] = []
@@ -807,11 +830,11 @@ def divide_phases_and_save(
 def find_steady_state_window(
     iteration_roots: List[dict],
     num_steps: int,
+    steady_state_regions: List[Tuple[int, int]],
     mode: str = "mixed",
-    conc: Optional[int] = None,
-    osl: Optional[float] = None,
+    CONC: Optional[int] = None,
+    OSL: Optional[float] = None,
     R: Optional[float] = None,
-    forced_regions: Optional[List[Tuple[int, int]]] = None,
 ) -> List[dict]:
     """
     Find the best contiguous window of up to ``num_steps`` iterations.
@@ -820,23 +843,21 @@ def find_steady_state_window(
     ----------
     iteration_roots : list of iteration-root events
     num_steps : requested window size
+    steady_state_regions : pre-computed steady-state region list as ``(start, end)``
+        index pairs.  Pass ``[(0, len(iteration_roots))]`` to treat the entire
+        slice as steady state.
     mode : one of ``"mixed"``, ``"decode_only"``, ``"max_prefilldecode"``
-    conc : expected peak concurrency (number of concurrent requests).
+    CONC : expected peak concurrency (number of concurrent requests).
         If provided, a warning is printed when the observed peak in the trace
         differs from this value.
-    osl : average output sequence length (decode tokens per request).
+    OSL : average output sequence length (decode tokens per request).
         Combined with ``R`` to derive the ideal PD ratio.
     R : OSL window ratio in [0, 1]. The actual OSL per request is sampled from
-        ``[R * osl, osl]``, giving mean OSL = osl * (1 + R) / 2.
-    forced_regions
-        When provided, used directly as the steady-state region list, bypassing
-        ``identify_steady_state_regions`` and ``compute_reference_pd_ratio``.
-        Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady
-        state and derive the empirical reference ratio from it.
+        ``[R * OSL, OSL]``, giving mean OSL = OSL * (1 + R) / 2.
 
-    When ``conc``, ``osl``, and ``R`` are all provided the ideal PD ratio is
+    When ``CONC``, ``OSL``, and ``R`` are all provided the ideal PD ratio is
 
-        ideal_pd_ratio = (conc * 2) / (osl * (1 + R))
+        ideal_pd_ratio = (CONC * 2) / (OSL * (1 + R))
 
     and ``num_steps`` is automatically raised to ``ceil(1 / ideal_pd_ratio)``
     if it is too small to capture the true DO/PD distribution.
@@ -853,36 +874,31 @@ def find_steady_state_window(
         Most-PD window: sub-window with highest pd_ratio.
     """
     iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
+    regions = steady_state_regions
+    global_max = max(t["num_requests"] for t in iter_details)
 
-    if forced_regions is not None:
-        print(f"Using forced regions (bypassing steady-state detection): {forced_regions}")
-        regions = forced_regions
-        global_max = max(t["num_requests"] for t in iter_details)
-    else:
-        regions, global_max = identify_steady_state_regions(iter_details, num_steps)
-
-    (largest_start, largest_end), reference_ratio, median_ratio = (
+    (largest_start, largest_end), reference_ratio, largest_window_ratio = (
         compute_reference_pd_ratio(regions, iter_details)
     )
 
-    # --- Optional: conc / osl / R validation and ideal ratio override ----------
+    # --- Optional: CONC / OSL / R validation and ideal ratio override ----------
     ideal_pd_ratio: Optional[float] = None
 
-    if conc is not None and global_max != conc:
+    if CONC is not None and global_max != CONC:
         print(
-            f"Warning: expected peak concurrency conc={conc} but the trace peak is "
+            f"Warning: expected peak concurrency CONC={CONC} but the trace peak is "
             f"global_max={global_max}. The trace may not contain requests at the "
             f"intended concurrency level."
         )
 
-    if conc is not None and osl is not None and R is not None:
+    if CONC is not None and OSL is not None and R is not None:
         if not (0.0 <= R <= 1.0):
             print(f"Warning: R={R} is outside [0, 1]; clamping to valid range.")
             R = max(0.0, min(1.0, R))
-        mean_osl = osl * (1.0 + R) / 2.0
-        ideal_pd_ratio = (conc * 2.0) / (osl * (1.0 + R))
+        mean_osl = OSL * (1.0 + R) / 2.0
+        ideal_pd_ratio = (CONC * 2.0) / (OSL * (1.0 + R))
         print(
-            f"Ideal prefilldecodemix_ratio = (conc={conc} * 2) / (osl={osl} * (1 + R={R})) "
+            f"Ideal prefilldecodemix_to_totalsteps_ratio = (CONC={CONC} * 2) / (OSL={OSL} * (1 + R={R})) "
             f"= {ideal_pd_ratio:.4f}  [mean OSL = {mean_osl:.1f}]"
         )
 
@@ -890,19 +906,19 @@ def find_steady_state_window(
         if num_steps < min_steps_for_ratio:
             print(
                 f"Warning: --num-steps={num_steps} is too small to capture the true "
-                f"decode_only/prefilldecodemix distribution. At prefilldecodemix_ratio={ideal_pd_ratio:.4f} you need at "
+                f"decode_only/prefilldecodemix distribution. At prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} you need at "
                 f"least {min_steps_for_ratio} steps to see a representative mix. "
                 f"Raising num_steps to {min_steps_for_ratio}."
             )
             num_steps = min_steps_for_ratio
         else:
-            print(
-                f"num_steps={num_steps} >= min required {min_steps_for_ratio} — OK."
-            )
+            print(f"num_steps={num_steps} >= min required {min_steps_for_ratio} — OK.")
 
         # Ideal ratio overrides the empirical reference for the mixed mode
         reference_ratio = ideal_pd_ratio
-        print(f"Using ideal prefilldecodemix_ratio={ideal_pd_ratio:.4f} as reference (overrides empirical {median_ratio:.4f})")
+        print(
+            f"Using ideal prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} as reference (overrides empirical {reference_ratio:.4f})"
+        )
     print(f"\n --------------------------------")
     # ---------------------------------------------------------------------------
 
@@ -935,7 +951,9 @@ def find_steady_state_window(
                 "end": e,
                 "pd_count": pd_count,
                 "pd_ratio": pd_count / len(window) if window else 0.0,
-                "avg_requests": mean(t["num_requests"] for t in window) if window else 0,
+                "avg_requests": (
+                    mean(t["num_requests"] for t in window) if window else 0
+                ),
             }
         )
 
@@ -946,7 +964,7 @@ def find_steady_state_window(
         )
         print(
             f"[mixed] Selected window [{best['start']}, {best['end']}): "
-            f"prefilldecodemix_ratio={best['pd_ratio']:.3f} (target={reference_ratio:.3f}), "
+            f"prefilldecodemix_to_totalsteps_ratio={best['pd_ratio']:.3f} (target={reference_ratio:.3f}), "
             f"avg_requests={best['avg_requests']:.1f}"
         )
 
@@ -1068,7 +1086,7 @@ def main():
         help="Number of iterations to extract for steady state (default: 32)",
     )
     parser.add_argument(
-        "--conc",
+        "--CONC",
         type=int,
         default=None,
         help=(
@@ -1077,7 +1095,7 @@ def main():
         ),
     )
     parser.add_argument(
-        "--osl",
+        "--OSL",
         type=float,
         default=None,
         help=(
@@ -1091,9 +1109,9 @@ def main():
         default=None,
         help=(
             "OSL window ratio in [0, 1]. OSL per request is sampled from "
-            "[R*osl, osl], giving mean OSL = osl*(1+R)/2. "
-            "R=0 means all requests have exactly osl tokens; "
-            "R=1 means OSL is uniform in [0, osl]."
+            "[R*OSL, OSL], giving mean OSL = OSL*(1+R)/2. "
+            "R=0 means all requests have exactly OSL tokens; "
+            "R=1 means OSL is uniform in [0, OSL]."
         ),
     )
     parser.add_argument(
@@ -1165,20 +1183,35 @@ def main():
             )
             execution_details.extend(temp_execution_details)
 
-        # Determine the working set and whether steady-state detection is needed.
-        # When an explicit range is given, that range IS the region of interest.
+        # Determine the working set and compute steady-state regions once,
+        # shared across all downstream calls.
         if args.iterations != "all":
             working_roots = iteration_roots[start:end]
-            forced_regions: Optional[List[Tuple[int, int]]] = [(0, end - start)]
-            print(f"\nUsing explicit iteration range [{start}, {end}) as the working region.")
+            steady_state_regions: List[Tuple[int, int]] = [(0, end - start)]
+            print(
+                f"\nUsing explicit iteration range [{start}, {end}) as the working region."
+            )
         else:
             working_roots = iteration_roots
-            forced_regions = None
+            if args.find_steady_state or args.divide_phases:
+                _iter_details = [
+                    get_iter_details_from_name(r["name"]) for r in working_roots
+                ]
+                steady_state_regions, _ = identify_steady_state_regions(
+                    _iter_details, args.num_steps
+                )
 
         _extract_args = (
-            events, trace_json, args.output_dir, base_name,
-            "annotation_iteration", 0, 1,
-            gpu_corr_map, flow_corr_map, meta_events,
+            events,
+            trace_json,
+            args.output_dir,
+            base_name,
+            "annotation_iteration",
+            0,
+            1,
+            gpu_corr_map,
+            flow_corr_map,
+            meta_events,
         )
 
         if args.divide_phases:
@@ -1192,8 +1225,7 @@ def main():
                 gpu_corr_map,
                 flow_corr_map,
                 meta_events,
-                num_steps=args.num_steps,
-                forced_regions=forced_regions,
+                steady_state_regions=steady_state_regions,
             )
             execution_details.extend(temp_execution_details)
 
@@ -1203,11 +1235,11 @@ def main():
             mixed_roots = find_steady_state_window(
                 working_roots,
                 num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions,
                 mode="mixed",
-                conc=args.conc,
-                osl=args.osl,
+                CONC=args.CONC,
+                OSL=args.OSL,
                 R=args.R,
-                forced_regions=forced_regions,
             )
             temp_execution_details = extract_and_save(
                 [mixed_roots], *_extract_args, output_label="mixed_steady_state"
@@ -1218,8 +1250,8 @@ def main():
             do_roots = find_steady_state_window(
                 working_roots,
                 num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions,
                 mode="decode_only",
-                forced_regions=forced_regions,
             )
             temp_execution_details = extract_and_save(
                 [do_roots], *_extract_args, output_label="decode_only_steady_state"
@@ -1230,8 +1262,8 @@ def main():
             pd_roots = find_steady_state_window(
                 working_roots,
                 num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions,
                 mode="max_prefilldecode",
-                forced_regions=forced_regions,
             )
             temp_execution_details = extract_and_save(
                 [pd_roots], *_extract_args, output_label="prefilldecode_steady_state"

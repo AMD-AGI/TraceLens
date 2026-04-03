@@ -165,11 +165,38 @@ This optional step reads the collected trace and splits it into smaller trace fi
 Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher, SGLang v0.5.9, and Atom 0.1.1; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
 
 ```python
-python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -o ./steady_state_analysis \\
+python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -o ./steady_state_analysis \
      --find-steady-state --num-steps 256
 ```
 
 Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have large idle times between execution steps.
+
+**Refining steady-state window selection with `--CONC`, `--OSL`, and `--R`**
+
+By default, the mixed steady-state window is selected by matching the empirically observed prefill-decode to total-steps ratio of the trace. If the benchmark parameters are known, passing `--CONC`, `--OSL`, and `--R` lets the tool compute an *ideal* perfilldecodemix_steps/total_steps ratio analytically and use that to drive window selection instead:
+
+| Argument | Type | Description |
+| -------- | ---- | ----------- |
+| `--CONC` | `int` | Expected peak concurrency (number of concurrent requests). A warning is printed if the observed trace peak differs from this value. |
+| `--OSL` | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from `[R × OSL, OSL]`. |
+| `--R` | `float` | OSL sampling range ratio in `[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
+
+When all three are provided, the tool derives:
+
+```
+ideal_prefilldecodemix_to_totalsteps_ratio = (CONC × 2) / (OSL × (1 + R))
+```
+
+and uses this as the reference ratio for mixed-window selection, overriding the empirical estimate. `--num-steps` is also automatically raised to `ceil(1 / ideal_prefilldecodemix_to_totalsteps_ratio)` if it is too small to capture a representative decode/prefill-decode mix.
+
+Example — benchmark with CONC=32, OSL=1024, R=0.8:
+
+```python
+python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
+    -o ./steady_state_analysis \
+    --find-steady-state --num-steps 256 \
+    --CONC 32 --OSL 1024 --R 0.8
+```
 
 Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher, SGLang v0.5.9, and Atom 0.1.1). This is recommended if the user wants to perform analysis on an isolated execution step.
 
@@ -179,10 +206,11 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o
 
 Output: Single trace file per execution step.
 
-Option 3: Extract execution steps from a specified range and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher and SGLang v0.5.9; using the patchfile is recommended).
+Option 3: Limit the search of steady-state region to a limited window
 
 ```python
-python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --iterations 10:20
+python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --iterations 10:20 --find-steady-state --num-steps 256 \
+    --CONC 32 --OSL 1024 --R 0.8
 ```
 
 ### Step 4: Generate Performance Report
@@ -646,7 +674,7 @@ delay_iters = ( ((R+1)/2) * 5 * OSL ) - (max_iters/2) # The execution step where
 The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher, or use of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
 
 1. **Split into individual execution steps:** Decompose the entire trace into per-step files, extracting batch size from annotations or kernels for shape-focused analysis and comparison.
-2. **Identify steady-state region:** Detect execution steps with near-maximum concurrency. The algorithm identifies large windows with concurrency close to peak levels and selects a representative steady-state region based on prefill-decode and decode-only step composition.
+2. **Identify steady-state region:** Detect execution steps with near-maximum concurrency. The algorithm identifies large windows with concurrency close to peak levels and selects a representative steady-state region based on prefill-decode and decode-only step composition. When benchmark parameters are known, pass `--CONC`, `--OSL`, and `--R` to `split_inference_trace_annotation` to override the empirical reference ratio with the analytically derived ideal PD ratio — see [Step 3](#step-3-trace-preparation-optional) for details.
 3. **Separate phase analysis:** Further decompose steady-state into prefill-decode and decode-only traces. Since prefill and decode have different computational bottlenecks, separate analysis enables targeted performance optimization.
 
 ### [Trace Availability-Analysis Trade-off](#trace-availability-analysis-trade-off)
