@@ -169,7 +169,7 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -
      --find-steady-state --num-steps 256
 ```
 
-Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, a tracefile containing prefill-decode mix steps from this window, and a tracefile containing decode-only steps from this window. The tracefiles with prefill-decode and decode-only steps are non-contiguous and will have large idle times between execution steps.
+Output: A tracefile containing {num-steps} contiguous execution steps where close to maximum concurrency is observed, plus contiguous prefill-decode mix and decode-only steady-state tracefiles extracted from this window with no idle gaps between execution steps.
 
 **Refining steady-state window selection with `--CONC`, `--OSL`, and `--R`**
 
