@@ -33,6 +33,7 @@ from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
+from ..PerfModel.utils import add_simulation_time_columns
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -171,6 +172,7 @@ class TreePerfAnalyzer:
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
         detect_recompute=False,
+        enable_origami=False,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -181,6 +183,7 @@ class TreePerfAnalyzer:
         self.add_python_func = add_python_func
         self.arch = arch
         self.python_path = python_path
+        self.enable_origami = enable_origami
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
         self.with_python_stack = any(
@@ -334,7 +337,10 @@ class TreePerfAnalyzer:
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
         perf_model = perf_model_class(
-            event, arch=self.arch, python_path=self.python_path
+            event,
+            arch=self.arch,
+            python_path=self.python_path,
+            enable_origami=self.enable_origami,
         )
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
@@ -408,28 +414,22 @@ class TreePerfAnalyzer:
                 )
 
         if hasattr(perf_model, "get_simulation_time") and not bwd:
-            # This is for the case where we have a simulated time
-            # for the forward pass, but not for the backward pass
-            simulated_time = perf_model.get_simulation_time()
-            if simulated_time:
-                dict_metrics["Simulated Time (µs)"] = simulated_time
-                dict_metrics["Simulated TFLOPS/s"] = (
-                    (gflops / 1e3) / (simulated_time / 1e6)
-                    if simulated_time > 0
-                    else float("nan")
-                )
+            add_simulation_time_columns(
+                dict_metrics,
+                perf_model.get_simulation_time(),
+                gflops,
+                bytes_moved,
+                busy_kernel_time,
+            )
 
         if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
-            # This is for the case where we have a simulated time
-            # for the forward pass, but not for the backward pass
-            simulated_time = perf_model.get_simulation_time_bwd()
-            if simulated_time:
-                dict_metrics["Simulated Time (µs)"] = simulated_time
-                dict_metrics["Simulated TFLOPS/s"] = (
-                    (gflops / 1e3) / (simulated_time / 1e6)
-                    if simulated_time > 0
-                    else float("nan")
-                )
+            add_simulation_time_columns(
+                dict_metrics,
+                perf_model.get_simulation_time_bwd(),
+                gflops,
+                bytes_moved,
+                busy_kernel_time,
+            )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -604,10 +604,11 @@ class TreePerfAnalyzer:
             dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
-        if "Simulated Time (µs)" in df_perf_metrics.columns:
-            # first since it should be same for the group
-            dict_agg["Simulated Time (µs)"] = "first"
-            dict_agg["Simulated TFLOPS/s"] = "first"
+        if "Origami Time (µs)" in df_perf_metrics.columns:
+            dict_agg["Origami Time (µs)"] = "first"
+            dict_agg["Origami TFLOPS/s"] = "first"
+            dict_agg["Origami TB/s"] = agg_metrics
+            dict_agg["Pct Origami"] = agg_metrics
         if "Non-Data-Mov TFLOPS/s" in df_perf_metrics.columns:
             dict_agg["Non-Data-Mov TFLOPS/s"] = agg_metrics
         if "Non-Data-Mov Kernel Time (µs)" in df_perf_metrics.columns:
@@ -1907,6 +1908,10 @@ class TreePerfAnalyzer:
                 "Roofline Time (µs)",
                 "Roofline Bound",
                 "Pct Roofline",
+                "Origami Time (µs)",
+                "Origami TFLOPS/s",
+                "Origami TB/s",
+                "Pct Origami",
             ]
 
             if include_perf_metrics and has_own_perf_model:
@@ -2092,9 +2097,19 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
+        # Optional simulated metrics from perf model.
+        # Keep the flattened "_first" names in unified_perf_summary for visibility.
+        origami_static_cols = ["Origami Time (µs)", "Origami TFLOPS/s"]
+        for col in origami_static_cols:
+            if col in df_temp.columns:
+                agg_dict[col] = "first"
+
         # Time-varying metrics - mean/std (varies per instance)
         time_varying_cols = ["TB/s", "TFLOPS/s"]
         for col in time_varying_cols:
+            if col in df_temp.columns:
+                agg_dict[col] = agg_metrics
+        for col in ("Origami TB/s", "Pct Origami"):
             if col in df_temp.columns:
                 agg_dict[col] = agg_metrics
 
@@ -2664,11 +2679,13 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         arch=None,
         python_path=None,
         kernel_metadata_keyword_filters: list[str] = None,
+        enable_origami=False,
     ):
         # super.__init__(*args, **kwargs)
         self.tree = tree
         self.arch = arch
         self.python_path = python_path
+        self.enable_origami = enable_origami
         self.event_to_category = event_to_category
         self.pb_file_name = pb_file_name
         self.arch = arch
@@ -3166,7 +3183,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             logger.warning(f"\nPerf model is not implemented. \n\nEvent: {event}")
             return dict()
         perf_model = perf_model_class(
-            event, arch=self.arch, python_path=self.python_path
+            event,
+            arch=self.arch,
+            python_path=self.python_path,
+            enable_origami=self.enable_origami,
         )
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
@@ -3200,38 +3220,33 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             dict_metrics["FLOPS/Byte"] = float("nan")
             dict_metrics["TB/s"] = float("nan")
 
-        # JaxGemm
+        # JaxGemm (constructor may set simulation_time from Origami)
         if hasattr(perf_model, "simulation_time"):
-            dict_metrics["Simulation Time (µs)"] = perf_model.simulation_time
-            dict_metrics["Simulation TFLOPS/s"] = (
-                (gflops / 1e3) / (perf_model.simulation_time / 1e6)
-                if perf_model.simulation_time > 0
-                else float("nan")
+            add_simulation_time_columns(
+                dict_metrics,
+                perf_model.simulation_time,
+                gflops,
+                bytes_moved,
+                busy_kernel_time,
             )
 
         if hasattr(perf_model, "get_simulation_time") and not bwd:
-            # This is for the case where we have a simulated time
-            # for the forward pass, but not for the backward pass
-            simulated_time = perf_model.get_simulation_time()
-            if simulated_time:
-                dict_metrics["Simulated Time (µs)"] = simulated_time
-                dict_metrics["Simulated TFLOPS/s"] = (
-                    (gflops / 1e3) / (simulated_time / 1e6)
-                    if simulated_time > 0
-                    else float("nan")
-                )
+            add_simulation_time_columns(
+                dict_metrics,
+                perf_model.get_simulation_time(),
+                gflops,
+                bytes_moved,
+                busy_kernel_time,
+            )
 
         if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
-            # This is for the case where we have a simulated time
-            # for the forward pass, but not for the backward pass
-            simulated_time = perf_model.get_simulation_time_bwd()
-            if simulated_time:
-                dict_metrics["Simulated Time (µs)"] = simulated_time
-                dict_metrics["Simulated TFLOPS/s"] = (
-                    (gflops / 1e3) / (simulated_time / 1e6)
-                    if simulated_time > 0
-                    else float("nan")
-                )
+            add_simulation_time_columns(
+                dict_metrics,
+                perf_model.get_simulation_time_bwd(),
+                gflops,
+                bytes_moved,
+                busy_kernel_time,
+            )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
