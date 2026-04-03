@@ -1598,8 +1598,6 @@ class TreePerfAnalyzer:
         current = event
         autograd_wrapper = None
         fwd_uid = None
-        # if current.get("children") and not any(self.event_to_category(self.tree.get_UID2event(child_uid)) == "cuda_runtime" for child_uid in current.get("children", [])):
-        #     return None, False
 
         for _ in range(5):
             parent = self.tree.get_parent_event(current)
@@ -1679,8 +1677,6 @@ class TreePerfAnalyzer:
         (``python_function`` nodes are transparent). Used so a parent that only
         qualifies via ``_is_sole_bwd_with_fwd_perf_model`` does not win over a
         deeper op with its own perf model.
-
-        Checking only *direct* ``cpu_op`` children would miss nested launchers.
         """
         stack = list(event.get("children", []))
         while stack:
