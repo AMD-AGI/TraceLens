@@ -669,8 +669,10 @@ def identify_steady_state_regions(
     print(f"Steady state regions: {regions}")
 
     if len(regions) == 0:
-        delta = max(8, num_steps - n)
-        regions = [(delta // 2, n - delta // 2)]
+        delta = min(n, max(8, num_steps - n))
+        start = max(0, delta // 2)
+        end = min(n, n - delta // 2)
+        regions = [(start, end)]
         print(
             "Warning: no steady state region found; discarding initial/final iterations "
             "and selecting middle region"
