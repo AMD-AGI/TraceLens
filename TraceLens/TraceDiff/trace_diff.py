@@ -229,7 +229,8 @@ class TraceDiff:
                     children = current.get("children", [])
                     if len(children) == 1:
                         child = tree.get_UID2event(children[0])
-                        if (child.get("cat") or child.get("category")) == "cpu_op":
+                        child_cat = child.get("cat") or child.get("category")
+                        if child_cat in ("cpu_op", "cuda_runtime"):
                             break
                         current = child
                     else:
