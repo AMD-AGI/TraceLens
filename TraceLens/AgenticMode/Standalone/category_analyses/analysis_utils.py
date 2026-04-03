@@ -325,7 +325,13 @@ def build_operation_metrics(
         if count > 10:
             std_val = row.get("Kernel Time (µs)_std")
             mean_val = row.get("Kernel Time (µs)_mean")
-            if std_val is not None and mean_val is not None and not pd.isna(std_val) and not pd.isna(mean_val) and mean_val > 0:
+            if (
+                std_val is not None
+                and mean_val is not None
+                and not pd.isna(std_val)
+                and not pd.isna(mean_val)
+                and mean_val > 0
+            ):
                 cov = round(float(std_val) / float(mean_val), 3)
                 op_metric["cov"] = cov
                 op_metric["high_variance"] = cov > 1.0
@@ -512,7 +518,11 @@ def parse_first_shape(dims_str):
         return None
     try:
         parsed = ast.literal_eval(str(dims_str))
-        return tuple(parsed[0]) if parsed and isinstance(parsed[0], (list, tuple)) else None
+        return (
+            tuple(parsed[0])
+            if parsed and isinstance(parsed[0], (list, tuple))
+            else None
+        )
     except Exception:
         return None
 

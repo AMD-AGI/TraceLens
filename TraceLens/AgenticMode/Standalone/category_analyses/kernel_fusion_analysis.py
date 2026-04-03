@@ -33,14 +33,26 @@ TARGET_LOW = 75.0
 TARGET_MID = 87.5
 MIN_E2E_PCT = 2.0
 
-_MATRIX_SPECS = frozenset({
-    "matrix_fp16", "matrix_bf16", "matrix_fp32", "matrix_fp64",
-    "matrix_fp8", "matrix_int8",
-})
+_MATRIX_SPECS = frozenset(
+    {
+        "matrix_fp16",
+        "matrix_bf16",
+        "matrix_fp32",
+        "matrix_fp64",
+        "matrix_fp8",
+        "matrix_int8",
+    }
+)
 
-_NORM_TYPES = frozenset({
-    "LayerNorm", "BatchNorm", "GroupNorm", "InstanceNorm", "Norm",
-})
+_NORM_TYPES = frozenset(
+    {
+        "LayerNorm",
+        "BatchNorm",
+        "GroupNorm",
+        "InstanceNorm",
+        "Norm",
+    }
+)
 
 
 def build_kernel_perf_lookup(csv_path: str) -> Dict[str, Dict]:
@@ -113,9 +125,7 @@ def _split_into_subgroups(enriched_kernels):
     return typed
 
 
-def _roofline_savings_us(
-    enriched, peak_bw_bytes_s, vector_maf, matrix_maf, target_pct
-):
+def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, target_pct):
     """Compute roofline-projected savings for an elementwise sub-group."""
     modeled = [e for e in enriched if e["has_perf_data"]]
     if not modeled:
@@ -145,11 +155,13 @@ def _roofline_savings_us(
     memory_time_us = total_ext_data_bytes / (peak_bw_bytes_s * frac) * 1e6
     matrix_time_us = (
         (matrix_gflops * 1e9) / (matrix_maf * 1e12 * frac) * 1e6
-        if matrix_gflops > 0 else 0.0
+        if matrix_gflops > 0
+        else 0.0
     )
     vector_time_us = (
         (vector_gflops * 1e9) / (vector_maf * 1e12 * frac) * 1e6
-        if vector_gflops > 0 else 0.0
+        if vector_gflops > 0
+        else 0.0
     )
     fused_time_us = max(memory_time_us, max(matrix_time_us, vector_time_us))
 
@@ -202,17 +214,19 @@ def compute_fusion_impact_estimates(
             dm = perf.get("Data Moved (MB)")
             gf = perf.get("GFLOPS")
             has_data = dm is not None
-            enriched.append({
-                "name": kname,
-                "type": k.get("type", k.get("kernel_type", "Unknown")),
-                "dur_us": dur_us,
-                "data_moved_mb": float(dm) if dm is not None else None,
-                "data_in_mb": k.get("data_in_mb"),
-                "data_out_mb": k.get("data_out_mb"),
-                "gflops": float(gf) if gf is not None else None,
-                "compute_spec": perf.get("Compute Spec"),
-                "has_perf_data": has_data,
-            })
+            enriched.append(
+                {
+                    "name": kname,
+                    "type": k.get("type", k.get("kernel_type", "Unknown")),
+                    "dur_us": dur_us,
+                    "data_moved_mb": float(dm) if dm is not None else None,
+                    "data_in_mb": k.get("data_in_mb"),
+                    "data_out_mb": k.get("data_out_mb"),
+                    "gflops": float(gf) if gf is not None else None,
+                    "compute_spec": perf.get("Compute Spec"),
+                    "has_perf_data": has_data,
+                }
+            )
 
         modeled = [e for e in enriched if e["has_perf_data"]]
         unmodeled_count = len(enriched) - len(modeled)
@@ -259,7 +273,10 @@ def compute_fusion_impact_estimates(
                     total_savings_us += non_gemm_time
                 elif sg_type == "elementwise":
                     sg_savings = _roofline_savings_us(
-                        sg_kernels, peak_bw_bytes_s, vector_maf, matrix_maf,
+                        sg_kernels,
+                        peak_bw_bytes_s,
+                        vector_maf,
+                        matrix_maf,
                         target_pct,
                     )
                     total_savings_us += sg_savings
@@ -314,9 +331,7 @@ def compute_fusion_impact_estimates(
             e2e_pct_high = savings_high / baseline_ms * 100
             if e2e_pct_high < MIN_E2E_PCT:
                 continue
-            estimate["e2e_pct_low"] = round(
-                savings_low / baseline_ms * 100, 2
-            )
+            estimate["e2e_pct_low"] = round(savings_low / baseline_ms * 100, 2)
             estimate["e2e_pct_high"] = round(e2e_pct_high, 2)
 
         estimates.append(estimate)
@@ -360,7 +375,9 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
 
     arch_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "utils", "arch", f"{platform}.json",
+        "utils",
+        "arch",
+        f"{platform}.json",
     )
     if os.path.exists(arch_path):
         with open(arch_path, "r") as f:
@@ -383,8 +400,7 @@ def _filter_and_dedup(candidates: list) -> list:
     Keep only the one with the shorter (more specific) module name.
     """
     filtered = [
-        c for c in candidates
-        if c.get("kernel_count", 0) <= MAX_FUSION_KERNEL_COUNT
+        c for c in candidates if c.get("kernel_count", 0) <= MAX_FUSION_KERNEL_COUNT
     ]
 
     seen: dict = {}
@@ -425,8 +441,10 @@ def main():
 
     raw_count = len(candidates)
     candidates = _filter_and_dedup(candidates)
-    print(f"  Filtered: {raw_count} -> {len(candidates)} candidates "
-          f"(max {MAX_FUSION_KERNEL_COUNT} kernels, deduped)")
+    print(
+        f"  Filtered: {raw_count} -> {len(candidates)} candidates "
+        f"(max {MAX_FUSION_KERNEL_COUNT} kernels, deduped)"
+    )
 
     if not candidates:
         metrics = {
