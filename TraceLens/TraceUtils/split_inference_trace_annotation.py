@@ -1106,7 +1106,7 @@ def main():
         type=float,
         default=None,
         help=(
-            "Average output sequence length (decode tokens per request). "
+            "Maximum output sequence length (decode tokens per request). "
             "Used with --R to compute the ideal PD ratio for mixed-window selection."
         ),
     )
