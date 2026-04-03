@@ -1735,9 +1735,23 @@ class TreePerfAnalyzer:
 
             # Exit condition 2: 1:1 backward op with linked forward that has perf model
             # We can compute backward metrics via forward's perf model
+            # However, prefer a child cpu_op that has its own perf model (e.g.,
+            # prefer aten::convolution_backward over ConvolutionBackward0)
             if self._is_sole_bwd_with_fwd_perf_model(event):
-                collected.append(event)
-                return
+                child_has_own_perf_model = False
+                for c in event.get("children", []):
+                    child = self.tree.get_UID2event(c)
+                    if (
+                        self.event_to_category(child) == "cpu_op"
+                        and self._has_perf_model(child)
+                        and self._launches_gpu_kernels(child)
+                    ):
+                        child_has_own_perf_model = True
+                        break
+                if not child_has_own_perf_model:
+                    collected.append(event)
+                    return
+                # Fall through to traverse children with their own perf models
 
             # Exit condition 3: Leaf cpu_op (direct kernel launcher) with GPU kernels
             if self._is_leaf_cpu_op(event):
