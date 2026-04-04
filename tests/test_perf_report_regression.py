@@ -67,7 +67,7 @@ def test_perf_report_regression(
 
     When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
     the checked-in reference CSVs are overwritten with the freshly generated
-    output and the test is marked *xfail* so the suite still returns green.
+    output and the test is skipped so the suite still returns green.
     """
     profile_path = os.path.join(dirpath, gz)
     ref_csv_dir = os.path.join(dirpath, report_csv_dirname)
