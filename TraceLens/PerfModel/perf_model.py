@@ -3433,16 +3433,12 @@ class aten_reduce(Reduce):
         else:
             dtype_out = None
 
-        # Infer output shape from dim and keepdim if available
         concrete = args.get("Concrete Inputs", [])
         dim = None
         keepdim = False
-        # concrete[0] is expected to be the input tensor; parse the rest heuristically
         if len(concrete) >= 2:
-            # Slice off the input tensor; remaining are scalar/config args
             scalar_args = concrete[1:]
 
-            # Heuristic for keepdim: use the last boolean argument
             keepdim_idx = None
             for idx in range(len(scalar_args) - 1, -1, -1):
                 val = scalar_args[idx]
@@ -3451,7 +3447,6 @@ class aten_reduce(Reduce):
                     keepdim_idx = idx
                     break
 
-            # Heuristic for dim: prefer the last int or list/tuple of ints, excluding keepdim_idx
             for idx in range(len(scalar_args) - 1, -1, -1):
                 if keepdim_idx is not None and idx == keepdim_idx:
                     continue
@@ -3468,15 +3463,12 @@ class aten_reduce(Reduce):
                         break
                     print(f"failed to parse dimension specification for reduce: {name}")
                 except (TypeError, ValueError):
-                    # Not a valid dimension specification; ignore
-                    print("failed to parse dimension specification for reduce: {name}")
+                    print(f"failed to parse dimension specification for reduce: {name}")
                     continue
 
-        # cumsum/cumprod preserve shape
         if "cumsum" in name or "cumprod" in name:
             num_output_elems = num_input_elems
         elif dim is not None and len(dim) > 0:
-            # Normalize dim to positive indices
             ndim = len(input_shape)
             dim = [d if d >= 0 else ndim + d for d in dim]
             out_shape = list(input_shape)
@@ -3488,7 +3480,6 @@ class aten_reduce(Reduce):
                         out_shape.pop(d)
             num_output_elems = prod(out_shape) if out_shape else 1
         else:
-            # Reduce over all dimensions: scalar or single element
             num_output_elems = 1
 
         reduce_type = "sum"

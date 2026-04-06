@@ -55,7 +55,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 
 ##### vLLM Script
 
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, or `v17`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, or `v18`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
 | Version | Base Image                                                    | vLLM Version |
@@ -64,6 +64,7 @@ A unified build script is provided that supports multiple vLLM versions. It take
 | `v15`   | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130`        | v0.15.0      |
 | `v16`   | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0      |
 | `v17`   | `vllm/vllm-openai-rocm:v0.17.0`                               | v0.17.0      |
+| `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      |
 
 
 ```bash
@@ -73,45 +74,57 @@ bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
     -t tracelens-vllm
 ```
 
+To use a custom base Docker image instead of the default for the selected version, pass `--base-image`:
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
+    v18 \
+    /path/to/TraceLens-internal \
+    --base-image my-registry/vllm:nightly \
+    -t tracelens-vllm:custom
+```
+
 Then create a container from the image.
 
 ##### SGLang Script
 
-The build script for SGLang supports SGLang 0.5.9 with ROCm 7. The script takes the path to the local TraceLens-internal clone and the GPU type being used. It currently supports MI300 and MI355 and defaults to MI355 if not provided.
+The build script for SGLang supports SGLang 0.5.9 with ROCm 7. The script takes the path to the local TraceLens-internal clone and the GPU type being used. It supports MI300 and MI350/MI355 (equivalent targets), defaulting to MI350.
 
 
-| GPU Type | Base Image                             | SGLang Version |
-| -------- | -------------------------------------- | -------------- |
-| `MI300`  | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9         |
-| `MI355`  | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9         |
+| GPU Type      | Base Image                             | SGLang Version |
+| ------------- | -------------------------------------- | -------------- |
+| `MI300`       | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9         |
+| `MI350/MI355` | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9         |
 
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
     /path/to/TraceLens-internal \
-    mi355
+    mi350 \
+    -t tracelens-sglang
 ```
 
-A container with the name sglang-deepseek-mi300/355x will be created depending on the GPU type specified.
+Then create a container from the image.
 
 ##### Atom Script
 
-The build script for Atom supports Atom 0.1.1 with ROCm 7.1.1. The script takes the path to the local TraceLens-internal clone and the GPU type being used. It currently supports MI300 and MI355 and defaults to MI355 if not provided.
+The build script for Atom supports Atom 0.1.1 with ROCm 7.1.1. The script takes the path to the local TraceLens-internal clone and the GPU type being used. It supports MI300 and MI350/MI355 (equivalent targets), defaulting to MI350.
 
 
-| GPU Type | Base Image                                                             | Atom Version |
-| -------- | ---------------------------------------------------------------------- | ------------ |
-| `MI300`  | `rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI300x`          | 0.1.1        |
-| `MI355`  | `rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI355x`          | 0.1.1        |
+| GPU Type      | Base Image                                                    | Atom Version |
+| ------------- | ------------------------------------------------------------- | ------------ |
+| `MI300`       | `rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI300x` | 0.1.1        |
+| `MI350/MI355` | `rocm/atom:rocm7.1.1-ubuntu24.04-pytorch2.9-atom0.1.1-MI350x` | 0.1.1        |
 
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_atom.sh \
     /path/to/TraceLens-internal \
-    mi355
+    mi350 \
+    -t tracelens-atom
 ```
 
-A container with the name atom-deepseek-mi300/355x will be created depending on the GPU type specified.
+Then create a container from the image.
 
 #### Option B: Apply framework patches manually
 

@@ -7,7 +7,7 @@
 # Regression tests for generate_perf_report_pytorch_inference.
 # Each test case is a subdirectory under tests/traces/inference/ containing:
 #   - A .json.gz trace file
-#   - A perf_report.xlsx reference report
+#   - A perf_csvs/ folder with reference CSV files (one per output sheet)
 #   - Optionally capture_traces/ (graph capture mode)
 #   - Optionally gpu_arch.json
 
@@ -176,7 +176,7 @@ COLS_IGNORE = [
 def find_inference_test_cases():
     """
     Discover test cases under INFERENCE_TRACES_ROOT.
-    Each subdirectory with a .json.gz and perf_report.xlsx becomes a test case.
+    Each subdirectory with a .json.gz and a perf_csvs/ folder becomes a test case.
     """
     test_cases = []
     if not os.path.isdir(INFERENCE_TRACES_ROOT):
@@ -186,8 +186,8 @@ def find_inference_test_cases():
         if not os.path.isdir(dirpath):
             continue
         gz_files = [f for f in os.listdir(dirpath) if f.endswith(".json.gz")]
-        ref_xlsx = os.path.join(dirpath, "perf_report.xlsx")
-        if not gz_files or not os.path.exists(ref_xlsx):
+        perf_csvs_dir = os.path.join(dirpath, "perf_csvs")
+        if not gz_files or not os.path.isdir(perf_csvs_dir):
             continue
         trace_gz = gz_files[0]
         capture_folder = os.path.join(dirpath, "capture_traces")
@@ -216,10 +216,10 @@ def test_inference_perf_report(
 ):
     """
     Directly call generate_perf_report_pytorch (from the inference module)
-    and compare every returned DataFrame against the reference perf_report.xlsx.
+    and compare every output CSV against the reference CSVs in perf_csvs/.
     """
     profile_path = os.path.join(dirpath, trace_gz)
-    ref_report_path = os.path.join(dirpath, "perf_report.xlsx")
+    ref_csvs_dir = os.path.join(dirpath, "perf_csvs")
 
     # Build the augmented graph tree when capture traces are present
     graph_tree = None
@@ -230,7 +230,7 @@ def test_inference_perf_report(
             capture_folder, metadata_json_path, profile_path
         )
 
-    # Call the function under test
+    # Call the function under test — write CSVs to a temp directory
     output_csvs_dir = str(tmp_path / "csvs")
     os.makedirs(output_csvs_dir, exist_ok=True)
     result = generate_perf_report_pytorch(
@@ -254,17 +254,26 @@ def test_inference_perf_report(
         assert isinstance(df, pd.DataFrame), f"Sheet '{sheet_name}' is not a DataFrame"
         assert not df.empty, f"Sheet '{sheet_name}' is unexpectedly empty"
 
-    # Compare against reference xlsx
-    ref_sheets = pd.ExcelFile(ref_report_path).sheet_names
-    for sheet in ref_sheets:
-        df_ref = pd.read_excel(ref_report_path, sheet_name=sheet)
+    # Verify CSV output was written for every sheet
+    for sheet_name in result:
+        csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
+        assert os.path.exists(
+            csv_path
+        ), f"CSV output for sheet '{sheet_name}' was not written to {csv_path}"
+
+    # Compare each generated CSV against the reference CSV in perf_csvs/
+    ref_csv_files = [f for f in os.listdir(ref_csvs_dir) if f.endswith(".csv")]
+    for csv_file in ref_csv_files:
+        sheet_name = csv_file[: -len(".csv")]
+        ref_csv_path = os.path.join(ref_csvs_dir, csv_file)
+        df_ref = pd.read_csv(ref_csv_path)
         if df_ref.empty:
             continue
-        assert sheet in result, (
-            f"Sheet '{sheet}' exists in reference but was not returned by "
+        assert sheet_name in result, (
+            f"'{sheet_name}' exists in reference perf_csvs/ but was not returned by "
             f"generate_perf_report_pytorch"
         )
-        df_test = result[sheet]
+        df_test = result[sheet_name]
         cols = [
             col
             for col in df_ref.columns
@@ -272,13 +281,6 @@ def test_inference_perf_report(
         ]
         diff_cols = compare_cols(df_test, df_ref, cols, tol=tol)
         assert not diff_cols, (
-            f"Sheet '{sheet}' has differences in {profile_path}:"
+            f"'{sheet_name}' has differences in {profile_path}:"
             f"{format_diff_details(diff_cols)}"
         )
-
-    # Verify CSV output was written for every sheet
-    for sheet_name in result:
-        csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-        assert os.path.exists(
-            csv_path
-        ), f"CSV output for sheet '{sheet_name}' was not written to {csv_path}"

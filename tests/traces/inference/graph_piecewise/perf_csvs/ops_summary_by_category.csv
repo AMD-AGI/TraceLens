@@ -1,0 +1,8 @@
+op category,parent_module,Count,call_stack_first,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
+other, nn.Module: GraphModule ,169,aiter::rms_norm => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,131.1588525390625,84.02991173755899,84.02991173755899
+GEMM, nn.Module: GraphModule ,72,aten::addmm => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,17.3018173828125,11.084804109155332,95.11471584671432
+InferenceAttention, nn.Module: GraphModule ,24,vllm::unified_attention_with_output => nn.Module: GraphModule_0 => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,5.1469072265625,3.2974835597974104,98.41219940651173
+triton, nn.Module: GraphModule ,48,triton_poi_fused_0 => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,2.0454619140625,1.310471849774837,99.72267125628657
+GEMM, nn.Module: LogitsProcessor,1,aten::mm => nn.Module: LogitsProcessor_0,0.34663671875,0.22208072362393175,99.9447519799105
+elementwise,NA,12,aten::copy_,0.082595703125,0.05291682192346347,99.99766880183397
+other,NA,1,aten::index,0.003638671875,0.0023311981660340147,100.0
