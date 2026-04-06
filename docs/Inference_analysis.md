@@ -158,6 +158,19 @@ If you prefer to patch an existing environment instead of building a new image, 
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh), an example to run the DSR-1 model using SGLang can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh), and an example to run DSR-1 using Atom can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp4_mi355x_atom.sh).
 
+#### Trace collection options
+##### SG Lang
+1. While doing the profiling of the execution step, pass the parameter `shape_discovery=True` in the profile request to enable shape discovery and registration for operations which are not covered in default SGLang profile.
+
+2. While doing the profiling of the execution step, pass the parameter `roofline_annotations=True` in the profile request to annotate trace with more detailed information useful for roofline annotations.
+
+3. To profile the graph capture phase, while server startup provide the `--enable-profile-cuda-graph` server argument. This will save a trace file per batch size but it misses shape information for some operations, to ensure more diverse coverage, provide the `--enable-shape-discovery-for-cuda-graph-profile` server argument.
+
+##### ATOM
+1. To annotate the execution steps trace with roofline annotations, set the environment variable `ATOM_ENABLE_ROOFLINE_ANNOTATION=1`.
+
+2. To profile the capture phase and store one trace file per batch size, add the server argument `--enable-capture-profiling` during startup.
+
 ### Step 3: Trace Preparation (Optional)
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
