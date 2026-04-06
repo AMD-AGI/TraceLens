@@ -27,11 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
 
-MAX_FUSION_KERNEL_COUNT = 15
-TARGET_HIGH = 100.0
-TARGET_LOW = 75.0
-TARGET_MID = 87.5
-MIN_E2E_PCT = 2.0
+MAX_FUSION_KERNEL_COUNT = 15 # Skip candidates with more kernels than this (too complex to fuse reliably)
+
+TARGET_HIGH = 100.0 # Best-case savings target (100% of original time)
+TARGET_LOW = 75.0 # Mid-range savings target (75% of original time)
+TARGET_MID = 87.5 # Balanced savings target (87.5% of original time)
+MIN_E2E_PCT = 2.0 # Drop estimates whose best-case E2E impact is below this threshold
+OVERLAP_EFFICIENCY = 0.85 # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
 _MATRIX_SPECS = frozenset(
     {
@@ -126,7 +128,10 @@ def _split_into_subgroups(enriched_kernels):
 
 
 def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, target_pct):
-    """Compute roofline-projected savings for an elementwise sub-group."""
+    """Compute roofline-projected savings for an elementwise sub-group.
+
+    Blends between max (perfect overlap) and sum (no overlap) using OVERLAP_EFFICIENCY.
+    """
     modeled = [e for e in enriched if e["has_perf_data"]]
     if not modeled:
         return 0.0
@@ -163,7 +168,10 @@ def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, targ
         if vector_gflops > 0
         else 0.0
     )
-    fused_time_us = max(memory_time_us, max(matrix_time_us, vector_time_us))
+
+    fused_optimal = max(memory_time_us, matrix_time_us, vector_time_us)
+    fused_sum = memory_time_us + matrix_time_us + vector_time_us
+    fused_time_us = fused_optimal + (1.0 - OVERLAP_EFFICIENCY) * (fused_sum - fused_optimal)
 
     unmodeled_time_us = sum(e["dur_us"] for e in enriched if not e["has_perf_data"])
     current_us = sum(e["dur_us"] for e in enriched)

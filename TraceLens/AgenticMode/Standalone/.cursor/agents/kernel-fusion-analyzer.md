@@ -146,6 +146,8 @@ Within each tier, sort by `total_kernel_time_us` descending.
 ## Overview
 Found N kernel fusion opportunities across M module types.
 
+> **Methodology:** Savings projections use a roofline model with 85% memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual savings may vary with workload and hardware.
+
 ## Findings
 
 ### 🔴 P1: <Pattern Name> (<time_ms> ms, <instance_count> instances)
