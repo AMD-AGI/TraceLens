@@ -916,7 +916,8 @@ def main():
         action="store_true",
         default=False,
         help="Detect activation recomputation (checkpointing) and add an is_recompute column "
-        "to ops_summary, ops_unique_args, and unified_perf_summary sheets. "
+        "to gpu_timeline, ops_summary_by_category, ops_summary, ops_unique_args, and "
+        "unified_perf_summary sheets. "
         "Requires python_function events in the trace (forces add_python_func=True internally).",
     )
     parser.add_argument(

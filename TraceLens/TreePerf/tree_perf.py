@@ -2323,8 +2323,11 @@ class TreePerfAnalyzer:
             pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
         """
         df_temp = df_kernel_launchers.copy()
+        groupby_cols = ["op category"]
+        if "is_recompute" in df_temp.columns:
+            groupby_cols.append("is_recompute")
         agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
-        df_agg = df_temp.groupby("op category").agg(agg_dict)
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
@@ -2342,7 +2345,11 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-        return df_agg
+        ordered = ["op category"]
+        if "is_recompute" in df_agg.columns:
+            ordered.append("is_recompute")
+        ordered.extend(c for c in df_agg.columns if c not in ordered)
+        return df_agg[ordered]
 
     @staticmethod
     def get_df_kernel_launchers_summary_by_category_module(
@@ -2359,6 +2366,8 @@ class TreePerfAnalyzer:
         groupby_cols = ["op category"]
         if "parent_module" in df_temp.columns:
             groupby_cols.append("parent_module")
+        if "is_recompute" in df_temp.columns:
+            groupby_cols.append("is_recompute")
         agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
         if "call_stack" in df_temp.columns:
             agg_dict["call_stack"] = "first"
@@ -2381,7 +2390,13 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-        return df_agg
+        ordered = ["op category"]
+        if "parent_module" in df_agg.columns:
+            ordered.append("parent_module")
+        if "is_recompute" in df_agg.columns:
+            ordered.append("is_recompute")
+        ordered.extend(c for c in df_agg.columns if c not in ordered)
+        return df_agg[ordered]
 
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
@@ -2391,11 +2406,28 @@ class TreePerfAnalyzer:
         ]
         if not self.include_unlinked_kernels:
             kernel_events = [event for event in kernel_events if event.get("tree")]
-        gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
-        df = gpu_event_analyser.get_breakdown_df(
-            micro_idle_thresh_us=micro_idle_thresh_us
-        )
-        return df
+        if not self.detect_recompute:
+            gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
+            return gpu_event_analyser.get_breakdown_df(
+                micro_idle_thresh_us=micro_idle_thresh_us
+            )
+
+        norc = [e for e in kernel_events if not e.get("is_recompute")]
+        rc = [e for e in kernel_events if e.get("is_recompute")]
+        dfs = []
+        for flag, subset in ((False, norc), (True, rc)):
+            if not subset:
+                continue
+            df_part = self.GPUEventAnalyser(subset).get_breakdown_df(
+                micro_idle_thresh_us=micro_idle_thresh_us
+            )
+            df_part["is_recompute"] = flag
+            dfs.append(df_part)
+        if not dfs:
+            return pd.DataFrame()
+        out = pd.concat(dfs, ignore_index=True)
+        cols = ["type", "time ms", "percent", "is_recompute"]
+        return out[[c for c in cols if c in out.columns]]
 
     def get_kernel_details(
         self,

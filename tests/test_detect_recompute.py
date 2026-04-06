@@ -36,7 +36,14 @@ REF_CSV_DIR = os.path.join(
     TRACE_DIR, perf_report_csv_dirname("resnet_act_checkpoint_recompute")
 )
 
-SHEETS_WITH_RECOMPUTE = ["ops_summary", "ops_unique_args", "unified_perf_summary"]
+SHEETS_WITH_RECOMPUTE = [
+    "gpu_timeline",
+    "ops_summary_by_category",
+    "ops_summary",
+    "ops_unique_args",
+    "unified_perf_summary",
+]
+
 PERF_METRICS_SHEETS = [
     "GEMM",
     "SDPA_fwd",
