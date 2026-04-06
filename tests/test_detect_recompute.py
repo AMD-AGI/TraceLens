@@ -104,6 +104,7 @@ def test_detect_recompute_e2e(tmp_path, update_references):
             not diff_cols
         ), f"Sheet '{sheet}' has differences: {format_diff_details(diff_cols)}"
 
+    # Verify is_recompute column exists in the expected sheets
     for sheet_name in SHEETS_WITH_RECOMPUTE:
         df = read_perf_report_csv(fn_csv_dir, sheet_name)
         assert (
@@ -114,6 +115,7 @@ def test_detect_recompute_e2e(tmp_path, update_references):
             "is_recompute"
         ].all(), f"All rows marked as recompute in {sheet_name} — expected a mix"
 
+    # Verify is_recompute propagates to perf metrics sheets (build_df_perf_metrics)
     all_sheets = list_perf_report_csv_sheets(fn_csv_dir)
     for sheet_name in PERF_METRICS_SHEETS:
         if sheet_name in all_sheets:
