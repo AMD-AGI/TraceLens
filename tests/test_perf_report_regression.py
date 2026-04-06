@@ -65,7 +65,7 @@ def test_perf_report_regression(
     """
     For each .gz / *_perf_report_csvs/ pair, generate a report and compare to reference CSVs.
 
-    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    When ``--update-references`` is passed,
     the checked-in reference CSVs are overwritten with the freshly generated
     output and the test is skipped so the suite still returns green.
     """

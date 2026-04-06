@@ -61,7 +61,7 @@ COLS_IGNORE = [
 def test_detect_recompute_e2e(tmp_path, update_references):
     """Generate perf report with detect_recompute=True and compare to reference CSVs.
 
-    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    When ``--update-references`` is passed,
     the checked-in reference CSVs are overwritten with the freshly generated
     output and the test is skipped so the suite still returns green.
     """

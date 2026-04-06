@@ -39,7 +39,7 @@ def test_collective_analysis(update_references, tol=1e-6):
     Test NCCL collective analysis report generation.
     Compares generated report against reference for nccl_summary_implicit_sync sheet.
 
-    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    When ``--update-references`` is passed,
     the checked-in reference CSVs are overwritten with the freshly generated
     output and the test is skipped so the suite still returns green.
     """

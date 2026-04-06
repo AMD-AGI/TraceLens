@@ -28,8 +28,7 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="Update reference CSV directories with freshly generated outputs "
-        "instead of comparing against them. Can also be enabled by setting "
-        "the UPDATE_REFERENCE_TRACES=1 environment variable.",
+        "instead of comparing against them.",
     )
 
 
@@ -37,16 +36,9 @@ def pytest_addoption(parser):
 def update_references(request):
     """Return True when reference traces should be overwritten with new outputs.
 
-    Enabled by either the ``--update-references`` CLI flag or the
-    ``UPDATE_REFERENCE_TRACES`` environment variable (any truthy value).
+    Enabled by the ``--update-references`` CLI flag.
     """
-    from_cli = request.config.getoption("--update-references", default=False)
-    from_env = os.environ.get("UPDATE_REFERENCE_TRACES", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    return from_cli or from_env
+    return request.config.getoption("--update-references", default=False)
 
 
 def update_reference_csvs(generated_dir, reference_dir):

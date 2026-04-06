@@ -174,7 +174,7 @@ def test_jax_perf_report_csv_regression(
     When a sibling ``<trace_folder>_perf_report_csvs/`` directory exists under
     tests/traces, generated CSVs must match it (regression).
 
-    When ``--update-references`` is passed (or ``UPDATE_REFERENCE_TRACES=1``),
+    When ``--update-references`` is passed,
     the checked-in reference CSVs are overwritten with the freshly generated
     output and the test is skipped so the suite still returns green.
     """
