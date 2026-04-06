@@ -159,7 +159,7 @@ If you prefer to patch an existing environment instead of building a new image, 
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh), an example to run the DSR-1 model using SGLang can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh), and an example to run DSR-1 using Atom can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp4_mi355x_atom.sh).
 
 #### Trace collection options
-##### SG Lang
+##### SGLang
 1. While doing the profiling of the execution step, pass the parameter `shape_discovery=True` in the profile request to enable shape discovery and registration for operations which are not covered in default SGLang profile.
 
 2. While doing the profiling of the execution step, pass the parameter `roofline_annotations=True` in the profile request to annotate trace with more detailed information useful for roofline annotations.
