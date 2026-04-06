@@ -54,9 +54,10 @@ jobs:
           pytest tests/test_perf_report_regression.py
 
       - name: Run compare perf reports tests
-        . .venv/bin/activate
-        run: pytest tests/test_compare_perf_reports.py
-        
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_compare_perf_reports.py
+
       - name: Run pytest on inference perf report tests
         run: |
           . .venv/bin/activate
