@@ -19,6 +19,8 @@ on:
 jobs:
   regression-tests:
     runs-on: ubuntu-latest
+    # rocm-origami needs rocm
+    container: rocm/dev-ubuntu-24.04:7.2.1
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,46 +29,60 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
       - name: Install dependencies
         run: |
+          apt update && apt install -y python3-venv git
+          python -m venv .venv
+          . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0'
+          pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
 
       - name: Run function-based tests
-        run: pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
 
       - name: Run rocprof report tests
-        run: pytest tests/test_rocprof_perf_report.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_rocprof_perf_report.py
 
       - name: Run perf report regression tests
-        run: pytest tests/test_perf_report_regression.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_perf_report_regression.py
 
       - name: Run compare perf reports tests
+        . .venv/bin/activate
         run: pytest tests/test_compare_perf_reports.py
         
       - name: Run pytest on inference perf report tests
         run: |
-          pip install pytest openpyxl pandas
+          . .venv/bin/activate
           pytest tests/test_inference_perf_report.py
-          
-      - name: Run pytest on collective analysis tests
-        run: |
-          pip install pytest openpyxl pandas
-          pytest tests/test_collective_analysis.py
 
       - name: Run collective analysis tests
-        run: pytest tests/test_collective_analysis.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_collective_analysis.py
 
       - name: Run all2allv summary tests
-        run: pytest tests/test_all2allv_summary.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_all2allv_summary.py
 
       - name: Run JAX perf report tests
-        run: pytest tests/test_jax_perf_report.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_jax_perf_report.py
 
       - name: Run detect recompute tests
-        run: pytest tests/test_detect_recompute.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_detect_recompute.py
 
       - name: Run copyright header checks
-        run: pytest tests/test_copyright_headers.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_copyright_headers.py

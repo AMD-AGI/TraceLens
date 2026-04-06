@@ -526,6 +526,7 @@ def generate_perf_report_pytorch(
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    enable_origami: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
 ) -> Dict[str, pd.DataFrame]:
@@ -1041,6 +1042,12 @@ def main():
         default=None,
         help="Path to the GPU architecture JSON file",
     )
+    parser.add_argument(
+        "--enable-origami",
+        action="store_true",
+        default=False,
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
 
     parser.add_argument(
         "--capture_folder",
@@ -1083,6 +1090,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        enable_origami=args.enable_origami,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
     )

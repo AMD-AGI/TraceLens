@@ -249,10 +249,12 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator
+    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     group_by_num_kernels: bool = False,
+    enable_origami: bool = False,
+    # activation recompute detection
     detect_recompute: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
@@ -268,6 +270,7 @@ def generate_perf_report_pytorch(
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
         detect_recompute=detect_recompute,
+        enable_origami=enable_origami,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -910,6 +913,12 @@ def main():
         help="Group by number of kernels in summary tables.",
     )
     parser.add_argument(
+        "--enable-origami",
+        action="store_true",
+        default=False,
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
+    parser.add_argument(
         "--include_overlap_info",
         action="store_true",
         default=False,
@@ -953,6 +962,7 @@ def main():
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         group_by_num_kernels=args.group_by_num_kernels,
+        enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
     )
 
