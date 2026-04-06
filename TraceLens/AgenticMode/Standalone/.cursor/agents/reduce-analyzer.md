@@ -56,18 +56,6 @@ Use vendor-agnostic terminology:
 
 ---
 
-## Performance Model Limitation
-
-> **Note:** TraceLens does not currently have dedicated performance models for reduce kernels. Memory bandwidth utilization is reported as a general indicator, but reduce operations are not purely memory-bound — achievable efficiency depends on reduction dimensions, input sizes, and kernel implementation. Efficiency thresholds and `kernel_tuning` impact estimates should be treated as approximate.
-
-**What this means for your analysis:**
-- **Algorithmic recommendations** (e.g., unfused attention, Flash Attention) remain valid and high-confidence
-- **`kernel_tuning` recommendations** should use **`low` confidence** unless there is a clear, extreme efficiency gap (e.g., <20%)
-- The findings file **must** include the performance model caveat note (see findings template below)
-- Do NOT claim a reduce kernel is "underperforming" based solely on HBM bandwidth — instead describe it as "showing lower bandwidth utilization than a simple memory-bound model would predict"
-
----
-
 ## Analysis Workflow
 
 ### Step 1: Run Analysis Script
@@ -111,7 +99,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 **Special considerations:**
 - Softmax operations may indicate unfused attention
-- Reduce ops are generally memory-bound, but achievable efficiency varies by reduction shape — see [Performance Model Limitation](#performance-model-limitation)
+- Reduce ops are generally memory-bound
 
 ### Step 5: Generate Markdown Tables
 
@@ -134,12 +122,6 @@ For each validated bottleneck, provide recommendations in both categories:
 ### Step 7: Write Category Findings
 
 Write `<output_dir>/category_findings/reduce_findings.md` using the command prefix.
-
-The findings file **must** include the performance model caveat after the Status line:
-
-```markdown
-> **Note:** TraceLens does not currently have dedicated performance models for reduce kernels. Memory bandwidth utilization is reported as a general indicator but should not be used to draw kernel efficiency conclusions. Algorithmic recommendations (e.g., Flash Attention for unfused softmax) remain valid.
-```
 
 The findings file **must** include **Impact Summary** followed by **Detailed Analysis**.
 
@@ -167,7 +149,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = approximate estimate or based on general memory-bound model (use for all `kernel_tuning` rows)
+- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
@@ -184,7 +166,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 - **Symptoms:** sum, mean, max operations in isolation
 - **General guideline:** >70% of peak HBM BW is the target
 - **Algorithmic:** Fuse with adjacent operations if possible
-- **Kernel:** Flag for investigation if showing very low bandwidth utilization (<20%); use `low` confidence
+- **Kernel:** Flag for investigation if below 70% efficiency threshold
 
 ### High Softmax Count
 - **Symptoms:** Many softmax operations
@@ -196,7 +178,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ## Key Principles
 
 1. **Softmax is key indicator** - Often reveals unfused attention
-2. **Generally memory-bound** - But no dedicated performance model; treat efficiency as approximate (see [Performance Model Limitation](#performance-model-limitation))
+2. **Generally memory-bound** - Should approach peak HBM BW for simple reductions
 3. **Fusion primary algorithmic** - Fusing softmax with attention is high impact
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
