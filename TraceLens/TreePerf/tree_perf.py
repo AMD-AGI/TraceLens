@@ -1669,6 +1669,32 @@ class TreePerfAnalyzer:
         except Exception:
             return False
 
+    def _has_descendant_cpu_op_with_own_perf_model(self, event):
+        """
+        True if some ``cpu_op`` strictly below ``event`` has a perf model and GPU work.
+
+        Walks descendants the same way as ``collect_unified_perf_events.traverse``
+        (``python_function`` nodes are transparent). Used so a parent that only
+        qualifies via ``_is_sole_bwd_with_fwd_perf_model`` does not win over a
+        deeper op with its own perf model.
+        """
+        stack = list(event.get("children", []))
+        while stack:
+            uid = stack.pop()
+            node = self.tree.get_UID2event(uid)
+            if not node:
+                continue
+            cat = self.event_to_category(node)
+            if cat == "python_function":
+                stack.extend(node.get("children", []))
+                continue
+            if cat != "cpu_op":
+                continue
+            if self._has_perf_model(node) and self._launches_gpu_kernels(node):
+                return True
+            stack.extend(node.get("children", []))
+        return False
+
     def _is_nccl_event(self, event):
         """Check if an event launches NCCL kernels."""
         gpu_event_uids = event.get("gpu_events", [])
@@ -1688,7 +1714,8 @@ class TreePerfAnalyzer:
         Traverses from cpu_root_nodes and collects events where:
         1. Event has GPU kernels in subtree (first check - skip CPU-only subtrees)
         2. Event has a perf model -> collect and stop traversing subtree
-        3. Event is a 1:1 backward op with linked forward that has perf model -> collect and stop
+        3. Event is a 1:1 backward op with linked forward that has perf model -> collect
+           and stop unless a descendant ``cpu_op`` has its own perf model (then recurse)
         4. Event is a leaf cpu_op (direct kernel launcher) -> collect
 
         Args:
@@ -1735,8 +1762,13 @@ class TreePerfAnalyzer:
                 return
 
             # Exit condition 2: 1:1 backward op with linked forward that has perf model
-            # We can compute backward metrics via forward's perf model
+            # We can compute backward metrics via forward's perf model — but prefer any
+            # descendant cpu_op with its own perf model (not only direct children).
             if self._is_sole_bwd_with_fwd_perf_model(event):
+                if self._has_descendant_cpu_op_with_own_perf_model(event):
+                    for child_uid in event.get("children", []):
+                        traverse(child_uid)
+                    return
                 collected.append(event)
                 return
 
@@ -2323,8 +2355,11 @@ class TreePerfAnalyzer:
             pd.DataFrame: DataFrame with breakdown of kernel launchers by category.
         """
         df_temp = df_kernel_launchers.copy()
+        groupby_cols = ["op category"]
+        if "is_recompute" in df_temp.columns:
+            groupby_cols.append("is_recompute")
         agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
-        df_agg = df_temp.groupby("op category").agg(agg_dict)
+        df_agg = df_temp.groupby(groupby_cols).agg(agg_dict)
         df_agg.columns = ["_".join(col).strip() for col in df_agg.columns.values]
         df_agg.reset_index(inplace=True)
         df_agg.rename(columns={"total_direct_kernel_time_count": "Count"}, inplace=True)
@@ -2342,7 +2377,11 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-        return df_agg
+        ordered = ["op category"]
+        if "is_recompute" in df_agg.columns:
+            ordered.append("is_recompute")
+        ordered.extend(c for c in df_agg.columns if c not in ordered)
+        return df_agg[ordered]
 
     @staticmethod
     def get_df_kernel_launchers_summary_by_category_module(
@@ -2359,6 +2398,8 @@ class TreePerfAnalyzer:
         groupby_cols = ["op category"]
         if "parent_module" in df_temp.columns:
             groupby_cols.append("parent_module")
+        if "is_recompute" in df_temp.columns:
+            groupby_cols.append("is_recompute")
         agg_dict = {"total_direct_kernel_time": ["sum", "count"]}
         if "call_stack" in df_temp.columns:
             agg_dict["call_stack"] = "first"
@@ -2381,7 +2422,13 @@ class TreePerfAnalyzer:
         ) * 100
         df_agg["Cumulative Percentage (%)"] = df_agg["Percentage (%)"].cumsum()
         df_agg.reset_index(drop=True, inplace=True)
-        return df_agg
+        ordered = ["op category"]
+        if "parent_module" in df_agg.columns:
+            ordered.append("parent_module")
+        if "is_recompute" in df_agg.columns:
+            ordered.append("is_recompute")
+        ordered.extend(c for c in df_agg.columns if c not in ordered)
+        return df_agg[ordered]
 
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
@@ -2391,11 +2438,28 @@ class TreePerfAnalyzer:
         ]
         if not self.include_unlinked_kernels:
             kernel_events = [event for event in kernel_events if event.get("tree")]
-        gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
-        df = gpu_event_analyser.get_breakdown_df(
-            micro_idle_thresh_us=micro_idle_thresh_us
-        )
-        return df
+        if not self.detect_recompute:
+            gpu_event_analyser = self.GPUEventAnalyser(kernel_events)
+            return gpu_event_analyser.get_breakdown_df(
+                micro_idle_thresh_us=micro_idle_thresh_us
+            )
+
+        norc = [e for e in kernel_events if not e.get("is_recompute")]
+        rc = [e for e in kernel_events if e.get("is_recompute")]
+        dfs = []
+        for flag, subset in ((False, norc), (True, rc)):
+            if not subset:
+                continue
+            df_part = self.GPUEventAnalyser(subset).get_breakdown_df(
+                micro_idle_thresh_us=micro_idle_thresh_us
+            )
+            df_part["is_recompute"] = flag
+            dfs.append(df_part)
+        if not dfs:
+            return pd.DataFrame()
+        out = pd.concat(dfs, ignore_index=True)
+        cols = ["type", "time ms", "percent", "is_recompute"]
+        return out[[c for c in cols if c in out.columns]]
 
     def get_kernel_details(
         self,
