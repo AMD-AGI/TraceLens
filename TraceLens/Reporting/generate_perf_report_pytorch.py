@@ -922,8 +922,16 @@ def main():
         "--include_overlap_info",
         action="store_true",
         default=False,
-        help="Include overlapping-kernel breakdown sheets (ops_unique_args_kl_overlap, "
-        "*_kl_overlap, unified_perf_summary_kl_overlap).",
+        help="Include overlap info in the report. Disabled by default.",
+    )
+    parser.add_argument(
+        "--detect_recompute",
+        action="store_true",
+        default=False,
+        help="Detect activation recomputation (checkpointing) and add an is_recompute column "
+        "to gpu_timeline, ops_summary_by_category, ops_summary, ops_unique_args, and "
+        "unified_perf_summary sheets. "
+        "Requires python_function events in the trace (forces add_python_func=True internally).",
     )
     parser.add_argument(
         "--include_first_occurrence_time",
@@ -932,12 +940,6 @@ def main():
         help="Add first_occurrence_time to ops_unique_args (and ops_unique_args_kl_overlap "
         "when overlap sheets are enabled): earliest launcher timestamp per group, "
         "relative to the minimum in the table.",
-    )
-    parser.add_argument(
-        "--detect_recompute",
-        action="store_true",
-        default=False,
-        help="Mark ops under torch.utils.checkpoint recompute_fn; adds is_recompute columns.",
     )
 
     args = parser.parse_args()
