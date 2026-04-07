@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-🚀 vLLM/SGLang Trace Splitting and Analysis Tool
+vLLM/SGLang/ATOM Trace Splitting and Analysis Tool
 
 This script splits large vLLM and SGLang inference traces into smaller, analyzable components:
 - Individual execution iterations
@@ -17,92 +17,126 @@ This enables efficient performance analysis and comparison without processing ma
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-📋 BASIC USAGE
+BASIC USAGE
 ───────────────────────────────────────────────────────────────────────────────
-    python split_vllm_trace_annotation.py <trace_path> -o <output_dir> [OPTIONS]
+    python split_inference_trace_annotation.py <trace_path> -o <output_dir> [OPTIONS]
 
-🔧 REQUIRED ARGUMENTS
+REQUIRED ARGUMENTS
 ───────────────────────────────────────────────────────────────────────────────
     trace_path              Path to input trace file (.json, .json.gz, or .zip)
     -o, --output-dir        Directory where split traces will be saved
 
-📊 OPTIONAL ARGUMENTS
-───────────────────────────────────────────────────────────────────────────────    
+OPTIONAL ARGUMENTS
+───────────────────────────────────────────────────────────────────────────────
     -i, --iterations        Iteration range to extract (default: 'all'):
-                           'START:END'  - Extract iterations START through END-1
-    
+                            'all'        - All iterations
+                            'N'          - Single iteration N
+                            'START:END'  - Iterations START through END-1
+
     -d, --dummy             Dummy run range (default: 'all'):
-                           'START:END'  - Extract dummy runs START through END-1
-    
-    --store-single-iteration  Store each iteration/dummy run as individual file
-                             
-    --find-steady-state      Automatically detect and extract steady-state region:
-                            - Combines specified number of iterations from steady-state window
-                            - Extracts separate prefill-decode phase trace
-                            - Extracts separate decode-only phase trace
-                            (Requires --iterations all # Default value)
+                            'all'        - All dummy runs
+                            'N'          - Single dummy run N
+                            'START:END'  - Dummy runs START through END-1
+
+    --store-single-iteration  Store each iteration/dummy run as an individual file
+
+    --find-steady-state      Automatically detect steady-state and extract three
+                             representative contiguous windows (no idle gaps):
+                             - mixed_steady_state_*        : representative DO:PD mix
+                             - decode_only_steady_state_*  : fewest prefill-decode steps
+                             - prefilldecode_steady_state_*: most prefill-decode steps
+
+    --divide-phases          Find all steady-state regions and store each individual
+                             step into phase-specific sub-folders:
+                             output_dir/prefilldecodemix/ and output_dir/decode_only/.
+                             Each step is written as a separate trace file.
 
     --num-steps             Number of iterations to extract for steady-state (default: 32)
-💡 QUICK EXAMPLES
+
+    --CONC                  Expected peak concurrency (number of concurrent requests).
+                            A warning is printed if the trace peak differs from this value.
+
+    --OSL                   Average output sequence length (decode tokens per request).
+                            Used with --R to compute the ideal PD ratio for mixed-window
+                            selection under --find-steady-state.
+
+    --R                     OSL window ratio in [0, 1]. OSL per request is sampled from
+                            [R*OSL, OSL], giving mean OSL = OSL*(1+R)/2.
+                            R=0 means all requests have exactly OSL tokens;
+                            R=1 means OSL is uniform in [0, OSL].
+
+QUICK EXAMPLES
 ───────────────────────────────────────────────────────────────────────────────
 
-1. DEFAULT: Extract all iterations separately
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
-   
-   → Individual trace files for each iteration (e.g. trace_annotation )
+1. EXTRACT ALL ITERATIONS SEPARATELY
+
+   $ python split_inference_trace_annotation.py trace.json.gz -o ./output --store-single-iteration
+
+   → One trace file per iteration in ./output/
 
 ─────────────────────────────────────────────────────────────────────────────
 
 2. EXTRACT SPECIFIC ITERATION RANGE (combined)
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz \\
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
      -o ./output \\
      --iterations 10:20
-   
-   → Single trace file containing iterations 10-19 with prefill-decode and decode-only phases separated to two different tracefiles
-   
+
+   → Single combined trace file containing iterations 10-19
 
 ─────────────────────────────────────────────────────────────────────────────
 
-3. FIND AND EXTRACT STEADY STATE REGION ⭐ RECOMMENDED
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz \\
+3. FIND AND EXTRACT STEADY STATE REGION (recommended)
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
      -o ./steady_state_analysis \\
      --find-steady-state
-   
+
    This automatically:
-   • Analyzes all iterations to find steady-state region
-   • Extracts the specified number  (default: 32) representative iterations
-   • Splits into phase-specific traces:
-     - Combined steady-state trace
-     - Prefill-decode phase trace
-     - Decode-only phase trace
-     - execution_details.json with metadata
+   • Identifies all steady-state regions across the trace
+   • Computes the PD/total ratio for every region and derives a reference
+     ratio (largest region, cross-checked against the median of all regions)
+   • Extracts THREE separate contiguous windows — no idle gaps:
+     - mixed_steady_state_*        : representative DO:PD mix
+     - decode_only_steady_state_*  : fewest prefill-decode steps
+     - prefilldecode_steady_state_*: most prefill-decode steps
+
 ─────────────────────────────────────────────────────────────────────────────
 
-4. EXTRACT DUMMY RUNS (Graph Capture Phases)
-   
-   $ python split_vllm_trace_annotation.py trace.json.gz \\
+4. SPLIT STEADY-STATE STEPS BY PHASE
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
+     -o ./phase_split \\
+     --divide-phases
+
+   → Writes each steady-state step into phase-specific sub-folders:
+       ./phase_split/prefilldecodemix/
+       ./phase_split/decode_only/
+
+─────────────────────────────────────────────────────────────────────────────
+
+5. EXTRACT DUMMY RUNS (Graph Capture Phases)
+
+   $ python split_inference_trace_annotation.py trace.json.gz \\
      -o ./dummy_runs --store-single-iteration
-   
-   → Tracefile per specified dummy run
+
+   → One trace file per dummy run in ./dummy_runs/
 
 ─────────────────────────────────────────────────────────────────────────────
-
-───────────────────────────────────────────────────────────────────────────────
 
 Generated outputs:
 
   ✓ Individual .json.gz trace files in output directory
   ✓ execution_details.json - Metadata about extracted traces
+  ✓ execution_details.csv  - Flat CSV version of the same metadata
 
-Example file structure:
+Example file structure (--find-steady-state):
   output/
-  ├── trace_annotation_iteration_0_prefilldecode_10_bs32_conc18.json.gz
-  ├── trace_decode_3_bs32_conc18.json.gz
-  ├── trace_prefilldecode_10_bs32_conc18.json.gz
-  └── execution_details.json
+  ├── mixed_steady_state_prefilldecode_5_decode_27_bs32_conc18_{base}.json.gz
+  ├── decode_only_steady_state_prefilldecode_0_decode_32_bs30_conc16_{base}.json.gz
+  ├── prefilldecode_steady_state_prefilldecode_12_decode_20_bs48_conc20_{base}.json.gz
+  ├── execution_details.json
+  └── execution_details.csv
 
 Example execution_details.json entry:
 {
@@ -121,7 +155,7 @@ Example execution_details.json entry:
   }
 }
 
-🔗 RELATED TOOLS
+RELATED TOOLS
 ───────────────────────────────────────────────────────────────────────────────
 
 After splitting traces, analyze them with:
@@ -135,6 +169,7 @@ After splitting traces, analyze them with:
 import argparse
 import gzip
 import json
+import math
 import os
 import re
 import sys
@@ -414,9 +449,19 @@ def extract_and_save(
     gpu_corr_map: dict,
     flow_corr_map: dict,
     meta_events: List[dict],
+    output_label: Optional[str] = None,
 ):
-    """Extract and save a range of iterations/dummy runs."""
+    """Extract and save a range of iterations/dummy runs.
+
+    If ``output_label`` is provided the output filename becomes
+    ``{output_label}_{name_append}_{base_name}.json.gz`` instead of the
+    default ``{base_name}_{prefix}_{idx}_{name_append}.json.gz``.
+    """
     extraction_summary = []
+    # print(f"roots: {roots}")
+    if len(roots) == 0 or len(roots[0]) == 0:
+        print(f"No {prefix} events found in the specified range, skipping extraction")
+        return extraction_summary
     selected = roots[start:end]
     indices = range(start, end)
     if len(selected) == 0:
@@ -441,9 +486,14 @@ def extract_and_save(
         if "annotation_iteration" in prefix and len(root) > 1:
             name_append = f"prefilldecode_{phase_details['num_prefilldecode']}_decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
-        out_path = os.path.join(
-            output_dir, f"{base_name}_{prefix}_{idx}_{name_append}.json.gz"
-        )
+        if output_label is not None:
+            out_path = os.path.join(
+                output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
+            )
+        else:
+            out_path = os.path.join(
+                output_dir, f"{base_name}_{prefix}_{idx}_{name_append}.json.gz"
+            )
         with gzip.open(out_path, "wb") as f:
             f.write(json.dumps(iter_trace).encode("utf-8"))
 
@@ -532,6 +582,22 @@ def extract_phases_and_save(
                     "phase": phase_details,
                 }
             )
+        if len(decode_steps) > 0:
+            iter_details = [
+                get_iter_details_from_name(r["name"], prefix) for r in decode_steps
+            ]
+            phase_details = find_phase_from_window(iter_details)
+            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
+                extract_iteration(
+                    decode_steps,
+                    events,
+                    trace_json,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                )
+            )
+            name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
         iter_details = [
             get_iter_details_from_name(r["name"], prefix) for r in decode_steps
@@ -562,92 +628,440 @@ def extract_phases_and_save(
     return extraction_summary
 
 
-def find_steady_state_iterations(
-    iteration_roots: List[dict], num_steps: int = 5, decode_only: bool = False
-) -> List[dict]:
-    n = len(iteration_roots)
-    thresh = 0.1
-    if n < num_steps:
-        print(
-            f"Not enough iterations ({n}) to find steady state with {num_steps} steps"
-        )
-        thresh = 0.2
-    iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
+def identify_steady_state_regions(
+    iter_details: List[dict], num_steps: int
+) -> Tuple[List[Tuple[int, int]], int]:
+    """Detect contiguous steady-state regions based on num_requests proximity to global max.
+
+    Returns ``(regions, global_max)`` where ``regions`` is a list of
+    ``(start, end)`` index pairs and ``global_max`` is the peak concurrency
+    observed across all iterations.
+    """
+    n = len(iter_details)
+    thresh = 0.1 if n >= num_steps else 0.2
     global_max = max(t["num_requests"] for t in iter_details)
-    # Find indices where num_requests is close to global average
+
     steady_state_started = False
     steady_state_ended = False
     prev_events_in_steady = 0
+    start_index = 0
     regions = []
-    for i, t in enumerate(iter_details):
-        # print(t["num_requests"],global_max,abs(t["num_requests"] - global_max))
 
+    for i, t in enumerate(iter_details):
         if abs(t["num_requests"] - global_max) <= max(1, thresh * global_max):
             if not steady_state_started:
-                print(
-                    f"iteration {i} with num_requests {t['num_requests']} is within steady state threshold of global max {global_max}"
-                )
                 prev_events_in_steady += 1
         else:
             if steady_state_started:
                 prev_events_in_steady -= 1
+
         if prev_events_in_steady > 5 and not steady_state_started:
-            print("steady state started at index", i - 5)
+            print(f"Steady state started at index {i - 5}")
             steady_state_started = True
             start_index = i - prev_events_in_steady + 1
+
         if (
             prev_events_in_steady <= 0
             and steady_state_started
             and not steady_state_ended
         ):
-            print("steady state ended at index", i)
+            print(f"Steady state ended at index {i}")
             steady_state_ended = True
-            end_index = i
-            regions.append((start_index, end_index))
+            regions.append((start_index, i))
             steady_state_started = False
             steady_state_ended = False
             prev_events_in_steady = 0
+
     if steady_state_started and not steady_state_ended:
         regions.append((start_index, i))
-    print("steady state regions:", regions)
+
+    print(f"Steady state regions: {regions}")
 
     if len(regions) == 0:
-        delta = max(8, num_steps - n)
-        regions = [(delta // 2, n - delta // 2)]
+        delta = min(n, max(8, num_steps - n))
+        start = max(0, delta // 2)
+        end = min(n, n - delta // 2)
+        regions = [(start, end)]
         print(
-            "warning: no steady state region found, discarding initial and final iterations and selecting middle region"
+            "Warning: no steady state region found; discarding initial/final iterations "
+            "and selecting middle region"
         )
-    sub_regions = []
+
+    return regions, global_max
+
+
+def compute_reference_pd_ratio(
+    regions: List[Tuple[int, int]], iter_details: List[dict]
+) -> Tuple[Tuple[int, int], float, float]:
+    """
+    Return the largest steady-state region, a reference PD ratio, and the
+    median PD ratio across all regions.
+
+    The reference ratio starts as the PD/total ratio of the largest region.  A
+    sanity check compares it to the median ratio across ALL regions.  If the
+    largest region deviates by more than 50 % relative from the median, the
+    median is used instead and a warning is printed.
+    """
+    region_stats = []
+    total_steps = 0
+    total_pd_steps = 0
     for s, e in regions:
-        if (e - s) > num_steps:
-            for s1 in range(s, e, num_steps // 10):
-                region = iter_details[s1 : s1 + num_steps]
-                sub_regions.append(
-                    [
-                        s1,
-                        s1 + num_steps,
-                        len([t for t in region if t["context_requests"] > 0]),
-                        mean([t["num_requests"] for t in region]),
-                    ]
-                )
+        window = iter_details[s:e]
+        total = len(window)
+        total_steps += total
+        pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+        total_pd_steps += pd_count
+        ratio = pd_count / total if total > 0 else 0.0
+        region_stats.append({"start": s, "end": e, "size": total, "pd_ratio": ratio})
+        print(
+            f"  Region [{s}, {e}): size={total}, "
+            f"prefilldecodemix_steps={pd_count}, prefilldecodemix_to_totalsteps_ratio={ratio:.3f}"
+        )
+
+    largest = max(region_stats, key=lambda x: x["size"])
+    average_ratio = total_pd_steps / total_steps if total_steps > 0 else 0.0
+    largest_window_ratio = largest["pd_ratio"]
+    print(
+        f"Reference prefilldecodemix_to_totalsteps_ratio={largest_window_ratio:.3f} (largest region [{largest['start']}, {largest['end']}), Average across all regions={average_ratio:.3f})"
+    )
+
+    return (largest["start"], largest["end"]), average_ratio, largest_window_ratio
+
+
+def divide_phases_and_save(
+    iteration_roots: List[dict],
+    events: List[dict],
+    trace_json: dict,
+    output_dir: str,
+    base_name: str,
+    gpu_corr_map: dict,
+    flow_corr_map: dict,
+    meta_events: List[dict],
+    steady_state_regions: List[Tuple[int, int]],
+) -> List[dict]:
+    """
+    Group contiguous steps of the same phase within steady-state regions and
+    save each contiguous run as a single trace file into one of two sub-folders:
+
+    - ``{output_dir}/prefilldecodemix/`` — runs where every step has ``context_requests > 0``
+    - ``{output_dir}/decode_only/``      — runs where every step has ``context_requests == 0``
+                                           and ``generation_requests > 0``
+
+    A phase transition (PD → DO or DO → PD) always starts a new file.
+
+    Parameters
+    ----------
+    steady_state_regions
+        Pre-computed steady-state region list as ``(start, end)`` index pairs.
+        Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady state.
+    """
+    iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
+    regions = steady_state_regions
+    print(f"[divide-phases] Steady-state regions: {regions}")
+
+    # Build an ordered list of (phase_label, root) for all steady-state steps
+    steady_steps: List[Tuple[str, dict]] = []
+    for s, e in regions:
+        for idx in range(s, e):
+            detail = iter_details[idx]
+            root = iteration_roots[idx]
+            if detail.get("context_requests", 0) > 0:
+                steady_steps.append(("prefilldecodemix", root))
+            elif detail.get("generation_requests", 0) > 0:
+                steady_steps.append(("decode_only", root))
+            # steps that are neither (e.g. idle) are skipped
+
+    # Group into contiguous runs of the same phase
+    runs: List[Tuple[str, List[dict]]] = []  # (phase, [roots])
+    for phase, root in steady_steps:
+        if runs and runs[-1][0] == phase:
+            runs[-1][1].append(root)
         else:
-            sub_regions.append(
-                [
-                    s,
-                    e,
-                    len([t for t in iter_details[s:e] if t["context_requests"] > 0]),
-                    mean([t["num_requests"] for t in iter_details[s:e]]),
-                ]
+            runs.append((phase, [root]))
+
+    pd_count = sum(1 for p, _ in runs if p == "prefilldecodemix")
+    do_count = sum(1 for p, _ in runs if p == "decode_only")
+    total_pd_steps = sum(len(r) for p, r in runs if p == "prefilldecodemix")
+    total_do_steps = sum(len(r) for p, r in runs if p == "decode_only")
+    print(
+        f"\n[divide-phases] {pd_count} prefilldecodemix runs ({total_pd_steps} steps) and "
+        f"{do_count} decode_only runs ({total_do_steps} steps) across all steady-state regions."
+    )
+
+    pd_dir = os.path.join(output_dir, "prefilldecodemix")
+    do_dir = os.path.join(output_dir, "decode_only")
+    if pd_count:
+        os.makedirs(pd_dir, exist_ok=True)
+    if do_count:
+        os.makedirs(do_dir, exist_ok=True)
+
+    extraction_summary = []
+    pd_chunk_idx = 0
+    do_chunk_idx = 0
+
+    for phase, chunk_roots in runs:
+        if phase == "prefilldecodemix":
+            out_dir = pd_dir
+            chunk_idx = pd_chunk_idx
+            pd_chunk_idx += 1
+        else:
+            out_dir = do_dir
+            chunk_idx = do_chunk_idx
+            do_chunk_idx += 1
+
+        phase_details = find_phase_from_window(
+            [get_iter_details_from_name(r["name"]) for r in chunk_roots]
+        )
+        name_append = (
+            f"chunk{chunk_idx}_"
+            f"steps{len(chunk_roots)}_"
+            f"bs{phase_details['avg_bs']}_"
+            f"conc{phase_details['avg_conc']}"
+        )
+        extraction_summary.extend(
+            extract_and_save(
+                [chunk_roots],
+                events,
+                trace_json,
+                out_dir,
+                base_name,
+                "annotation_iteration",
+                0,
+                1,
+                gpu_corr_map,
+                flow_corr_map,
+                meta_events,
+                output_label=f"{phase}_{name_append}",
             )
-    if not decode_only:
-        sub_regions_tmp = [t for t in sub_regions if t[2] > 0]
-        if len(sub_regions_tmp) == 0:
-            print("prefilldecode step not found, selecting decode-only region")
+        )
+
+    return extraction_summary
+
+
+def find_steady_state_window(
+    iteration_roots: List[dict],
+    num_steps: int,
+    steady_state_regions: List[Tuple[int, int]],
+    mode: str = "mixed",
+    CONC: Optional[int] = None,
+    OSL: Optional[float] = None,
+    R: Optional[float] = None,
+) -> List[dict]:
+    """
+    Find the best contiguous window of up to ``num_steps`` iterations.
+
+    Parameters
+    ----------
+    iteration_roots : list of iteration-root events
+    num_steps : requested window size
+    steady_state_regions : pre-computed steady-state region list as ``(start, end)``
+        index pairs.  Pass ``[(0, len(iteration_roots))]`` to treat the entire
+        slice as steady state.
+    mode : one of ``"mixed"``, ``"decode_only"``, ``"max_prefilldecode"``
+    CONC : expected peak concurrency (number of concurrent requests).
+        If provided, a warning is printed when the observed peak in the trace
+        differs from this value.
+    OSL : average output sequence length (decode tokens per request).
+        Combined with ``R`` to derive the ideal PD ratio.
+    R : OSL window ratio in [0, 1]. The actual OSL per request is sampled from
+        ``[R * OSL, OSL]``, giving mean OSL = OSL * (1 + R) / 2.
+
+    When ``CONC``, ``OSL``, and ``R`` are all provided the ideal PD ratio is
+
+        ideal_pd_ratio = (CONC * 2) / (OSL * (1 + R))
+
+    and ``num_steps`` is automatically raised to ``ceil(1 / ideal_pd_ratio)``
+    if it is too small to capture the true DO/PD distribution.
+
+    Modes
+    -----
+    ``"mixed"``
+        Pick the sub-window whose pd_ratio is closest to the reference ratio
+        (ideal when available, otherwise largest-region / median sanity-checked).
+        Ties broken by highest average num_requests.
+    ``"decode_only"``
+        Fewest-PD window: sub-window with lowest pd_ratio.
+    ``"max_prefilldecode"``
+        Most-PD window: sub-window with highest pd_ratio.
+    """
+    iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
+    regions = steady_state_regions
+    global_max = max(t["num_requests"] for t in iter_details)
+
+    (largest_start, largest_end), reference_ratio, largest_window_ratio = (
+        compute_reference_pd_ratio(regions, iter_details)
+    )
+
+    # --- Optional: CONC / OSL / R validation and ideal ratio override ----------
+    ideal_pd_ratio: Optional[float] = None
+
+    if CONC is not None and global_max != CONC:
+        print(
+            f"Warning: expected peak concurrency CONC={CONC} but the trace peak is "
+            f"global_max={global_max}. The trace may not contain requests at the "
+            f"intended concurrency level."
+        )
+
+    if CONC is not None and OSL is not None and R is not None:
+        if not (0.0 <= R <= 1.0):
+            print(f"Warning: R={R} is outside [0, 1]; clamping to valid range.")
+            R = max(0.0, min(1.0, R))
+        mean_osl = OSL * (1.0 + R) / 2.0
+        ideal_pd_ratio = (CONC * 2.0) / (OSL * (1.0 + R))
+        print(
+            f"Ideal prefilldecodemix_to_totalsteps_ratio = (CONC={CONC} * 2) / (OSL={OSL} * (1 + R={R})) "
+            f"= {ideal_pd_ratio:.4f}  [mean OSL = {mean_osl:.1f}]"
+        )
+
+        min_steps_for_ratio = math.ceil(1.0 / ideal_pd_ratio)
+        if num_steps < min_steps_for_ratio:
+            print(
+                f"Warning: --num-steps={num_steps} is too small to capture the true "
+                f"decode_only/prefilldecodemix distribution. At prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} you need at "
+                f"least {min_steps_for_ratio} steps to see a representative mix. "
+                f"Raising num_steps to {min_steps_for_ratio}."
+            )
+            num_steps = min_steps_for_ratio
         else:
-            sub_regions = sub_regions_tmp
-    best_window = sorted(sub_regions, key=lambda x: x[3], reverse=True)[0]
-    print("Selected steady state window:", best_window)
-    return iteration_roots[best_window[0] : best_window[1]]
+            print(f"num_steps={num_steps} >= min required {min_steps_for_ratio} — OK.")
+
+        # Ideal ratio overrides the empirical reference for the mixed mode
+        reference_ratio = ideal_pd_ratio
+        print(
+            f"Using ideal prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} as reference (overrides empirical {reference_ratio:.4f})"
+        )
+    print(f"\n --------------------------------")
+    # ---------------------------------------------------------------------------
+
+    divider = max(1, min(int(num_steps / 2), 10))
+    step = max(1, num_steps // divider)
+
+    # Build candidate sub-windows from the largest region
+    candidates = []
+    s, e = largest_start, largest_end
+    if (e - s) >= num_steps:
+        for s1 in range(s, e - num_steps + 1, step):
+            window = iter_details[s1 : s1 + num_steps]
+            pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+            candidates.append(
+                {
+                    "start": s1,
+                    "end": s1 + num_steps,
+                    "pd_count": pd_count,
+                    "pd_ratio": pd_count / num_steps,
+                    "avg_requests": mean(t["num_requests"] for t in window),
+                }
+            )
+    else:
+        # Region is smaller than num_steps — use the whole region
+        window = iter_details[s:e]
+        pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+        candidates.append(
+            {
+                "start": s,
+                "end": e,
+                "pd_count": pd_count,
+                "pd_ratio": pd_count / len(window) if window else 0.0,
+                "avg_requests": (
+                    mean(t["num_requests"] for t in window) if window else 0
+                ),
+            }
+        )
+
+    if mode == "mixed":
+        best = min(
+            candidates,
+            key=lambda c: (abs(c["pd_ratio"] - reference_ratio), -c["avg_requests"]),
+        )
+        print(
+            f"[mixed] Selected window [{best['start']}, {best['end']}): "
+            f"prefilldecodemix_to_totalsteps_ratio={best['pd_ratio']:.3f} (target={reference_ratio:.3f}), "
+            f"avg_requests={best['avg_requests']:.1f}"
+        )
+
+    elif mode == "decode_only":
+        # Find the longest contiguous run of pure decode-only steps (active
+        # generation with no context requests) in the largest steady-state
+        # region, capped at num_steps.
+        do_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
+        run_start: Optional[int] = None
+        for idx in range(largest_start, largest_end):
+            step_info = iter_details[idx]
+            is_do = (
+                step_info.get("generation_requests", 0) > 0
+                and step_info.get("context_requests", 0) == 0
+            )
+            if is_do:
+                if run_start is None:
+                    run_start = idx
+            else:
+                if run_start is not None:
+                    do_runs.append((run_start, idx))
+                    run_start = None
+        if run_start is not None:
+            do_runs.append((run_start, largest_end))
+
+        if do_runs:
+            longest = max(do_runs, key=lambda r: r[1] - r[0])
+            run_s, run_e = longest
+            win_s = run_s
+            win_e = min(run_e, run_s + num_steps)
+            print(
+                f"[decode_only] Longest pure decode-only run: [{run_s}, {run_e}) "
+                f"({run_e - run_s} steps). "
+                f"Selected [{win_s}, {win_e}) ({win_e - win_s} steps, "
+                f"capped at num_steps={num_steps})."
+            )
+            return iteration_roots[win_s:win_e]
+        else:
+            print(
+                "[decode_only] No pure decode-only run found in steady-state region; "
+            )
+            return []
+
+    elif mode == "max_prefilldecode":
+        # Find the longest contiguous run of pure PD steps (no decode-only) in
+        # the largest steady-state region, capped at num_steps.
+        pd_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
+        run_start: Optional[int] = None
+        for idx in range(largest_start, largest_end):
+            is_pd = iter_details[idx].get("context_requests", 0) > 0
+            if is_pd:
+                if run_start is None:
+                    run_start = idx
+            else:
+                if run_start is not None:
+                    pd_runs.append((run_start, idx))
+                    run_start = None
+        if run_start is not None:
+            pd_runs.append((run_start, largest_end))
+
+        if pd_runs:
+            # Pick the longest pure-PD run
+            longest = max(pd_runs, key=lambda r: r[1] - r[0])
+            run_s, run_e = longest
+            # Cap to num_steps from the start of the run
+            win_s = run_s
+            win_e = min(run_e, run_s + num_steps)
+            print(
+                f"[max_prefilldecode] Longest pure prefilldecodemix run: [{run_s}, {run_e}) "
+                f"({run_e - run_s} steps). "
+                f"Selected [{win_s}, {win_e}) ({win_e - win_s} steps, "
+                f"capped at num_steps={num_steps})."
+            )
+            return iteration_roots[win_s:win_e]
+        else:
+            print(
+                "[max_prefilldecode] No pure prefilldecodemix run found in steady-state "
+            )
+            return []
+
+    else:
+        raise ValueError(
+            f"Unknown mode: {mode!r}. Use 'mixed', 'decode_only', or 'max_prefilldecode'."
+        )
+
+    return iteration_roots[best["start"] : best["end"]]
 
 
 def main():
@@ -688,10 +1102,43 @@ def main():
         help="Number of iterations to extract for steady state (default: 32)",
     )
     parser.add_argument(
-        "--decode-only",
+        "--CONC",
+        type=int,
+        default=None,
+        help=(
+            "Expected peak concurrency (number of concurrent requests). "
+            "A warning is printed if the trace peak differs from this value."
+        ),
+    )
+    parser.add_argument(
+        "--OSL",
+        type=float,
+        default=None,
+        help=(
+            "Maximum output sequence length (decode tokens per request). "
+            "Used with --R to compute the ideal PD ratio for mixed-window selection."
+        ),
+    )
+    parser.add_argument(
+        "--R",
+        type=float,
+        default=None,
+        help=(
+            "OSL window ratio in [0, 1]. OSL per request is sampled from "
+            "[R*OSL, OSL], giving mean OSL = OSL*(1+R)/2. "
+            "R=0 means all requests have exactly OSL tokens; "
+            "R=1 means OSL is uniform in [0, OSL]."
+        ),
+    )
+    parser.add_argument(
+        "--divide-phases",
         action="store_true",
         default=False,
-        help="Extract only decode phase",
+        help=(
+            "Find all steady-state regions and store each individual step into "
+            "phase-specific sub-folders: output_dir/prefilldecodemix/ and "
+            "output_dir/decode_only/. Each step is a separate trace file."
+        ),
     )
     args = parser.parse_args()
     execution_details = []
@@ -734,8 +1181,9 @@ def main():
     # Extract iterations
     if args.iterations and iteration_roots:
         start, end = parse_range(args.iterations, len(iteration_roots))
+
         if args.store_single_iteration:
-            print(f"\nExtracting iterations {start} to {end-1}...")
+            print(f"\nExtracting iterations {start} to {end - 1} individually...")
             temp_execution_details = extract_and_save(
                 [[root] for root in iteration_roots],
                 events,
@@ -751,43 +1199,90 @@ def main():
             )
             execution_details.extend(temp_execution_details)
 
-        if args.iterations != "all" or args.find_steady_state:
-            if args.iterations != "all":
-                iteration_roots_subset = iteration_roots[start:end]
-            else:
-                iteration_roots_subset = find_steady_state_iterations(
-                    iteration_roots,
-                    num_steps=args.num_steps,
-                    decode_only=args.decode_only,
+        # Determine the working set and compute steady-state regions once,
+        # shared across all downstream calls.
+        if args.iterations != "all":
+            working_roots = iteration_roots[start:end]
+            steady_state_regions: List[Tuple[int, int]] = [(0, end - start)]
+            print(
+                f"\nUsing explicit iteration range [{start}, {end}) as the working region."
+            )
+        else:
+            working_roots = iteration_roots
+            if args.find_steady_state or args.divide_phases:
+                _iter_details = [
+                    get_iter_details_from_name(r["name"]) for r in working_roots
+                ]
+                steady_state_regions, _ = identify_steady_state_regions(
+                    _iter_details, args.num_steps
                 )
-            print(f"\nExtracting iterations {start} to {end-1}...")
-            temp_execution_details = extract_and_save(
-                [iteration_roots_subset],
+
+        _extract_args = (
+            events,
+            trace_json,
+            args.output_dir,
+            base_name,
+            "annotation_iteration",
+            0,
+            1,
+            gpu_corr_map,
+            flow_corr_map,
+            meta_events,
+        )
+
+        if args.divide_phases:
+            print("\n--- Dividing steady-state steps by phase ---")
+            temp_execution_details = divide_phases_and_save(
+                working_roots,
                 events,
                 trace_json,
                 args.output_dir,
                 base_name,
-                "annotation_iteration",
-                0,
-                1,
                 gpu_corr_map,
                 flow_corr_map,
                 meta_events,
+                steady_state_regions=steady_state_regions,
             )
             execution_details.extend(temp_execution_details)
-            print("starting phase extraction...")
-            temp_execution_details = extract_phases_and_save(
-                [iteration_roots_subset],
-                events,
-                trace_json,
-                args.output_dir,
-                base_name,
-                "annotation_iteration",
-                0,
-                1,
-                gpu_corr_map,
-                flow_corr_map,
-                meta_events,
+
+        elif args.find_steady_state:
+            # Three separate contiguous windows — no phase-splitting, no idle gaps
+            print("\n--- Finding mixed steady-state window ---")
+            mixed_roots = find_steady_state_window(
+                working_roots,
+                num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions,
+                mode="mixed",
+                CONC=args.CONC,
+                OSL=args.OSL,
+                R=args.R,
+            )
+            temp_execution_details = extract_and_save(
+                [mixed_roots], *_extract_args, output_label="mixed_steady_state"
+            )
+            execution_details.extend(temp_execution_details)
+
+            print("\n--- Finding decode-only steady-state window ---")
+            do_roots = find_steady_state_window(
+                working_roots,
+                num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions,
+                mode="decode_only",
+            )
+            temp_execution_details = extract_and_save(
+                [do_roots], *_extract_args, output_label="decode_only_steady_state"
+            )
+            execution_details.extend(temp_execution_details)
+
+            print("\n--- Finding biggest prefill-decode steady-state window ---")
+            pd_roots = find_steady_state_window(
+                working_roots,
+                num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions,
+                mode="max_prefilldecode",
+            )
+            temp_execution_details = extract_and_save(
+                [pd_roots], *_extract_args, output_label="prefilldecode_steady_state"
             )
             execution_details.extend(temp_execution_details)
     # Extract dummy runs
