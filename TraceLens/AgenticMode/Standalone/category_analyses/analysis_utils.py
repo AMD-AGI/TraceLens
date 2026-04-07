@@ -341,8 +341,10 @@ def build_operation_metrics(
             if field in row and not pd.isna(row[field]):
                 op_metric[field] = row[field]
 
-        # Kernel time variance detection (require 10+ samples for reliable CoV)
-        if count > 10:
+        # Kernel time variance detection (require 10+ samples, >= 5% of E2E)
+        e2e_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+        e2e_frac = time_ms / e2e_ms if e2e_ms > 0 else 1.0
+        if count > 10 and e2e_frac >= 0.05:
             std_val = row.get("Kernel Time (µs)_std")
             mean_val = row.get("Kernel Time (µs)_mean")
             if (

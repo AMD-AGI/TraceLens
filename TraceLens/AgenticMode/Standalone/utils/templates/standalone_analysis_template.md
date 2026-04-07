@@ -135,7 +135,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ## Kernel Fusion Opportunities (Experimental)
 
-> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak). Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
 <!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
