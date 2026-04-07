@@ -403,13 +403,14 @@ Run trace preprocessing on the rank-0 trace file:
 ```bash
 ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
   cd <TraceLens_repo> && \
-  python examples/custom_workflows/split_vllm_trace_annotation.py \
+  python -m TraceLens.TraceUtils.split_inference_trace_annotation \
     <workspace>/torch_trace/<rank-0-trace>.pt.trace.json.gz \
     -o <workspace>/torch_trace/trace_split \
-    --find-steady-state --num-steps 32"
+    --find-steady-state --num-steps 32 \
+    --CONC <conc> --OSL <osl> --R <r>"
 ```
 
-Despite the script name referencing "vllm", it handles both vLLM and sglang traces.
+Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
 
 This produces ~3 files in `trace_split/`:
 - `*_annotation_iteration_0_*.json.gz` — full iteration (prefill + decode), ~16MB. **Use this for analysis.**
