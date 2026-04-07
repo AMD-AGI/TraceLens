@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # 🚀 TraceLens Inference Performance Analysis
 
 TraceLens now provides comprehensive support for inference use cases, with a focus on inference serving optimization. This documentation covers:
