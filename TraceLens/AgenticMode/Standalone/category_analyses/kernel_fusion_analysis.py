@@ -56,6 +56,19 @@ _NORM_TYPES = frozenset(
     }
 )
 
+_NORM_NAME_PATTERNS = [
+    "batchnorm", "layernorm", "groupnorm", "instancenorm",
+    "miopenbatchnorm", "rmsnorm",
+]
+
+
+def _is_norm_kernel(kernel_info: dict) -> bool:
+    """Check if a kernel is a normalization op by type or kernel name."""
+    if kernel_info.get("type", "") in _NORM_TYPES:
+        return True
+    name = kernel_info.get("name", kernel_info.get("kernel_name", "")).lower()
+    return any(p in name for p in _NORM_NAME_PATTERNS)
+
 
 def build_kernel_perf_lookup(csv_path: str) -> Dict[str, Dict]:
     """
@@ -250,7 +263,7 @@ def compute_fusion_impact_estimates(
 
         non_matrix = [e for e in enriched if not _is_matrix_op(e)]
         if non_matrix and any(_is_matrix_op(e) for e in enriched):
-            if all(e["type"] in _NORM_TYPES for e in non_matrix):
+            if all(_is_norm_kernel(e) for e in non_matrix):
                 continue
 
         modeled_frac = len(modeled) / len(enriched)
@@ -400,16 +413,21 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
     )
 
 
-def _filter_and_dedup(candidates: list) -> list:
-    """Filter by kernel count cap and deduplicate nested duplicates.
+def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:
+    """Filter by kernel count cap, drop tiny candidates, and deduplicate.
 
-    Two candidates with the same (instance_count, kernel_count, total_kernel_time_us)
-    are the same set of kernels captured at different nesting levels in the call tree.
-    Keep only the one with the shorter (more specific) module name.
+    Candidates whose total time can't reach MIN_E2E_PCT of baseline are
+    dropped early to avoid expensive downstream enrichment.
     """
     filtered = [
         c for c in candidates if c.get("kernel_count", 0) <= MAX_FUSION_KERNEL_COUNT
     ]
+
+    if baseline_ms > 0:
+        min_time_us = baseline_ms * 10 * MIN_E2E_PCT
+        filtered = [
+            c for c in filtered if c.get("total_kernel_time_us", 0) >= min_time_us
+        ]
 
     seen: dict = {}
     for c in filtered:
@@ -447,8 +465,10 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+
     raw_count = len(candidates)
-    candidates = _filter_and_dedup(candidates)
+    candidates = _filter_and_dedup(candidates, baseline_ms=baseline_ms)
     print(
         f"  Filtered: {raw_count} -> {len(candidates)} candidates "
         f"(max {MAX_FUSION_KERNEL_COUNT} kernels, deduped)"
@@ -474,7 +494,6 @@ def main():
 
     peak_bw_tbs = arch["peak_hbm_bw_tbs"]
     peak_maf_tflops = arch["max_achievable_tflops"]
-    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
 
     kernel_lookup = build_kernel_perf_lookup(csv_path)
 

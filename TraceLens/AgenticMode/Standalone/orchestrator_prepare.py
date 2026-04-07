@@ -48,6 +48,7 @@ FUSION_ALREADY_FUSED = [
     "silu_and_mul",
     "SiluAndMul",
 ]
+_NORM_KERNEL_PATTERNS = ["batchnorm", "layernorm", "groupnorm", "instancenorm", "rmsnorm"]
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
@@ -99,6 +100,30 @@ def _build_kernel_perf_lookup(csv_path):
                     "data_out_mb": data_out,
                 }
     return dict(lookup)
+
+
+def _is_gemm_norm_only(entry):
+    """Reject GEMM + norm-only candidates (BN folding, not kernel fusion)."""
+    kernels = entry.get("kernels", [])
+    has_gemm = any(
+        k.get("type", "").upper() in ("GEMM", "GEMM (GENERIC)")
+        or "conv" in k.get("name", "").lower()
+        for k in kernels
+    )
+    if not has_gemm:
+        return False
+    non_gemm = [
+        k for k in kernels
+        if k.get("type", "").upper() not in ("GEMM", "GEMM (GENERIC)")
+        and "conv" not in k.get("name", "").lower()
+    ]
+    if not non_gemm:
+        return False
+    return all(
+        any(p in k.get("name", "").lower() for p in _NORM_KERNEL_PATTERNS)
+        or k.get("type", "") in ("Elementwise Add", "Copy/Cast")
+        for k in non_gemm
+    )
 
 
 def _extract_attention_core(kernels, perf_lookup):
@@ -662,11 +687,12 @@ def main():
                 seen_sibling_bases[sbase] = entry
                 sibling_seqs.append(entry)
 
-            # Build candidate summary -- minimal filtering, let the LLM decide fusability
             fusion_candidates = []
             for b in base_order:
                 m = seen_base[b]
                 if m["has_fused_kernel"] or m["eligible_kernel_count"] < 2:
+                    continue
+                if _is_gemm_norm_only(m):
                     continue
                 fusion_candidates.append(m)
 
@@ -729,6 +755,8 @@ def main():
 
                 for c in fusion_candidates:
                     for k in c.get("kernels", []):
+                        if k.get("data_in_mb") is not None:
+                            continue
                         kname = k.get("name", k.get("kernel_name", ""))
                         entry = shape_aware_lookup(
                             perf_lookup, kname, c.get("input_dims")
