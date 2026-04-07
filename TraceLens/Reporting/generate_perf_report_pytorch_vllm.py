@@ -248,6 +248,7 @@ def generate_perf_report_pytorch(
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    enable_origami: bool = False,
     group_by_parent_module: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
@@ -263,6 +264,7 @@ def generate_perf_report_pytorch(
         include_unlinked_kernels=include_unlinked_kernels,
         add_python_func=add_python_func,
         enable_pseudo_ops=enable_pseudo_ops,
+        enable_origami=enable_origami,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -710,6 +712,12 @@ def main():
         default=None,
         help="Path to the GPU architecture JSON file",
     )
+    parser.add_argument(
+        "--enable-origami",
+        action="store_true",
+        default=False,
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -730,6 +738,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        enable_origami=args.enable_origami,
         group_by_parent_module=args.group_by_parent_module,
     )
 

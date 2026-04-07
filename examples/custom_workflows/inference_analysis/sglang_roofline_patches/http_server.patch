@@ -1,0 +1,13 @@
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+index 88705cc35..44d937228 100644
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -735,6 +735,8 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
+         merge_profiles=obj.merge_profiles,
+         profile_prefix=obj.profile_prefix,
+         profile_stages=obj.profile_stages,
++        shape_discovery=obj.shape_discovery,
++        roofline_annotations=obj.roofline_annotations,
+     )
+     return Response(
+         content="Start profiling.\n",

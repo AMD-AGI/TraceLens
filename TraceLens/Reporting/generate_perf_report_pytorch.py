@@ -253,9 +253,10 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator
+    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    enable_origami: bool = False,
     # activation recompute detection
     detect_recompute: bool = False,
     # first occurrence time column in ops_unique_args
@@ -274,6 +275,7 @@ def generate_perf_report_pytorch(
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
         detect_recompute=detect_recompute,
+        enable_origami=enable_origami,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -898,6 +900,12 @@ def main():
         help="Path to the GPU architecture JSON file",
     )
     parser.add_argument(
+        "--enable-origami",
+        action="store_true",
+        default=False,
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
+    parser.add_argument(
         "--include_overlap_info",
         action="store_true",
         default=False,
@@ -908,7 +916,8 @@ def main():
         action="store_true",
         default=False,
         help="Detect activation recomputation (checkpointing) and add an is_recompute column "
-        "to ops_summary, ops_unique_args, and unified_perf_summary sheets. "
+        "to gpu_timeline, ops_summary_by_category, ops_summary, ops_unique_args, and "
+        "unified_perf_summary sheets. "
         "Requires python_function events in the trace (forces add_python_func=True internally).",
     )
     parser.add_argument(
@@ -939,6 +948,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
         include_first_occurrence_time=args.include_first_occurrence_time,
     )
