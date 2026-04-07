@@ -6,6 +6,7 @@
 
 import copy
 import gzip
+import inspect
 import json
 import logging
 import os, re, sys
@@ -127,6 +128,30 @@ def get_max_achievable_tflops(perf_model, arch):
         return None
 
     return maf_specs.get(compute_spec)
+
+
+def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_origami):
+    """
+    Build keyword args for perf model construction. Only passes enable_origami when
+    the model's __init__ declares that parameter or accepts **kwargs.
+    """
+    kwargs = {
+        "event": event,
+        "arch": arch,
+        "python_path": python_path,
+    }
+    try:
+        sig = inspect.signature(perf_model_class.__init__)
+    except (TypeError, ValueError):
+        return kwargs
+    if "enable_origami" in sig.parameters:
+        kwargs["enable_origami"] = enable_origami
+        return kwargs
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            kwargs["enable_origami"] = enable_origami
+            break
+    return kwargs
 
 
 class TreePerfAnalyzer:
@@ -344,10 +369,13 @@ class TreePerfAnalyzer:
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
         perf_model = perf_model_class(
-            event,
-            arch=self.arch,
-            python_path=self.python_path,
-            enable_origami=self.enable_origami,
+            **_perf_model_init_kwargs(
+                perf_model_class,
+                event,
+                self.arch,
+                self.python_path,
+                self.enable_origami,
+            )
         )
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
@@ -3232,10 +3260,13 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             logger.warning(f"\nPerf model is not implemented. \n\nEvent: {event}")
             return dict()
         perf_model = perf_model_class(
-            event,
-            arch=self.arch,
-            python_path=self.python_path,
-            enable_origami=self.enable_origami,
+            **_perf_model_init_kwargs(
+                perf_model_class,
+                event,
+                self.arch,
+                self.python_path,
+                self.enable_origami,
+            )
         )
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
