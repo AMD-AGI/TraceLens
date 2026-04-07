@@ -26,6 +26,26 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+_OP_NAME_LIBRARY_RULES = [
+    ("aiter::", "AITER"),
+    ("rocm_aiter", "AITER"),
+    ("miopen", "MIOpen"),
+    ("triton", "Triton"),
+]
+_KERNEL_NAME_LIBRARY_RULES = [
+    ("aiter", "AITER"),
+    ("ck_tile::", "CK"),
+    ("ck_tile6kentry", "CK"),
+    ("FmhaFwd", "CK"),
+    ("FmhaBwd", "CK"),
+    ("Cijk_", "Tensile"),
+    ("wvSplitK", "rocBLAS"),
+    ("splitKreduce", "rocBLAS"),
+    ("rocprim::", "rocPRIM"),
+    ("triton_", "Triton"),
+    ("void at::native::", "PyTorch Native"),
+]
+
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
@@ -341,6 +361,10 @@ def build_operation_metrics(
         if classifier:
             op_metric["classification"] = classifier(op_name, row)
 
+        op_metric["library"] = classify_kernel_library(
+            op_name, row.get("kernel_details_summary", "")
+        )
+
         operations.append(op_metric)
 
     return operations
@@ -597,6 +621,19 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
 
 
 # Category-specific helper functions
+def classify_kernel_library(op_name: str, kernel_details: str = "") -> Optional[str]:
+    """Identify the GPU library backing an operation from its name or kernel strings."""
+    op_lower = op_name.lower()
+    for marker, lib in _OP_NAME_LIBRARY_RULES:
+        if marker in op_lower:
+            return lib
+    kd = str(kernel_details) if kernel_details and not pd.isna(kernel_details) else ""
+    for marker, lib in _KERNEL_NAME_LIBRARY_RULES:
+        if marker in kd:
+            return lib
+    return None
+
+
 def detect_quantized_gemm(op_name: str) -> bool:
     """Check if GEMM operation is quantized."""
     quantized_markers = ["w8a8", "int8", "fp8", "w4a16", "w4a4", "fp4", "mxfp4"]
