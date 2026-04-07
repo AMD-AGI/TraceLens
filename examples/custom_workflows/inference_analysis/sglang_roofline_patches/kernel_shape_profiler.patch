@@ -1,6 +1,6 @@
 diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
 new file mode 100644
-index 000000000..340884240
+index 000000000..6d8563b29
 --- /dev/null
 +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
 @@ -0,0 +1,732 @@
@@ -641,7 +641,7 @@ index 000000000..340884240
 +            +
 +            _discover_kernel_entry_points()
 +        )
-+             
++
 +        for module_path, attr_name in all_entry_points:
 +            resolved = _resolve_target(module_path, attr_name)
 +            if resolved is None:

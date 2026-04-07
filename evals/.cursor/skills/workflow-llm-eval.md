@@ -50,8 +50,7 @@ Read `standalone_analysis.md` and check for the presence of ALL these section he
 - `## Executive Summary`
 - `## Compute Kernel Optimizations`
 - `## System-Level Optimizations`
-- `## Detailed Analysis: Compute Kernels`
-- `## Detailed Analysis: System-Level`
+- `## Detailed Analysis`
 - `## Appendix`
 
 Also verify the Executive Summary contains a markdown table (lines with `|`).

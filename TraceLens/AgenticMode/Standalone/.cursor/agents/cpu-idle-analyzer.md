@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: cpu-idle-analyzer
-description: Report GPU idle time percentage and utilization breakdown. Always invoked by orchestrator.
+description: Report GPU idle time percentage and utilization breakdown. Invoked when idle_time_percent exceeds 15%.
 model: inherit
 ---
 
@@ -132,7 +132,17 @@ idle time is within acceptable range and no action is needed.]
 |---------------|------|----------------------|-------------------------------|------------|
 ```
 
+**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
+
 **Impact estimates are not produced for system-level analyses.** The Impact Summary table header must be present but must have **zero data rows**. Do NOT estimate savings for idle time reduction, GPU graph mode, sync reduction, or any other system-level recommendation.
+
+### Step 3.5: Write Impact Estimates to Metadata
+
+Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+
+```bash
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'cpu_idle', 'system')"
+```
 
 ---
 

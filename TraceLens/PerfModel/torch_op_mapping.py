@@ -57,6 +57,10 @@ unary_elemwise_ops = [
     "aten::clamp_max",
     "aten::clamp_max_",
     "aten::sigmoid",
+    "aten::rsqrt",
+    "aten::silu",
+    "aten::neg",
+    "aten::pow",
 ]
 
 binary_elemwise_ops = [
@@ -117,12 +121,30 @@ norm_ops = {
 }
 
 
+reduce_ops = [
+    "aten::sum",
+    "aten::mean",
+    "aten::max",
+    "aten::min",
+    "aten::norm",
+    "aten::linalg_norm",
+    "aten::std",
+    "aten::var",
+    "aten::logsumexp",
+    "aten::cumsum",
+    "aten::cumprod",
+    "aten::amin",
+    "aten::amax",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
 for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
+for op in reduce_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_reduce
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
@@ -131,6 +153,7 @@ dict_base_class2category = {
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
+    perf_model.Reduce: "Reduce",
 }
 
 # Add pseudo-op extension categories
@@ -209,12 +232,16 @@ def categorize_torch_op(row):
         return "MoE_unfused"
     elif row["name"] in dict_cat2names.get("InferenceAttention", []):
         return "InferenceAttention"
-    elif row["name"] in dict_cat2names.get("UnaryElementwise", []):
-        return "UnaryElemwise"
     elif row["name"] in dict_cat2names.get("RMSNorm", []):
         return "RMSNorm"
     elif row["name"] in dict_cat2names.get("Collective", []):
         return "Collective"
+    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
+        return "elementwise"
+    elif row["name"] in dict_cat2names.get("UnaryElementwise", []):
+        return "elementwise"
+    elif row["name"] in dict_cat2names.get("Reduce", []):
+        return "reduce"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
         # else:
