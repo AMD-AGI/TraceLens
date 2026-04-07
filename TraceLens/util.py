@@ -165,13 +165,9 @@ class JaxProfileProcessor:
         line = re.sub(r", ", ",", line)
         line = re.sub(r" %", "%", line)
         backend_config = re.search(
-            r"backend_config=\{[a-zA-Z0-9_=\"\(\)\/ \@\.\,\[\]\{\}\-:]*",
-            line,
+            r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*", line
         )
-        metadata = re.search(
-            r"metadata=\{[a-zA-Z0-9_=\"\(\)\/ \@\.\-]*",
-            line,
-        )
+        metadata = re.search(r"metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*", line)
         custom_call_target = re.search(
             r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*", line
         )
