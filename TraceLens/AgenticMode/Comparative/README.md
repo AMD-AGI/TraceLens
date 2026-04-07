@@ -11,7 +11,6 @@ See LICENSE for license information.
 ---
 
 ## 📋 Table of Contents
-0. [Cluster Access](#Cluster)
 1. [Prerequisites](#prerequisites)
 2. [Environment Setup](#environment-setup)
 3. [Installation](#installation)
@@ -20,16 +19,6 @@ See LICENSE for license information.
 6. [Troubleshooting](#troubleshooting)
 
 ---
-
-## Cluster
-
-For now, access to AMD Network GPU Cluster (ALOLA Cluster) is required to run the LLM based analysis.
-
-Follow this link to get access to the ALOLA Cluster: https://amd.atlassian.net/wiki/spaces/MLSE/pages/897801231/AGS+cluster+user+resources
-
-## LLM Gateway Access
-
-You need Gateway api key to run LLM. If you don't have one, feel free to reach out to me.
 
 ## Prerequisites
 
@@ -40,7 +29,6 @@ Before you begin, ensure you have:
 - **pip** or **uv** package installer
 - Access to GPU trace files (Kineto JSON format)
 - **API Key** for AI analysis (OpenAI/Azure/Anthropic)
-  - Set environment variable: `export AMD_LLM_API_KEY='your-api-key-here'`
 
 ---
 
@@ -86,7 +74,7 @@ bash requirements.sh
 
 **Important** 
 
-Set your AMD-LLM-gateway API key in run-comparative-analysis.sh.
+Set your LLM-gateway API key in run-comparative-analysis.sh.
 
 
 **Verify installation:**
@@ -168,7 +156,7 @@ python3 -c "import TraceLens"
 
 **Solution:**
 ```bash
-Follow instructions in run-comparative-analysis.sh to properly set the AMD Gateway LLM api Key.
+Follow instructions in run-comparative-analysis.sh to properly set the Gateway LLM api Key.
 ```
 
 ### Issue: Trace files not found
@@ -222,8 +210,7 @@ After successful setup:
 In the future the user will be able to get the following features:
 
 1. Using Roofline as Target and Single GPU traces as Baseline. This part is in progress and the support will be added soon
-2. MIDAS Roofline as GEMM Target
-3. Local LLM for report generations to avoid cluster bounding and gatway-api key access.
+2. Local LLM for report generations to avoid cluster bounding and gatway-api key access.
 
 **Note**
 This tool is veru much work in progress. In case something goes wrong, you feedback will be highly appreciated.
