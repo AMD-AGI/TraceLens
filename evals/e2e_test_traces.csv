@@ -1,0 +1,3 @@
+id,sub_category,trace_path,reference_dir,platform
+qwen1.5_mi300,full_model,evals/e2e_tests/qwen1.5_mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz,evals/e2e_tests/qwen1.5_mi300/analysis_output,MI300X
+16_owlv2_mi300,full_model,evals/e2e_tests/owlv2_mi300/google_owlv2-large-patch14-ensemble__1016001.json.gz,evals/e2e_tests/owlv2_mi300/analysis_output,MI300X
