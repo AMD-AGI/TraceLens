@@ -202,6 +202,14 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
         )
     dict_cat2names[cat].append(op_name)
 
+# Ops that should be categorized but don't have a built-in perf model.
+# Their perf model can be supplied via an extension (e.g., Megatron).
+# Without a perf model they still get kernel-time-only metrics.
+_extra_sdpa_names = ["FusedAttnFunc", "FusedAttnFuncBackward"]
+for _name in _extra_sdpa_names:
+    if _name not in dict_cat2names["SDPA"]:
+        dict_cat2names["SDPA"].append(_name)
+
 
 def categorize_torch_op(row):
     """

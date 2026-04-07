@@ -505,14 +505,16 @@ class TreePerfAnalyzer:
                 continue
             except Exception as e:
                 list_warn_perf_metrics_failed.append((event, e))
-                continue
+                dict_perf_metrics = self._fallback_kernel_metrics(event, bwd)
+                if dict_perf_metrics is None:
+                    continue
             # handle warnings
             if bwd and not event.get("bwd_events"):
                 list_no_bwd_events.append(event)
                 continue
             if (
-                dict_perf_metrics["GFLOPS"] > 0
-                and dict_perf_metrics["Kernel Time (µs)"] == 0
+                dict_perf_metrics.get("GFLOPS", 0) > 0
+                and dict_perf_metrics.get("Kernel Time (µs)", 0) == 0
             ):
                 list_warn_non_zero_flops_and_zero_time.append(event)
 
@@ -562,6 +564,41 @@ class TreePerfAnalyzer:
             warnings.warn(
                 f"Example event: {pprint.pformat(list_warn_perf_metrics_failed[0][0])} Error: {list_warn_perf_metrics_failed[0][1]}"
             )
+
+    def _fallback_kernel_metrics(self, event, bwd=False):
+        """Compute kernel-time-only metrics when the full perf model fails.
+
+        Returns a dict with Kernel Time populated from GPU events and NaN for
+        FLOPS/bytes metrics, or None if no kernel time can be computed.
+        """
+        if bwd:
+            cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
+        else:
+            cpu_op_uids = [event["UID"]]
+        cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
+        _, list_kernel_uids = self.loop_and_aggregate_kernels(cpu_op_list)
+        if not list_kernel_uids:
+            return None
+        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernel_uids]
+        busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
+            "busy_time"
+        ]
+        event["kernel_details"] = [
+            {
+                "name": kernel["name"],
+                "dur": kernel["dur"],
+                "stream": kernel.get("args", {}).get("stream", None),
+            }
+            for kernel in list_kernels
+        ]
+        return {
+            "GFLOPS": float("nan"),
+            "Kernel Time (µs)": busy_kernel_time,
+            "TFLOPS/s": float("nan"),
+            "Data Moved (MB)": float("nan"),
+            "FLOPS/Byte": float("nan"),
+            "TB/s": float("nan"),
+        }
 
     def build_df_fwd_perf_metrics(self, events):
         return self.build_df_perf_metrics(events, bwd=False)

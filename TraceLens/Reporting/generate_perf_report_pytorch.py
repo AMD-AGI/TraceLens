@@ -437,6 +437,7 @@ def generate_perf_report_pytorch(
                         "aten::convolution_backward",
                         "ConvBias_Backward",
                         "ConvBiasReLU_Backward",
+                        "FusedAttnFuncBackward",
                     ]
                     filtered_df_bwd_ops = df_ops_fwd[
                         df_ops_fwd["name"].isin(bwd_op_names)
@@ -472,6 +473,7 @@ def generate_perf_report_pytorch(
                         "aten::cudnn_convolution",
                         "ConvBias_",
                         "ConvBiasReLU_",
+                        "FusedAttnFunc",
                     ]
                     df_ops_bwd = df_ops_bwd[~df_ops_bwd["name"].isin(fwd_op_names)]
                 if not df_ops_fwd.empty:
@@ -507,6 +509,7 @@ def generate_perf_report_pytorch(
                             "aten::convolution_backward",
                             "ConvBias_Backward",
                             "ConvBiasReLU_Backward",
+                            "FusedAttnFuncBackward",
                         ]
                         filtered_df_bwd_ops_overlapping_kernels = (
                             df_ops_fwd_overlapping_kernels[
@@ -552,6 +555,7 @@ def generate_perf_report_pytorch(
                             "aten::cudnn_convolution",
                             "ConvBias_",
                             "ConvBiasReLU_",
+                            "FusedAttnFunc",
                         ]
                         df_ops_bwd_overlapping_kernels = df_ops_bwd_overlapping_kernels[
                             ~df_ops_bwd_overlapping_kernels["name"].isin(fwd_op_names)
