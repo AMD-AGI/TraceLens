@@ -292,8 +292,10 @@ def is_sharepoint_url(url: str) -> bool:
     Returns:
         bool: True if URL is a SharePoint URL
     """
-    parsed = urlparse(url)
-    return "sharepoint.com" in parsed.netloc.lower()
+    hostname = (urlparse(url).hostname or "").lower()
+    # Match sharepoint.com or *.sharepoint.com; avoid substring checks on netloc
+    # (e.g. evil-sharepoint.com must not match).
+    return hostname == "sharepoint.com" or hostname.endswith(".sharepoint.com")
 
 
 def load_trace_from_url(url: str, local_path: Optional[Path] = None) -> str:
