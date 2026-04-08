@@ -9,6 +9,8 @@ NUM_REPEATS="${NUM_REPEATS:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
 TEST_IDS="${TEST_IDS:-}"
+SUITE_NAME="${SUITE_NAME:-eval}"
+SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
 REPO_ROOT="$(pwd)"
@@ -16,6 +18,7 @@ STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
+REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 
 # ---------------------------------------------------------------------------
@@ -193,3 +196,28 @@ echo "========================================="
 echo "  Repeatability test finished."
 echo "  Results in: $RESULTS_ROOT"
 echo "========================================="
+
+# ---------------------------------------------------------------------------
+# Post-processing: aggregate results and generate reports via Cursor agent
+# ---------------------------------------------------------------------------
+
+if [[ "$SKIP_POST_PROCESSING" == "1" ]]; then
+    echo ""
+    echo "  Post-processing skipped (SKIP_POST_PROCESSING=1)."
+    echo "  To run later: agent \"Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER\""
+else
+    mkdir -p "$REPORT_DIR"
+
+    echo ""
+    echo "========================================="
+    echo "  Running eval post-processing..."
+    echo "========================================="
+
+    (
+        cd "$EVALS_DIR"
+        agent --print --force --trust --output-format stream-json \
+            "Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER"
+    ) < /dev/null > "$REPORT_DIR/post_processing.ndjson" 2>&1
+
+    echo "  Post-processing complete. Reports in: $REPORT_DIR"
+fi
