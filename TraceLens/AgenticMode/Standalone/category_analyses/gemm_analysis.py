@@ -76,7 +76,10 @@ def main():
         "--mode",
         choices=("standalone", "comparative"),
         default="standalone",
-        help="standalone: roofline-based impact_estimates; comparative: trace2 speed-match gaps",
+        help=(
+            "standalone: roofline Pct Roofline in operations[].efficiency; "
+            "comparative: 100*t2/t1 in operations[].efficiency (needs TraceDiff CSV columns)"
+        ),
     )
     args = parser.parse_args()
 
