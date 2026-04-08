@@ -22,7 +22,6 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     compute_impact_estimates,
-    has_comparative_impact_columns,
     write_metrics_json,
     detect_quantized_gemm,
 )
@@ -73,7 +72,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze GEMM operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
-        "--mode",
+        "--comparison_scope",
         choices=("standalone", "comparative"),
         default="standalone",
         help=(
@@ -99,28 +98,19 @@ def main():
     # Build metrics
     time_metrics = calculate_time_metrics(ops_df, metadata)
     operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=args.mode
+        ops_df, metadata, config, analysis_mode=args.comparison_scope
     )
     category_specific = extract_category_specific(ops_df, metadata)
 
     baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    if args.mode == "comparative" and not has_comparative_impact_columns(ops_df):
-        print(
-            "gemm_analysis: comparative mode requires columns "
-            "'speedup (trace1/trace2)' and 'delta_us (trace2 - trace1)' "
-            "on gemm_ops.csv (TraceDiff extension report).",
-            file=sys.stderr,
-        )
-        impact_estimates = []
-    else:
-        impact_estimates = compute_impact_estimates(
-            operations, "gemm", baseline_ms=baseline_ms
-        )
+    impact_estimates = compute_impact_estimates(
+        operations, "gemm", baseline_ms=baseline_ms
+    )
 
     metrics = {
         "category": "gemm",
         "status": "OK",
-        "analysis_mode": args.mode,
+        "analysis_mode": args.comparison_scope,
         **time_metrics,
         "operations": operations,
         "category_specific": category_specific,

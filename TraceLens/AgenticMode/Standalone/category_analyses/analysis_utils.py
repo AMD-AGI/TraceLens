@@ -196,13 +196,6 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
 _COMPARATIVE_SPEEDUP_COL = "speedup (trace1/trace2)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
 
-
-def has_comparative_impact_columns(ops_df: pd.DataFrame) -> bool:
-    """True if ops CSV has columns needed for trace2 speed-match impact estimates."""
-    cols = ops_df.columns
-    return _COMPARATIVE_SPEEDUP_COL in cols and _COMPARATIVE_DELTA_COL in cols
-
-
 def _comparative_efficiency_percent_from_row(
     result: Dict[str, Any], row: pd.Series
 ) -> None:
