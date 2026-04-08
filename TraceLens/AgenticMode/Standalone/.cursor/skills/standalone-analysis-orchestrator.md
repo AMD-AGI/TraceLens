@@ -6,10 +6,12 @@ See LICENSE for license information.
 
 ---
 name: Standalone Analysis Orchestrator
-description: Orchestrate two-tier standalone performance analysis - system-level (CPU/idle, multi-kernel) and compute kernel tiers with independently composable reports
+description: Orchestrate two-tier PyTorch trace performance analysis (standalone single-trace or comparative two-trace) — system-level (CPU/idle, multi-kernel) and compute kernel tiers with independently composable reports
 triggers:
   - standalone analysis
+  - comparative analysis
   - analyze trace standalone
+  - compare two traces
   - performance analysis single platform
 tools:
   - terminal
@@ -19,11 +21,13 @@ tools:
 
 # Standalone Analysis Orchestrator
 
-Orchestrate modular standalone PyTorch trace analysis using a **two-tier architecture**:
+Orchestrate modular PyTorch trace analysis using a **two-tier architecture**:
 - **System-Level Analysis** (Step 6): CPU/idle time + multi-kernel issues (memcpy, NCCL blocking, overlap)
 - **Compute Kernel Analysis** (Step 7): Per-category kernel efficiency (GEMM, SDPA, elementwise, etc.)
 
-**Role**: Load trace once, pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
+**Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
+
+**Comparison scope (`<comparison_scope>`):** **`standalone`** — single trace, roofline analysis. **`comparative`** — primary trace vs second trace comparative analysis
 
 ---
 
@@ -38,8 +42,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
-1. Generate Performance Report (branches on analysis mode: training vs inference)
+0. Query User Inputs (Platform, Trace Path(s), Analysis Mode, Environment Setup)
+1. Generate Performance Report (branches on comparison_scope, then analysis mode: training vs inference)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 5.5. Model Identification (subagent) → metadata/model_info.json
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
@@ -60,8 +64,18 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ### Required Information:
 
-1. **Trace File Path** → `<trace_path>`
-   - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
+0. **Comparison scope** → `<comparison_scope>`
+   - Set from the user’s intent **before** deep-diving on paths:
+     - **`comparative`** if the skill was triggered by **“comparative analysis”**, **“compare two traces”**, or the user supplies **two** trace paths / explicitly asks to compare trace A vs B.
+     - **`standalone`** otherwise (including triggers **“standalone analysis”**, **“analyze trace standalone”**, single trace only).
+
+1. **Trace File Path(s)**
+   - **`standalone`:** **Trace File Path** → `<trace_path>`
+     - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
+   - **`comparative`:** ask for both:
+     - **Primary trace (trace1)** → `<trace1_path>`
+     - **Comparison trace (trace2)** → `<trace2_path>`
+     - Ask: "Please the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
 
 2. **Platform** → `<platform>`
    - Ask: "Which platform are you analyzing?"
@@ -134,9 +148,18 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 ## Step 1: Generate Performance Report
 
-Use the analysis mode selected in Step 0 to determine which CLI tool to run.
+Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
 
-**Default (training and eager inference)** (analysis_mode = `default`):
+**Extension flags (comparative only):** When `<comparison_scope>` = `comparative`, append to the chosen command:
+
+```text
+  --extension_file TraceLens/Reporting/tracediff_comparison_extension.py \
+  --extension_args <trace2_path>
+```
+
+---
+
+**Default (training and eager inference)** (`<analysis_mode>` = `default`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
@@ -149,7 +172,7 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --group_by_num_kernels
 ```
 
-**Inference eager mode** (analysis_mode = `inference`, inference_exec_mode = `eager`):
+**Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
@@ -162,7 +185,7 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --group_by_num_kernels
 ```
 
-**Inference graph replay + capture mode** (analysis_mode = `inference`, inference_exec_mode = `graph_capture`):
+**Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
@@ -299,6 +322,7 @@ Then launch a Task subagent with the following prompt:
 ---END AGENT INSTRUCTIONS---
 
 **Execution Context:**
+- Comparison scope: `<comparison_scope>` (`standalone` or `comparative`)
 - Output directory: <output_dir>
 - Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: <list from agent file's "Input files" section>
@@ -403,19 +427,15 @@ Include these constraints in EVERY compute kernel subagent invocation prompt:
 
 #### 1. Flag Efficiency Anomalies
 
-- Any efficiency > 100% **MUST** be noted as `[ANOMALY] - verify measurement`
-- Do **NOT** use > 100% values to claim "excellent performance"
-- Report the anomaly but base recommendations on other operations
-- Efficiency anomalies indicate:
-  - Wrong peak spec for the platform
-  - Measurement timing issues
-  - Workload characteristics outside normal bounds
+- **`standalone`:** Any **roofline** `efficiency_percent` > 100% **MUST** be noted as `[ANOMALY] - verify measurement`. Do **NOT** use >100% to claim "excellent performance." Anomalies may indicate wrong peak spec, timing issues, or workload outside normal bounds.
+- **`comparative`:** `efficiency_percent` is **100×t2/t1** kernel-time ratio for aligned ops (see category metrics `analysis_mode`). Values **> 100** can mean trace2 spent **more** kernel time than trace1 on that op — **not** automatically a roofline measurement bug. Follow each category agent’s comparative guidance (e.g. `gemm-analyzer.md`); do **not** apply the standalone roofline >100% rule blindly.
 
 #### 2. Output Consistency
 
 - Status must be `SUCCESS` or `ERROR`
 - Time values in milliseconds (ms) unless otherwise noted
-- Efficiency values as percentages (0-100% typically; flag >100% as anomaly)
+- **`standalone`:** efficiency percentages are typically 0–100% roofline; flag >100% as anomaly per above
+- **`comparative`:** state efficiency semantics per `*_metrics.json` and agent docs
 - Always include operation count for context
 
 ---
@@ -428,14 +448,16 @@ When invoking a compute kernel subagent, use this template:
 You are analyzing {category} operations for a PyTorch trace on {platform}.
 
 **CRITICAL - READ FIRST:**
+- **Comparison scope:** {comparison_scope} (`standalone` or `comparative` from orchestrator Step 0)
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
+- **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement"
+- **Comparative:** read `metrics['analysis_mode']` and category agent docs — `efficiency_percent` is not roofline %
 - When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
 
 **Platform Specs:**
 - Peak HBM BW: {peak_hbm_bw} TB/s
 - Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
-- Impact estimates assume tuning can reach 75–100% of roofline (midpoint 87.5% used for plots)
+- Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
 
 **Input files:**
 - category_data/{category}_ops.csv
@@ -475,7 +497,7 @@ validate_subagent_outputs(sys.argv[1])
 
 This runs four checks:
 1. **Time Sanity** -- category GPU kernel time sum vs computation time (WARN if >15% discrepancy)
-2. **Efficiency Anomalies** -- findings with efficiency >100% (measurement issues)
+2. **Efficiency Anomalies** -- findings with efficiency >100% (measurement issues) when `<comparison_scope>` = `standalone`
 3. **Coverage** -- all expected system and compute findings present
 4. **Priority Consistency** -- top 3 categories by GPU time for P1-P3 verification
 
