@@ -508,10 +508,10 @@ class JaxTraceToTree(BaseTraceToTree):
                     hlo_module = event.get("args").get("hlo_module")
                     if hlo_module not in hlo_module_list:
                         hlo_module_list.append(hlo_module)
-                        self.hlo_ops[
-                            hlo_module
-                        ] = JaxProfileProcessor.process_protobuf_file(
-                            pb_file_name, hlo_module
+                        self.hlo_ops[hlo_module] = (
+                            JaxProfileProcessor.process_protobuf_file(
+                                pb_file_name, hlo_module
+                            )
                         )
 
     def _create_linking_key_to_uid_map(self) -> None:

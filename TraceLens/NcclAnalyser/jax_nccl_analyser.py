@@ -362,7 +362,7 @@ class JaxNcclAnalyser:
                 "p75_bus_bandwidth_gbps": np.percentile(bus_bandwidths, 75),
                 "avg_data_size_mb": data["total_data_bytes"]
                 / len(data["operations"])
-                / (1024 ** 2),
+                / (1024**2),
             }
 
             summary_data.append(stats)
@@ -635,7 +635,7 @@ class JaxNcclAnalyser:
 
                 # Calculate algorithmic bandwidth
                 algorithmic_bandwidth_gbps = (
-                    algorithmic_bytes / (1024 ** 3)
+                    algorithmic_bytes / (1024**3)
                 ) / fastest_gpu_duration_s
 
                 # Calculate bus bandwidth using the scaler

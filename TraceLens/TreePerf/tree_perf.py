@@ -648,9 +648,9 @@ class TreePerfAnalyzer:
             include_overlapping_kernels
             and "overlapping_kernel_names" in df_perf_metrics.columns
         ):
-            df_perf_metrics[
-                "overlapping_kernel_names_str_repr_for_grouping"
-            ] = df_perf_metrics["overlapping_kernel_names"].apply(str)
+            df_perf_metrics["overlapping_kernel_names_str_repr_for_grouping"] = (
+                df_perf_metrics["overlapping_kernel_names"].apply(str)
+            )
             groupby_cols.append("overlapping_kernel_names_str_repr_for_grouping")
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
@@ -716,22 +716,18 @@ class TreePerfAnalyzer:
                 and c != "overlapping_kernel_names_str_repr_for_grouping"
             ]
             if group_cols:
-                df_perf_metrics_summary[
-                    "_group_total_time"
-                ] = df_perf_metrics_summary.groupby(group_cols, dropna=False)[
-                    "Kernel Time (µs)_sum"
-                ].transform(
-                    "sum"
+                df_perf_metrics_summary["_group_total_time"] = (
+                    df_perf_metrics_summary.groupby(group_cols, dropna=False)[
+                        "Kernel Time (µs)_sum"
+                    ].transform("sum")
                 )
                 sort_by = ["_group_total_time"]
                 sort_ascending = [False]
                 if "UID_first" in df_perf_metrics_summary.columns:
-                    df_perf_metrics_summary[
-                        "_group_min_uid"
-                    ] = df_perf_metrics_summary.groupby(group_cols, dropna=False)[
-                        "UID_first"
-                    ].transform(
-                        "min"
+                    df_perf_metrics_summary["_group_min_uid"] = (
+                        df_perf_metrics_summary.groupby(group_cols, dropna=False)[
+                            "UID_first"
+                        ].transform("min")
                     )
                     sort_by.append("_group_min_uid")
                     sort_ascending.append(True)
@@ -772,9 +768,9 @@ class TreePerfAnalyzer:
                     and "overlap_pct_mean" in df_perf_metrics_summary.columns
                 ):
                     has_overlap = pd.notna(df_perf_metrics_summary["overlap_pct_mean"])
-                    df_perf_metrics_summary.loc[
-                        has_overlap, col
-                    ] = df_perf_metrics_summary.loc[has_overlap, col].fillna(0.0)
+                    df_perf_metrics_summary.loc[has_overlap, col] = (
+                        df_perf_metrics_summary.loc[has_overlap, col].fillna(0.0)
+                    )
 
         return df_perf_metrics_summary
 
@@ -2874,10 +2870,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(
-                f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}"
-            )
+            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}")
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
@@ -3164,9 +3158,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             if include_kernel_details:
                 metrics_event["kernel_details"] = event["kernel_details"]
 
-            metrics_event[
-                "GPU_kernel_launch_latency"
-            ] = self.get_GPU_kernel_launch_latency(event)
+            metrics_event["GPU_kernel_launch_latency"] = (
+                self.get_GPU_kernel_launch_latency(event)
+            )
 
             metadata = event.get("metadata")
 
