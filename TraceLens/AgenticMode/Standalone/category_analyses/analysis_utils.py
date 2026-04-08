@@ -192,8 +192,82 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
     return fallback_maf
 
 
+# TraceDiff comparison extension columns on unified_perf_summary-derived category CSVs.
+_COMPARATIVE_SPEEDUP_COL = "speedup (trace1/trace2)"
+_COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
+
+
+def has_comparative_impact_columns(ops_df: pd.DataFrame) -> bool:
+    """True if ops CSV has columns needed for trace2 speed-match impact estimates."""
+    cols = ops_df.columns
+    return _COMPARATIVE_SPEEDUP_COL in cols and _COMPARATIVE_DELTA_COL in cols
+
+
+def _comparative_efficiency_percent_from_row(
+    result: Dict[str, Any], row: pd.Series
+) -> None:
+    """
+    When comparative columns support it, set ``efficiency_percent`` to
+    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), and clear roofline anomaly flags.
+
+    t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t1/t2.
+    If comparative metrics cannot be computed, leaves ``result`` unchanged for those keys.
+    """
+    kt = row.get("Kernel Time (µs)_sum")
+    if kt is None or pd.isna(kt):
+        return
+    t1_us = float(kt)
+    if t1_us <= 0:
+        return
+
+    comp_pct: Optional[float] = None
+    delta = row.get(_COMPARATIVE_DELTA_COL)
+    if delta is not None and not pd.isna(delta):
+        comp_pct = 100.0 * (t1_us + float(delta)) / t1_us
+    else:
+        speedup = row.get(_COMPARATIVE_SPEEDUP_COL)
+        if speedup is not None and not pd.isna(speedup):
+            s = float(speedup)
+            if s > 0:
+                comp_pct = 100.0 / s
+
+    if comp_pct is None:
+        return
+    result["efficiency_percent"] = round(comp_pct, 2)
+    result["is_anomaly"] = False
+    result["warning"] = None
+
+
+def _standalone_efficiency_percent_from_row(row: pd.Series) -> Optional[float]:
+    """
+    Roofline utilization as a percent from ``Pct Roofline_mean`` (standalone traces).
+    """
+    pct = row.get("Pct Roofline_mean")
+    if pct is None or pd.isna(pct):
+        return None
+    return float(pct)
+
+
+def _apply_standalone_efficiency_percent(
+    result: Dict[str, Any], row: pd.Series
+) -> None:
+    """Set ``efficiency_percent`` from roofline column and roofline anomaly flags."""
+    solo_pct = _standalone_efficiency_percent_from_row(row)
+    if solo_pct is None:
+        return
+    result["efficiency_percent"] = round(solo_pct, 2)
+    if result["efficiency_percent"] > 110:
+        result["warning"] = (
+            f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
+        )
+        result["is_anomaly"] = True
+
+
 def calculate_efficiency(
-    row: pd.Series, peak_hbm_bw: float, peak_maf_or_maf_dict
+    row: pd.Series,
+    peak_hbm_bw: float,
+    peak_maf_or_maf_dict,
+    analysis_mode: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
     Extract efficiency metrics for an operation from pre-computed CSV columns.
@@ -203,6 +277,9 @@ def calculate_efficiency(
         peak_hbm_bw: Peak HBM bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
             for resolving the precision-aware peak
+        analysis_mode: ``standalone`` uses ``_apply_standalone_efficiency_percent``;
+            ``comparative`` uses ``_comparative_efficiency_percent_from_row``, falling back
+            to standalone when no comparative value is written
 
     Returns:
         Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type, warning
@@ -249,20 +326,23 @@ def calculate_efficiency(
         balance_point = peak_maf / peak_hbm_bw
         result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
 
-    pct_roofline = row.get("Pct Roofline_mean")
-    if pct_roofline is not None and not pd.isna(pct_roofline):
-        result["efficiency_percent"] = round(float(pct_roofline), 2)
-        if result["efficiency_percent"] > 110:
-            result["warning"] = (
-                f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
-            )
-            result["is_anomaly"] = True
+    if analysis_mode == "comparative":
+        _comparative_efficiency_percent_from_row(result, row)
+    elif analysis_mode == "standalone":
+        _apply_standalone_efficiency_percent(result, row)
+    else:
+        raise ValueError(
+            f"analysis_mode must be 'standalone' or 'comparative', got {analysis_mode!r}"
+        )
 
     return result
 
 
 def build_operation_metrics(
-    ops_df: pd.DataFrame, metadata: dict, category_config: dict
+    ops_df: pd.DataFrame,
+    metadata: dict,
+    category_config: dict,
+    analysis_mode: str = "standalone",
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
@@ -273,6 +353,7 @@ def build_operation_metrics(
         category_config: Category-specific configuration with:
             - extra_fields: Additional fields to extract (optional)
             - operation_classifier: Function to classify operations (optional)
+        analysis_mode: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
 
     Returns:
         List of operation metric dicts
@@ -301,7 +382,9 @@ def build_operation_metrics(
             (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
         )
 
-        efficiency = calculate_efficiency(row, peak_hbm_bw, maf)
+        efficiency = calculate_efficiency(
+            row, peak_hbm_bw, maf, analysis_mode=analysis_mode
+        )
 
         op_metric = {
             "name": op_name,
@@ -355,7 +438,11 @@ def compute_impact_estimates(
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    Assumes tuning can reach 75%–100% of roofline performance. Produces a range:
+    Assumes tuning can reach 75%–100% of the efficiency target. For standalone
+    metrics that is roofline performance; for comparative metrics,
+    ``calculate_efficiency(..., analysis_mode='comparative')`` sets
+    ``efficiency_percent`` to ``100 * t2 / t1`` and the same band math applies.
+    Produces a range:
       - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
       - savings_ms_low  = op_time_ms * (1 - efficiency_pct / 75)    [75% target]
       - savings_ms      = op_time_ms * (1 - efficiency_pct / 87.5)  [87.5% midpoint]
@@ -421,9 +508,9 @@ def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
     Aggregate impact_estimates from all *_metrics.json files into a single
     plot_data.json consumed by the performance improvement plot script.
 
-    Only kernel_tuning estimates with high/medium confidence are included
-    in the plot recommendations. All estimates (including system and
-    algorithmic) are collected in all_estimates for the report.
+    Only ``kernel_tuning`` estimates (roofline or comparative trace2-gap;
+    see ``analysis_mode`` on each metrics file) with high/medium confidence
+    are included in plot recommendations. All estimates are in ``all_estimates``.
 
     Args:
         output_dir: Base output directory containing category_data/
