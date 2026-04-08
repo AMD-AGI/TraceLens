@@ -18,7 +18,7 @@ tools:
 
 # Eval Post Processing
 
-Short-lived skill invoked after the repeatability harness finishes (or manually on existing results). Aggregates per-run CSVs, classifies failures, and writes two markdown reports.
+Standalone skill invoked after the repeatability harness finishes, or manually on existing results. Aggregates per-run CSVs, classifies failures, and writes two markdown reports.
 
 ## Inputs
 
@@ -168,7 +168,42 @@ For the reproducer commands:
 - Use the absolute path of `test_traces_csv`
 - The `platform` comes from the test traces CSV
 
-## Step 7 — Save and Summarize
+## Step 7 — Build Reproducer Packages
+
+Create a self-contained, assignable reproducer folder for each unique failure issue. These let a developer load the stream JSON into Cursor and debug the issue directly.
+
+**For each unique `issue_summary` in the FAIL rows:**
+
+1. Create a folder: `<report_dir>/reproducers/<sanitized_issue_name>/`
+   - Sanitize the name for filesystem use (lowercase, replace spaces/special chars with underscores, truncate to 80 chars)
+
+2. Write a `README.md` inside the folder with:
+   - Issue name and total failure count
+   - Table of affected traces (trace_id, run_id, platform, details snippet)
+   - The reproducer shell command for the worst-affected trace
+
+3. For each (trace_id, run_id) pair that hit this issue (limit to 3 representative examples):
+   - Copy the `analysis_stream.ndjson` from `<results_root>/<trace_id>/run_<run_id>/analysis_stream.ndjson` into the folder as `<trace_id>_run_<run_id>.ndjson`
+   - **Sanitize identifying paths**: replace absolute repo paths (e.g. `/home/ahasssan/TraceLens-internal/`) with `$REPO_ROOT/` so the stream is portable
+   - Copy the `eval_summary.csv` from that run as `<trace_id>_run_<run_id>_eval_summary.csv`
+
+4. Compress the folder:
+   ```bash
+   tar -czf <report_dir>/reproducers/<sanitized_issue_name>.tar.gz \
+     -C <report_dir>/reproducers <sanitized_issue_name>/
+   ```
+
+The path sanitization command for each NDJSON:
+```bash
+sed 's|/home/[^/]*/[^/]*/|$REPO_ROOT/|g' <source> > <dest>
+```
+
+After all issues are processed, print the count:
+```
+Built <N> reproducer packages in <report_dir>/reproducers/
+```
+
+## Step 8 — Save and Summarize
 
 1. Copy `<report_dir>` to `evals/eval_reports/latest/` (remove existing `latest/` first if present):
    ```bash
@@ -180,4 +215,10 @@ For the reproducer commands:
    - Overall pass rate and PASS/FAIL/MISSING counts
    - Top 3 worst-performing traces
    - Top 3 failure issues
-   - Paths to `pr_report.md` and `fix_ticket_report.md` for manual GitHub posting
+   - **Explicitly print the full paths** to the generated outputs:
+     ```
+     PR report:          <report_dir>/pr_report.md
+     Fix-ticket report:  <report_dir>/fix_ticket_report.md
+     Reproducer packages: <report_dir>/reproducers/ (<N> issues)
+     Latest copy:        evals/eval_reports/latest/
+     ```
