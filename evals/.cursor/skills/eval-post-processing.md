@@ -185,7 +185,7 @@ Create a self-contained, assignable reproducer folder for each unique failure is
 
 3. For each (trace_id, run_id) pair that hit this issue (limit to 3 representative examples):
    - Copy the `analysis_stream.ndjson` from `<results_root>/<trace_id>/run_<run_id>/analysis_stream.ndjson` into the folder as `<trace_id>_run_<run_id>.ndjson`
-   - **Sanitize identifying paths**: replace absolute repo paths (e.g. `/home/ahasssan/TraceLens-internal/`) with `$REPO_ROOT/` so the stream is portable
+   - **Sanitize identifying paths**: replace the absolute repo root path with `$REPO_ROOT/` so the stream is portable
    - Copy the `eval_summary.csv` from that run as `<trace_id>_run_<run_id>_eval_summary.csv`
 
 4. Compress the folder:
