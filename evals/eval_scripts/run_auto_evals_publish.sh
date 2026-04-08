@@ -19,11 +19,11 @@ fi
 
 CONTAINER="$CONTAINER" \
 python3 evals/eval_scripts/run_eval_pipeline.py \
-  --suite unit \
-  --num-repeats 2 \
-  --max-parallel 2 \
+  --suite e2e \
+  --num-repeats 5 \
+  --max-parallel 5 \
   --sleep-between 30 \
-  --run-id format_test_publish \
+  --run-id e2e_fullscale_publish \
   --publish \
   --pr-number "$PR_NUMBER" \
   --issue-number "$ISSUE_NUMBER"
