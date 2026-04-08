@@ -9,6 +9,7 @@ import itertools
 import tqdm
 from TraceLens.util import TraceEventUtils
 
+
 class GPUEventAnalyser:
     def __init__(self, events):
         """
@@ -348,7 +349,6 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 
 # Jax GPU event analyser
 class JaxGPUEventAnalyser(GPUEventAnalyser):
-
     @staticmethod
     def _is_gpu_event(event: dict) -> bool:
         """Return True if event's process_name contains /device:GPU."""

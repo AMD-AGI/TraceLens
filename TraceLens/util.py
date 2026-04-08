@@ -394,7 +394,6 @@ COMMUNICATION_KEYS = ["rccl", "nccl"]
 
 
 class TraceEventUtils:
-
     class JaxOpKeys:
 
         # keywords for splitting jax events
@@ -413,7 +412,7 @@ class TraceEventUtils:
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
         ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
         TEKeys = ["transformer_engine"]
-        CommunicationKeys = COMMUNICATION_KEYS # use the generic version until we can't
+        CommunicationKeys = COMMUNICATION_KEYS  # use the generic version until we can't
         ClassCategories = {
             "GEMM": GemmKeys,
             "FA BWD": FABwdKeys,
@@ -641,11 +640,12 @@ class TraceEventUtils:
     @staticmethod
     def get_communication_regexes() -> List[re.Pattern]:
         return [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
-    
+
     @staticmethod
     def is_communication_string(text: str) -> bool:
         """Return True if *text* case-insensitively indicates a collective operation."""
         return any(x.match(text) for x in TraceEventUtils.get_communication_regexes())
+
 
 class RocprofParser:
     """Parser for rocprofiler-sdk JSON format (rocprofv3)"""

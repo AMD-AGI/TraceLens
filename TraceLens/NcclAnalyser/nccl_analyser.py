@@ -17,6 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from ..util import DataLoader
 from ..util import TraceEventUtils
 
+
 def list_to_tuple(obj):
     if isinstance(obj, list):
         return tuple(list_to_tuple(item) for item in obj)
@@ -46,6 +47,7 @@ def _parse_split_sizes(value):
             except (ValueError, SyntaxError):
                 pass
     return None
+
 
 import re
 
@@ -153,9 +155,10 @@ class NcclAnalyser:
             if custom_collective_patterns is not None
             else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
         )
-        self._filter_patterns, self._inference_rules = (
-            _build_filter_and_inference_rules(patterns)
-        )
+        (
+            self._filter_patterns,
+            self._inference_rules,
+        ) = _build_filter_and_inference_rules(patterns)
 
         # Byte sizes per dtype
         self.dtype2bytes = {
@@ -284,10 +287,10 @@ class NcclAnalyser:
                 )
                 if bytes_per_elem is not None and row["In msg nelems"] is not None:
                     row["In msg size (MB)"] = (
-                        row["In msg nelems"] * bytes_per_elem / 1024**2
+                        row["In msg nelems"] * bytes_per_elem / 1024 ** 2
                     )
                     row["Out msg size (MB)"] = (
-                        row["Out msg nelems"] * bytes_per_elem / 1024**2
+                        row["Out msg nelems"] * bytes_per_elem / 1024 ** 2
                     )
                 else:
                     row["In msg size (MB)"] = None
@@ -969,7 +972,7 @@ class NcclAnalyser:
                 "rows (exceeds Excel row limit). Consider post-processing "
                 "the per-rank long table directly.",
                 self.world_size,
-                self.world_size**2,
+                self.world_size ** 2,
             )
             return None
 
@@ -977,7 +980,7 @@ class NcclAnalyser:
             self.logger.warning(
                 "all2allv heatmap will produce %d rows for world_size=%d. "
                 "This may be slow to write and unwieldy in Excel.",
-                self.world_size**2,
+                self.world_size ** 2,
                 self.world_size,
             )
 
@@ -1042,7 +1045,7 @@ class NcclAnalyser:
 
         rows = []
         for (src, dst), vals in sorted(pair_data.items()):
-            total_mb = vals["total_bytes"] / (1024**2)
+            total_mb = vals["total_bytes"] / (1024 ** 2)
             count = vals["count"]
             rows.append(
                 {
