@@ -239,6 +239,13 @@ class TraceDiff:
                             )
                         current = root
                         break
+                if current is not root:
+                    children = current.get("children", [])
+                    root["children"] = children
+                    root_uid = root.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
+                    for child_uid in children:
+                        child_event = tree.get_UID2event(child_uid)
+                        child_event["parent"] = root_uid
                 return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
 
@@ -506,7 +513,7 @@ class TraceDiff:
             node2 = variant_uid2node.get(uid2) if uid2 is not None else None
 
             # Boundary logic: when both exist, check POD and name mismatch
-            if uid1 and uid2:
+            if uid1 is not None and uid2 is not None:
                 if uid1 in self.pod1 or uid2 in self.pod2:
                     pass  # Skip boundary logic, still need merge structure
                 else:
@@ -519,20 +526,20 @@ class TraceDiff:
                         self.pod2.add(uid2)
 
             # POD logic: when only one exists, add to POD
-            if uid1 and not uid2:
+            if uid1 is not None and uid2 is None:
                 self.pod1.add(uid1)
-            if uid2 and not uid1:
+            if uid2 is not None and uid1 is None:
                 self.pod2.add(uid2)
 
             merged_id = merged_id_counter[0]
             merged_id_counter[0] += 1
             uid_pair_to_merged_id[key] = merged_id
 
-            if uid1 and uid2:
+            if uid1 is not None and uid2 is not None:
                 self.merged_uid_map[(1, uid1)] = uid2
                 self.merged_uid_map[(2, uid2)] = uid1
                 nn_module_stack = node1.get("nn_module_stack", "")
-            elif uid1:
+            elif uid1 is not None:
                 self.merged_uid_map[(1, uid1)] = -1
                 nn_module_stack = node1.get("nn_module_stack", "")
             else:
@@ -571,8 +578,11 @@ class TraceDiff:
                         self.db2.append(child_node)
                     child_merged_ids.append(traverse_and_merge(None, c2))
 
+            # UID 0 is valid; do not use truthiness (0 and 0 is falsy).
             merged_type = (
-                "combined" if (uid1 and uid2) else ("trace1" if uid1 else "trace2")
+                "combined"
+                if (uid1 is not None and uid2 is not None)
+                else ("trace1" if uid1 is not None else "trace2")
             )
             event = make_event(
                 merged_id, uid1, uid2, merged_type, child_merged_ids, nn_module_stack
