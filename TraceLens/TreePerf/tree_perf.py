@@ -1669,6 +1669,32 @@ class TreePerfAnalyzer:
         except Exception:
             return False
 
+    def _has_descendant_cpu_op_with_own_perf_model(self, event):
+        """
+        True if some ``cpu_op`` strictly below ``event`` has a perf model and GPU work.
+
+        Walks descendants the same way as ``collect_unified_perf_events.traverse``
+        (``python_function`` nodes are transparent). Used so a parent that only
+        qualifies via ``_is_sole_bwd_with_fwd_perf_model`` does not win over a
+        deeper op with its own perf model.
+        """
+        stack = list(event.get("children", []))
+        while stack:
+            uid = stack.pop()
+            node = self.tree.get_UID2event(uid)
+            if not node:
+                continue
+            cat = self.event_to_category(node)
+            if cat == "python_function":
+                stack.extend(node.get("children", []))
+                continue
+            if cat != "cpu_op":
+                continue
+            if self._has_perf_model(node) and self._launches_gpu_kernels(node):
+                return True
+            stack.extend(node.get("children", []))
+        return False
+
     def _is_nccl_event(self, event):
         """Check if an event launches NCCL kernels."""
         gpu_event_uids = event.get("gpu_events", [])
@@ -1688,7 +1714,8 @@ class TreePerfAnalyzer:
         Traverses from cpu_root_nodes and collects events where:
         1. Event has GPU kernels in subtree (first check - skip CPU-only subtrees)
         2. Event has a perf model -> collect and stop traversing subtree
-        3. Event is a 1:1 backward op with linked forward that has perf model -> collect and stop
+        3. Event is a 1:1 backward op with linked forward that has perf model -> collect
+           and stop unless a descendant ``cpu_op`` has its own perf model (then recurse)
         4. Event is a leaf cpu_op (direct kernel launcher) -> collect
 
         Args:
@@ -1735,8 +1762,13 @@ class TreePerfAnalyzer:
                 return
 
             # Exit condition 2: 1:1 backward op with linked forward that has perf model
-            # We can compute backward metrics via forward's perf model
+            # We can compute backward metrics via forward's perf model — but prefer any
+            # descendant cpu_op with its own perf model (not only direct children).
             if self._is_sole_bwd_with_fwd_perf_model(event):
+                if self._has_descendant_cpu_op_with_own_perf_model(event):
+                    for child_uid in event.get("children", []):
+                        traverse(child_uid)
+                    return
                 collected.append(event)
                 return
 
