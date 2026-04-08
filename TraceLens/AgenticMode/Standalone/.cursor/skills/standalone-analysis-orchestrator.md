@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: Standalone Analysis Orchestrator
-description: Orchestrate two-tier PyTorch trace performance analysis (standalone single-trace or comparative two-trace) — system-level (CPU/idle, multi-kernel) and compute kernel tiers with independently composable reports
+description: Orchestrate two-tier PyTorch trace performance analysis - system-level (CPU/idle, multi-kernel) and compute kernel tiers with independently composable reports
 triggers:
   - standalone analysis
   - comparative analysis
@@ -43,7 +43,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ```
 0. Query User Inputs (Platform, Trace Path(s), Analysis Mode, Environment Setup)
-1. Generate Performance Report (branches on comparison_scope, then analysis mode: training vs inference)
+1. Generate Performance Report (branches on analysis mode: training vs inference then, comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 5.5. Model Identification (subagent) → metadata/model_info.json
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
@@ -73,7 +73,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - **`standalone`:** **Trace File Path** → `<trace_path>`
      - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
    - **`comparative`:** ask for both:
-     - **Primary trace (trace1)** → `<trace1_path>`
+     - **Primary trace (trace1)** → `<trace_path>`
      - **Comparison trace (trace2)** → `<trace2_path>`
      - Ask: "Please the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
 
@@ -322,7 +322,7 @@ Then launch a Task subagent with the following prompt:
 ---END AGENT INSTRUCTIONS---
 
 **Execution Context:**
-- Comparison scope: `<comparison_scope>` (`standalone` or `comparative`)
+- Comparison scope: `<comparison_scope>`
 - Output directory: <output_dir>
 - Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: <list from agent file's "Input files" section>
@@ -427,8 +427,15 @@ Include these constraints in EVERY compute kernel subagent invocation prompt:
 
 #### 1. Flag Efficiency Anomalies
 
-- **`standalone`:** Any **roofline** `efficiency_percent` > 100% **MUST** be noted as `[ANOMALY] - verify measurement`. Do **NOT** use >100% to claim "excellent performance." Anomalies may indicate wrong peak spec, timing issues, or workload outside normal bounds.
-- **`comparative`:** `efficiency_percent` is **100×t2/t1** kernel-time ratio for aligned ops (see category metrics `analysis_mode`). Values **> 100** can mean trace2 spent **more** kernel time than trace1 on that op — **not** automatically a roofline measurement bug. Follow each category agent’s comparative guidance (e.g. `gemm-analyzer.md`); do **not** apply the standalone roofline >100% rule blindly.
+When `<comparison_scope>`== `standalone`:
+
+- Any efficiency > 100% **MUST** be noted as `[ANOMALY] - verify measurement`
+- Do **NOT** use > 100% values to claim "excellent performance"
+- Report the anomaly but base recommendations on other operations
+- Efficiency anomalies indicate:
+  - Wrong peak spec for the platform
+  - Measurement timing issues
+  - Workload characteristics outside normal bounds
 
 #### 2. Output Consistency
 
@@ -448,10 +455,9 @@ When invoking a compute kernel subagent, use this template:
 You are analyzing {category} operations for a PyTorch trace on {platform}.
 
 **CRITICAL - READ FIRST:**
-- **Comparison scope:** {comparison_scope} (`standalone` or `comparative` from orchestrator Step 0)
+- Pass `<comparison_scope>` variable
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
 - **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement"
-- **Comparative:** read `metrics['analysis_mode']` and category agent docs — `efficiency_percent` is not roofline %
 - When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
 
 **Platform Specs:**
