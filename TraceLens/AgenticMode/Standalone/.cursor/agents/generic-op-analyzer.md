@@ -113,7 +113,7 @@ For each operation consuming significant time or with notable invocation count:
 - What is this operation actually doing?
 - Why isn't it in a standard category?
 - Is there a known optimized implementation (e.g., Flash Attention for unfused attention ops)?
-- Can it be fused with adjacent operations?
+- For fusion opportunities, defer to the kernel fusion analysis
 
 ### Step 6: Determine Optimization Recommendations
 
@@ -122,7 +122,6 @@ For each validated bottleneck, provide recommendations in both categories:
 **Algorithmic Recommendations:**
 - If the operation appears to be a known pattern (e.g., embedding lookup, index operations), suggest standard optimizations
 - If it's a custom or unusual operation, suggest whether it could be replaced by a standard library call
-- Look for fusion opportunities with adjacent operations in the tree
 
 **Kernel Optimization Focus:**
 - Flag operations where the kernel name suggests a suboptimal implementation
@@ -234,7 +233,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ### Embedding and Index Operations
 - **Symptoms:** `embedding`, `index_select`, `gather`, `scatter_` operations
 - **Expected:** Memory-bound, should approach peak HBM BW
-- **Algorithmic:** Check if fused embedding kernels are available
+- **Algorithmic:** For fusion opportunities, defer to the kernel fusion analysis
 - **Kernel:** Optimize memory access patterns if below expected bandwidth
 
 ---

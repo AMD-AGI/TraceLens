@@ -222,7 +222,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 #### Unfused Attention Patterns
 - **Symptoms:** Multiple operations: softmax, bmm, mul, copy_ appearing together
-- **Algorithmic (primary):** Migrate to Flash Attention
+- **Note:** Fusion analysis and recommendations for unfused attention are handled by the kernel fusion module
 
 #### Flash Attention Already Used
 - **Good sign:** Model is already optimized

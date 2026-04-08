@@ -82,14 +82,14 @@ Check `category_specific.softmax_count` to identify attention patterns.
 
 Each entry in `metrics['operations']` has a `name` field (e.g. `aten::softmax`, `aten::sum`, `aten::mean`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
 
-- **Softmax**: softmax (attention activation function, common in Transformer attention layers; may indicate unfused attention when paired with bmm)
+- **Softmax**: softmax (attention activation function, common in Transformer attention layers)
 - **Sum**: sum (element summation across one or more dimensions, common in loss computation and gradient accumulation)
 - **Mean**: mean, avg (average reduction across dimensions, used in pooling and normalization)
 - **Max**: max (maximum value reduction, used in argmax patterns and pooling)
 - **Min**: min (minimum value reduction, used in clamping and threshold logic)
 - **Other**: anything not matching the above
 
-These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it. Pay special attention to softmax — it is the most actionable reduce type because it often signals unfused attention patterns.
+These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it.
 
 ### Step 4: Identify Bottlenecks
 
@@ -98,7 +98,6 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 - Efficiency: < 70% of peak HBM BW
 
 **Special considerations:**
-- Softmax operations may indicate unfused attention
 - Reduce ops are generally memory-bound
 
 ### Step 5: Generate Markdown Tables
@@ -110,9 +109,8 @@ Build operations table from `metrics['operations']`.
 For each validated bottleneck, provide recommendations in both categories:
 
 **Algorithmic Recommendations:**
-- **Softmax in attention:** Should use Flash Attention instead
-- Fuse softmax with preceding/following operations
-- Look for unfused attention patterns
+- For fusion opportunities (e.g., softmax in attention context), defer to the kernel fusion analysis
+- Use torch.compile to auto-fuse operations
 
 **Kernel Optimization Focus:**
 - If standalone reduce ops have low efficiency, investigate kernel issues
@@ -156,32 +154,19 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 ## Common Patterns for Reduce Analysis
 
-### Softmax in Attention Context
-- **Symptoms:** Standalone softmax ops, often with bmm nearby
-- **Issue:** Indicates unfused attention pattern
-- **Algorithmic (primary):** Migrate to Flash Attention
-- **Kernel:** Optimize softmax kernel (limited gains)
-
 ### Standalone Reductions
 - **Symptoms:** sum, mean, max operations in isolation
 - **General guideline:** >70% of peak HBM BW is the target
-- **Algorithmic:** Fuse with adjacent operations if possible
 - **Kernel:** Flag for investigation if below 70% efficiency threshold
-
-### High Softmax Count
-- **Symptoms:** Many softmax operations
-- **Indicates:** Heavy attention usage, potential optimization opportunity
-- **Action:** Ensure Flash Attention is being used
 
 ---
 
 ## Key Principles
 
-1. **Softmax is key indicator** - Often reveals unfused attention
-2. **Generally memory-bound** - Should approach peak HBM BW for simple reductions
-3. **Fusion primary algorithmic** - Fusing softmax with attention is high impact
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+1. **Generally memory-bound** - Should approach peak HBM BW for simple reductions
+2. **Fusion opportunities** - If softmax patterns suggest unfused attention, note the observation but defer fusion analysis to the kernel fusion module
+3. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+4. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 
@@ -190,4 +175,4 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 | Efficiency | Assessment |
 |------------|------------|
 | >70% | Good |
-| <70% | Investigate kernel or fusion opportunity |
+| <70% | Investigate kernel issues |
