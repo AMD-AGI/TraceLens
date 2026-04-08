@@ -159,13 +159,14 @@ Generated at: `<ISO 8601 timestamp>`
 
 | Trace/Case | Failures | Platform | Reproducer command |
 |---|---|---|---|
-| <trace_id> | <count> | <platform> | `CONTAINER=<container> NUM_REPEATS=1 MAX_PARALLEL=1 TEST_IDS="<trace_id>" TEST_TRACES_CSV="<absolute_csv_path>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="evals/<suite>_test_traces.csv" bash evals/eval_scripts/run_repeatability_parallel.sh` |
 ...top 5 traces by failure count
 ```
 
 For the reproducer commands:
 - Use the `container` value from inputs
-- Use the absolute path of `test_traces_csv`
+- Use the **relative** path of `test_traces_csv` (e.g. `evals/e2e_test_traces.csv`) — never embed absolute or user-specific paths
+- Omit `NUM_REPEATS` and `MAX_PARALLEL` so the script defaults (5 repeats, 5 parallel) are used, matching a standard eval run
 - The `platform` comes from the test traces CSV
 
 ## Step 7 — Build Reproducer Packages
@@ -193,9 +194,10 @@ Create a self-contained, assignable reproducer folder for each unique failure is
      -C <report_dir>/reproducers <sanitized_issue_name>/
    ```
 
-The path sanitization command for each NDJSON:
+The path sanitization command for each NDJSON (replaces the full repo root path):
 ```bash
-sed 's|/home/[^/]*/[^/]*/|$REPO_ROOT/|g' <source> > <dest>
+REPO_ABS=$(cd "$(git rev-parse --show-toplevel)" && pwd)
+sed "s|${REPO_ABS}|\$REPO_ROOT|g" <source> > <dest>
 ```
 
 After all issues are processed, print the count:
