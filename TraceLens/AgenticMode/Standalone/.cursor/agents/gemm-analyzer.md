@@ -23,7 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory (e.g., `/path/to/analysis_output/`)
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
-- `mode`: `standalone` (default) or `comparative`
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/gemm_ops.csv` - Filtered GEMM operations
@@ -74,7 +74,7 @@ Execute the analysis script using the command prefix:
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/gemm_analysis.py \
   --output-dir <output_dir> \
-  --mode <mode>
+  --comparison_scope <comparison_scope>
 ```
 
 The script outputs `gemm_metrics.json` to `category_data/`.
@@ -99,7 +99,7 @@ Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations
 
 **Bottleneck criteria (efficiency — mode-specific):**
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
-- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)** for that op. It is **not** % of peak. Values **below 100** mean trace2 spent less kernel time on that op than trace1 (larger gap → smaller percentage). Use this for relative gaps vs trace2; do not apply the “< 70% of peak” roofline rule unless you are also citing achieved TFLOPS/TB/s vs peak from the same row for context.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
 ### Step 4: Generate Markdown Tables
 
@@ -112,7 +112,7 @@ Build the operations breakdown table from `metrics['operations']`:
 
 **Column mappings:**
 - **Count**: Use `operations[i].count` (total invocations, not unique signatures)
-- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. In **standalone** mode, format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`). In **comparative** mode, report it as **trace2/trace1 kernel-time ratio as a percentage** (e.g. `50%` means trace2 uses half the kernel time of trace1 for that op)—do not describe it as roofline %.
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. In **standalone** mode, format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`). In **comparative** mode, report it as **trace2/trace1 kernel-time ratio as a percentage**.
 - **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
 - **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`). Do NOT use `classification.gemm_type` here — that field distinguishes quantized vs regular, not the compute/memory bound type.
 
@@ -175,8 +175,6 @@ Do not look up peaks independently from the metadata dict.
 
 **Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% target band), `savings_ms_high` (100% target band), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
 
-**Comparative mode (`--mode comparative`):** In `metrics['operations']`, `efficiency.efficiency_percent` is **`100 × (trace2 kernel time) / (trace1 kernel time)`** for aligned rows (not roofline %). The same 75 / 87.5 / 100 band math in `impact_estimates` applies to that synthetic efficiency; use `metrics['analysis_mode']` to interpret the percentage.
-
 ### Step 6.5: Write Impact Estimates to Metadata
 
 Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
@@ -188,7 +186,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: **Standalone:** `high` = clear gap vs expected peak. **Comparative:** interpret as strength of evidence for a trace2-vs-trace1 kernel-time gap. `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
@@ -217,7 +215,9 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ## Key Principles
 
 1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
-2. **Interpret efficiency** - **Standalone:** compare achieved TFLOPS/s vs peak MAF (compute-bound) or TB/s vs peak HBM BW using `efficiency_percent` as roofline %. **Comparative:** `efficiency_percent` is trace2/trace1 kernel-time ratio (100×t2/t1); use roofline/TFLOPS fields only as supplementary context if needed
+2. **Calculate efficiency** - 
+  **Standalone:** Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
+  **Comparative:** Compare achieved runtime in trace1 vs acheived runtime in trace2. use roofline/TFLOPS fields only as supplementary context if needed
 3. **Be specific** - Include M/N/K shapes, batch sizes, data types
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
@@ -227,14 +227,10 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 ## Efficiency Thresholds
 
-**Standalone** (`efficiency_percent` = roofline %):
-
 | Efficiency | Assessment | Action |
 |------------|------------|--------|
 | >70% | Good | Limited optimization potential |
 | <70% | Needs investigation | Priority for kernel optimization |
-
-**Comparative** (`efficiency_percent` = 100×t2/t1, not roofline): interpret relative to 100 (equal kernel time). Well below 100 means trace2 is much faster on that op; at or above 100 means trace1 is not slower than trace2 for kernel time on that row. Do not use the >70% / <70% roofline table as the primary rule.
 
 ---
 
