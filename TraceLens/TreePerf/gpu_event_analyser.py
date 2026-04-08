@@ -7,7 +7,7 @@
 import pandas as pd
 import itertools
 import tqdm
-
+from TraceLens.util import TraceEventUtils
 
 class GPUEventAnalyser:
     def __init__(self, events):
@@ -118,7 +118,7 @@ class GPUEventAnalyser:
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if "nccl" in event.get("name"):
+                    if TraceEventUtils.is_communication_string(event.get("name")):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)
@@ -395,12 +395,12 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
                 cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
-                name = event.get("name") or ""
+                name = event.get("name", "")
                 if any(
                     name.lower().startswith(x) for x in ["copy", "memcpy", "memset"]
                 ):
                     cur_dict[GPUEventAnalyser.memcpy_key].append(event)
-                elif name.startswith("nccl"):
+                elif TraceEventUtils.is_communication_string(name):
                     cur_dict[GPUEventAnalyser.communication_key].append(event)
                 else:
                     cur_dict[GPUEventAnalyser.computation_key].append(event)

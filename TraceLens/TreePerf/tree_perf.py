@@ -819,7 +819,7 @@ class TreePerfAnalyzer:
 
         for kernel in kernel_events:
             # Skip nccl if not included
-            is_nccl = "nccl" in kernel.get("name", "").lower()
+            is_nccl = TraceEventUtils.is_communication_string(kernel.get("name", ""))
             if is_nccl and not include_nccl:
                 continue
 
@@ -1677,7 +1677,7 @@ class TreePerfAnalyzer:
         # Check if any GPU kernel is an NCCL kernel
         for gpu_uid in gpu_event_uids:
             gpu_event = self.tree.get_UID2event(gpu_uid)
-            if gpu_event and "nccl" in gpu_event.get("name", "").lower():
+            if gpu_event and TraceEventUtils.is_communication_string(gpu_event.get("name", "")):
                 return True
         return False
 

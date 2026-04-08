@@ -387,6 +387,12 @@ class JaxProfileProcessor:
 # Trace event utilities to help with traces in the Google Trace Event format
 # https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview?tab=t.0
 # This trace event format includes both Pytorch and Jax traces (and anything that can be viewed in Perfetto)
+#
+# Shared by TraceEventUtils and JaxOpKeys; cannot use TraceEventUtils.CommunicationKeys
+# inside the nested JaxOpKeys class (outer class name is not bound yet during nested exec).
+COMMUNICATION_KEYS = ["rccl", "nccl"]
+
+
 class TraceEventUtils:
 
     class JaxOpKeys:
@@ -407,7 +413,7 @@ class TraceEventUtils:
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
         ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
         TEKeys = ["transformer_engine"]
-        CommunicationKeys = ["rccl", "nccl"]
+        CommunicationKeys = COMMUNICATION_KEYS # use the generic version until we can't
         ClassCategories = {
             "GEMM": GemmKeys,
             "FA BWD": FABwdKeys,
@@ -632,6 +638,14 @@ class TraceEventUtils:
                 + event[TraceEventUtils.TraceKeys.Duration]
             )
 
+    @staticmethod
+    def get_communication_regexes() -> List[re.Pattern]:
+        return [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+    
+    @staticmethod
+    def is_communication_string(text: str) -> bool:
+        """Return True if *text* case-insensitively indicates a collective operation."""
+        return any(x.match(text) for x in TraceEventUtils.get_communication_regexes())
 
 class RocprofParser:
     """Parser for rocprofiler-sdk JSON format (rocprofv3)"""

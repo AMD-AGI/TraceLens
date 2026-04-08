@@ -407,7 +407,7 @@ class JaxNcclAnalyser:
             bool: True if event is a collective communication event, False otherwise
         """
         is_coll_comm_event = (
-            event.get("gpu_kernel_op_cat", "") == "Communication rccl/nccl"
+            TraceEventUtils.is_communication_string(event.get("name", ""))
         )
         return is_coll_comm_event
 

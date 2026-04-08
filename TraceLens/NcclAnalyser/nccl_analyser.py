@@ -15,7 +15,7 @@ import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..util import DataLoader
-
+from ..util import TraceEventUtils
 
 def list_to_tuple(obj):
     if isinstance(obj, list):
@@ -47,14 +47,13 @@ def _parse_split_sizes(value):
                 pass
     return None
 
-
 import re
 
 DEFAULT_CUSTOM_COLLECTIVE_PATTERNS = [
     (r"cross_device_reduce", "allreduce"),
 ]
 
-_DEFAULT_FILTER_PATTERNS = [re.compile(r"nccl", re.IGNORECASE)] + [
+_DEFAULT_FILTER_PATTERNS = TraceEventUtils.get_communication_regexes() + [
     re.compile(p, re.IGNORECASE) for p, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
 ]
 
@@ -66,7 +65,7 @@ _DEFAULT_INFERENCE_RULES = [
 
 def _build_filter_and_inference_rules(custom_patterns):
     """Build compiled regex lists from user-provided (pattern, collective) tuples."""
-    filter_patterns = [re.compile(r"nccl", re.IGNORECASE)]
+    filter_patterns = TraceEventUtils.get_communication_regexes()
     inference_rules = []
     for pattern, collective in custom_patterns:
         compiled = re.compile(pattern, re.IGNORECASE)
