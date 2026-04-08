@@ -281,11 +281,40 @@ def calculate_efficiency(
     return result
 
 
+def _load_fusion_map(output_dir: str) -> Dict[str, str]:
+    """Load high-confidence GPU kernel name -> fusion candidate name mapping."""
+    if not output_dir:
+        return {}
+    path = os.path.join(output_dir, "category_data", "kernel_fusion_metrics.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r") as f:
+            return json.load(f).get("high_confidence_kernel_map", {})
+    except (json.JSONDecodeError, KeyError):
+        return {}
+
+
+def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
+    """Match kernel_details_summary against fusion kernel map with prefix fallback."""
+    for kn in re.findall(r"'name': '([^']+)'", kd_str):
+        if kn in fusion_map:
+            return fusion_map[kn]
+        for fk, bn in fusion_map.items():
+            if fk.startswith(kn) or kn.startswith(fk):
+                return bn
+    return None
+
+
 def build_operation_metrics(
     ops_df: pd.DataFrame, metadata: dict, category_config: dict
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
+
+    Automatically loads the high-confidence fusion kernel map from
+    ``kernel_fusion_metrics.json`` (if it exists) via ``metadata["output_dir"]``
+    and tags operations whose GPU kernels are covered by a fusion candidate.
 
     Args:
         ops_df: Operations DataFrame
@@ -299,6 +328,7 @@ def build_operation_metrics(
     """
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
+    fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
 
     # Calculate total time for percentage calculations
     total_time_ms = 0
@@ -363,9 +393,19 @@ def build_operation_metrics(
         if classifier:
             op_metric["classification"] = classifier(op_name, row)
 
-        op_metric["library"] = classify_kernel_library(
-            op_name, row.get("kernel_details_summary", "")
-        )
+        kd_str = row.get("kernel_details_summary", "")
+        if pd.isna(kd_str):
+            kd_str = ""
+        else:
+            kd_str = str(kd_str)
+
+        op_metric["library"] = classify_kernel_library(op_name, kd_str)
+
+        if fusion_map and kd_str:
+            matched = _match_fusion_op(kd_str, fusion_map)
+            if matched:
+                op_metric["fusion_flagged"] = True
+                op_metric["fusion_candidate_name"] = matched
 
         operations.append(op_metric)
 
@@ -408,6 +448,8 @@ def compute_impact_estimates(
 
     estimates = []
     for op in operations:
+        if op.get("fusion_flagged"):
+            continue
         eff = op.get("efficiency", {})
         eff_pct = eff.get("efficiency_percent")
         if eff_pct is None or eff.get("is_anomaly"):

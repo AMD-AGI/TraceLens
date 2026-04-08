@@ -61,6 +61,14 @@ _NORM_NAME_PATTERNS = [
     "miopenbatchnorm", "rmsnorm",
 ]
 
+_CONFIDENCE_NAME_HINTS = {
+    "attention": ("attention", "sdpa", "self_attn"),
+    "norm": ("rmsnorm", "rms_norm", "layernorm", "layer_norm"),
+    "mlp": ("mlp",),
+    "rope": ("rotary", "rope", "apply_rotary"),
+    "siglu": ("silu", "swiglu"),
+}
+
 
 def _is_norm_kernel(kernel_info: dict) -> bool:
     """Check if a kernel is a normalization op by type or kernel name."""
@@ -191,6 +199,53 @@ def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, targ
     return max(0.0, current_us - fused_time_us - unmodeled_time_us)
 
 
+def _classify_confidence(candidate: dict, enriched: list) -> str:
+    """Classify fusion confidence from enriched kernel data + module name.
+
+    High   = module name matches a known pattern AND kernel composition confirms it.
+    Medium = one signal matches.
+    Low    = speculative.
+    """
+    bn = candidate.get("base_name", "").lower()
+    mn = candidate.get("module_name", "").lower()
+
+    name_signal = next(
+        (p for p, hints in _CONFIDENCE_NAME_HINTS.items()
+         if any(h in bn or h in mn for h in hints)),
+        None,
+    )
+
+    n_gemm = sum(1 for e in enriched if _is_matrix_op(e))
+    has_softmax = any("softmax" in e["name"].lower() for e in enriched)
+    has_rsqrt = any("rsqrt" in e["name"].lower() for e in enriched)
+    has_neg_cat = (
+        any("neg" in e["name"].lower() for e in enriched)
+        and any("catarray" in e["name"].lower() or "cat_" in e["name"].lower()
+                for e in enriched)
+    )
+    n_non_gemm = len(enriched) - n_gemm
+
+    comp_signal = None
+    # Unfused attention: QK^T (GEMM) + Softmax + PV (GEMM) → minimum 2 GEMMs
+    if n_gemm >= 2 and has_softmax:
+        comp_signal = "attention"
+    # rsqrt is shared by RMSNorm, LayerNorm, GroupNorm — all valid fusion targets
+    elif has_rsqrt:
+        comp_signal = "norm"
+    elif n_gemm >= 2 and n_non_gemm >= 1:
+        comp_signal = "mlp"
+    elif has_neg_cat:
+        comp_signal = "rope"
+    elif n_gemm == 0 and len(enriched) >= 3:
+        comp_signal = "elementwise_chain"
+
+    if name_signal and comp_signal:
+        return "high"
+    if name_signal or comp_signal:
+        return "medium"
+    return "low"
+
+
 def compute_fusion_impact_estimates(
     candidates: List[dict],
     kernel_lookup: Dict[str, dict],
@@ -209,6 +264,10 @@ def compute_fusion_impact_estimates(
 
     Kernels without perf models use their measured trace time as-is
     and a warning is emitted.
+
+    Each estimate includes a deterministic ``confidence`` level (high / medium /
+    low) and the list of GPU kernel names (``affected_gpu_kernels``) so that
+    downstream compute-category scripts can skip fusion-covered operations.
     """
 
     vector_maf = peak_maf_tflops.get(
@@ -336,6 +395,9 @@ def compute_fusion_impact_estimates(
             "kernel_count": len(kernels),
             "modeled_kernel_count": len(modeled),
         }
+
+        estimate["confidence"] = _classify_confidence(candidate, enriched)
+        estimate["affected_gpu_kernels"] = [e["name"] for e in enriched]
 
         if has_matrix_ops:
             estimate["fusion_type"] = "matrix_compute"
@@ -524,11 +586,22 @@ def main():
     if warnings:
         metrics["warnings"] = warnings
 
+    high_confidence_kernel_map: Dict[str, str] = {}
+    for est in impact_estimates:
+        if est.get("confidence") == "high":
+            op_name = est["operation"]
+            for kn in est.get("affected_gpu_kernels", []):
+                if kn:
+                    high_confidence_kernel_map[kn] = op_name
+    metrics["high_confidence_kernel_map"] = high_confidence_kernel_map
+
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
     print(f"Kernel fusion analysis complete:")
     print(f"  Candidates: {len(candidates)}")
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total savings (mid): {total_savings_ms:.3f} ms")
+    high_count = sum(1 for e in impact_estimates if e.get("confidence") == "high")
+    print(f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}")
     if warnings:
         print(f"  Warnings: {len(warnings)}")
     print(f"  Metrics written to: {output_path}")
