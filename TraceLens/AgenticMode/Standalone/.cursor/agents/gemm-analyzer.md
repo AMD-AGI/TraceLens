@@ -23,7 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory (e.g., `/path/to/analysis_output/`)
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
-- `mode`: `standalone` (default) or `comparative` — pass through to `gemm_analysis.py` as `--mode`
+- `mode`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/gemm_ops.csv` - Filtered GEMM operations
@@ -94,9 +94,12 @@ Check `status` field - if 'ERROR', write error findings and stop.
 
 Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations']`:
 
-**Bottleneck criteria:**
+**Bottleneck criteria (time — both modes):**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
+
+**Bottleneck criteria (efficiency — mode-specific):**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)** for that op. It is **not** % of peak. Values **below 100** mean trace2 spent less kernel time on that op than trace1 (larger gap → smaller percentage). Use this for relative gaps vs trace2; do not apply the “< 70% of peak” roofline rule unless you are also citing achieved TFLOPS/TB/s vs peak from the same row for context.
 
 ### Step 4: Generate Markdown Tables
 
@@ -145,9 +148,10 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute)
-- **Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
-- **Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
-- *Use the template matching `bound_type` and delete the other.*
+- **Standalone — Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
+- **Standalone — Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
+- **Comparative — Relative kernel time:** `efficiency_percent` = 100×t2/t1 for this op (state in plain language vs trace2; optional: cite achieved TFLOPS/TB/s vs peak from the same row as context)
+- *Standalone: use the template matching `bound_type` and delete the other peak line. Comparative: omit roofline-only efficiency lines if you only discuss trace2 ratio.*
 - **Issue:** [Brief description]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
@@ -184,7 +188,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- **Confidence**: **Standalone:** `high` = clear gap vs expected peak. **Comparative:** interpret as strength of evidence for a trace2-vs-trace1 kernel-time gap. `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
@@ -213,7 +217,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ## Key Principles
 
 1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
-2. **Calculate efficiency** - Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
+2. **Interpret efficiency** - **Standalone:** compare achieved TFLOPS/s vs peak MAF (compute-bound) or TB/s vs peak HBM BW using `efficiency_percent` as roofline %. **Comparative:** `efficiency_percent` is trace2/trace1 kernel-time ratio (100×t2/t1); use roofline/TFLOPS fields only as supplementary context if needed
 3. **Be specific** - Include M/N/K shapes, batch sizes, data types
 4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
@@ -223,10 +227,14 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 ## Efficiency Thresholds
 
+**Standalone** (`efficiency_percent` = roofline %):
+
 | Efficiency | Assessment | Action |
 |------------|------------|--------|
 | >70% | Good | Limited optimization potential |
 | <70% | Needs investigation | Priority for kernel optimization |
+
+**Comparative** (`efficiency_percent` = 100×t2/t1, not roofline): interpret relative to 100 (equal kernel time). Well below 100 means trace2 is much faster on that op; at or above 100 means trace1 is not slower than trace2 for kernel time on that row. Do not use the >70% / <70% roofline table as the primary rule.
 
 ---
 
@@ -238,7 +246,8 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 | Kernel durations | Trace events |
 | Input shapes (M/N/K) | `Input Dims` column |
 | Achieved TFLOPS/s | Calculated from duration + FLOPs |
-| Efficiency % | Achieved / Peak MAF |
+| Efficiency % (standalone) | `efficiency_percent` as Achieved / Peak (roofline) |
+| Efficiency % (comparative) | `efficiency_percent` as 100×trace2/trace1 kernel time for the op |
 | Batch counts | Number of invocations |
 
 ## What You CANNOT Infer
