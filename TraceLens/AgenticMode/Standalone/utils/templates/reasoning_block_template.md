@@ -149,6 +149,7 @@ Quantifiable:
 - High end (100% roofline): <savings_ms_high> ms savings (<e2e_pct_high>% E2E)
 - Coverage: <modeled_kernel_count> of <kernel_count> kernels modelled
 - Fusion pattern: <bound_type>-bound, <fusion_type>
+- Confidence: High/Medium/Low — <brief reason from sub-agent pattern classification>
 ```
 
 When partial coverage, append to Coverage: `(<unmodeled_count> kernel(s) use measured trace time)`.

@@ -554,8 +554,17 @@ def parse_first_shape(dims_str):
 
 
 def shape_aware_lookup(table, kname, input_dims=None):
-    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name."""
+    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name.
+
+    Uses prefix matching as fallback when exact key misses, since trace kernel
+    names can be longer than the truncated names stored in perf CSV lookups.
+    """
     shapes = table.get(kname, {})
+    if not shapes:
+        for csv_name in table:
+            if kname.startswith(csv_name) or csv_name.startswith(kname):
+                shapes = table[csv_name]
+                break
     shape_key = parse_first_shape(input_dims) if input_dims else None
     return shapes.get(shape_key) or next(iter(shapes.values()), {})
 

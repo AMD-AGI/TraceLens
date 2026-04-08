@@ -181,6 +181,7 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 - High end (100% roofline): X.XXX ms savings (X.XX% E2E)
 - Coverage: M of N kernels modelled
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
+- Confidence: High/Medium/Low — <brief reason>
 
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 <!-- When not quantifiable: **Impact estimate:** Impact estimate is not quantifiable from trace data. -->
