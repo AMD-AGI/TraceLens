@@ -277,9 +277,9 @@ def calculate_efficiency(
         peak_hbm_bw: Peak HBM bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
             for resolving the precision-aware peak
-        analysis_mode: ``standalone`` uses ``_apply_standalone_efficiency_percent``;
-            ``comparative`` uses ``_comparative_efficiency_percent_from_row``, falling back
-            to standalone when no comparative value is written
+        analysis_mode:
+            ``standalone`` uses roofline efficiency
+            ``comparative`` uses comparative efficiency
 
     Returns:
         Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type, warning

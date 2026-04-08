@@ -28,6 +28,7 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     validate_efficiency,
     calculate_efficiency_with_validation,
     compute_impact_estimates,
+    has_comparative_impact_columns,
     generate_plot_data,
     write_metrics_json,
     load_category_data,
@@ -241,6 +242,57 @@ def test_compute_impact_estimates_min_savings():
     assert len(estimates_strict) == 0
 
 
+def test_has_comparative_impact_columns():
+    df_missing = pd.DataFrame({"name": ["a"]})
+    assert not has_comparative_impact_columns(df_missing)
+    df_ok = pd.DataFrame(
+        {
+            "speedup (trace1/trace2)": [0.5],
+            "delta_us (trace2 - trace1)": [-1000.0],
+        }
+    )
+    assert has_comparative_impact_columns(df_ok)
+
+
+def test_comparative_impact_from_operations_trace2_faster():
+    """Comparative efficiency_percent = 100*t2/t1; impact uses same 75/87.5/100 bands."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm", "aten::addmm", "aten::bmm"],
+            "count": [1, 1, 1],
+            "Kernel Time (µs)_sum": [10_000.0, 5_000.0, 2_000.0],
+            "speedup (trace1/trace2)": [0.5, 1.2, 0.8],
+            "delta_us (trace2 - trace1)": [-5_000.0, 1_000.0, -200.0],
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    config: dict = {}
+    operations = build_operation_metrics(
+        df, metadata, config, analysis_mode="comparative"
+    )
+    mm_op = next(o for o in operations if o["name"] == "aten::mm")
+    assert mm_op["efficiency"]["efficiency_percent"] == 50.0
+    bmm_op = next(o for o in operations if o["name"] == "aten::bmm")
+    assert bmm_op["efficiency"]["efficiency_percent"] == 90.0
+
+    out = compute_impact_estimates(
+        operations, "gemm", min_savings_ms=0.1, baseline_ms=1000.0
+    )
+    # Row 1: eff 120 -> savings_high 0 -> excluded; row 0 and 2 remain
+    assert len(out) == 2
+    assert out[0]["operation"] == "aten::mm"
+    assert out[0]["type"] == "kernel_tuning"
+    assert out[0]["efficiency_pct"] == 50.0
+    assert out[0]["savings_ms_high"] == 5.0
+    assert out[0]["savings_ms_low"] == round(10.0 * (1 - 50.0 / 75.0), 3)
+    assert out[0]["savings_ms"] == round(10.0 * (1 - 50.0 / 87.5), 3)
+    assert out[0]["e2e_pct_high"] == 0.5
+    assert out[1]["operation"] == "aten::bmm"
+    assert out[1]["efficiency_pct"] == 90.0
+    assert out[1]["savings_ms_high"] == 0.2
+    assert out[1]["savings_ms"] == 0.0
+
+
 # ----- Unit tests: generate_plot_data -----
 
 
@@ -266,6 +318,36 @@ def test_generate_plot_data(output_dir_with_manifest_and_metrics):
     gemm_rec = next(r for r in recs if r["category"] == "gemm")
     assert gemm_rec["savings_ms"] == 150.0
     assert gemm_rec["operation_count"] == 2
+
+
+def test_generate_plot_data_comparative_kernel_tuning_type(tmp_path):
+    cat_data = tmp_path / "category_data"
+    cat_data.mkdir(parents=True)
+    (cat_data / "category_manifest.json").write_text(
+        json.dumps({"gpu_utilization": {"total_time_ms": 2000.0}}, indent=2)
+    )
+    gemm_metrics = {
+        "status": "OK",
+        "category": "gemm",
+        "impact_estimates": [
+            {
+                "operation": "aten::mm",
+                "category": "gemm",
+                "type": "kernel_tuning",
+                "savings_ms": 12.0,
+                "savings_ms_low": 12.0,
+                "savings_ms_high": 12.0,
+                "confidence": "high",
+            },
+        ],
+    }
+    (cat_data / "gemm_metrics.json").write_text(json.dumps(gemm_metrics, indent=2))
+    out_path = generate_plot_data(str(tmp_path))
+    with open(out_path) as f:
+        data = json.load(f)
+    assert len(data["recommendations"]) == 1
+    assert data["recommendations"][0]["type"] == "kernel_tuning"
+    assert data["recommendations"][0]["savings_ms"] == 12.0
 
 
 def test_generate_plot_data_skips_error_metrics(tmp_path):
@@ -500,3 +582,66 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     if m.get("status") == "OK":
         assert "operations" in m
         assert "impact_estimates" in m
+        assert m.get("analysis_mode") == "standalone"
+
+
+def test_gemm_analysis_script_comparative_mode(tmp_path):
+    """gemm_ops.csv with TraceDiff columns + --mode comparative -> kernel_tuning-shaped estimates."""
+    out = tmp_path / "analysis_output"
+    (out / "category_data").mkdir(parents=True)
+    (out / "metadata").mkdir(parents=True)
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "TFLOPS/s_mean": [400.0],
+            "TB/s_mean": [0.5],
+            "FLOPS/Byte": [2000.0],
+            "Compute Spec": ["matrix_bf16"],
+            "speedup (trace1/trace2)": [0.5],
+            "delta_us (trace2 - trace1)": [-5_000.0],
+        }
+    )
+    df.to_csv(out / "category_data" / "gemm_ops.csv", index=False)
+    meta = {
+        "platform": "MI300X",
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    (out / "metadata" / "gemm_metadata.json").write_text(json.dumps(meta, indent=2))
+
+    script = os.path.join(STANDALONE, "category_analyses", "gemm_analysis.py")
+    if not os.path.isfile(script):
+        pytest.skip("gemm_analysis.py not found")
+
+    import subprocess
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
+    result = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            str(out),
+            "--mode",
+            "comparative",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    with open(out / "category_data" / "gemm_metrics.json") as f:
+        m = json.load(f)
+    assert m["analysis_mode"] == "comparative"
+    assert len(m["impact_estimates"]) == 1
+    assert m["impact_estimates"][0]["type"] == "kernel_tuning"
+    assert m["operations"][0]["efficiency"]["efficiency_percent"] == 50.0
+    assert m["impact_estimates"][0]["efficiency_pct"] == 50.0
+    assert m["impact_estimates"][0]["savings_ms"] == round(10.0 * (1 - 50.0 / 87.5), 3)
+    assert m["impact_estimates"][0]["savings_ms_high"] == 5.0
