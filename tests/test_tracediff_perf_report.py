@@ -1236,7 +1236,8 @@ class TestEnrichSheetWithTrace2:
 # Tests: enrichment via enrich_perf_report_dict_inplace
 # ---------------------------------------------------------------------------
 class TestEnrichmentViaBuildReport:
-    """Sheets with ``name`` + kernel time get speedup/delta; others unchanged."""
+    """Only ``unified_perf_summary`` gets speedup/delta; op-category and launcher
+    sheets do not."""
 
     @pytest.fixture
     def enriched_report(self):
@@ -1332,26 +1333,22 @@ class TestEnrichmentViaBuildReport:
         }
         return _enrich_perf_from_diff(diff_df, perf1, None)
 
-    def test_gemm_sheet_enriched(self, enriched_report):
+    def test_gemm_sheet_not_enriched(self, enriched_report):
         gemm = enriched_report["GEMM"]
         assert "Kernel Time trace2 (µs)_sum" not in gemm.columns
-        assert "speedup (trace1/trace2)" in gemm.columns
-        assert "delta_us (trace2 - trace1)" in gemm.columns
-        assert gemm.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(200.0 / 150.0)
-        assert gemm.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-50.0)
+        assert "speedup (trace1/trace2)" not in gemm.columns
+        assert "delta_us (trace2 - trace1)" not in gemm.columns
 
-    def test_normalization_sheet_enriched(self, enriched_report):
+    def test_normalization_sheet_not_enriched(self, enriched_report):
         norm = enriched_report["Normalization"]
-        assert "Kernel Time trace2 (µs)_sum" not in norm.columns
-        assert norm.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(30.0 / 25.0)
+        assert "speedup (trace1/trace2)" not in norm.columns
+        assert "delta_us (trace2 - trace1)" not in norm.columns
 
-    def test_ops_unique_args_enriched(self, enriched_report):
+    def test_ops_unique_args_not_enriched(self, enriched_report):
         ops = enriched_report["ops_unique_args"]
         assert "Kernel Time trace2 (µs)_sum" not in ops.columns
-        mm_row = ops[ops["name"] == "aten::mm"].iloc[0]
-        relu_row = ops[ops["name"] == "aten::relu"].iloc[0]
-        assert mm_row["speedup (trace1/trace2)"] == pytest.approx(200.0 / 150.0)
-        assert relu_row["speedup (trace1/trace2)"] == pytest.approx(30.0 / 25.0)
+        assert "speedup (trace1/trace2)" not in ops.columns
+        assert "delta_us (trace2 - trace1)" not in ops.columns
 
     def test_unified_perf_summary_enriched(self, enriched_report):
         ups = enriched_report["unified_perf_summary"]
@@ -1592,6 +1589,16 @@ class TestConsolidationViaReport:
                     "total_direct_kernel_time_sum": [500.0, 100.0, 200.0],
                 }
             ),
+            "unified_perf_summary": pd.DataFrame(
+                {
+                    "name": ["aiter::fmha_v3_bwd", "aten::fill_", "aten::mm"],
+                    "Input Dims": ["", "", "[32,64]"],
+                    "Input type": ["", "", "float"],
+                    "Input Strides": ["", "", ""],
+                    "Concrete Inputs": ["", "", ""],
+                    "Kernel Time (µs)_sum": [500.0, 100.0, 200.0],
+                }
+            ),
         }
         enriched = _enrich_perf_from_diff(diff_df, perf1, None)
         summary = tracediff_perf_summary_from_diff_stats(diff_df)
@@ -1611,11 +1618,13 @@ class TestConsolidationViaReport:
         ops = consolidated_report["enriched"]["ops_unique_args"]
         mm = ops[ops["name"] == "aten::mm"].iloc[0]
         assert mm["total_direct_kernel_time_sum"] == pytest.approx(200.0)
-        assert mm["speedup (trace1/trace2)"] == pytest.approx(200.0 / 150.0)
+        ups = consolidated_report["enriched"]["unified_perf_summary"]
+        mm_u = ups[ups["name"] == "aten::mm"].iloc[0]
+        assert mm_u["speedup (trace1/trace2)"] == pytest.approx(200.0 / 150.0)
 
     def test_dominant_op_speedup(self, consolidated_report):
-        ops = consolidated_report["enriched"]["ops_unique_args"]
-        fmha = ops[ops["name"] == "aiter::fmha_v3_bwd"].iloc[0]
+        ups = consolidated_report["enriched"]["unified_perf_summary"]
+        fmha = ups[ups["name"] == "aiter::fmha_v3_bwd"].iloc[0]
         assert fmha["speedup (trace1/trace2)"] == pytest.approx(525.0 / 300.0)
 
     def test_summary_still_uses_pipe_name(self, consolidated_report):

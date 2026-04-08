@@ -13,13 +13,15 @@ Use with::
         --extension_file <path/to/this/file.py> \\
         --extension_args /path/to/trace2.json
 
-This runs TraceDiff in memory, then adds **speedup** and **delta** columns to
-the **existing** report sheets (same keys as a standard pytorch perf report).
-When ``unified_perf_summary`` is non-empty, ``cpu_op_uid`` rows map to a key
-only if a tree ancestor or descendant appears on that sheet (same tuple key).
-Otherwise the key is omitted from the trace2 lookup (no diff-row alias). If
-the sheet is empty, keys use only the diff row's ``cpu_op_name`` and arg
-columns.
+This runs TraceDiff in memory, then adds **speedup** and **delta** only to
+``unified_perf_summary`` (``Kernel Time (µs)_sum``). Op-category workbook tabs
+(``GEMM``, ``CONV_bwd``, etc.) and launcher sheets are unchanged—enough for
+workflows that consume unified summary only (e.g. AgenticMode standalone).
+When ``unified_perf_summary`` is non-empty, diff rows use ``cpu_op_uid`` and
+enriched unified rows use ``ex_UID`` to align tuple keys via the same tree walk
+as the trace2 time lookup. If no unified row matches a diff UID, that diff row
+is skipped in the lookup. If the unified sheet is empty, keys use only the
+diff row's ``cpu_op_name`` and arg columns.
 """
 
 from __future__ import annotations
@@ -34,8 +36,11 @@ from TraceLens import TraceDiff, TreePerfAnalyzer
 
 _ARG_COLS = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
 
+# Sheets enriched with speedup/delta must use this column (unified + op-category tabs).
+_KERNEL_TIME_COL_FOR_SPEEDUP_DELTA = "Kernel Time (µs)_sum"
+
 _KERNEL_TIME_SUM_COLS = [
-    "Kernel Time (µs)_sum",
+    _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA,
     "total_direct_kernel_time_sum",
 ]
 
@@ -232,6 +237,37 @@ def _find_perf_summary_matching_node(cpu_op_uid, tree, perf_summary_keys: Set[tu
     return None
 
 
+def _row_cpu_op_uid(row) -> Optional[Any]:
+    """UID for tree alignment: diff_stats uses ``cpu_op_uid``; perf sheets ``UID_first``; unified ``ex_UID``."""
+    for col in ("cpu_op_uid", "UID_first", "ex_UID"):
+        if col not in row.index:
+            continue
+        u = row.get(col)
+        if u is not None and pd.notna(u):
+            return u
+    return None
+
+
+def _tree_resolve_uid_to_key(
+    uid: Any,
+    tree,
+    perf_summary_keys: Set[tuple],
+    uid_cache: Dict,
+) -> Optional[tuple]:
+    """Return unified-aligned tuple key, or ``None`` if this UID does not match any unified row."""
+    if uid not in uid_cache:
+        anc = _find_perf_summary_matching_node(uid, tree, perf_summary_keys)
+        uid_cache[uid] = (
+            _str_key_from_cpu_op_node(anc)
+            if anc is not None
+            else _NO_UNIFIED_PERF_MATCH
+        )
+    resolved = uid_cache[uid]
+    if resolved is _NO_UNIFIED_PERF_MATCH:
+        return None
+    return resolved
+
+
 def _resolve_row_to_key(
     row, tree=None, uid_cache=None, perf_summary_keys=None
 ) -> Optional[tuple]:
@@ -240,25 +276,31 @@ def _resolve_row_to_key(
     if perf_summary_keys is None:
         perf_summary_keys = set()
 
-    if tree is not None and "cpu_op_uid" in row.index and perf_summary_keys:
-        uid = row.get("cpu_op_uid")
+    if tree is not None and perf_summary_keys:
+        uid = _row_cpu_op_uid(row)
         if uid is not None:
-            if uid not in uid_cache:
-                anc = _find_perf_summary_matching_node(uid, tree, perf_summary_keys)
-                uid_cache[uid] = (
-                    _str_key_from_cpu_op_node(anc)
-                    if anc is not None
-                    else _NO_UNIFIED_PERF_MATCH
-                )
-            resolved = uid_cache[uid]
-            if resolved is _NO_UNIFIED_PERF_MATCH:
-                return None
-            return resolved
+            k = _tree_resolve_uid_to_key(uid, tree, perf_summary_keys, uid_cache)
+            if k is not None:
+                return k
+            return None
 
-    return _make_str_key(
-        row.get("cpu_op_name", ""),
-        {c: str(row.get(c, "")) for c in _ARG_COLS},
-    )
+    return _make_str_key(row.get("cpu_op_name", ""), row)
+
+
+def _enrichment_row_lookup_key(
+    row: pd.Series,
+    tree,
+    perf_summary_keys: Set[tuple],
+    uid_cache: Dict,
+) -> tuple:
+    """Key into trace2 time lookup for a perf-sheet row (UID-first when possible)."""
+    if tree is not None and perf_summary_keys:
+        uid = _row_cpu_op_uid(row)
+        if uid is not None:
+            k = _tree_resolve_uid_to_key(uid, tree, perf_summary_keys, uid_cache)
+            if k is not None:
+                return k
+    return _make_str_key(row.get("name", ""), row)
 
 
 def _build_lca_consolidation(
@@ -431,6 +473,9 @@ def _enrich_sheet_with_trace2(
     df_sheet: pd.DataFrame,
     lookup: Dict[tuple, float],
     kernel_time_col: str,
+    *,
+    tree=None,
+    perf_summary_keys: Optional[Set[tuple]] = None,
 ) -> pd.DataFrame:
     """Add speedup and delta columns only (trace2 times from *lookup*)."""
     if df_sheet.empty or not lookup:
@@ -438,8 +483,13 @@ def _enrich_sheet_with_trace2(
 
     df = df_sheet.copy()
 
+    psk = perf_summary_keys if perf_summary_keys is not None else set()
+    uid_cache: Dict = {}
     trace2_times = [
-        lookup.get(_make_str_key(row.get("name", ""), row), np.nan)
+        lookup.get(
+            _enrichment_row_lookup_key(row, tree, psk, uid_cache),
+            np.nan,
+        )
         for _, row in df.iterrows()
     ]
 
@@ -475,79 +525,31 @@ def _merge_dominant_into_lookup(
 def _enrich_consolidated_perf_sheets(
     consolidated_t1: Dict[str, pd.DataFrame],
     lookup: Dict[tuple, float],
+    *,
+    trace1_tree=None,
+    perf_summary_keys: Optional[Set[tuple]] = None,
 ) -> Dict[str, pd.DataFrame]:
+    """Add speedup/delta only to ``unified_perf_summary``."""
     result: Dict[str, pd.DataFrame] = {}
+    kt_col = _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA
     for sheet_name, df_sheet in consolidated_t1.items():
+        if sheet_name != "unified_perf_summary":
+            result[sheet_name] = df_sheet
+            continue
         if "name" not in df_sheet.columns or not lookup:
             result[sheet_name] = df_sheet
             continue
-        matched_kt_col: Optional[str] = None
-        for kt_col in _KERNEL_TIME_SUM_COLS:
-            if kt_col in df_sheet.columns:
-                matched_kt_col = kt_col
-                break
-        if matched_kt_col:
-            result[sheet_name] = _enrich_sheet_with_trace2(
-                df_sheet, lookup, matched_kt_col
-            )
-        else:
+        if kt_col not in df_sheet.columns:
             result[sheet_name] = df_sheet
-    return result
-
-
-def _enrich_ops_summary_by_category_from_unique_args(
-    perf_dfs: Dict[str, pd.DataFrame],
-) -> Dict[str, pd.DataFrame]:
-    if "ops_summary_by_category" not in perf_dfs or "ops_unique_args" not in perf_dfs:
-        return perf_dfs
-
-    by_cat = perf_dfs["ops_summary_by_category"]
-    uniq = perf_dfs["ops_unique_args"]
-
-    if (
-        by_cat.empty
-        or uniq.empty
-        or "op category" not in by_cat.columns
-        or "op category" not in uniq.columns
-        or "total_direct_kernel_time_sum" not in uniq.columns
-        or "delta_us (trace2 - trace1)" not in uniq.columns
-    ):
-        return perf_dfs
-
-    kt = "total_direct_kernel_time_sum"
-    uniq_work = uniq.copy()
-    uniq_work["_t2_row"] = uniq_work[kt] + uniq_work["delta_us (trace2 - trace1)"]
-
-    g = (
-        uniq_work.groupby("op category", dropna=False)
-        .agg(
-            _t1=(kt, "sum"),
-            _t2=("_t2_row", "sum"),
+            continue
+        result[sheet_name] = _enrich_sheet_with_trace2(
+            df_sheet,
+            lookup,
+            kt_col,
+            tree=trace1_tree,
+            perf_summary_keys=perf_summary_keys,
         )
-        .reset_index()
-    )
-
-    m = by_cat.merge(g, on="op category", how="left")
-    t1 = m["_t1"]
-    t2 = m["_t2"]
-    m["speedup (trace1/trace2)"] = t1 / t2.replace(0, np.nan)
-    m["delta_us (trace2 - trace1)"] = t2 - t1
-    m = m.drop(columns=["_t1", "_t2"])
-
-    insert_cols = [
-        "speedup (trace1/trace2)",
-        "delta_us (trace2 - trace1)",
-    ]
-    anchor = "total_direct_kernel_time_ms"
-    if anchor in m.columns:
-        cols = [c for c in m.columns if c not in insert_cols]
-        ai = cols.index(anchor) + 1
-        ordered = cols[:ai] + insert_cols + cols[ai:]
-        m = m[[c for c in ordered if c in m.columns]]
-
-    out = dict(perf_dfs)
-    out["ops_summary_by_category"] = m
-    return out
+    return result
 
 
 def enrich_perf_report_dict_inplace(
@@ -581,18 +583,27 @@ def enrich_perf_report_dict_inplace(
         ),
         dominant_t2_map,
     )
-    enriched = _enrich_consolidated_perf_sheets(consolidated_t1, lookup)
-    return _enrich_ops_summary_by_category_from_unique_args(enriched)
+    return _enrich_consolidated_perf_sheets(
+        consolidated_t1,
+        lookup,
+        trace1_tree=trace1_tree,
+        perf_summary_keys=perf_summary_keys,
+    )
 
 
-def enrich_existing_perf_report_with_tracediff(
-    dict_name2df: Dict[str, pd.DataFrame],
+def postprocess_perf_report_dataframes_extension(
+    dict_name2df: Dict[str, Any],
     perf_analyzer,
-    trace2_path: str,
     *,
+    extension_args: Optional[str] = None,
     extension_file: Optional[str] = None,
     enable_pseudo_ops: bool = False,
-) -> Dict[str, pd.DataFrame]:
+) -> Dict[str, Any]:
+    if not extension_args or not str(extension_args).strip():
+        return dict_name2df
+
+    trace2_path = str(extension_args).strip()
+
     perf_analyzer2 = TreePerfAnalyzer.from_file(
         profile_filepath=trace2_path,
         arch=perf_analyzer.arch,
@@ -621,32 +632,6 @@ def enrich_existing_perf_report_with_tracediff(
             dict_name2df, diff_stats_df, baseline
         )
         out.update(enriched)
-        print(
-            "[TraceDiff] Added speedup and delta to existing perf sheets "
-            "(e.g. ops_unique_args, ops_summary, unified_perf_summary, category tabs) "
-            "and category rollups on ops_summary_by_category."
-        )
+        print("[TraceDiff] Added speedup and delta to unified_perf_summary only.")
 
     return out
-
-
-def postprocess_perf_report_dataframes_extension(
-    dict_name2df: Dict[str, Any],
-    perf_analyzer,
-    *,
-    extension_args: Optional[str] = None,
-    extension_file: Optional[str] = None,
-    enable_pseudo_ops: bool = False,
-):
-    if not extension_args or not str(extension_args).strip():
-        return dict_name2df
-
-    trace2_path = str(extension_args).strip()
-
-    return enrich_existing_perf_report_with_tracediff(
-        dict_name2df,
-        perf_analyzer,
-        trace2_path,
-        extension_file=extension_file,
-        enable_pseudo_ops=enable_pseudo_ops,
-    )
