@@ -229,13 +229,13 @@ def categorize_torch_op(row):
         "aiter::moe_sorting_opus_fwd",
         "aiter::moe_align_block_size",
         "_moe_C::moe_align_block_size",
-        "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)"
+        "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)",
     ]:
-        return "MoE_sorting"
+        return "MoE_aux"
     elif row["name"] in [
         "aiter::moe_sum",
     ]:
-        return "MoE_reduce"
+        return "MoE_aux"
     elif row["name"] in [
         "aiter::topk_softmax",
         "aiter::topk_softmax_asm",
@@ -244,10 +244,10 @@ def categorize_torch_op(row):
         "aiter::grouped_topk",
         "aiter::moe_fused_gate",
     ]:
-        return "MoE_topk"
+        return "MoE_aux"
     elif row["name"] in [
         "_C_cache_ops::reshape_and_cache_flash",
-        "_C_cache_ops::concat_and_cache_mla"
+        "_C_cache_ops::concat_and_cache_mla",
     ]:
         return "InferenceAttention"
     elif row["name"].startswith("record_param_comms"):

@@ -18,7 +18,7 @@ def set_bookkeeping_attr(tree, event: dict):
     event["UID"] = UID
     tree.events.append(event)
     tree.events_by_uid[UID] = event
-    
+
     seq_num = event["args"].get("Sequence number")
     if seq_num is not None:
         if seq_num not in tree.seq_num2event_uids_map:
@@ -40,7 +40,7 @@ def inject_pseudo_op(
     """
     Create pseudo op between parent CPU op and kernel.
     Creates: Parent CPU Op → Pseudo Op → Launcher → Kernel
-    
+
     Args:
         tree: TraceToTree instance
         kernel_evt: Kernel event to inject pseudo-op for
@@ -63,10 +63,22 @@ def inject_pseudo_op(
         "pid": orig_cpu_evt["pid"],
         "tid": orig_cpu_evt["tid"],
         "args": {
-            "Input Dims": orig_cpu_evt["args"].get("Input Dims") if dims is None else dims,
-            "Input type": orig_cpu_evt["args"].get("Input type") if types is None else types,
-            "Input Strides": orig_cpu_evt["args"].get("Input Strides") if strides is None else strides,
-            "Concrete Inputs": orig_cpu_evt["args"].get("Concrete Inputs") if concrete_inputs is None else concrete_inputs,
+            "Input Dims": (
+                orig_cpu_evt["args"].get("Input Dims") if dims is None else dims
+            ),
+            "Input type": (
+                orig_cpu_evt["args"].get("Input type") if types is None else types
+            ),
+            "Input Strides": (
+                orig_cpu_evt["args"].get("Input Strides")
+                if strides is None
+                else strides
+            ),
+            "Concrete Inputs": (
+                orig_cpu_evt["args"].get("Concrete Inputs")
+                if concrete_inputs is None
+                else concrete_inputs
+            ),
             "Sequence number": seq_num,
             "External id": kernel_evt["args"]["correlation"],
             "Pseudo op": True,
@@ -74,13 +86,13 @@ def inject_pseudo_op(
         "children": [launcher_evt["UID"]],
         "gpu_events": [kernel_evt["UID"]],
     }
-    
+
     # Add any extra custom args
     if extra_args:
         pseudo_evt["args"].update(extra_args)
-    
+
     set_bookkeeping_attr(tree, pseudo_evt)
-    
+
     children = orig_cpu_evt["children"]
     children.remove(launcher_evt["UID"])
     children.append(pseudo_evt["UID"])
@@ -161,23 +173,21 @@ def inject_pseudo_op_wrap_children(
     tree.cpu_root_nodes.append(pseudo_evt["UID"])
 
 
-def apply_pseudo_op_extensions(
-    tree, 
-    verbose: bool = False
-):
+def apply_pseudo_op_extensions(tree, verbose: bool = False):
     """
     Apply all available pseudo-op extensions to trace tree.
     Extensions are automatically detected and applied.
     """
-    
+
     # Auto-detect and add all known pseudo-op extensions
     extensions = []
-    
+
     if "vllm::moe_forward" in tree.name2event_uids:
 
         # MoE: AITER Fused Implementation
         if "vllm::rocm_aiter_fused_moe" in tree.name2event_uids:
             from .moe_aiter_pseudo_ops import create_pseudo_ops_moe_fused_aiter
+
             extensions.append(("MoE_Fused", create_pseudo_ops_moe_fused_aiter))
             if verbose:
                 logger.info("Auto-detected fused MoE operations")
@@ -193,10 +203,17 @@ def apply_pseudo_op_extensions(
             )
 
             if has_matmul_ogs:
-                from .moe_unfused_triton_pseudo_ops import create_pseudo_ops_moe_unfused_triton
-                extensions.append(("MoE_Unfused_Triton", create_pseudo_ops_moe_unfused_triton))
+                from .moe_unfused_triton_pseudo_ops import (
+                    create_pseudo_ops_moe_unfused_triton,
+                )
+
+                extensions.append(
+                    ("MoE_Unfused_Triton", create_pseudo_ops_moe_unfused_triton)
+                )
                 if verbose:
-                    logger.info("Auto-detected GPT_OSS unfused MoE operations with Triton kernels")
+                    logger.info(
+                        "Auto-detected GPT_OSS unfused MoE operations with Triton kernels"
+                    )
 
     # MoE: GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
     if "vllm::outplace_fused_experts" in tree.name2event_uids:
@@ -207,10 +224,13 @@ def apply_pseudo_op_extensions(
         )
         if has_gptq_awq:
             from .moe_gptq_awq_pseudo_ops import create_pseudo_ops_moe_gptq_awq
+
             extensions.append(("MoE_GPTQ_AWQ", create_pseudo_ops_moe_gptq_awq))
             if verbose:
-                logger.info("Auto-detected GPTQ/AWQ MoE operations (outplace_fused_experts)")
-    
+                logger.info(
+                    "Auto-detected GPTQ/AWQ MoE operations (outplace_fused_experts)"
+                )
+
     # MLA Decode: AITER implementation
     if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:
         has_mla_python_func = any(
@@ -219,6 +239,7 @@ def apply_pseudo_op_extensions(
         )
         if has_mla_python_func:
             from .mla_decode_pseudo_ops import create_pseudo_ops_mla_decode
+
             extensions.append(("MLA_Decode", create_pseudo_ops_mla_decode))
             if verbose:
                 logger.info("Auto-detected MLA decode operations")
@@ -227,10 +248,10 @@ def apply_pseudo_op_extensions(
     for ext_info in extensions:
         # ext_info tuple of (extension_name, extension_function)
         ext_name, ext_func = ext_info
-        
+
         if verbose:
             logger.info(f"Applying pseudo-op extension: {ext_name}")
-        
+
         try:
             ext_func(tree)
         except Exception as e:
