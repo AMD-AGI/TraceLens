@@ -27,7 +27,9 @@ def create_pseudo_ops_mla_decode(trace_tree):
     mla_python_funcs = _find_mla_decode_python_funcs(trace_tree)
 
     if not mla_python_funcs:
-        logger.warning("No python_function events matching mla_decode_fwd pattern found")
+        logger.warning(
+            "No python_function events matching mla_decode_fwd pattern found"
+        )
         return
 
     logger.info(f"Processing {len(mla_python_funcs)} MLA decode operations")
