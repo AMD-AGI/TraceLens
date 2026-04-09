@@ -447,24 +447,6 @@ class per_group_quant(GroupQuant):
         return torch_dtype_map(dtype) if dtype else None
 
 
-class aiter_moe_sorting_fwd(BinaryElementwise):
-    """Performance model for aiter::moe_sorting_fwd."""
-
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-
-    @staticmethod
-    def get_param_details(event):
-        pass
-
-    def flops(self):
-        pass
-
-    def bytes(self):
-        pass
-
 
 class concat_and_cache_mla(BinaryElementwise):
     """Performance model for _C_cache_ops::concat_and_cache_mla."""
@@ -486,7 +468,29 @@ class concat_and_cache_mla(BinaryElementwise):
 
 
 class vllm_triton_per_token_group_quant_fp8(GroupQuant):
-    """Performance model for vllm::triton_per_token_group_quant_fp8."""
+    """
+    Performance model for vllm::triton_per_token_group_quant_fp8.
+
+    Wraps `per_token_group_quant_fp8` (vllm fp8_utils.py), which launches the
+    Triton kernel `_per_token_group_quant_fp8` when the CUDA native quant path
+    is unavailable: for each row, each contiguous group of `group_size`
+    elements along the last dimension is scaled by a per-group FP32 factor and
+    written as FP8.
+
+    Roofline -- bytes moved (approximate):
+        Read  x [M, N] in the trace input dtype (typically BF16)
+        Write x_q [M, N] as FP8 (1 byte/elem)
+        Write scales [M, ceil(N / group_size)] as FP32
+
+    Roofline -- FLOPs:
+        Treated as ~6 FLOPs per input element (abs/max reduction amortized over
+        groups, scale, divide, clamp, store) for order-of-magnitude roofline use.
+
+    Expected trace:
+        Input Dims: ((M, N), ()) for tensor x and scalar group_size
+        Input type: (dtype_x, 'Scalar')
+        Concrete Inputs: often ('', '<group_size>') e.g. ('', '128')
+    """
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
@@ -495,16 +499,58 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
 
     @staticmethod
     def get_param_details(event):
-        pass
+        args = event["args"]
+        dims = args.get("Input Dims") or []
+        shape_x = tuple(dims[0]) if len(dims) > 0 else ()
+        if len(shape_x) >= 2:
+            M, N = shape_x[0], shape_x[1]
+        elif len(shape_x) == 1:
+            M, N = 1, shape_x[0]
+        else:
+            M, N = 1, 1
+
+        concrete = args.get("Concrete Inputs") or []
+        group_size = 128
+        if len(concrete) > 1:
+            raw = str(concrete[1]).strip()
+            if raw and raw.lower() not in ("none",):
+                try:
+                    group_size = int(raw)
+                except ValueError:
+                    pass
+
+        num_groups = max(1, (N + group_size - 1) // group_size)
+        dtype_x = args.get("Input type", ("",))[0] if args.get("Input type") else ""
+
+        return {
+            "M": M,
+            "N": N,
+            "group_size": group_size,
+            "num_groups": num_groups,
+            "shape_x": shape_x,
+            "dtype_x": dtype_x,
+        }
 
     def flops(self):
-        pass
+        M = self.param_details["M"]
+        N = self.param_details["N"]
+        return 6 * M * N
 
     def bytes(self):
-        pass
+        M = self.param_details["M"]
+        N = self.param_details["N"]
+        ng = self.param_details["num_groups"]
+        bpe_in = name2bpe(self.param_details["dtype_x"])
+        if bpe_in is None:
+            return None
+        bpe_fp8 = name2bpe("c10::float8_e4m3fn")
+        if bpe_fp8 is None:
+            bpe_fp8 = 1
+        return M * N * bpe_in + M * N * bpe_fp8 + M * ng * 4
 
     def get_compute_precision(self):
-        return None
+        dtype = self.param_details.get("dtype_x")
+        return torch_dtype_map(dtype) if dtype else None
 
 
 class aiter_silu_and_mul(UnaryElementwise):
@@ -544,6 +590,49 @@ class aiter_silu_and_mul(UnaryElementwise):
     def flops(self):
         return 5 * prod(self.param_details["op_shape"])
 
-
     def bytes(self):
         return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
+
+
+class aiter_gelu_and_mul(aiter_silu_and_mul):
+    """
+    Performance model for aiter::gelu_and_mul.
+
+    Computes the gated GELU activation (erf path):
+        out[..., :inter_dim] = gelu(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    AITER signature: gelu_and_mul(out: Tensor, input: Tensor) -> None
+        out   — shape [..., inter_dim],     dtype BFloat16
+        input — shape [..., 2 * inter_dim], dtype BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+
+    FLOPs: ~8 per output element (erf-based GELU: div, erf, add, mul, mul; then gate mul).
+    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    """
+
+    def flops(self):
+        return 8 * prod(self.param_details["op_shape"])
+
+
+class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
+    """
+    Performance model for aiter::gelu_tanh_and_mul.
+
+    Computes the gated GELU activation (tanh/fast approximation path):
+        out[..., :inter_dim] = gelu_tanh(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    AITER signature: gelu_tanh_and_mul(out: Tensor, input: Tensor) -> None
+        out   — shape [..., inter_dim],     dtype BFloat16
+        input — shape [..., 2 * inter_dim], dtype BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+
+    FLOPs: ~10 per output element (tanh GELU: x^3, coefficients, tanh, scale; then gate mul).
+    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    """
+
+    def flops(self):
+        return 10 * prod(self.param_details["op_shape"])

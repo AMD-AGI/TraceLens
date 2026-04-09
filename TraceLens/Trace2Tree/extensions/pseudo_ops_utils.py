@@ -197,6 +197,19 @@ def apply_pseudo_op_extensions(
                 extensions.append(("MoE_Unfused_Triton", create_pseudo_ops_moe_unfused_triton))
                 if verbose:
                     logger.info("Auto-detected GPT_OSS unfused MoE operations with Triton kernels")
+
+    # MoE: GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
+    if "vllm::outplace_fused_experts" in tree.name2event_uids:
+        has_gptq_awq = any(
+            "fused_moe_kernel_gptq_awq" in event.get("name", "")
+            for event in tree.events
+            if event.get("cat") == "kernel"
+        )
+        if has_gptq_awq:
+            from .moe_gptq_awq_pseudo_ops import create_pseudo_ops_moe_gptq_awq
+            extensions.append(("MoE_GPTQ_AWQ", create_pseudo_ops_moe_gptq_awq))
+            if verbose:
+                logger.info("Auto-detected GPTQ/AWQ MoE operations (outplace_fused_experts)")
     
     # MLA Decode: AITER implementation
     if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:

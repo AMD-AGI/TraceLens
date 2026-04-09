@@ -52,6 +52,58 @@ class aiter_rms_norm(RMSNorm):
         }
 
 
+class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
+    """
+    Performance model for aiter::rmsnorm2d_fwd_with_dynamicquant_ck.
+
+    Fused RMSNorm + per-token FP8 dynamic quantization (CK backend).
+    Signature: rmsnorm2d_fwd_with_dynamicquant_ck(out, input, yscale, weight, epsilon, use_model_sensitive_rmsnorm)
+        out      — shape [M, N], dtype FP8  (quantized RMSNorm output)
+        input    — shape [M, N], dtype BFloat16
+        yscale   — shape [M, 1], dtype FP32 (per-token dynamic scale)
+        weight   — shape [N],    dtype BFloat16 (affine scale)
+        epsilon  — float scalar
+        use_model_sensitive_rmsnorm — int scalar
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape, yscale_shape, weight_shape, eps_scalar, flag_scalar]
+        e.g. [(4, 7168), (4, 7168), (4, 1), (7168,), (), ()]
+
+    FLOPs: RMSNorm (inherited) + per-token quant (2 * num_elems: max-abs + scale).
+    Bytes: read input+weight, write out (FP8) + yscale (FP32).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])     # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]            # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        num_channels = event["args"]["Input Dims"][3][0]     # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        # RMSNorm + per-token quant: max-abs per row + scale each element
+        return super().flops() + 2 * self.num_elems
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        bytes_read_x      = self.num_elems * self.bpe_in   # BF16 input
+        bytes_read_weight = N * self.bpe_in                # BF16 weight
+        bytes_write_quant  = self.num_elems * 1            # FP8 = 1 byte/elem
+        bytes_write_scales = M * 1 * 4                     # FP32 per-token scales [M, 1]
+        return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+
 class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
     """
     Performance model for vllm::rocm_aiter_rmsnorm_fp8_group_quant.
@@ -107,6 +159,56 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
         bytes_write_quant  = self.num_elems * 1            # FP8 = 1 byte/elem
         bytes_write_scales = M * num_groups * 4            # FP32 scales
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+
+class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
+    """
+    Performance model for aiter::rmsnorm2d_fwd_with_add_ck.
+
+    Fused residual-add + RMSNorm (CK backend).
+    Signature: rmsnorm2d_fwd_with_add_ck(out, input, residual_in, residual_out, weight, epsilon, use_model_sensitive_rmsnorm)
+        out                        — shape [M, N], dtype BFloat16 (RMSNorm output)
+        input                      — shape [M, N], dtype BFloat16
+        residual_in                — shape [M, N], dtype BFloat16
+        residual_out               — shape [M, N], dtype BFloat16 (input + residual_in)
+        weight                     — shape [N],    dtype BFloat16 (affine scale)
+        epsilon                    — float scalar
+        use_model_sensitive_rmsnorm — int scalar
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape, residual_in_shape, residual_out_shape, weight_shape, eps_scalar, flag_scalar]
+        e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), (), ()]
+
+    FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
+    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])     # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]            # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        num_channels = event["args"]["Input Dims"][4][0]     # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        # residual add: num_elems (input + residual_in -> residual_out)
+        return self.num_elems + super().flops()
+
+    def bytes(self):
+        N = self.num_channels
+        bytes_read  = 2 * self.num_elems * self.bpe_in + N * self.bpe_in  # input, residual_in, weight
+        bytes_write = 2 * self.num_elems * self.bpe_in                    # out, residual_out
+        return bytes_read + bytes_write
 
 
 class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):

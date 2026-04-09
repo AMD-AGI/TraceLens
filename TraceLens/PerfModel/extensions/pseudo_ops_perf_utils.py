@@ -13,7 +13,7 @@ from . import (
     attention_perf_model_extensions,
     perf_model_extensions,
     rmsnorm_perf_model_extensions,
-    collectives_perf_model_extensions,
+    custom_collectives_perf_model_extensions,
 )
 
 
@@ -39,6 +39,9 @@ def get_pseudo_op_mappings():
         # MoE pseudo ops - Unfused Triton (2-stage: up and down)
         "pseudo_op::moe_triton_unfused_up": moe_perf_model_extensions.moe_triton_unfused_up,
         "pseudo_op::moe_triton_unfused_down": moe_perf_model_extensions.moe_triton_unfused_down,
+        # MoE - GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
+        "pseudo_op::moe_gptq_awq_up": moe_perf_model_extensions.moe_gptq_awq_up,
+        "pseudo_op::moe_gptq_awq_down": moe_perf_model_extensions.moe_gptq_awq_down,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
@@ -49,24 +52,42 @@ def get_pseudo_op_mappings():
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_aiter_triton_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_blockscale_ck": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_blockscale_cktile": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_blockscale_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_blockscale_bpreshuffle_cktile": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::flatmm_a8w8_blockscale_asm": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gfx950_a8w8_blockscale_asm": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_ck": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_464": perf_model_extensions.batched_gemm_a8w8,
         ## Cache ops
         ##"_C_cache_ops::concat_and_cache_mla": perf_model_extensions.concat_and_cache_mla,
         ## Quantization ops
-        ##"vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
+        "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
         ## Activation ops
         "aiter::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
+        "_C::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
+        "aiter::gelu_and_mul": perf_model_extensions.aiter_gelu_and_mul,
+        "aiter::gelu_tanh_and_mul": perf_model_extensions.aiter_gelu_tanh_and_mul,
         ## MoE ops
         ##"aiter::moe_sorting_fwd": perf_model_extensions.aiter_moe_sorting_fwd,
         ## RMSNorm ops
         "aiter::rms_norm": rmsnorm_perf_model_extensions.aiter_rms_norm,
+        "aiter::rmsnorm2d_fwd_ck": rmsnorm_perf_model_extensions.aiter_rms_norm,
+        "aiter::rmsnorm2d_fwd_with_add_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
+        "aiter::rmsnorm2d_fwd_with_dynamicquant_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
         "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
         "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
         ## Collective ops
-        "aiter::fused_allreduce_rmsnorm": collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
-        "_C_custom_ar::all_reduce": collectives_perf_model_extensions.custom_ar_all_reduce,
+        "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
+        "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
+        "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
+        "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,
+        ## GDN attention ops
+        "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
     }
 
     return pseudo_op_mappings
@@ -92,7 +113,8 @@ def get_pseudo_op_categories():
         perf_model_extensions.gemm_a16w16_atomic_: "GEMM",
         perf_model_extensions.batched_gemm_a8w8: "GEMM",
         rmsnorm_perf_model_extensions.RMSNorm: "RMSNorm",
-        collectives_perf_model_extensions.Collective: "Collective",
+        custom_collectives_perf_model_extensions.CustomCollective: "CustomCollective",
+        perf_model_extensions.aiter_silu_and_mul: "UnaryElementwise",
     }
     
     return pseudo_op_categories

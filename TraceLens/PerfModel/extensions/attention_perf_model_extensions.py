@@ -99,6 +99,8 @@ class InferenceAttention:
             "B": 1,
             "N_Q": N_Q,
             "H_Q": H_Q,
+            "H_V": H_KV,
+            "H_K": H_KV,
             "N_KV": N_KV,
             "H_KV": H_KV,
             "d_h_qk": d_h_qk,
@@ -248,3 +250,136 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
 
 class vllm_unified_mla_attention_with_output(InferenceAttention):
     pass
+
+
+class gdn_attention_core(InferenceAttention):
+    """
+    Performance model for vllm::gdn_attention_core (Gated Delta Network).
+
+    Recurrent linear attention used by Qwen3-Next/Qwen3.5.  Each value head
+    maintains a state S ∈ R^{d_v × d_k} that is decayed, updated, and queried
+    per token.  There is no KV cache — compute per token is O(d_v * d_k)
+    regardless of past context length.
+
+    Head relationship: num_v_heads = 2 * num_k_heads.  Multiple v-heads share
+    one q/k head.
+
+    Input Dims layout:
+        [0] mixed_qkv       [T, 2*H_K*d_k + H_V*d_v]
+        [1] b                [T, H_V]
+        [2] a                [T, H_V]
+        [3] core_attn_out    [T, H_V, d_v]
+        [4] layer_name       ()
+
+    Per token per v-head FLOPs (recurrent delta rule):
+        decay S:         1 * d_v * d_k
+        retrieval S^T k: 2 * d_v * d_k
+        state update:    2 * d_v * d_k
+        output S^T q:    2 * d_v * d_k
+        total:           7 * d_v * d_k
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.H_V = self.param_details["H_V"]
+        self.d_k = self.param_details["d_h_qk"]
+        self.d_v = self.param_details["d_h_v"]
+
+    @staticmethod
+    def get_param_details(event):
+        annotation = str(event.get("annotation"))
+        if annotation == "NA":
+            raise NotImplementedError(
+                "GDN attention without annotation is not supported"
+            )
+
+        if "sq" not in annotation:
+            requests = annotation.replace("(", "_").replace(")", "_").split("_")
+            if len(requests) < 8:
+                raise NotImplementedError(
+                    "GDN attention without annotation is not supported"
+                )
+            c_sq = int(requests[3])
+            g_sq = 0
+        else:
+            name = annotation.replace("(", "_").replace(")", "_")
+            requests = re.sub(r"[sqk]+", "_", name).split("_")
+            if len(requests) < 16:
+                raise NotImplementedError(
+                    "GDN attention without annotation is not supported"
+                )
+            c_sq = int(requests[5])
+            g_sq = int(requests[13])
+
+        input_dims = event["args"]["Input Dims"]
+        T = input_dims[0][0]
+        D = input_dims[0][1]              # 2*H_K*d_k + H_V*d_v
+        H_V = input_dims[1][1]            # num_v_heads / tp
+        d_v = input_dims[3][2]            # head_v_dim
+
+        H_K = H_V // 2
+        key_dim_tp = (D - H_V * d_v) // 2
+        d_k = key_dim_tp // H_K
+
+        dtype_Q = event["args"]["Input type"][0]
+
+        return {
+            "H_V": H_V,
+            "H_K": H_K,
+            "d_h_qk": d_k,
+            "d_h_v": d_v,
+            "c_sq": c_sq,
+            "g_sq": g_sq,
+            "dtype_Q": dtype_Q,
+        }
+
+    @staticmethod
+    def flops_func(H_V, d_k, d_v, total_tokens):
+        """GDN recurrent delta rule FLOPs.
+
+        Per token per v-head: 7 * d_v * d_k
+        (decay: 1, retrieval: 2, state update: 2, output query: 2)
+        """
+        return total_tokens * H_V * 7 * d_v * d_k
+
+    @staticmethod
+    def bytes_func(H_V, d_k, d_v, total_tokens, bytes_per_element):
+        """GDN HBM traffic.  State S stays in registers during recurrence.
+
+        Per token read:  q(d_k) + k(d_k) shared across 2 v-heads → H_V*d_k
+                         v(d_v) per v-head → H_V*d_v
+                         a(1) + b(1) per v-head → 2*H_V
+        Per token write: o(d_v) per v-head → H_V*d_v
+        """
+        elems_per_token = H_V * (d_k + 2 * d_v + 2)
+        return total_tokens * elems_per_token * bytes_per_element
+
+    def flops(self):
+        total_tokens = self.param_details["c_sq"] + self.param_details["g_sq"]
+        if total_tokens == 0:
+            raise NotImplementedError(
+                "GDN perf model requires annotation with non-zero c_sq or g_sq"
+            )
+        return self.flops_func(self.H_V, self.d_k, self.d_v, total_tokens)
+
+    def bytes(self, bytes_per_element=2):
+        total_tokens = self.param_details["c_sq"] + self.param_details["g_sq"]
+        return self.bytes_func(
+            self.H_V, self.d_k, self.d_v, total_tokens, bytes_per_element
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for GDN attention is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for GDN attention is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_Q", None)
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"

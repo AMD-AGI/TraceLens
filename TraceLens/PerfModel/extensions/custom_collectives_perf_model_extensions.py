@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-Performance models for collective operation extensions.
+Performance models for custom collective operation extensions.
 """
 
 from math import prod
@@ -13,11 +13,11 @@ from TraceLens.PerfModel.utils import name2bpe
 from TraceLens.PerfModel.perf_model import RMSNorm
 
 
-class Collective:
+class CustomCollective:
     pass
 
 
-class aiter_fused_allreduce_rmsnorm(Collective):
+class aiter_fused_allreduce_rmsnorm(CustomCollective):
     """
     Performance model for aiter::fused_allreduce_rmsnorm.
 
@@ -77,7 +77,7 @@ class aiter_fused_allreduce_rmsnorm(Collective):
         return bytes_read + bytes_write
 
 
-class custom_ar_all_reduce(Collective):
+class custom_ar_all_reduce(CustomCollective):
     """
     Performance model for _C_custom_ar::all_reduce.
 
@@ -118,6 +118,102 @@ class custom_ar_all_reduce(Collective):
     def flops(self):
         # Pure collective — no meaningful on-chip compute FLOPs
         return 0
+
     def bytes(self):
         # HBM traffic per GPU: read inp + write out
         return 2 * self.num_elems * self.bpe_in
+
+
+class aiter_reduce_scatter(CustomCollective):
+    """
+    Performance model for aiter::reduce_scatter.
+
+    Pure reduce-scatter collective — each GPU contributes a shard, result is scattered.
+    Signature: reduce_scatter(_fa, inp, out, reg_buffer=None)
+        _fa        — int handle (Scalar)
+        inp        — shape [M, N], dtype BFloat16 (full local tensor before scatter)
+        out        — shape [M // N_gpus, N], dtype BFloat16 (scattered shard)
+        reg_buffer — optional int pointer (Scalar)
+
+    Expected Input Dims from trace:
+        [(), inp_shape, out_shape, ...]
+        e.g. [(), (8, 7168), (4, 7168)]
+
+    FLOPs: None — purely inter-GPU communication.
+    Bytes: HBM traffic per GPU (read inp + write out).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_elems = prod(self.param_details["op_shape"])
+        self.bpe_in = name2bpe(self.param_details["dtype_in"])
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])    # inp: [M, N]
+        out_shape = tuple(event["args"]["Input Dims"][2])   # out: [M // N_gpus, N]
+        dtype_in = event["args"]["Input type"][1]           # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        return {
+            "op_shape": op_shape,
+            "out_shape": out_shape,
+            "dtype_in": dtype_in,
+            "stride_input": stride_input,
+        }
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        # read inp (full) + write out (scattered shard, smaller)
+        num_elems_out = prod(self.param_details["out_shape"])
+        return (self.num_elems + num_elems_out) * self.bpe_in
+
+
+class aiter_all_gather_reg(CustomCollective):
+    """
+    Performance model for aiter::all_gather_reg.
+
+    Pure all-gather collective — each GPU contributes a shard, all get the full tensor.
+    Signature: all_gather_reg(_fa, inp, out)
+        _fa — int handle (Scalar)
+        inp — shape [M // N_gpus, N], dtype BFloat16 (local shard)
+        out — shape [M, N],           dtype BFloat16 (gathered full tensor)
+
+    Expected Input Dims from trace:
+        [(), inp_shape, out_shape]
+        e.g. [(), (4, 7168), (8, 7168)]
+
+    FLOPs: None — purely inter-GPU communication.
+    Bytes: HBM traffic per GPU (read inp shard + write full out).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_elems = prod(self.param_details["op_shape"])
+        self.bpe_in = name2bpe(self.param_details["dtype_in"])
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])    # inp shard: [M // N_gpus, N]
+        out_shape = tuple(event["args"]["Input Dims"][2])   # out: [M, N]
+        dtype_in = event["args"]["Input type"][1]           # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        return {
+            "op_shape": op_shape,
+            "out_shape": out_shape,
+            "dtype_in": dtype_in,
+            "stride_input": stride_input,
+        }
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        # read inp shard + write full gathered out
+        num_elems_out = prod(self.param_details["out_shape"])
+        return (self.num_elems + num_elems_out) * self.bpe_in
