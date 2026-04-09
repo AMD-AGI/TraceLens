@@ -119,7 +119,7 @@ class TestSingleLCASingleKernel:
 
     def test_speedup(self, report):
         summary = report["tracediff_perf_summary"]
-        assert summary.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(100.0 / 80.0)
+        assert summary.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
 
     def test_delta(self, report):
         summary = report["tracediff_perf_summary"]
@@ -200,7 +200,7 @@ class TestSingleLCAMultipleKernels:
 
     def test_speedup_with_summed_times(self, report):
         summary = report["tracediff_perf_summary"]
-        assert summary.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(100.0 / 60.0)
+        assert summary.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(60.0 / 100.0)
 
     def test_kernel_count_trace1(self, report):
         summary = report["tracediff_perf_summary"]
@@ -439,9 +439,9 @@ class TestTrace2OnlyLCA:
         assert summary.iloc[0]["kernel_time_trace2_us"] == 75.0
 
     def test_speedup_is_nan(self, report):
-        """With trace1=0, speedup should be 0/75 = 0."""
+        """With trace1=0, speedup is t2/t1 = 75/0 = NaN."""
         summary = report["tracediff_perf_summary"]
-        assert summary.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(0.0)
+        assert math.isnan(summary.iloc[0]["speedup (trace2/trace1)"])
 
 
 # ---------------------------------------------------------------------------
@@ -469,10 +469,10 @@ class TestTrace1OnlyLCA:
         summary = report["tracediff_perf_summary"]
         assert summary.iloc[0]["kernel_time_trace2_us"] == 0.0
 
-    def test_speedup_is_nan(self, report):
-        """With trace2=0, speedup should be NaN."""
+    def test_speedup_is_zero(self, report):
+        """With trace2=0, speedup is t2/t1 = 0/50 = 0."""
         summary = report["tracediff_perf_summary"]
-        assert math.isnan(summary.iloc[0]["speedup (trace1/trace2)"])
+        assert summary.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(0.0)
 
     def test_delta(self, report):
         summary = report["tracediff_perf_summary"]
@@ -718,7 +718,7 @@ class TestRealisticScenario:
     def test_conv_speedup(self, report):
         summary = report["tracediff_perf_summary"]
         conv_row = summary[summary["lowest_common_ancestor_id"] == 92].iloc[0]
-        assert conv_row["speedup (trace1/trace2)"] == pytest.approx(51.239 / 128.096)
+        assert conv_row["speedup (trace2/trace1)"] == pytest.approx(128.096 / 51.239)
 
     def test_sorted_by_trace1_time(self, report):
         summary = report["tracediff_perf_summary"]
@@ -1255,7 +1255,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         result = _enrich_sheet_with_trace2(df, {}, "Kernel Time (µs)_sum")
-        assert "speedup (trace1/trace2)" not in result.columns
+        assert "speedup (trace2/trace1)" not in result.columns
 
     def test_single_row_enrichment(self):
         df = pd.DataFrame(
@@ -1272,9 +1272,9 @@ class TestEnrichSheetWithTrace2:
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
         assert "Kernel Time trace2 (µs)_sum" not in result.columns
-        assert "speedup (trace1/trace2)" in result.columns
+        assert "speedup (trace2/trace1)" in result.columns
         assert "delta_us (trace2 - trace1)" in result.columns
-        assert result.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(100.0 / 80.0)
+        assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-20.0)
 
     def test_unmatched_row_gets_nan(self):
@@ -1293,7 +1293,7 @@ class TestEnrichSheetWithTrace2:
 
         import numpy as np
 
-        assert np.isnan(result.iloc[0]["speedup (trace1/trace2)"])
+        assert np.isnan(result.iloc[0]["speedup (trace2/trace1)"])
 
     def test_multiple_rows_mixed_match(self):
         df = pd.DataFrame(
@@ -1311,12 +1311,12 @@ class TestEnrichSheetWithTrace2:
         }
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
-        assert result.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(200.0 / 150.0)
+        assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(150.0 / 200.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-50.0)
 
         import numpy as np
 
-        assert np.isnan(result.iloc[1]["speedup (trace1/trace2)"])
+        assert np.isnan(result.iloc[1]["speedup (trace2/trace1)"])
 
     def test_columns_inserted_after_kernel_time(self):
         df = pd.DataFrame(
@@ -1336,7 +1336,7 @@ class TestEnrichSheetWithTrace2:
 
         cols = list(result.columns)
         kt_idx = cols.index("Kernel Time (µs)_sum")
-        assert cols[kt_idx + 1] == "speedup (trace1/trace2)"
+        assert cols[kt_idx + 1] == "speedup (trace2/trace1)"
         assert cols[kt_idx + 2] == "delta_us (trace2 - trace1)"
 
     def test_works_with_ops_unique_args_column(self):
@@ -1353,9 +1353,9 @@ class TestEnrichSheetWithTrace2:
         )
         lookup = {("aten::mm", "(32,64)", "float", "", ""): 70.0}
         result = _enrich_sheet_with_trace2(df, lookup, "total_direct_kernel_time_sum")
-        assert result.iloc[0]["speedup (trace1/trace2)"] == pytest.approx(100.0 / 70.0)
+        assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(70.0 / 100.0)
 
-    def test_zero_trace2_time_gives_nan_speedup(self):
+    def test_zero_trace2_time_gives_zero_speedup(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm"],
@@ -1369,9 +1369,7 @@ class TestEnrichSheetWithTrace2:
         lookup = {("aten::mm", "", "", "", ""): 0.0}
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
-        import numpy as np
-
-        assert np.isnan(result.iloc[0]["speedup (trace1/trace2)"])
+        assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(0.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-100.0)
 
     def test_original_df_not_modified(self):
@@ -1495,29 +1493,29 @@ class TestEnrichmentViaBuildReport:
     def test_gemm_sheet_not_enriched(self, enriched_report):
         gemm = enriched_report["GEMM"]
         assert "Kernel Time trace2 (µs)_sum" not in gemm.columns
-        assert "speedup (trace1/trace2)" not in gemm.columns
+        assert "speedup (trace2/trace1)" not in gemm.columns
         assert "delta_us (trace2 - trace1)" not in gemm.columns
 
     def test_normalization_sheet_not_enriched(self, enriched_report):
         norm = enriched_report["Normalization"]
-        assert "speedup (trace1/trace2)" not in norm.columns
+        assert "speedup (trace2/trace1)" not in norm.columns
         assert "delta_us (trace2 - trace1)" not in norm.columns
 
     def test_ops_unique_args_not_enriched(self, enriched_report):
         ops = enriched_report["ops_unique_args"]
         assert "Kernel Time trace2 (µs)_sum" not in ops.columns
-        assert "speedup (trace1/trace2)" not in ops.columns
+        assert "speedup (trace2/trace1)" not in ops.columns
         assert "delta_us (trace2 - trace1)" not in ops.columns
 
     def test_unified_perf_summary_enriched(self, enriched_report):
         ups = enriched_report["unified_perf_summary"]
         assert "Kernel Time trace2 (µs)_sum" not in ups.columns
-        assert "speedup (trace1/trace2)" in ups.columns
+        assert "speedup (trace2/trace1)" in ups.columns
 
     def test_gpu_timeline_not_enriched(self, enriched_report):
         timeline = enriched_report["gpu_timeline"]
         assert "Kernel Time trace2 (µs)_sum" not in timeline.columns
-        assert "speedup (trace1/trace2)" not in timeline.columns
+        assert "speedup (trace2/trace1)" not in timeline.columns
 
     def test_existing_columns_preserved(self, enriched_report):
         gemm = enriched_report["GEMM"]
@@ -1779,12 +1777,12 @@ class TestConsolidationViaReport:
         assert mm["total_direct_kernel_time_sum"] == pytest.approx(200.0)
         ups = consolidated_report["enriched"]["unified_perf_summary"]
         mm_u = ups[ups["name"] == "aten::mm"].iloc[0]
-        assert mm_u["speedup (trace1/trace2)"] == pytest.approx(200.0 / 150.0)
+        assert mm_u["speedup (trace2/trace1)"] == pytest.approx(150.0 / 200.0)
 
     def test_dominant_op_speedup(self, consolidated_report):
         ups = consolidated_report["enriched"]["unified_perf_summary"]
         fmha = ups[ups["name"] == "aiter::fmha_v3_bwd"].iloc[0]
-        assert fmha["speedup (trace1/trace2)"] == pytest.approx(525.0 / 300.0)
+        assert fmha["speedup (trace2/trace1)"] == pytest.approx(300.0 / 525.0)
 
     def test_summary_still_uses_pipe_name(self, consolidated_report):
         summary = consolidated_report["summary"]

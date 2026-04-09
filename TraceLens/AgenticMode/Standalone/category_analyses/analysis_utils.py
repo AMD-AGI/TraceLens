@@ -193,7 +193,7 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
 
 
 # TraceDiff comparison extension columns on unified_perf_summary-derived category CSVs.
-_COMPARATIVE_SPEEDUP_COL = "speedup (trace1/trace2)"
+_COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
 
 def _comparative_efficiency_percent_from_row(
@@ -203,7 +203,7 @@ def _comparative_efficiency_percent_from_row(
     When comparative columns support it, set ``efficiency_percent`` to
     ``100 * t2 / t1`` (trace2 vs trace1 kernel time), and clear roofline anomaly flags.
 
-    t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t1/t2.
+    t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t2/t1.
     If comparative metrics cannot be computed, leaves ``result`` unchanged for those keys.
     """
     kt = row.get("Kernel Time (µs)_sum")
@@ -221,8 +221,8 @@ def _comparative_efficiency_percent_from_row(
         speedup = row.get(_COMPARATIVE_SPEEDUP_COL)
         if speedup is not None and not pd.isna(speedup):
             s = float(speedup)
-            if s > 0:
-                comp_pct = 100.0 / s
+            if s >= 0:
+                comp_pct = 100.0 * s
 
     if comp_pct is None:
         return

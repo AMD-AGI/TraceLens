@@ -732,8 +732,12 @@ def main():
         "--extension_args",
         type=str,
         default=None,
-        metavar="PATH",
-        help="Extension-specific argument",
+        metavar="VALUE",
+        help=(
+            "Argument for extensions that implement postprocess_perf_report_dataframes_extension "
+            "(e.g. absolute path to a second profile JSON for TraceDiff comparison extensions). "
+            "Passed after expanduser; file paths are resolved to absolute paths."
+        ),
     )
 
     parser.add_argument(

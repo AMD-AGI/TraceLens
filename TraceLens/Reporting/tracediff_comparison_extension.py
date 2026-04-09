@@ -124,10 +124,10 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
             "kernel_names_trace2": kernel_names_trace2,
         }
 
-        if kernel_time_trace2 > 0:
-            row["speedup (trace1/trace2)"] = kernel_time_trace1 / kernel_time_trace2
+        if kernel_time_trace1 > 0:
+            row["speedup (trace2/trace1)"] = kernel_time_trace2 / kernel_time_trace1
         else:
-            row["speedup (trace1/trace2)"] = float("nan")
+            row["speedup (trace2/trace1)"] = float("nan")
         row["delta_us (trace2 - trace1)"] = kernel_time_trace2 - kernel_time_trace1
         rows.append(row)
 
@@ -499,8 +499,8 @@ def _enrich_sheet_with_trace2(
 
     df.insert(
         col_idx + 1,
-        "speedup (trace1/trace2)",
-        t1 / t2.replace(0, np.nan),
+        "speedup (trace2/trace1)",
+        t2 / t1.replace(0, np.nan),
     )
     df.insert(
         col_idx + 2,
