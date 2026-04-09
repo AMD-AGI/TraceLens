@@ -307,8 +307,8 @@ def _build_lca_consolidation(
     diff_stats_df: pd.DataFrame,
     trace1_tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
-) -> Tuple[Dict[tuple, float], Dict[tuple, float], Dict[tuple, float]]:
-    empty = ({}, {}, {})
+) -> Tuple[Dict[tuple, float], Dict[tuple, float], Dict[tuple, float], Dict[tuple, List]]:
+    empty = ({}, {}, {}, {})
     if diff_stats_df.empty:
         return empty
 
@@ -332,6 +332,7 @@ def _build_lca_consolidation(
     time_additions: Dict[tuple, float] = {}
     time_subtractions: Dict[tuple, float] = {}
     dominant_trace2_map: Dict[tuple, float] = {}
+    dominant_lca_ids: Dict[tuple, List] = {}
     psk = perf_summary_keys if perf_summary_keys is not None else set()
 
     for lca_id in multi_lca_ids:
@@ -353,6 +354,7 @@ def _build_lca_consolidation(
         dominant_trace2_map[dominant_key] = (
             dominant_trace2_map.get(dominant_key, 0.0) + t2_time
         )
+        dominant_lca_ids.setdefault(dominant_key, []).append(lca_id)
 
         for op_name, op_total_time in op_times.items():
             if op_name == dominant_op_name:
@@ -373,7 +375,7 @@ def _build_lca_consolidation(
                 time_additions.get(dominant_key, 0.0) + op_total_time
             )
 
-    return time_additions, time_subtractions, dominant_trace2_map
+    return time_additions, time_subtractions, dominant_trace2_map, dominant_lca_ids
 
 
 def _apply_lca_consolidation(
@@ -427,19 +429,19 @@ def _build_trace2_time_lookup(
     diff_stats_df: pd.DataFrame,
     tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
-) -> Dict[tuple, float]:
+) -> Tuple[Dict[tuple, float], Dict[tuple, List]]:
     if diff_stats_df.empty:
-        return {}
+        return {}, {}
 
     df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
     if df.empty:
-        return {}
+        return {}, {}
 
     trace1 = df[df["source"] == "trace1"]
     trace2 = df[df["source"] == "trace2"]
 
     if trace1.empty:
-        return {}
+        return {}, {}
 
     lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["kernel_time"].sum()
 
@@ -448,6 +450,7 @@ def _build_trace2_time_lookup(
     psk = perf_summary_keys if perf_summary_keys is not None else set()
 
     lookup: Dict[tuple, float] = {}
+    lca_ids_lookup: Dict[tuple, List] = {}
     for lca_id, grp in lca_groups:
         t2_time = lca_trace2_time.get(lca_id, 0.0)
 
@@ -465,8 +468,9 @@ def _build_trace2_time_lookup(
         if key is None:
             continue
         lookup[key] = lookup.get(key, 0.0) + t2_time
+        lca_ids_lookup.setdefault(key, []).append(lca_id)
 
-    return lookup
+    return lookup, lca_ids_lookup
 
 
 def _enrich_sheet_with_trace2(
@@ -476,6 +480,8 @@ def _enrich_sheet_with_trace2(
     *,
     tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
+    lca_ids_lookup: Optional[Dict[tuple, List]] = None,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """Add speedup and delta columns only (trace2 times from *lookup*)."""
     if df_sheet.empty or not lookup:
@@ -485,13 +491,14 @@ def _enrich_sheet_with_trace2(
 
     psk = perf_summary_keys if perf_summary_keys is not None else set()
     uid_cache: Dict = {}
-    trace2_times = [
-        lookup.get(
-            _enrichment_row_lookup_key(row, tree, psk, uid_cache),
-            np.nan,
-        )
-        for _, row in df.iterrows()
-    ]
+
+    trace2_times = []
+    lca_id_lists = []
+    for _, row in df.iterrows():
+        key = _enrichment_row_lookup_key(row, tree, psk, uid_cache)
+        trace2_times.append(lookup.get(key, np.nan))
+        if debug and lca_ids_lookup is not None:
+            lca_id_lists.append(str(lca_ids_lookup.get(key, [])))
 
     col_idx = df.columns.get_loc(kernel_time_col)
     t1 = df[kernel_time_col]
@@ -507,6 +514,17 @@ def _enrich_sheet_with_trace2(
         "delta_us (trace2 - trace1)",
         t2 - t1,
     )
+    if debug:
+        df.insert(
+            col_idx + 3,
+            "debug_trace2_time_us",
+            t2,
+        )
+        df.insert(
+            col_idx + 4,
+            "debug_lca_ids",
+            lca_id_lists if lca_id_lists else "[]",
+        )
 
     return df
 
@@ -514,12 +532,17 @@ def _enrich_sheet_with_trace2(
 def _merge_dominant_into_lookup(
     diff_stats_lookup: Dict[tuple, float],
     dominant_t2_map: Dict[tuple, float],
-) -> Dict[tuple, float]:
+    diff_stats_lca_ids: Optional[Dict[tuple, List]] = None,
+    dominant_lca_ids: Optional[Dict[tuple, List]] = None,
+) -> Tuple[Dict[tuple, float], Dict[tuple, List]]:
     merged = dict(diff_stats_lookup)
+    merged_lca: Dict[tuple, List] = dict(diff_stats_lca_ids or {})
     for key, val in dominant_t2_map.items():
         if key not in merged:
             merged[key] = val
-    return merged
+            if dominant_lca_ids and key in dominant_lca_ids:
+                merged_lca[key] = dominant_lca_ids[key]
+    return merged, merged_lca
 
 
 def _enrich_consolidated_perf_sheets(
@@ -528,6 +551,8 @@ def _enrich_consolidated_perf_sheets(
     *,
     trace1_tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
+    lca_ids_lookup: Optional[Dict[tuple, List]] = None,
+    debug: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     """Add speedup/delta only to ``unified_perf_summary``."""
     result: Dict[str, pd.DataFrame] = {}
@@ -548,6 +573,8 @@ def _enrich_consolidated_perf_sheets(
             kt_col,
             tree=trace1_tree,
             perf_summary_keys=perf_summary_keys,
+            lca_ids_lookup=lca_ids_lookup,
+            debug=debug,
         )
     return result
 
@@ -556,6 +583,7 @@ def enrich_perf_report_dict_inplace(
     perf_dfs: Dict[str, pd.DataFrame],
     diff_stats_df: pd.DataFrame,
     trace1_tree,
+    debug: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if diff_stats_df.empty:
         return perf_dfs
@@ -565,29 +593,36 @@ def enrich_perf_report_dict_inplace(
         ups if isinstance(ups, pd.DataFrame) else pd.DataFrame()
     )
 
-    time_additions, time_subtractions, dominant_t2_map = _build_lca_consolidation(
-        diff_stats_df,
-        trace1_tree=trace1_tree,
-        perf_summary_keys=perf_summary_keys,
+    time_additions, time_subtractions, dominant_t2_map, dominant_lca_ids = (
+        _build_lca_consolidation(
+            diff_stats_df,
+            trace1_tree=trace1_tree,
+            perf_summary_keys=perf_summary_keys,
+        )
     )
     consolidated_t1 = _apply_lca_consolidation(
         {k: v.copy() for k, v in perf_dfs.items()},
         time_additions,
         time_subtractions,
     )
-    lookup = _merge_dominant_into_lookup(
-        _build_trace2_time_lookup(
-            diff_stats_df,
-            tree=trace1_tree,
-            perf_summary_keys=perf_summary_keys,
-        ),
+    diff_lookup, diff_lca_ids = _build_trace2_time_lookup(
+        diff_stats_df,
+        tree=trace1_tree,
+        perf_summary_keys=perf_summary_keys,
+    )
+    lookup, merged_lca_ids = _merge_dominant_into_lookup(
+        diff_lookup,
         dominant_t2_map,
+        diff_stats_lca_ids=diff_lca_ids,
+        dominant_lca_ids=dominant_lca_ids,
     )
     return _enrich_consolidated_perf_sheets(
         consolidated_t1,
         lookup,
         trace1_tree=trace1_tree,
         perf_summary_keys=perf_summary_keys,
+        lca_ids_lookup=merged_lca_ids if debug else None,
+        debug=debug,
     )
 
 
@@ -602,7 +637,9 @@ def postprocess_perf_report_dataframes_extension(
     if not extension_args or not str(extension_args).strip():
         return dict_name2df
 
-    trace2_path = str(extension_args).strip()
+    parts = str(extension_args).strip().split()
+    trace2_path = parts[0]
+    debug = "debug" in parts[1:]
 
     perf_analyzer2 = TreePerfAnalyzer.from_file(
         profile_filepath=trace2_path,
@@ -629,9 +666,11 @@ def postprocess_perf_report_dataframes_extension(
     out = dict(dict_name2df)
     if not diff_stats_df.empty:
         enriched = enrich_perf_report_dict_inplace(
-            dict_name2df, diff_stats_df, baseline
+            dict_name2df, diff_stats_df, baseline, debug=debug
         )
         out.update(enriched)
+        if debug:
+            out["diff_stats"] = diff_stats_df
         print("[TraceDiff] Added speedup and delta to unified_perf_summary only.")
 
     return out
