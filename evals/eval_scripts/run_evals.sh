@@ -6,37 +6,51 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
+TEST_IDS="${TEST_IDS:-}"
 
 REPO_ROOT="$(pwd)"
 STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
-RESULTS_ROOT="$EVALS_DIR/results"
-TEST_TRACES_CSV="$EVALS_DIR/unit_test_traces.csv"
+RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/results}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 
 mkdir -p "$RESULTS_ROOT"
 $DEXEC bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
 
-# Expand unit_tests archive if the directory is missing or stale
-UNIT_TESTS_DIR="$EVALS_DIR/unit_tests"
-UNIT_TESTS_ARCHIVE="$EVALS_DIR/unit_tests.tar.gz"
-if [[ -f "$UNIT_TESTS_ARCHIVE" ]]; then
-    if [[ ! -d "$UNIT_TESTS_DIR" ]] || [[ "$UNIT_TESTS_ARCHIVE" -nt "$UNIT_TESTS_DIR" ]]; then
-        echo "Expanding unit_tests.tar.gz..."
-        tar xzf "$UNIT_TESTS_ARCHIVE" -C "$EVALS_DIR"
-        echo "Done."
+expand_archive() {
+    local name="$1"
+    local archive="$EVALS_DIR/${name}.tar.gz"
+    local target="$EVALS_DIR/$name"
+    if [[ -f "$archive" ]]; then
+        if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
+            echo "Expanding ${name}.tar.gz..."
+            tar xzf "$archive" -C "$EVALS_DIR"
+            echo "Done."
+        fi
     fi
-fi
+}
+expand_archive unit_tests
+expand_archive e2e_tests
 
 echo "========================================="
 echo "  Standalone Analysis Evaluation"
 echo "  Node:      $(hostname)"
 echo "  Container: $CONTAINER"
+if [[ -n "$TEST_IDS" ]]; then
+    echo "  Test filter: $TEST_IDS"
+fi
 echo "========================================="
 echo ""
 
 while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     [[ -z "$id" ]] && continue
+    if [[ -n "$TEST_IDS" ]]; then
+        case " $TEST_IDS " in
+            *" $id "*) ;;
+            *) continue ;;
+        esac
+    fi
 
     CASE_RESULTS="$RESULTS_ROOT/$id"
     OUTPUT_DIR="$CASE_RESULTS/analysis_output"

@@ -7,12 +7,13 @@ set -uo pipefail
 CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
 NUM_REPEATS="${NUM_REPEATS:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
+TEST_IDS="${TEST_IDS:-}"
 
 REPO_ROOT="$(pwd)"
 STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
-RESULTS_ROOT="$EVALS_DIR/repeatability_results"
-TEST_TRACES_CSV="$EVALS_DIR/unit_test_traces.csv"
+RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 
 mkdir -p "$RESULTS_ROOT"
@@ -34,11 +35,20 @@ echo "  Standalone Analysis Repeatability Test"
 echo "  Node:      $(hostname)"
 echo "  Container: $CONTAINER"
 echo "  Repeats:   $NUM_REPEATS"
+if [[ -n "$TEST_IDS" ]]; then
+    echo "  Test filter: $TEST_IDS"
+fi
 echo "========================================="
 echo ""
 
 while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     [[ -z "$id" ]] && continue
+    if [[ -n "$TEST_IDS" ]]; then
+        case " $TEST_IDS " in
+            *" $id "*) ;;
+            *) continue ;;
+        esac
+    fi
 
     echo "-----------------------------------------"
     echo "  [$id] Starting $NUM_REPEATS repeat runs"
