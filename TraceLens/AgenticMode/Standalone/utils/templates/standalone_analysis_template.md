@@ -7,16 +7,33 @@ See LICENSE for license information.
 <!--
 === FORMATTING RULES (for the agent filling in this template) ===
 
+=== MODE SELECTION ===
+This template supports two modes determined by `comparison_scope`:
+  - **standalone**: Single-trace roofline analysis (default). Use sections marked STANDALONE.
+  - **comparative**: Two-trace analysis (Trace 1 =  primary, Trace 2 = target). Use sections marked COMPARATIVE.
+When filling in this template, select the block matching the active `comparison_scope` for each
+section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
+
+=== COMPARATIVE TERMINOLOGY ===
+  - **Trace 1** =  trace (primary). **Trace 2** = trace (target/comparison).
+  - Impact semantics: standalone uses roofline gap (75–100% of peak); comparative uses
+    trace 2 kernel time as the optimization target (gap = trace1 time − trace2 time).
+  - Efficiency semantics: standalone = % of roofline; comparative = 100 × (trace2 kernel time) / (trace1 kernel time).
+
+=== GENERAL RULES ===
 1. Warnings section: Only include if there were errors or high-variance operations; omit entirely if all succeeded and no variance flags.
 2. Executive Summary: Max ~20 lines.
 3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 10.2 with a base64-embedded
    PNG data URI (![Performance Improvement](data:image/png;base64,...)). This makes the report
-   fully portable. The plot shows kernel tuning potential only with 75–100% roofline potential on
-   both panes (left: E2E latency error bars from savings_ms_low/savings_ms_high, baseline bar has
-   no error bar; right: throughput uncertainty band from same range, no uncertainty at baseline).
+   fully portable.
+   - Standalone: plot shows kernel tuning potential with 75–100% roofline potential on both panes
+     (left: E2E latency error bars from savings_ms_low/savings_ms_high, baseline bar has no error
+     bar; right: throughput uncertainty band from same range, no uncertainty at baseline).
+   - Comparative: plot shows gap-to-target per category (trace 1 vs trace 2 kernel times).
    If the plot was not generated (Step 9.5 failed), the placeholder is removed.
-4. Compute Kernel Optimizations: P1-P3+ from category subagent findings. Impact estimates show a
-   range (75–100% of roofline target), e.g. "~X.X–Y.Y ms savings (X.X–Y.Y% of E2E)".
+4. Compute Kernel Optimizations: P1-P3+ from category subagent findings.
+   - Standalone: Impact estimates show a range (75–100% of roofline target), e.g. "~X.X–Y.Y ms savings (X.X–Y.Y% of E2E)".
+   - Comparative: Impact estimates show gap to target trace, e.g. "~X.X ms gap to target (Y.Y% of E2E)".
 5. System-Level Optimizations: If all system-level analyses report no actionable issues
    (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of
    P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue
@@ -30,21 +47,29 @@ See LICENSE for license information.
    `### Compute Kernel Insights` then `### System-Level Insights`, each with
    `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching the optimization card titles and order.
    Each block has five required labels in order: **Identification:**, **Data:**,
-   **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:**. Compute Data uses
-   trace-grounded kernel tables (FLOPS/Byte, Efficiency, Bound); System Data uses system
-   evidence only (no kernel breakdown tables). Impact estimate is rendered from
-   `metadata/*.json → impact_estimates`. P-item cards link to Detailed Analysis anchors
-   (e.g. `#detailed-analysis-compute-p1`).
-10. Model and appendix: Read `metadata/model_info.json`. For the report title and any **&lt;Model&gt;** placeholder used for display: use `model_info["model"]` when it is not "Cannot be inferred from trace"; otherwise use **"Workload"**. Fill the Appendix **Model Architecture** section with the raw `model`, `architecture`, `scale`, and `precision` values from that file (they may be "Cannot be inferred from trace").
+   **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:**.
+   - Standalone: Compute Data uses trace-grounded kernel tables (FLOPS/Byte, Efficiency, Bound).
+   - Comparative: Compute Data uses dual-trace kernel tables (Trace 1 Time, Trace 2 Time, Count,
+     Shape, FLOPS/Byte, Bound — columns for both traces).
+   System Data uses system evidence only (no kernel breakdown tables) in both modes.
+   Impact estimate is rendered from `metadata/*.json → impact_estimates`.
+   P-item cards link to Detailed Analysis anchors (e.g. `#detailed-analysis-compute-p1`).
+10. Model and appendix: Read `metadata/model_info.json`. For the report title and any **<Model>** placeholder used for display: use `model_info["model"]` when it is not "Cannot be inferred from trace"; otherwise use **"Workload"**. Fill the Appendix **Model Architecture** section with the raw `model`, `architecture`, `scale`, and `precision` values from that file (they may be "Cannot be inferred from trace").
 11. No redundancy: Information appears in ONE place only.
 12. Recommendations: Max ~10 lines PER recommendation. Use category-specific Action text
     (SDPA: tile/block, backend; GEMM: fusion, tile, library; elementwise: fuse with adjacent;
     do not suggest kernel fusion for SDPA).
 -->
 
+<!-- === STANDALONE title === -->
 # <Model> - <Platform> Standalone Analysis
 
+<!-- === COMPARATIVE title === -->
+# <Model> - Comparative Analysis: <Platform1> () vs <Platform2> (NVIDIA)
+
 ## Executive Summary
+
+<!-- === STANDALONE Executive Summary === -->
 [1 paragraph overview + key metrics table]
 
 | Metric | Value |
@@ -54,6 +79,17 @@ See LICENSE for license information.
 | Idle % | Z% |
 | Exposed Communication % | W% |
 | Top Bottleneck Category | Category (V%) |
+
+<!-- === COMPARATIVE Executive Summary === -->
+[1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
+
+| Metric | Trace 1 -  (<Platform1>) | Trace 2 - NVIDIA (<Platform2>) | Difference |
+|--------|----------------------------|-------------------------------|------------|
+| Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
+| Compute % | X% | Y% | +/-Z pp |
+| Idle % | X% | Y% | +/-Z pp |
+| Exposed Communication % | X% | Y% | +/-Z pp |
+| Top Bottleneck Category | Category (X%) | Category (Y%) | — |
 
 {{PERF_PLOT}}
 
@@ -86,22 +122,35 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ### Top Operations
 
+<!-- === STANDALONE Top Operations === -->
 Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %). The last column shows both the time range and E2E % range when kernel_tuning estimates exist (e.g. "~770–9801 ms (1.4–17.3%)"); use "—" when no estimates.
 
 | Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
 |------|----------|-----------|-------------------|-----|-------------------------------------|
 | 1 | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
 
+<!-- === COMPARATIVE Top Operations === -->
+<!-- Use **% of computation time** based on Trace 1 (). "Potential improvement" = Trace 1 category time − Trace 2 category time; positive means  is slower. Use "—" when trace 2 has no matching category data. -->
+
+| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
+|------|----------|-------------------|-------------------|-------------------|-----|-----------------------------|
+| 1 | ... | ... | ... | ... | ... | ~X ms (Y%) or — |
+
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
+
+<!-- === STANDALONE P-item cards and COMPARATIVE P-item cards === -->
+<!-- Impact: range from closing efficiency gaps to 75–100% of roofline (pre-computed). -->
 
 ### 🔴 P1: <Brief Title>
 
 **Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
-
+<!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+<!-- Comparative Impact -->
+**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
 
 → *See [Detailed Analysis: Compute kernel insights > P1](#detailed-analysis-compute-p1) for details*
 
@@ -112,9 +161,10 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 **Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
-
+<!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
-
+<!-- Comparative Impact -->
+**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
 → *See [Detailed Analysis: Compute kernel insights > P2](#detailed-analysis-compute-p2) for details*
 
 ---
@@ -124,8 +174,10 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 **Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
-
+<!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+<!-- Comparative Impact -->
+**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
 
 → *See [Detailed Analysis: Compute kernel insights > P3](#detailed-analysis-compute-p3) for details*
 
@@ -135,7 +187,23 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ## Kernel Fusion Opportunities (Experimental)
 
+<!-- === STANDALONE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak). Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
+
+<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
+<!-- P1/P2/P3+ ordered by confidence then kernel time. -->
+<!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
+
+No kernel fusion opportunities detected.
+
+<!-- === COMPARATIVE Kernel Fusion === -->
+<!-- In comparative mode, kernel fusion analysis examines Trace 1 () fusion candidates only.
+     Cross-trace fusion mapping (identifying fused kernels in the NVIDIA trace and suggesting
+     equivalent fusions for ) is not yet supported. Future enhancement: use TraceDiff LCA
+     alignment to detect operations that are fused in Trace 2 but unfused in Trace 1. -->
+
+> **Note:** Kernel fusion analysis is experimental. In comparative mode, fusion candidates are identified from Trace 1 () only. Cross-trace fusion mapping (NVIDIA fused kernels →  equivalents) is not yet supported. Savings estimates use a roofline projection model (75-100% of peak).
 
 <!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
@@ -149,6 +217,10 @@ No kernel fusion opportunities detected.
 ## System-Level Optimizations
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
+<!-- === COMPARATIVE system-level note === -->
+<!-- In comparative mode, add this note immediately after the blockquote above: -->
+<!-- > **Comparative note:** System-level analysis is performed on the primary trace (Trace 1) only. Cross-trace system-level comparison is not yet supported. -->
 
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
@@ -210,6 +282,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- One #### 🔴/🟡/🟢 Pn: <title> block per promoted compute P-item, in priority order. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
+<!-- === STANDALONE Compute Kernel Data table === -->
+
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>
 **Identification:** [1-2 sentences - How this opportunity was surfaced. Must end with (source: <artifact> → <keys>).]
@@ -221,6 +295,24 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Reasoning for Slowdown:** [2-3 sentences - Why the workload is slow as the trace shows. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps — not merely restating what to do.]
+**Impact estimate:** [Rendered from metadata → impact_estimates]
+
+<!-- === COMPARATIVE Compute Kernel Data table === -->
+<!-- In comparative mode, the Data table includes columns for both traces so the reader can
+     see where the gap originates. Efficiency column is replaced by the direct time comparison.
+     Shape columns are sourced from `Input Dims` in ops CSV / TraceDiff `diff_stats`. -->
+
+<a id="detailed-analysis-compute-p1"></a>
+#### 🔴 P1: <Brief Title>
+**Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
+**Data:** [1 sentence summary of table]
+
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Shape (T1) | Shape (T2) | FLOPS/Byte (T1/T2) | Bound (T1/T2) |
+|-----------|-------------------|-------------------|---------------|------------|------------|---------------------|---------------|
+| ...       | ...               | ...               | .../...       | ...        | ...        | .../...             | .../...       |
+
+**Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
+**Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]
 **Impact estimate:** [Rendered from metadata → impact_estimates]
 
 ### Kernel Fusion Insights
@@ -253,6 +345,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- One #### 🔴/🟡/🟢 Pn: <title> block per promoted system P-item, in priority order. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-system-pN"></a> -->
+<!-- System-level detailed analysis uses the same format for both standalone and comparative modes.
+     In comparative mode, system-level analysis covers Trace 1 () only. -->
 
 <a id="detailed-analysis-system-p1"></a>
 #### 🔴 P1: <Brief Title>
@@ -273,8 +367,21 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 - **Precision**: <precision>
 
 ### Hardware Reference
+
+<!-- === STANDALONE Hardware Reference === -->
 - **Platform**: <platform>
 - **Peak HBM BW**: X TB/s
 - **Peak MAF (BF16)**: Y TFLOPS
 - **Peak MAF (FP8)**: Z TFLOPS (if supported)
 - **Peak MAF (FP4)**: W TFLOPS (if supported)
+
+<!-- === COMPARATIVE Hardware Reference === -->
+<!-- Three-column table comparing Trace 1 and Trace 2 platform specs.
+     specs from arch/<platform>.json; specs from trace 2 metadata. -->
+
+| Reference | Trace 1 (<Platform1>) | Trace 2 (<Platform2>) |
+|-----------|-----------------------------|--------------------------------|
+| Peak HBM BW | X TB/s | Y TB/s |
+| Peak MAF (BF16) | X TFLOPS | Y TFLOPS |
+| Peak MAF (FP8) | X TFLOPS | Y TFLOPS |
+| Peak MAF (FP4) | X TFLOPS (if supported) | Y TFLOPS (if supported) |
