@@ -478,9 +478,9 @@ def generate_perf_report_pytorch(
             ):
                 mask_missing_parent = df_kernels["Parent cpu_op"].isna()
                 if mask_missing_parent.any():
-                    df_kernels.loc[
-                        mask_missing_parent, "Parent cpu_op"
-                    ] = df_kernels.loc[mask_missing_parent, "Launcher"]
+                    df_kernels.loc[mask_missing_parent, "Parent cpu_op"] = (
+                        df_kernels.loc[mask_missing_parent, "Launcher"]
+                    )
 
             # Fallback categorization for graph/runtime launched kernels with no cpu_op
             # Note: Basic 'Parent op category' is added by get_kernel_details() in tree_perf.py
@@ -498,10 +498,10 @@ def generate_perf_report_pytorch(
                             return "graph"
                         return "runtime" if s and s != "nan" else pd.NA
 
-                    df_kernels.loc[
-                        mask_missing_cat, "Parent op category"
-                    ] = df_kernels.loc[mask_missing_cat, "Launcher"].apply(
-                        _launcher_category
+                    df_kernels.loc[mask_missing_cat, "Parent op category"] = (
+                        df_kernels.loc[mask_missing_cat, "Launcher"].apply(
+                            _launcher_category
+                        )
                     )
 
             # Group by category/cpu_op along with kernel identifiers when available
