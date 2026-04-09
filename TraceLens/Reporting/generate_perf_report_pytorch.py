@@ -436,9 +436,9 @@ def generate_perf_report_pytorch(
     # Add CPU-dependent sheets only if not GPU-only
     if not perf_analyzer.gpu_only:
         if not df_kernel_launchers_summary_by_category.empty:
-            dict_name2df[
-                "ops_summary_by_category"
-            ] = df_kernel_launchers_summary_by_category
+            dict_name2df["ops_summary_by_category"] = (
+                df_kernel_launchers_summary_by_category
+            )
         if not df_kernel_launchers_summary.empty:
             dict_name2df["ops_summary"] = df_kernel_launchers_summary
         if not df_kernel_launchers_unique_args.empty:
