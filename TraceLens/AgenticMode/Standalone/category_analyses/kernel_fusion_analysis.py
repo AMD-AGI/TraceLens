@@ -27,13 +27,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
 
-MAX_FUSION_KERNEL_COUNT = 15 # Skip candidates with more kernels than this (too complex to fuse reliably)
+MAX_FUSION_KERNEL_COUNT = (
+    15  # Skip candidates with more kernels than this (too complex to fuse reliably)
+)
 
-TARGET_HIGH = 100.0 # Best-case savings target (100% of original time)
-TARGET_LOW = 75.0 # Mid-range savings target (75% of original time)
-TARGET_MID = 87.5 # Balanced savings target (87.5% of original time)
-MIN_E2E_PCT = 2.0 # Drop estimates whose best-case E2E impact is below this threshold
-OVERLAP_EFFICIENCY = 0.85 # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
+TARGET_HIGH = 100.0  # Best-case savings target (100% of original time)
+TARGET_LOW = 75.0  # Mid-range savings target (75% of original time)
+TARGET_MID = 87.5  # Balanced savings target (87.5% of original time)
+MIN_E2E_PCT = 2.0  # Drop estimates whose best-case E2E impact is below this threshold
+OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
 _MATRIX_SPECS = frozenset(
     {
@@ -57,13 +59,24 @@ _NORM_TYPES = frozenset(
 )
 
 _NORM_NAME_PATTERNS = [
-    "batchnorm", "layernorm", "groupnorm", "instancenorm",
-    "miopenbatchnorm", "rmsnorm",
+    "batchnorm",
+    "layernorm",
+    "groupnorm",
+    "instancenorm",
+    "miopenbatchnorm",
+    "rmsnorm",
 ]
 
 _CONFIDENCE_NAME_HINTS = {
     "attention": ("attention", "sdpa", "self_attn"),
-    "norm": ("rmsnorm", "rms_norm", "layernorm", "layer_norm", "batchnorm", "batch_norm"),
+    "norm": (
+        "rmsnorm",
+        "rms_norm",
+        "layernorm",
+        "layer_norm",
+        "batchnorm",
+        "batch_norm",
+    ),
     "mlp": ("mlp",),
     "rope": ("rotary", "rope", "apply_rotary"),
     "siglu": ("silu", "swiglu"),
@@ -192,7 +205,9 @@ def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, targ
 
     fused_optimal = max(memory_time_us, matrix_time_us, vector_time_us)
     fused_sum = memory_time_us + matrix_time_us + vector_time_us
-    fused_time_us = fused_optimal + (1.0 - OVERLAP_EFFICIENCY) * (fused_sum - fused_optimal)
+    fused_time_us = fused_optimal + (1.0 - OVERLAP_EFFICIENCY) * (
+        fused_sum - fused_optimal
+    )
 
     unmodeled_time_us = sum(e["dur_us"] for e in enriched if not e["has_perf_data"])
     current_us = sum(e["dur_us"] for e in enriched)
@@ -210,18 +225,19 @@ def _classify_confidence(candidate: dict, enriched: list) -> str:
     mn = candidate.get("module_name", "").lower()
 
     name_signal = next(
-        (p for p, hints in _CONFIDENCE_NAME_HINTS.items()
-         if any(h in bn or h in mn for h in hints)),
+        (
+            p
+            for p, hints in _CONFIDENCE_NAME_HINTS.items()
+            if any(h in bn or h in mn for h in hints)
+        ),
         None,
     )
 
     n_gemm = sum(1 for e in enriched if _is_matrix_op(e))
     has_softmax = any("softmax" in e["name"].lower() for e in enriched)
     has_rsqrt = any("rsqrt" in e["name"].lower() for e in enriched)
-    has_neg_cat = (
-        any("neg" in e["name"].lower() for e in enriched)
-        and any("catarray" in e["name"].lower() or "cat_" in e["name"].lower()
-                for e in enriched)
+    has_neg_cat = any("neg" in e["name"].lower() for e in enriched) and any(
+        "catarray" in e["name"].lower() or "cat_" in e["name"].lower() for e in enriched
     )
     n_non_gemm = len(enriched) - n_gemm
 
@@ -601,7 +617,9 @@ def main():
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total savings (mid): {total_savings_ms:.3f} ms")
     high_count = sum(1 for e in impact_estimates if e.get("confidence") == "high")
-    print(f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}")
+    print(
+        f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}"
+    )
     if warnings:
         print(f"  Warnings: {len(warnings)}")
     print(f"  Metrics written to: {output_path}")

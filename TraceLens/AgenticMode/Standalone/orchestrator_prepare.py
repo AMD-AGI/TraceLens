@@ -48,7 +48,13 @@ FUSION_ALREADY_FUSED = [
     "silu_and_mul",
     "SiluAndMul",
 ]
-_NORM_KERNEL_PATTERNS = ["batchnorm", "layernorm", "groupnorm", "instancenorm", "rmsnorm"]
+_NORM_KERNEL_PATTERNS = [
+    "batchnorm",
+    "layernorm",
+    "groupnorm",
+    "instancenorm",
+    "rmsnorm",
+]
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
@@ -113,7 +119,8 @@ def _is_gemm_norm_only(entry):
     if not has_gemm:
         return False
     non_gemm = [
-        k for k in kernels
+        k
+        for k in kernels
         if k.get("type", "").upper() not in ("GEMM", "GEMM (GENERIC)")
         and "conv" not in k.get("name", "").lower()
     ]
