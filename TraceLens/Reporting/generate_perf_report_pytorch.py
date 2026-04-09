@@ -106,7 +106,9 @@ def get_dfs_short_kernels(
 
     # Sort and format
     df_grouped.sort_values(
-        by="Short Kernel duration (µs) sum", ascending=False, inplace=True
+        by=["Short Kernel duration (µs) sum", "Kernel name"],
+        ascending=[False, True],
+        inplace=True,
     )
     df_grouped.reset_index(inplace=True)
     if topk is not None:
