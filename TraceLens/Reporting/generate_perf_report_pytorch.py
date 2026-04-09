@@ -106,9 +106,9 @@ def get_dfs_short_kernels(
 
     # Sort and format
     df_grouped.sort_values(
-        by=["Short Kernel duration (µs) sum","Kernel name"], 
-        ascending=[False, True], 
-        inplace=True
+        by=["Short Kernel duration (µs) sum", "Kernel name"],
+        ascending=[False, True],
+        inplace=True,
     )
     df_grouped.reset_index(inplace=True)
     if topk is not None:
@@ -436,9 +436,9 @@ def generate_perf_report_pytorch(
     # Add CPU-dependent sheets only if not GPU-only
     if not perf_analyzer.gpu_only:
         if not df_kernel_launchers_summary_by_category.empty:
-            dict_name2df["ops_summary_by_category"] = (
-                df_kernel_launchers_summary_by_category
-            )
+            dict_name2df[
+                "ops_summary_by_category"
+            ] = df_kernel_launchers_summary_by_category
         if not df_kernel_launchers_summary.empty:
             dict_name2df["ops_summary"] = df_kernel_launchers_summary
         if not df_kernel_launchers_unique_args.empty:
@@ -478,9 +478,9 @@ def generate_perf_report_pytorch(
             ):
                 mask_missing_parent = df_kernels["Parent cpu_op"].isna()
                 if mask_missing_parent.any():
-                    df_kernels.loc[mask_missing_parent, "Parent cpu_op"] = (
-                        df_kernels.loc[mask_missing_parent, "Launcher"]
-                    )
+                    df_kernels.loc[
+                        mask_missing_parent, "Parent cpu_op"
+                    ] = df_kernels.loc[mask_missing_parent, "Launcher"]
 
             # Fallback categorization for graph/runtime launched kernels with no cpu_op
             # Note: Basic 'Parent op category' is added by get_kernel_details() in tree_perf.py
@@ -498,10 +498,10 @@ def generate_perf_report_pytorch(
                             return "graph"
                         return "runtime" if s and s != "nan" else pd.NA
 
-                    df_kernels.loc[mask_missing_cat, "Parent op category"] = (
-                        df_kernels.loc[mask_missing_cat, "Launcher"].apply(
-                            _launcher_category
-                        )
+                    df_kernels.loc[
+                        mask_missing_cat, "Parent op category"
+                    ] = df_kernels.loc[mask_missing_cat, "Launcher"].apply(
+                        _launcher_category
                     )
 
             # Group by category/cpu_op along with kernel identifiers when available
