@@ -150,12 +150,18 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
 
-**Extension flags (comparative only):** When `<comparison_scope>` = `comparative`, append to the chosen command:
+**Output paths:** 
+**`standalone`** — one run: `--output_xlsx_path <output_dir>/perf_report.xlsx`, `--output_csvs_dir <output_dir>/perf_report_csvs`. 
+**`comparative`** — two runs: trace1 → `<output_dir>/perf_report_trace1.xlsx`, `<output_dir>/perf_report_trace1_csvs`; trace2 → `--profile_json_path <trace2_path>`, `<output_dir>/perf_report_trace2.xlsx`, `<output_dir>/perf_report_trace2_csvs`.
+
+**Extension flags (comparative, trace1 only):** When `<comparison_scope>` = `comparative`, append **only** to the trace1 command:
 
 ```text
   --extension_file TraceLens/Reporting/tracediff_comparison_extension.py \
   --extension_args <trace2_path>
 ```
+
+Do **not** pass `--extension_*` on the trace2 command.
 
 ---
 
@@ -199,9 +205,11 @@ Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<compar
   --group_by_num_kernels
 ```
 
-This generates:
-- `perf_report.xlsx` - Excel report with all sheets
-- `perf_report_csvs/` directory with CSV files
+This generates: 
+**`standalone`:** `perf_report.xlsx` and `perf_report_csvs/`. 
+**`comparative`:** `perf_report_trace1.xlsx`, `perf_report_trace1_csvs/`, `perf_report_trace2.xlsx`, `perf_report_trace2_csvs/`.
+
+Excel report contains all sheets. CSV directory contains individual sheets in report
 
 ---
 
