@@ -21,7 +21,7 @@ Analyze GEMM operations (matrix multiplications: mm, bmm, addmm) for performance
 When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
-- `output_dir`: Base analysis output directory (e.g., `/path/to/analysis_output/`)
+- `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - `comparison_scope`: `standalone` (default) or `comparative`
 
@@ -99,7 +99,7 @@ Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations
 
 **Bottleneck criteria (efficiency — mode-specific):**
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
-- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
 ### Step 4: Generate Markdown Tables
 
@@ -215,13 +215,10 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ## Key Principles
 
 1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
-2. **Calculate efficiency** - 
-  **Standalone:** Compare achieved TFLOPS/s vs peak MAF (compute-bound) or achieved TB/s vs peak HBM BW (memory-bound)
-  **Comparative:** Compare achieved runtime in trace1 vs acheived runtime in trace2. use roofline/TFLOPS fields only as supplementary context if needed
-3. **Be specific** - Include M/N/K shapes, batch sizes, data types
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
-6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+2. **Be specific** - Include M/N/K shapes, batch sizes, data types
+3. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+4. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
+5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

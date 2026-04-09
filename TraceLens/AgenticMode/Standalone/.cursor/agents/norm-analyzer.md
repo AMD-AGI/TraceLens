@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/norm_ops.csv` - Filtered normalization operations
@@ -90,9 +91,12 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 ### Step 4: Identify Bottlenecks
 
-**Bottleneck criteria:**
+**Bottleneck criteria (time — both modes):**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW
+
+**Bottleneck criteria (efficiency — mode-specific):**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak HBM BW**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
 **Baseline comparison:**
 - Compare to simple elementwise ops (add_, mul, copy_)
@@ -101,6 +105,8 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 ### Step 5: Generate Markdown Tables
 
 Build operations table from `metrics['operations']`.
+
+**Column mappings (efficiency):** Use `operations[i].efficiency.efficiency_percent`. In **standalone** mode, format vs peak HBM BW (roofline). In **comparative** mode, report as **trace2/trace1 kernel-time ratio as a percentage**.
 
 ### Step 6: Determine Optimization Recommendations
 
@@ -118,6 +124,11 @@ For each validated bottleneck, provide recommendations in both categories:
 ### Step 7: Write Category Findings
 
 Write `<output_dir>/category_findings/norm_findings.md` using the command prefix.
+
+For each bottleneck, align efficiency wording with `metrics['analysis_mode']`:
+- **Standalone — Efficiency (memory-bound):** Z% of peak HBM BW (achieved vs peak)
+- **Comparative — Relative kernel time:** `efficiency_percent` = 100×t2/t1 for this op (plain language vs trace2; optional: cite achieved TB/s vs peak as context)
+- *Standalone: roofline-first. Comparative: omit roofline-only lines if you only discuss trace2 ratio.*
 
 The findings file **must** include **Impact Summary** followed by **Detailed Analysis**.
 
@@ -145,7 +156,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---

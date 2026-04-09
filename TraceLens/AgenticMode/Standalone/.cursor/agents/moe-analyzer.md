@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator, if MoE exists):**
 1. `<output_dir>/category_data/moe_fused_ops.csv` - Filtered MoE operations
@@ -82,11 +83,14 @@ Check `status` field - if 'NO_DATA', write findings noting no MoE operations and
 
 ### Step 3: Identify Bottlenecks
 
-Apply roofline-based thresholds to identify bottlenecks from `metrics['operations']`:
+Apply thresholds to identify bottlenecks from `metrics['operations']`:
 
-**Bottleneck criteria:**
+**Bottleneck criteria (time — both modes):**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak (roofline)
+
+**Bottleneck criteria (efficiency — mode-specific):**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
 ### Step 4: Generate Markdown Tables
 
@@ -99,7 +103,7 @@ Build the operations breakdown table from `metrics['operations']`:
 
 **Column mappings:**
 - **Count**: Use `operations[i].count` (total invocations, not unique signatures)
-- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. Format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. In **standalone** mode, format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`). In **comparative** mode, report it as **trace2/trace1 kernel-time ratio as a percentage**.
 - **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
 - **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
 
@@ -135,9 +139,10 @@ MoE operations account for X% of compute time. Average efficiency: Y%.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute)
-- **Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
-- **Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
-- *Use the template matching `bound_type` and delete the other.*
+- **Standalone — Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
+- **Standalone — Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
+- **Comparative — Relative kernel time:** `efficiency_percent` = 100×t2/t1 for this op (state in plain language vs trace2; optional: cite achieved TFLOPS/TB/s vs peak from the same row as context)
+- *Standalone: use the template matching `bound_type` and delete the other peak line. Comparative: omit roofline-only efficiency lines if you only discuss trace2 ratio.*
 - **Issue:** [Brief description including bound type]
 - **Algorithmic:** [Model/framework-level recommendation]
 - **Kernel:** [Kernel optimization recommendation]
@@ -173,7 +178,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
@@ -207,13 +212,14 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 ## Key Principles
 
-1. **Roofline analysis drives recommendations** - Classify each operation as compute-bound or memory-bound and measure efficiency against the appropriate ceiling
-2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the appropriate peak (MAF for compute-bound, HBM BW for memory-bound)
-3. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
-5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**. When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
-6. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution -- these are not observable from kernel-level trace data
-7. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+1. **Be specific about the gap** -
+  **Standalone:** Report achieved TFLOPS/s or TB/s vs the appropriate peak (MAF for compute-bound, HBM BW for memory-bound).
+  **Comparative:** Quantify the gap with kernel times and/or `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**; do not present MAF or HBM peak as the primary “vs peak” baseline unless as supplementary roofline context.
+2. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
+3. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
+4. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated. The **FLOPS calculation is exact**. When reporting findings, note that **standalone** TB/s, FLOPS/Byte, and roofline `efficiency_percent` inherit this byte-model uncertainty. **Comparative** `efficiency_percent` is a trace2/trace1 kernel-time ratio and does **not** carry that caveat; any metrics still computed from estimated bytes (e.g. TB/s, FLOPS/Byte) remain approximate.
+5. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution -- these are not observable from kernel-level trace data
+6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 
@@ -236,7 +242,8 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 | Data types (FP4/FP8/BF16) | `Input type` / `Compute Spec` columns |
 | Achieved TFLOPS/s | Calculated from duration + FLOPs |
 | Achieved TB/s | Calculated from duration + Bytes |
-| Efficiency % | Achieved / Peak (roofline) |
+| Efficiency % (standalone) | Achieved / Peak (roofline) |
+| Efficiency % (comparative) | `efficiency_percent` as 100×trace2/trace1 kernel time for the op |
 | FLOPS/Byte | Arithmetic intensity from perf model |
 | Bound type | Compute vs memory from roofline balance point |
 | Batch counts | Number of invocations |

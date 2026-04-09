@@ -41,6 +41,16 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze normalization operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
+
+    parser.add_argument(
+        "--comparison_scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: roofline efficiency in operations[].efficiency; "
+            "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -56,7 +66,9 @@ def main():
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(ops_df, metadata, config)
+    operations = build_operation_metrics(
+        ops_df, metadata, config, analysis_mode=args.comparison_scope
+    )
     category_specific = extract_category_specific(ops_df, metadata)
 
     baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
@@ -67,6 +79,7 @@ def main():
     metrics = {
         "category": "norm",
         "status": "OK",
+        "analysis_mode": args.comparison_scope,
         **time_metrics,
         "operations": operations,
         "category_specific": category_specific,

@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/elementwise_ops.csv` - Filtered elementwise operations
@@ -31,6 +32,8 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Output file you must write:**
 - `<output_dir>/category_findings/elementwise_findings.md`
+
+**Critical:** Do NOT load the trace file directly. Use only the pre-computed data files.
 
 ---
 
@@ -65,7 +68,8 @@ Execute the analysis script using the command prefix:
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/elementwise_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --comparison_scope <comparison_scope>
 ```
 
 ### Step 2: Read Metrics
@@ -94,9 +98,12 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 ### Step 4: Identify Bottlenecks
 
-**Bottleneck criteria:**
+**Bottleneck criteria (time — both modes):**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW (compared to baseline)
+
+**Bottleneck criteria (efficiency — mode-specific):**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline** (peak HBM BW for these ops). Flag when **< 70% of peak** compared to baseline simple ops.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
 **Special considerations:**
 - Simple elementwise ops (add, mul, copy) should achieve >70% of peak HBM BW
@@ -179,10 +186,12 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ## Key Principles
 
 1. **Baseline comparison** - Compare complex ops to simple ops (add, mul, copy)
-2. **Memory-bound** - Elementwise ops should hit peak HBM BW
-3. **Fusion is primary algorithmic optimization** - Look for chains of ops
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+2. **Calculate efficiency** -
+  **Standalone:** Compare achieved TB/s vs peak HBM BW (memory-bound elementwise). Elementwise ops should hit peak HBM BW
+  **Comparative:** Compare achieved runtime in trace1 vs acheived runtime in trace2. use roofline fields only as supplementary context if needed
+4. **Fusion is primary algorithmic optimization** - Look for chains of ops
+5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
+6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
 ---
 

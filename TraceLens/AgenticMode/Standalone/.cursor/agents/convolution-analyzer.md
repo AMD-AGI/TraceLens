@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/convolution_ops.csv` - Filtered Convolution operations
@@ -66,7 +67,8 @@ Execute the analysis script using the command prefix:
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/convolution_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --comparison_scope <comparison_scope>
 ```
 
 ### Step 2: Read Metrics
@@ -94,9 +96,12 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 ### Step 4: Identify Bottlenecks
 
-**Bottleneck criteria:**
+**Bottleneck criteria (time — both modes):**
 - Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
+
+**Bottleneck criteria (efficiency — mode-specific):**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
 **Key indicator:**
 - High transpose overhead (>20%) indicates memory layout mismatch
@@ -112,7 +117,7 @@ Build the operations breakdown table from `metrics['operations']`:
 
 **Column mappings:**
 - **Count**: Use `operations[i].count` (total invocations, not unique signatures)
-- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. Format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
+- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. In **standalone** mode, format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`). In **comparative** mode, report it as **trace2/trace1 kernel-time ratio as a percentage**.
 - **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
 - **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
 
@@ -165,7 +170,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
+- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
 - If no actionable bottlenecks found, the table may have zero rows.
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 

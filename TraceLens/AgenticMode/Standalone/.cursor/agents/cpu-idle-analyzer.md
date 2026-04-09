@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/cpu_idle_ops.csv` - Timeline data for idle analysis

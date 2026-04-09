@@ -28,7 +28,6 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     validate_efficiency,
     calculate_efficiency_with_validation,
     compute_impact_estimates,
-    has_comparative_impact_columns,
     generate_plot_data,
     write_metrics_json,
     load_category_data,
@@ -240,18 +239,6 @@ def test_compute_impact_estimates_min_savings():
     assert estimates[0]["savings_ms"] == 0.429
     estimates_strict = compute_impact_estimates(operations, "gemm", min_savings_ms=1.0)
     assert len(estimates_strict) == 0
-
-
-def test_has_comparative_impact_columns():
-    df_missing = pd.DataFrame({"name": ["a"]})
-    assert not has_comparative_impact_columns(df_missing)
-    df_ok = pd.DataFrame(
-        {
-            "speedup (trace1/trace2)": [0.5],
-            "delta_us (trace2 - trace1)": [-1000.0],
-        }
-    )
-    assert has_comparative_impact_columns(df_ok)
 
 
 def test_comparative_impact_from_operations_trace2_faster():
@@ -586,7 +573,7 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
 
 
 def test_gemm_analysis_script_comparative_mode(tmp_path):
-    """gemm_ops.csv with TraceDiff columns + --mode comparative -> kernel_tuning-shaped estimates."""
+    """gemm_ops.csv with TraceDiff columns + --comparison_scope comparative -> kernel_tuning-shaped estimates."""
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
     (out / "metadata").mkdir(parents=True)
@@ -626,7 +613,7 @@ def test_gemm_analysis_script_comparative_mode(tmp_path):
             script,
             "--output-dir",
             str(out),
-            "--mode",
+            "--comparison_scope",
             "comparative",
         ],
         capture_output=True,
@@ -645,3 +632,96 @@ def test_gemm_analysis_script_comparative_mode(tmp_path):
     assert m["impact_estimates"][0]["efficiency_pct"] == 50.0
     assert m["impact_estimates"][0]["savings_ms"] == round(10.0 * (1 - 50.0 / 87.5), 3)
     assert m["impact_estimates"][0]["savings_ms_high"] == 5.0
+
+
+def test_moe_analysis_no_data_includes_analysis_mode(tmp_path):
+    """moe_analysis.py with no moe_fused_ops.csv writes analysis_mode from --comparison_scope."""
+    out = tmp_path / "analysis_output"
+    (out / "category_data").mkdir(parents=True)
+    script = os.path.join(STANDALONE, "category_analyses", "moe_analysis.py")
+    if not os.path.isfile(script):
+        pytest.skip("moe_analysis.py not found")
+
+    import subprocess
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
+    result = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            str(out),
+            "--comparison_scope",
+            "comparative",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    metrics_path = out / "category_data" / "moe_fused_metrics.json"
+    assert metrics_path.is_file()
+    with open(metrics_path) as f:
+        m = json.load(f)
+    assert m.get("status") == "NO_DATA"
+    assert m.get("analysis_mode") == "comparative"
+
+
+def test_norm_analysis_script_comparative_scope(tmp_path):
+    """norm_ops.csv with TraceDiff columns + --comparison_scope comparative."""
+    out = tmp_path / "analysis_output"
+    (out / "category_data").mkdir(parents=True)
+    (out / "metadata").mkdir(parents=True)
+    df = pd.DataFrame(
+        {
+            "name": ["aten::layer_norm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [8000.0],
+            "TFLOPS/s_mean": [50.0],
+            "TB/s_mean": [0.2],
+            "FLOPS/Byte": [80.0],
+            "Compute Spec": ["matrix_bf16"],
+            "speedup (trace1/trace2)": [0.5],
+            "delta_us (trace2 - trace1)": [-4000.0],
+        }
+    )
+    df.to_csv(out / "category_data" / "norm_ops.csv", index=False)
+    meta = {
+        "platform": "MI300X",
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    (out / "metadata" / "norm_metadata.json").write_text(json.dumps(meta, indent=2))
+
+    script = os.path.join(STANDALONE, "category_analyses", "norm_analysis.py")
+    if not os.path.isfile(script):
+        pytest.skip("norm_analysis.py not found")
+
+    import subprocess
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
+    result = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            str(out),
+            "--comparison_scope",
+            "comparative",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    with open(out / "category_data" / "norm_metrics.json") as f:
+        m = json.load(f)
+    assert m["analysis_mode"] == "comparative"
+    assert m["operations"][0]["efficiency"]["efficiency_percent"] == 50.0

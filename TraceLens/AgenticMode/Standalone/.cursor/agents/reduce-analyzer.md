@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/reduce_ops.csv` - Filtered reduce operations
@@ -105,9 +106,12 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 
 ### Step 4: Identify Bottlenecks
 
-**Bottleneck criteria:**
+**Bottleneck criteria (time — both modes):**
 - Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW
+
+**Bottleneck criteria (efficiency — mode-specific):**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline** (approximate for reduce — see [Performance Model Limitation](#performance-model-limitation)). Flag when **< 70% of peak HBM BW** as a rough indicator.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
 **Special considerations:**
 - Softmax operations may indicate unfused attention
@@ -167,7 +171,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 **Impact estimation guidelines:**
 - `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
 - Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = approximate estimate or based on general memory-bound model (use for all `kernel_tuning` rows)
+- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = approximate estimate or based on general memory-bound model (use for all `kernel_tuning` rows)
 - **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---

@@ -23,6 +23,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/triton_ops.csv` - Filtered Triton operations
@@ -31,6 +32,8 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Output file you must write:**
 - `<output_dir>/category_findings/triton_findings.md`
+
+**Critical:** Do NOT load the trace file directly. Use only the pre-computed data files.
 
 ---
 
@@ -68,13 +71,15 @@ Execute the analysis script using the command prefix:
   --output-dir <output_dir>
 ```
 
-### Step 2: Read Metrics
+### Step 2: Read Metrics and Data
 
 After the script completes, read the JSON metrics file:
 
 ```bash
 cat <output_dir>/category_data/triton_metrics.json
 ```
+
+Check `status` field - if 'ERROR', write error findings and stop.
 
 ### Step 3: Write Informational Findings
 
@@ -89,7 +94,7 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 
 **Platform:** <platform> | **Trace:** <trace_path> | **Analysis Date:** <date>
 
-> **Note:** Triton kernel analysis is not currently supported by TraceLens. This section provides an informational time breakdown only. No bottleneck conclusions or optimization recommendations are made.
+> **Note:** Triton kernel analysis is not currently supported by TraceLens. This section provides an informational time breakdown only. No bottleneck conclusions or optimization recommendations are made. When `comparison_scope` is `comparative`, you may note that in the overview; do **not** infer trace2-vs-trace1 efficiency (this category does not emit comparative metrics).
 
 ## 1. Overview
 
@@ -124,4 +129,5 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 2. **No impact estimates** -- the metrics JSON contains an empty `impact_estimates` list by design
 3. **No recommendations** -- do not suggest algorithmic or kernel-level optimizations
 4. **Empty Impact Summary** -- the table header must exist (for orchestrator parsing) but must have zero rows
-5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+5. **Comparative scope** -- Do not apply GEMM-style roofline vs comparative `efficiency_percent` rules; Triton metrics are time/count only
+6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
