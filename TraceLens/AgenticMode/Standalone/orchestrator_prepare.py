@@ -126,12 +126,23 @@ def _is_gemm_norm_only(entry):
     )
 
 
+def _prefix_lookup(lookup, kname):
+    """Look up by exact key, falling back to prefix match for truncated CSV names."""
+    result = lookup.get(kname)
+    if result is not None:
+        return result
+    for csv_name in lookup:
+        if kname.startswith(csv_name) or csv_name.startswith(kname):
+            return lookup[csv_name]
+    return None
+
+
 def _extract_attention_core(kernels, perf_lookup):
     """If kernels contain unfused attention (softmax), return just QKt+softmax+PV."""
     name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
 
     def is_gemm(k):
-        entries = perf_lookup.get(k.get(name_key, ""), {})
+        entries = _prefix_lookup(perf_lookup, k.get(name_key, "")) or {}
         return any(e.get("op_category") == "GEMM" for e in entries.values())
 
     for i, k in enumerate(kernels):

@@ -194,7 +194,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 ### Memory-Bound GEMMs
 - **Symptoms:** Low FLOPS/Byte (<100), low TB/s compared to peak HBM BW
-- **Algorithmic:** Fusion opportunities to reduce memory traffic
+- **Algorithmic:** For fusion opportunities (e.g., GEMM epilogue fusion), defer to the kernel fusion analysis
 - **Kernel:** If not reaching expected BW, indicates kernel optimization opportunity
 
 

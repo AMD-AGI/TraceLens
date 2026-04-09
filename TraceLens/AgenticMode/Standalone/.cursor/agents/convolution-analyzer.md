@@ -188,7 +188,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ### Small Kernel Convolutions (1x1, 3x3)
 - **Symptoms:** Common in modern architectures
 - **Expected:** >60% of peak HBM BW (memory-bound for 1x1)
-- **Algorithmic:** Fuse with adjacent operations
+- **Algorithmic:** For fusion opportunities, defer to the kernel fusion analysis
 - **Kernel:** Optimize memory access patterns
 
 ### Depthwise Convolutions

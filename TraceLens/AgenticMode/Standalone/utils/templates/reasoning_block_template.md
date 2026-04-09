@@ -116,12 +116,54 @@ Non-quantifiable: `Impact estimate is not quantifiable from trace data.`
 
 Each sub-agent renders the impact bullets directly in its `## Detailed Analysis` block after writing `impact_estimates` to metadata.
 
+---
+
+## Kernel fusion variant
+
+Kernel fusion blocks use **three** labels: **Identification**, **Data**, **Impact estimate**.
+
+```markdown
+<!-- reasoning-candidate tier=system rank=<N> -->
+#### <candidate_title>
+**Identification:** …
+
+**Data:** …
+
+**Impact estimate:** …
+```
+
+### Required labels (fusion)
+
+| Label | Purpose |
+|-------|---------|
+| `**Identification:**` | How the fusion candidate was surfaced. Plain language body ending with `(source: \`fusion_candidates.json\` → <keys>)`. |
+| `**Data:**` | Kernels table with columns: `Kernel \| Type \| Duration (us) \| Perf model`. |
+| `**Impact estimate:**` | Rendered from `kernel_fusion_metrics.json → impact_estimates[]`. Uses four-bullet format (see below); non-quantifiable entries use the standard single-line form. |
+
+### Fusion impact rendering format
+
+Quantifiable:
+
+```markdown
+- Low end (75% roofline): <savings_ms_low> ms savings (<e2e_pct_low>% E2E)
+- High end (100% roofline): <savings_ms_high> ms savings (<e2e_pct_high>% E2E)
+- Coverage: <modeled_kernel_count> of <kernel_count> kernels modelled
+- Fusion pattern: <bound_type>-bound, <fusion_type>
+- Confidence: High/Medium/Low — <brief reason from sub-agent pattern classification>
+```
+
+When partial coverage, append to Coverage: `(<unmodeled_count> kernel(s) use measured trace time)`.
+
+Non-quantifiable: `Impact estimate is not quantifiable from trace data.`
+
+---
+
 ## Self-check (for sub-agents)
 
 Before writing findings, verify these items:
 
 1. **Card–Detailed Analysis consistency:** Every claim, number, and operation in the P-item card (Insight / Action / Impact) must be consistent with the corresponding Detailed Analysis block. Do not introduce numbers or claims in one that are absent from the other.
-2. **Data table columns** match the tier defaults (compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`; system: `Metric | Value | Flagged`).
+2. **Data table columns** match the tier defaults (compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`; fusion: `Kernel | Type | Duration (us) | Perf model`; system: `Metric | Value | Flagged`).
 3. **Final report slice** From `## Detailed Analysis` through the next `##`, include `### Compute Kernel Insights` and `### System-Level Insights`.
 4. **P-block body:** five required labels in order; each label starts at the beginning of a line.
 5. **Identification** before `(source:`: no JSON-path-shaped backticks except op names used as prose.

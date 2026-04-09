@@ -418,6 +418,11 @@ Include these constraints in EVERY compute kernel subagent invocation prompt:
 - Efficiency values as percentages (0-100% typically; flag >100% as anomaly)
 - Always include operation count for context
 
+#### 3. Fusion-Tagged Operations
+
+- Operations with `fusion_flagged: true` in the metrics JSON are already covered by a high-confidence kernel fusion candidate — do **NOT** flag them as bottlenecks or write kernel_tuning recommendations
+- The analysis scripts already exclude them from `impact_estimates`
+
 ---
 
 **Compute Kernel Subagent Prompt Template:**

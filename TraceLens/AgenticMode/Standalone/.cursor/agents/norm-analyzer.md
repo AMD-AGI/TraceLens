@@ -108,8 +108,8 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Algorithmic Recommendations:**
 - Consider alternatives: LayerNorm, GroupNorm may have better kernels
-- Fuse with adjacent operations
 - Check if torch.compile helps
+- For fusion opportunities, defer to the kernel fusion analysis
 
 **Kernel Optimization Focus:**
 - Normalization ops use native PyTorch kernels, not optimized BLAS

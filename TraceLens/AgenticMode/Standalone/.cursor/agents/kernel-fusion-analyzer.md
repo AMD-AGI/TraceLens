@@ -131,12 +131,15 @@ Then look for novel patterns:
 
 Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
-Confidence maps directly to priority tier:
-- HIGH confidence findings → 🔴 P1
-- MEDIUM confidence findings → 🟡 P2
-- LOW confidence findings → 🟢 P3
+Number findings P1, P2, P3... sequentially by savings (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
 
-Within each tier, sort by `total_kernel_time_us` descending.
+| Confidence | Icon |
+|------------|------|
+| high       | 🔴   |
+| medium     | 🟡   |
+| low        | 🟢   |
+
+Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`. Two HIGH findings in a row are `### 🔴 P1:` and `### 🔴 P2:` (both red).
 
 **Title format:** `### <icon> <priority>: <Pattern Name>`
 
@@ -160,45 +163,31 @@ Found N kernel fusion opportunities across M module types.
 
 **Confidence:** High -- <brief reason from fusion pattern classification>
 
-**Kernels:**
+## Detailed Analysis
+
+<!-- reasoning-candidate tier=system rank=1 -->
+#### <Pattern Name> (<time_ms> ms, <instance_count> instances)
+
+**Identification:** <1-2 sentences: how this fusion candidate was surfaced — module name,
+kernel pattern, instance count, has_fused_kernel status. Must end with
+(source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`)>
+
+**Data:**
 
 | Kernel | Type | Duration (us) | Perf model |
 |--------|------|--------------|------------|
 | <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
 
-**Projection:**
+**Impact estimate:**
 
-| Metric | Value |
-|--------|-------|
-| Bound type | compute / memory |
-| Fusion type | matrix_compute / memory_bound |
-| Kernels modelled | M of N |
-| Savings (low-mid-high) | X.XX - Y.YY - Z.ZZ ms |
-| E2E impact | X.XX - Z.ZZ% |
+- Low end (75% roofline): X.XXX ms savings (X.XX% E2E)
+- High end (100% roofline): X.XXX ms savings (X.XX% E2E)
+- Coverage: M of N kernels modelled
+- Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
+- Confidence: High/Medium/Low — <brief reason>
 
----
-
-### 🟡 P2: <Pattern Name> (<time_ms> ms, <instance_count> instances)
-
-**Insight:** <Description>
-
-**Action:** <Recommendation>
-
-**Impact:** ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) with M of N kernels modelled
-
-**Confidence:** Medium -- <brief reason>
-
-**Kernels:**
-
-| Kernel | Type | Duration (us) | Perf model |
-|--------|------|--------------|------------|
-| ... | ... | ... | ... |
-
-**Projection:**
-
-| Metric | Value |
-|--------|-------|
-| ... | ... |
+<!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
+<!-- When not quantifiable: **Impact estimate:** Impact estimate is not quantifiable from trace data. -->
 ```
 
 If no fusion opportunities detected:

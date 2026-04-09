@@ -25,16 +25,19 @@ See LICENSE for license information.
 7. Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps).
 8. Priority icons are assigned by PRIORITY NUMBER, not severity:
    - Compute Kernel: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
+   - Kernel Fusion: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (by confidence: high → medium → low)
    - System-Level: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
 9. Detailed Analysis: A single `## Detailed Analysis` section contains
-   `### Compute Kernel Insights` then `### System-Level Insights`, each with
+   `### Compute Kernel Insights` then `### Kernel Fusion Insights` then
+   `### System-Level Insights`, each with
    `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching the optimization card titles and order.
-   Each block has five required labels in order: **Identification:**, **Data:**,
-   **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:**. Compute Data uses
-   trace-grounded kernel tables (FLOPS/Byte, Efficiency, Bound); System Data uses system
-   evidence only (no kernel breakdown tables). Impact estimate is rendered from
-   `metadata/*.json → impact_estimates`. P-item cards link to Detailed Analysis anchors
-   (e.g. `#detailed-analysis-compute-p1`).
+   Compute and System blocks use five labels: **Identification:**, **Data:**,
+   **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:**.
+   Kernel Fusion blocks use three labels: **Identification:**, **Data:**, **Impact estimate:**.
+   Compute Data uses trace-grounded kernel tables (FLOPS/Byte, Efficiency, Bound);
+   System Data uses system evidence only (no kernel breakdown tables). Impact estimate
+   is rendered from `metadata/*.json → impact_estimates`. P-item cards link to Detailed
+   Analysis anchors (e.g. `#detailed-analysis-compute-p1`).
 10. Model and appendix: Read `metadata/model_info.json`. For the report title and any **&lt;Model&gt;** placeholder used for display: use `model_info["model"]` when it is not "Cannot be inferred from trace"; otherwise use **"Workload"**. Fill the Appendix **Model Architecture** section with the raw `model`, `architecture`, `scale`, and `precision` values from that file (they may be "Cannot be inferred from trace").
 11. No redundancy: Information appears in ONE place only.
 12. Recommendations: Max ~10 lines PER recommendation. Use category-specific Action text
@@ -212,42 +215,42 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>
-**Identification:** [1-2 sentences - How this opportunity was surfaced. Must end with (source: <artifact> → <keys>).]
-**Data:** [1 sentence summary of table]
+**Identification:**
+**Data:**
 
 | Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound |
 |-----------|-----------------|---------------|-------|------------|------------|-------|
 | ...       | ...             | ...           | ...   | ...        | ...        | ...   |
 
-**Reasoning for Slowdown:** [2-3 sentences - Why the workload is slow as the trace shows. No micro-architecture speculation.]
-**Resolution:** [1-2 sentences - Why the suggested optimization helps — not merely restating what to do.]
-**Impact estimate:** [Rendered from metadata → impact_estimates]
+**Reasoning for Slowdown:**
+**Resolution:**
+**Impact estimate:**
 
 ### Kernel Fusion Insights
 
-**REQUIRED: For each candidate in kernel_fusion_findings.md, include BOTH the Kernels table AND the Projection table below, sorted by savings descending. Do NOT summarize into a single table. If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available."**
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual savings depend on implementation feasibility and interaction effects.
 
+<!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
+<!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
+<!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available." -->
+
+<a id="detailed-analysis-fusion-1"></a>
 #### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-**Kernels:**
+**Identification:**
+
+**Data:**
 
 | Kernel | Type | Duration (us) | Perf model |
 |--------|------|--------------|------------|
 | <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
 
-**Projection:**
+**Impact estimate:**
 
-| Metric | Value |
-|--------|-------|
-| Bound type | compute / memory |
-| Fusion type | matrix_compute / memory_bound |
-| Kernels modelled | M of N |
-| Savings (low-mid-high) | X.XX - Y.YY - Z.ZZ ms |
-| E2E impact | X.XX - Z.ZZ% |
-
+<a id="detailed-analysis-fusion-2"></a>
 #### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-*Repeat the same Kernels + Projection format for each candidate.*
+*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-N`.*
 
 ### System-Level Insights
 
@@ -256,11 +259,11 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <a id="detailed-analysis-system-p1"></a>
 #### 🔴 P1: <Brief Title>
-**Identification:** [1-2 sentences - How this opportunity was surfaced. Must end with (source: <artifact> → <keys>).]
-**Data:** [1-2 sentences - System-level trace evidence — no kernel breakdown tables.]
-**Reasoning for Slowdown:** [2-3 sentences - Why the workload is slow as the trace shows. No micro-architecture speculation.]
-**Resolution:** [1-2 sentences - Why the suggested optimization helps — not merely restating what to do.]
-**Impact estimate:** [Rendered from metadata → impact_estimates]
+**Identification:**
+**Data:**
+**Reasoning for Slowdown:**
+**Resolution:**
+**Impact estimate:**
 
 ---
 
