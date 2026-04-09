@@ -1214,3 +1214,182 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
 
     def get_maf_type(self):
         return "matrix"
+
+
+# ==============================================================================
+# MoE GPTQ/AWQ Performance Models (vllm::outplace_fused_experts)
+# ==============================================================================
+
+# INT4 weight dtype (GPTQ/AWQ packs 2 INT4 values into one unsigned char)
+_INT4_BPE = 0.5
+
+
+class moe_gptq_awq_up(UnfusedMoE_Up):
+    """
+    Performance model for pseudo_op::moe_gptq_awq_up.
+
+    Up/gate projection stage of GPTQ/AWQ quantized MoE
+    (vllm::outplace_fused_experts).  Weights are INT4 packed two-per-byte
+    (unsigned char storage).
+
+    Input Dims layout (from vllm::outplace_fused_experts):
+        [0] hidden_states       [T, K]
+        [1] w1 (gate+up, INT4)  [E, N_rows, K_packed]
+                                 N_rows   = inter_dim * 2  (SwiGLU gated)
+                                 K_packed = hidden_dim / 2
+        [4] topk_ids            [T, topk]
+
+    Extra args (injected by moe_gptq_awq_pseudo_ops.py):
+        MoE topk        - number of active experts per token
+        MoE GEMM gated  - True for up projection (SwiGLU)
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args["Input Dims"]
+
+        num_tokens = input_dims[0][0]  # T
+        hidden_dim = input_dims[0][1]  # K
+        num_experts = input_dims[1][0]  # E
+        n_rows = input_dims[1][1]  # combined gate+up output features
+        topk = args["MoE topk"]
+        gated = args.get("MoE GEMM gated", True)
+
+        # N_rows = inter_dim * 2 when gated (SwiGLU stores gate and up together)
+        inter_dim = n_rows // 2 if gated else n_rows
+
+        input_dtype = args.get("Input type", ["BFloat16"])[0]
+
+        return {
+            "num_tokens": num_tokens,
+            "hidden_dim": hidden_dim,
+            "inter_dim": inter_dim,
+            "num_experts": num_experts,
+            "topk": topk,
+            "gated": gated,
+            "input_dtype": input_dtype,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return self.flops_func(
+            p["num_tokens"], p["hidden_dim"], p["inter_dim"], p["topk"], p["gated"]
+        )
+
+    def bytes(self):
+        p = self.param_details
+        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        return self.bytes_func(
+            p["num_tokens"],
+            p["hidden_dim"],
+            p["inter_dim"],
+            p["num_experts"],
+            p["topk"],
+            p["gated"],
+            input_bpe=input_bpe,
+            weight_bpe=_INT4_BPE,
+            output_bpe=input_bpe,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for GPTQ/AWQ MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for GPTQ/AWQ MoE is not defined.")
+
+    def get_compute_precision(self):
+        # W4A16 kernel: weights dequantized to activation dtype before tl.dot.
+        # compute_type = tl.bfloat16/float16 driven by hidden_states.dtype.
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class moe_gptq_awq_down(UnfusedMoE_Down):
+    """
+    Performance model for pseudo_op::moe_gptq_awq_down.
+
+    Down projection stage of GPTQ/AWQ quantized MoE
+    (vllm::outplace_fused_experts).  Weights are INT4 packed two-per-byte
+    (unsigned char storage).
+
+    Input Dims layout (from vllm::outplace_fused_experts):
+        [0] hidden_states       [T, K]  (K = hidden_dim, also the output dim)
+        [2] w2 (down, INT4)     [E, K_actual, N_packed]
+                                 K_actual = hidden_dim
+                                 N_packed = inter_dim / 2
+        [4] topk_ids            [T, topk]
+
+    Extra args (injected by moe_gptq_awq_pseudo_ops.py):
+        MoE topk        - number of active experts per token
+        MoE GEMM gated  - False for down projection
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args["Input Dims"]
+
+        num_tokens = input_dims[0][0]  # T
+        hidden_dim = input_dims[0][1]  # K (= output dim of down projection)
+        num_experts = input_dims[2][0]  # E
+        n_packed = input_dims[2][2]  # N_packed = inter_dim / 2
+        inter_dim = n_packed * 2  # recover actual inter_dim
+
+        topk = args["MoE topk"]
+        input_dtype = args.get("Input type", ["BFloat16"])[0]
+
+        return {
+            "num_tokens": num_tokens,
+            "hidden_dim": hidden_dim,
+            "inter_dim": inter_dim,
+            "num_experts": num_experts,
+            "topk": topk,
+            "input_dtype": input_dtype,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return self.flops_func(
+            p["num_tokens"], p["hidden_dim"], p["inter_dim"], p["topk"]
+        )
+
+    def bytes(self):
+        p = self.param_details
+        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        return self.bytes_func(
+            p["num_tokens"],
+            p["hidden_dim"],
+            p["inter_dim"],
+            p["num_experts"],
+            p["topk"],
+            input_bpe=input_bpe,
+            weight_bpe=_INT4_BPE,
+            output_bpe=input_bpe,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for GPTQ/AWQ MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for GPTQ/AWQ MoE is not defined.")
+
+    def get_compute_precision(self):
+        # W4A16 kernel: weights dequantized to activation dtype before tl.dot.
+        # compute_type = tl.bfloat16/float16 driven by hidden_states.dtype.
+        dtype = self.param_details.get("input_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"

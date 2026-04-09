@@ -10,7 +10,7 @@ Performance models for pseudo-op extensions.
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 import re
-from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise
+from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise, UnaryElementwise
 from math import prod
 
 
@@ -370,7 +370,28 @@ class gemm_a16w16_atomic_(GEMM):
         )
 
 
-class per_group_quant(BinaryElementwise):
+class GroupQuant(BinaryElementwise):
+    """
+    Performance model for group quantization.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.nelems_in1 = prod(self.param_details["shape_in1"])
+        self.nelems_in2 = prod(self.param_details["shape_in2"])
+        self.nelems_out = prod(self.param_details["shape_out"])
+        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
+        self.stride_input1 = self.param_details["stride_input1"]
+        self.stride_input2 = self.param_details["stride_input2"]
+        self.stride_output = self.param_details["stride_output"]
+        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
+        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
+        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
+
+
+class per_group_quant(GroupQuant):
     """
     Performance model for aiter::dynamic_per_token_scaled_quant.
     Performs dynamic per-token quantization: each row of the input is
@@ -385,26 +406,6 @@ class per_group_quant(BinaryElementwise):
     Expected Input type format:
     [dtype_out, dtype_input, dtype_scales, ...]
     """
-
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-        self.nelems_in1 = prod(self.param_details["shape_in1"])
-        self.nelems_in2 = prod(self.param_details["shape_in2"])
-        self.nelems_out = prod(self.param_details["shape_out"])
-        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
-        self.stride_input1 = self.param_details["stride_input1"]
-        self.stride_input2 = self.param_details["stride_input2"]
-        self.stride_output = self.param_details["stride_output"]
-
-        dtype_in1, dtype_in2, dtype_out = self.dtype_in1_in2_out
-        self.bpe_in1 = name2bpe(dtype_in1)
-        self.bpe_in2 = name2bpe(dtype_in2)
-        if dtype_out is not None:
-            self.bpe_out = name2bpe(dtype_out)
-        else:
-            self.bpe_out = None
 
     @staticmethod
     def get_param_details(event):
@@ -448,3 +449,194 @@ class per_group_quant(BinaryElementwise):
         # Use first input dtype as the compute precision
         dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
+
+
+class concat_and_cache_mla(BinaryElementwise):
+    """Performance model for _C_cache_ops::concat_and_cache_mla."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        pass
+
+    def flops(self):
+        pass
+
+    def bytes(self):
+        pass
+
+
+class vllm_triton_per_token_group_quant_fp8(GroupQuant):
+    """
+    Performance model for vllm::triton_per_token_group_quant_fp8.
+
+    Wraps `per_token_group_quant_fp8` (vllm fp8_utils.py), which launches the
+    Triton kernel `_per_token_group_quant_fp8` when the CUDA native quant path
+    is unavailable: for each row, each contiguous group of `group_size`
+    elements along the last dimension is scaled by a per-group FP32 factor and
+    written as FP8.
+
+    Roofline -- bytes moved (approximate):
+        Read  x [M, N] in the trace input dtype (typically BF16)
+        Write x_q [M, N] as FP8 (1 byte/elem)
+        Write scales [M, ceil(N / group_size)] as FP32
+
+    Roofline -- FLOPs:
+        Treated as ~6 FLOPs per input element (abs/max reduction amortized over
+        groups, scale, divide, clamp, store) for order-of-magnitude roofline use.
+
+    Expected trace:
+        Input Dims: ((M, N), ()) for tensor x and scalar group_size
+        Input type: (dtype_x, 'Scalar')
+        Concrete Inputs: often ('', '<group_size>') e.g. ('', '128')
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        dims = args.get("Input Dims") or []
+        shape_x = tuple(dims[0]) if len(dims) > 0 else ()
+        if len(shape_x) >= 2:
+            M, N = shape_x[0], shape_x[1]
+        elif len(shape_x) == 1:
+            M, N = 1, shape_x[0]
+        else:
+            M, N = 1, 1
+
+        concrete = args.get("Concrete Inputs") or []
+        group_size = 128
+        if len(concrete) > 1:
+            raw = str(concrete[1]).strip()
+            if raw and raw.lower() not in ("none",):
+                try:
+                    group_size = int(raw)
+                except ValueError:
+                    pass
+
+        num_groups = max(1, (N + group_size - 1) // group_size)
+        dtype_x = args.get("Input type", ("",))[0] if args.get("Input type") else ""
+
+        return {
+            "M": M,
+            "N": N,
+            "group_size": group_size,
+            "num_groups": num_groups,
+            "shape_x": shape_x,
+            "dtype_x": dtype_x,
+        }
+
+    def flops(self):
+        M = self.param_details["M"]
+        N = self.param_details["N"]
+        return 6 * M * N
+
+    def bytes(self):
+        M = self.param_details["M"]
+        N = self.param_details["N"]
+        ng = self.param_details["num_groups"]
+        bpe_in = name2bpe(self.param_details["dtype_x"])
+        if bpe_in is None:
+            return None
+        bpe_fp8 = name2bpe("c10::float8_e4m3fn")
+        if bpe_fp8 is None:
+            bpe_fp8 = 1
+        return M * N * bpe_in + M * N * bpe_fp8 + M * ng * 4
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_x")
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class aiter_silu_and_mul(UnaryElementwise):
+    """
+    Performance model for aiter::silu_and_mul.
+
+    Computes the gated SiLU activation used after MoE stage-1 GEMM (split-K path):
+        out[..., :inter_dim] = silu(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    AITER signature: silu_and_mul(out: Tensor, input: Tensor) -> None
+        out   — shape [..., inter_dim],     dtype BFloat16
+        input — shape [..., 2 * inter_dim], dtype FP32 (split-K accumulation) or BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+        e.g. [(4, 9, 256), (4, 9, 512)]  →  op_shape=(4,9,256), 2*inter_dim=512
+
+    Expected Input type from trace:
+        [dtype_out, dtype_input]  (note: reversed — out is arg 0, input is arg 1)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        # Input Dims[0] = out (shape [..., inter_dim])
+        # Input Dims[1] = input (shape [..., 2 * inter_dim], gate+up concatenated)
+        op_shape = tuple(event["args"]["Input Dims"][0])
+        dtype_in = event["args"]["Input type"][1]  # input (gate+up) dtype
+        dtype_out = event["args"]["Input type"][0]  # output dtype
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        stride_output = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_out),
+            "stride_input": stride_input,
+            "stride_output": stride_output,
+        }
+
+    def flops(self):
+        return 5 * prod(self.param_details["op_shape"])
+
+    def bytes(self):
+        return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
+
+
+class aiter_gelu_and_mul(aiter_silu_and_mul):
+    """
+    Performance model for aiter::gelu_and_mul.
+
+    Computes the gated GELU activation (erf path):
+        out[..., :inter_dim] = gelu(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    AITER signature: gelu_and_mul(out: Tensor, input: Tensor) -> None
+        out   — shape [..., inter_dim],     dtype BFloat16
+        input — shape [..., 2 * inter_dim], dtype BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+
+    FLOPs: ~8 per output element (erf-based GELU: div, erf, add, mul, mul; then gate mul).
+    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    """
+
+    def flops(self):
+        return 8 * prod(self.param_details["op_shape"])
+
+
+class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
+    """
+    Performance model for aiter::gelu_tanh_and_mul.
+
+    Computes the gated GELU activation (tanh/fast approximation path):
+        out[..., :inter_dim] = gelu_tanh(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    AITER signature: gelu_tanh_and_mul(out: Tensor, input: Tensor) -> None
+        out   — shape [..., inter_dim],     dtype BFloat16
+        input — shape [..., 2 * inter_dim], dtype BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+
+    FLOPs: ~10 per output element (tanh GELU: x^3, coefficients, tanh, scale; then gate mul).
+    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    """
+
+    def flops(self):
+        return 10 * prod(self.param_details["op_shape"])
