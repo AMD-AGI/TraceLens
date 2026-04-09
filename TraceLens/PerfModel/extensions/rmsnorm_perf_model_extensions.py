@@ -47,7 +47,7 @@ class aiter_rms_norm(RMSNorm):
             "stride_output": None,
             "num_channels": num_channels,
             "has_bias": False,
-            "is_affine": True,   # weight is always provided
+            "is_affine": True,  # weight is always provided
             "is_training": False,
         }
 
@@ -75,10 +75,10 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
 
     @staticmethod
     def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][1])     # input: [M, N]
-        dtype_in = event["args"]["Input type"][1]            # BFloat16
+        op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
         stride_input = tuple(event["args"]["Input Strides"][1])
-        num_channels = event["args"]["Input Dims"][3][0]     # weight.shape[0] = N
+        num_channels = event["args"]["Input Dims"][3][0]  # weight.shape[0] = N
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, None),
@@ -97,10 +97,10 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
     def bytes(self):
         M = self.num_elems // self.num_channels
         N = self.num_channels
-        bytes_read_x      = self.num_elems * self.bpe_in   # BF16 input
-        bytes_read_weight = N * self.bpe_in                # BF16 weight
-        bytes_write_quant  = self.num_elems * 1            # FP8 = 1 byte/elem
-        bytes_write_scales = M * 1 * 4                     # FP32 per-token scales [M, 1]
+        bytes_read_x = self.num_elems * self.bpe_in  # BF16 input
+        bytes_read_weight = N * self.bpe_in  # BF16 weight
+        bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
+        bytes_write_scales = M * 1 * 4  # FP32 per-token scales [M, 1]
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
 
 
@@ -154,10 +154,10 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
         M = self.num_elems // self.num_channels
         N = self.num_channels
         num_groups = (N + self.group_size - 1) // self.group_size
-        bytes_read_x      = self.num_elems * self.bpe_in   # BF16 input
-        bytes_read_weight = N * self.bpe_in                # BF16 weight
-        bytes_write_quant  = self.num_elems * 1            # FP8 = 1 byte/elem
-        bytes_write_scales = M * num_groups * 4            # FP32 scales
+        bytes_read_x = self.num_elems * self.bpe_in  # BF16 input
+        bytes_read_weight = N * self.bpe_in  # BF16 weight
+        bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
+        bytes_write_scales = M * num_groups * 4  # FP32 scales
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
 
 
@@ -185,10 +185,10 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
 
     @staticmethod
     def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][1])     # input: [M, N]
-        dtype_in = event["args"]["Input type"][1]            # BFloat16
+        op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
         stride_input = tuple(event["args"]["Input Strides"][1])
-        num_channels = event["args"]["Input Dims"][4][0]     # weight.shape[0] = N
+        num_channels = event["args"]["Input Dims"][4][0]  # weight.shape[0] = N
         return {
             "op_shape": op_shape,
             "dtype_in_out": (dtype_in, None),
@@ -206,8 +206,10 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
 
     def bytes(self):
         N = self.num_channels
-        bytes_read  = 2 * self.num_elems * self.bpe_in + N * self.bpe_in  # input, residual_in, weight
-        bytes_write = 2 * self.num_elems * self.bpe_in                    # out, residual_out
+        bytes_read = (
+            2 * self.num_elems * self.bpe_in + N * self.bpe_in
+        )  # input, residual_in, weight
+        bytes_write = 2 * self.num_elems * self.bpe_in  # out, residual_out
         return bytes_read + bytes_write
 
 
@@ -264,11 +266,17 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
         M = self.num_elems // self.num_channels
         N = self.num_channels
         num_groups = (N + self.group_size - 1) // self.group_size
-        bytes_read_x        = self.num_elems * self.bpe_in   # BF16 input x
-        bytes_read_residual = self.num_elems * self.bpe_in   # BF16 residual (read)
-        bytes_read_weight   = N * self.bpe_in                # BF16 weight
-        bytes_write_quant   = self.num_elems * 1             # FP8 = 1 byte/elem
-        bytes_write_res     = self.num_elems * self.bpe_in   # BF16 updated residual
-        bytes_write_scales  = M * num_groups * 4             # FP32 scales
-        return (bytes_read_x + bytes_read_residual + bytes_read_weight
-                + bytes_write_quant + bytes_write_res + bytes_write_scales)
+        bytes_read_x = self.num_elems * self.bpe_in  # BF16 input x
+        bytes_read_residual = self.num_elems * self.bpe_in  # BF16 residual (read)
+        bytes_read_weight = N * self.bpe_in  # BF16 weight
+        bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
+        bytes_write_res = self.num_elems * self.bpe_in  # BF16 updated residual
+        bytes_write_scales = M * num_groups * 4  # FP32 scales
+        return (
+            bytes_read_x
+            + bytes_read_residual
+            + bytes_read_weight
+            + bytes_write_quant
+            + bytes_write_res
+            + bytes_write_scales
+        )

@@ -248,6 +248,7 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
             params["d_h_v"] = int(concrete[4])
         return params
 
+
 class vllm_unified_mla_attention_with_output(InferenceAttention):
     pass
 
@@ -316,9 +317,9 @@ class gdn_attention_core(InferenceAttention):
 
         input_dims = event["args"]["Input Dims"]
         T = input_dims[0][0]
-        D = input_dims[0][1]              # 2*H_K*d_k + H_V*d_v
-        H_V = input_dims[1][1]            # num_v_heads / tp
-        d_v = input_dims[3][2]            # head_v_dim
+        D = input_dims[0][1]  # 2*H_K*d_k + H_V*d_v
+        H_V = input_dims[1][1]  # num_v_heads / tp
+        d_v = input_dims[3][2]  # head_v_dim
 
         H_K = H_V // 2
         key_dim_tp = (D - H_V * d_v) // 2

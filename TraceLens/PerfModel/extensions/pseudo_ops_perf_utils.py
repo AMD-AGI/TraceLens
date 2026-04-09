@@ -20,7 +20,7 @@ from . import (
 def get_pseudo_op_mappings():
     """
     Return a dictionary mapping pseudo-op names to their performance model classes.
-    
+
     Returns:
         dict: Mapping of pseudo-op names to performance model classes
     """
@@ -96,11 +96,11 @@ def get_pseudo_op_mappings():
 def get_pseudo_op_categories():
     """
     Return a dictionary mapping pseudo-op base classes to their performance categories.
-    
+
     Returns:
         dict: Mapping of base classes to category names
     """
-    
+
     pseudo_op_categories = {
         moe_perf_model_extensions.FusedMoE: "MoE_fused",
         moe_perf_model_extensions.UnfusedMoE_Up: "MoE_unfused",
@@ -116,5 +116,5 @@ def get_pseudo_op_categories():
         custom_collectives_perf_model_extensions.CustomCollective: "CustomCollective",
         perf_model_extensions.aiter_silu_and_mul: "UnaryElementwise",
     }
-    
+
     return pseudo_op_categories

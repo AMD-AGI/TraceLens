@@ -369,10 +369,12 @@ class gemm_a16w16_atomic_(GEMM):
             bpe_output=self.bpe_output,
         )
 
+
 class GroupQuant(BinaryElementwise):
     """
     Performance model for group quantization.
     """
+
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
@@ -387,6 +389,7 @@ class GroupQuant(BinaryElementwise):
         self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
         self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
         self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
+
 
 class per_group_quant(GroupQuant):
     """
@@ -403,6 +406,7 @@ class per_group_quant(GroupQuant):
     Expected Input type format:
     [dtype_out, dtype_input, dtype_scales, ...]
     """
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -445,7 +449,6 @@ class per_group_quant(GroupQuant):
         # Use first input dtype as the compute precision
         dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
-
 
 
 class concat_and_cache_mla(BinaryElementwise):
@@ -571,12 +574,13 @@ class aiter_silu_and_mul(UnaryElementwise):
     Expected Input type from trace:
         [dtype_out, dtype_input]  (note: reversed — out is arg 0, input is arg 1)
     """
+
     @staticmethod
     def get_param_details(event):
         # Input Dims[0] = out (shape [..., inter_dim])
         # Input Dims[1] = input (shape [..., 2 * inter_dim], gate+up concatenated)
         op_shape = tuple(event["args"]["Input Dims"][0])
-        dtype_in = event["args"]["Input type"][1]   # input (gate+up) dtype
+        dtype_in = event["args"]["Input type"][1]  # input (gate+up) dtype
         dtype_out = event["args"]["Input type"][0]  # output dtype
         stride_input = tuple(event["args"]["Input Strides"][1])
         stride_output = tuple(event["args"]["Input Strides"][0])

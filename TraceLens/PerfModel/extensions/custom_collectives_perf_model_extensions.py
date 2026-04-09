@@ -48,10 +48,10 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
 
     @staticmethod
     def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][2])     # inp: [M, N]
-        dtype_in = event["args"]["Input type"][2]            # BFloat16
+        op_shape = tuple(event["args"]["Input Dims"][2])  # inp: [M, N]
+        dtype_in = event["args"]["Input type"][2]  # BFloat16
         stride_input = tuple(event["args"]["Input Strides"][2])
-        num_channels = event["args"]["Input Dims"][6][0]     # weight.shape[0] = N
+        num_channels = event["args"]["Input Dims"][6][0]  # weight.shape[0] = N
         return {
             "op_shape": op_shape,
             "dtype_in": dtype_in,
@@ -65,14 +65,14 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
         # RMSNorm (affine=True, training=False) — same formula as RMSNorm.flops()
         non_norm_elems = self.num_elems // self.num_channels
         rms_flops = non_norm_elems * (2 * self.num_channels + 2)  # compute rsqrt
-        rms_flops += self.num_elems * 2                           # apply weight
+        rms_flops += self.num_elems * 2  # apply weight
         return add_flops + rms_flops
 
     def bytes(self):
         # HBM traffic per GPU (inter-GPU allreduce bandwidth is separate)
         # Reads:  inp, res_inp, weight
         # Writes: res_out, out
-        bytes_read  = 2 * self.num_elems * self.bpe_in + self.num_channels * self.bpe_in
+        bytes_read = 2 * self.num_elems * self.bpe_in + self.num_channels * self.bpe_in
         bytes_write = 2 * self.num_elems * self.bpe_in
         return bytes_read + bytes_write
 
@@ -106,8 +106,8 @@ class custom_ar_all_reduce(CustomCollective):
 
     @staticmethod
     def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][1])    # inp: [M, N]
-        dtype_in = event["args"]["Input type"][1]           # BFloat16
+        op_shape = tuple(event["args"]["Input Dims"][1])  # inp: [M, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
         stride_input = tuple(event["args"]["Input Strides"][1])
         return {
             "op_shape": op_shape,
@@ -152,9 +152,9 @@ class aiter_reduce_scatter(CustomCollective):
 
     @staticmethod
     def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][1])    # inp: [M, N]
-        out_shape = tuple(event["args"]["Input Dims"][2])   # out: [M // N_gpus, N]
-        dtype_in = event["args"]["Input type"][1]           # BFloat16
+        op_shape = tuple(event["args"]["Input Dims"][1])  # inp: [M, N]
+        out_shape = tuple(event["args"]["Input Dims"][2])  # out: [M // N_gpus, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
         stride_input = tuple(event["args"]["Input Strides"][1])
         return {
             "op_shape": op_shape,
@@ -199,9 +199,9 @@ class aiter_all_gather_reg(CustomCollective):
 
     @staticmethod
     def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][1])    # inp shard: [M // N_gpus, N]
-        out_shape = tuple(event["args"]["Input Dims"][2])   # out: [M, N]
-        dtype_in = event["args"]["Input type"][1]           # BFloat16
+        op_shape = tuple(event["args"]["Input Dims"][1])  # inp shard: [M // N_gpus, N]
+        out_shape = tuple(event["args"]["Input Dims"][2])  # out: [M, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
         stride_input = tuple(event["args"]["Input Strides"][1])
         return {
             "op_shape": op_shape,

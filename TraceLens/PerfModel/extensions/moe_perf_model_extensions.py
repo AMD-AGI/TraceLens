@@ -1253,10 +1253,10 @@ class moe_gptq_awq_up(UnfusedMoE_Up):
         args = event.get("args", {})
         input_dims = args["Input Dims"]
 
-        num_tokens = input_dims[0][0]           # T
-        hidden_dim = input_dims[0][1]           # K
-        num_experts = input_dims[1][0]          # E
-        n_rows = input_dims[1][1]               # combined gate+up output features
+        num_tokens = input_dims[0][0]  # T
+        hidden_dim = input_dims[0][1]  # K
+        num_experts = input_dims[1][0]  # E
+        n_rows = input_dims[1][1]  # combined gate+up output features
         topk = args["MoE topk"]
         gated = args.get("MoE GEMM gated", True)
 
@@ -1341,11 +1341,11 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
         args = event.get("args", {})
         input_dims = args["Input Dims"]
 
-        num_tokens = input_dims[0][0]           # T
-        hidden_dim = input_dims[0][1]           # K (= output dim of down projection)
-        num_experts = input_dims[2][0]          # E
-        n_packed = input_dims[2][2]             # N_packed = inter_dim / 2
-        inter_dim = n_packed * 2                # recover actual inter_dim
+        num_tokens = input_dims[0][0]  # T
+        hidden_dim = input_dims[0][1]  # K (= output dim of down projection)
+        num_experts = input_dims[2][0]  # E
+        n_packed = input_dims[2][2]  # N_packed = inter_dim / 2
+        inter_dim = n_packed * 2  # recover actual inter_dim
 
         topk = args["MoE topk"]
         input_dtype = args.get("Input type", ["BFloat16"])[0]
