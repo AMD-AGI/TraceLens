@@ -8,7 +8,8 @@
 Unit tests for TraceLens.Reporting.tracediff_comparison_extension.
 
 Tests tracediff_perf_summary_from_diff_stats with synthetic diff_stats DataFrames,
-enrichment helpers, LCA consolidation, and integration with synthetic traces.
+enrichment helpers, LCA consolidation, _find_perf_summary_matching_node, and
+integration with synthetic traces.
 """
 
 import json
@@ -22,6 +23,8 @@ from TraceLens.Reporting.tracediff_comparison_extension import (
     _build_lca_consolidation,
     _build_trace2_time_lookup,
     _enrich_sheet_with_trace2,
+    _find_perf_summary_matching_node,
+    _make_str_key,
     enrich_perf_report_dict_inplace,
     tracediff_perf_summary_from_diff_stats,
 )
@@ -911,6 +914,162 @@ class TestIntegrationSyntheticTraces:
         if not summary.empty and "pct_of_trace1_total (%)" in summary.columns:
             total_pct = summary["pct_of_trace1_total (%)"].sum()
             assert total_pct == pytest.approx(100.0, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _find_perf_summary_matching_node
+# ---------------------------------------------------------------------------
+class _FakeTraceTree:
+    """Minimal tree for _find_perf_summary_matching_node (events_by_uid + categories)."""
+
+    def __init__(self, events_by_uid):
+        self.events_by_uid = events_by_uid
+
+    def event_to_category(self, node):
+        return node.get("_category", "cpu_op")
+
+
+def _empty_arg_row():
+    return {
+        "Input Dims": "",
+        "Input type": "",
+        "Input Strides": "",
+        "Concrete Inputs": "",
+    }
+
+
+class TestFindPerfSummaryMatchingNode:
+    """Ancestor walk, then descendant BFS, for unified_perf_summary key alignment."""
+
+    def test_returns_none_without_tree(self):
+        key = _make_str_key("aten::mm", _empty_arg_row())
+        assert _find_perf_summary_matching_node(1, None, {key}) is None
+
+    def test_returns_none_without_uid(self):
+        tree = _FakeTraceTree({1: {"parent": None, "name": "x", "args": {}}})
+        key = _make_str_key("aten::mm", _empty_arg_row())
+        assert _find_perf_summary_matching_node(None, tree, {key}) is None
+
+    def test_returns_none_when_perf_keys_empty(self):
+        tree = _FakeTraceTree({1: {"parent": None, "name": "aten::mm", "args": {}}})
+        assert _find_perf_summary_matching_node(1, tree, set()) is None
+
+    def test_returns_none_when_uid_missing(self):
+        tree = _FakeTraceTree({})
+        key = _make_str_key("aten::mm", _empty_arg_row())
+        assert _find_perf_summary_matching_node(99, tree, {key}) is None
+
+    def test_direct_match_on_starting_cpu_op(self):
+        args = _empty_arg_row()
+        key = _make_str_key("aten::mm", args)
+        mm = {
+            "parent": None,
+            "name": "aten::mm",
+            "args": dict(args),
+            "_category": "cpu_op",
+        }
+        tree = _FakeTraceTree({42: mm})
+        assert _find_perf_summary_matching_node(42, tree, {key}) is mm
+
+    def test_ancestor_match_when_starting_node_is_kernel(self):
+        args = _empty_arg_row()
+        key = _make_str_key("aten::mm", args)
+        mm = {
+            "parent": None,
+            "name": "aten::mm",
+            "args": dict(args),
+            "_category": "cpu_op",
+        }
+        kernel = {
+            "parent": 20,
+            "name": "gemm_kernel",
+            "args": {},
+            "_category": "kernel",
+        }
+        tree = _FakeTraceTree({10: kernel, 20: mm})
+        assert _find_perf_summary_matching_node(10, tree, {key}) is mm
+
+    def test_descendant_match_when_ancestors_do_not_match(self):
+        args_wrong = _empty_arg_row()
+        args_mm = _empty_arg_row()
+        key_mm = _make_str_key("aten::mm", args_mm)
+        outer = {
+            "parent": None,
+            "name": "aten::outer",
+            "args": dict(args_wrong),
+            "_category": "cpu_op",
+        }
+        mm = {
+            "parent": 1,
+            "name": "aten::mm",
+            "args": dict(args_mm),
+            "_category": "cpu_op",
+        }
+        tree = _FakeTraceTree({1: outer, 2: mm})
+        assert _find_perf_summary_matching_node(1, tree, {key_mm}) is mm
+
+    def test_returns_none_when_no_cpu_op_matches(self):
+        args = _empty_arg_row()
+        key = _make_str_key("aten::mm", args)
+        other = {
+            "parent": None,
+            "name": "aten::relu",
+            "args": dict(args),
+            "_category": "cpu_op",
+        }
+        tree = _FakeTraceTree({1: other})
+        assert _find_perf_summary_matching_node(1, tree, {key}) is None
+
+    def test_ancestor_match_wins_before_descendant_bfs(self):
+        """Walk upward fully before any child search; parent match beats child match."""
+        args = _empty_arg_row()
+        key_mm = _make_str_key("aten::mm", args)
+        mm_parent = {
+            "parent": None,
+            "name": "aten::mm",
+            "args": dict(args),
+            "_category": "cpu_op",
+        }
+        outer = {
+            "parent": 2,
+            "name": "aten::outer",
+            "args": dict(args),
+            "_category": "cpu_op",
+        }
+        mm_child = {
+            "parent": 1,
+            "name": "aten::mm",
+            "args": dict(args),
+            "_category": "cpu_op",
+        }
+        tree = _FakeTraceTree({1: outer, 2: mm_parent, 3: mm_child})
+        assert _find_perf_summary_matching_node(1, tree, {key_mm}) is mm_parent
+
+    def test_bfs_returns_first_matching_child_in_stable_order(self):
+        args_mm = _empty_arg_row()
+        key_mm = _make_str_key("aten::mm", args_mm)
+        outer = {
+            "parent": None,
+            "name": "aten::outer",
+            "args": dict(args_mm),
+            "_category": "cpu_op",
+        }
+        mm_a = {
+            "parent": 1,
+            "name": "aten::mm",
+            "args": dict(args_mm),
+            "_category": "cpu_op",
+        }
+        mm_b = {
+            "parent": 1,
+            "name": "aten::mm",
+            "args": dict(args_mm),
+            "_category": "cpu_op",
+        }
+        # Dict iteration order defines sibling order in _ensure_parent_to_children.
+        tree = _FakeTraceTree({1: outer, 2: mm_a, 3: mm_b})
+        found = _find_perf_summary_matching_node(1, tree, {key_mm})
+        assert found is mm_a
 
 
 # ---------------------------------------------------------------------------
