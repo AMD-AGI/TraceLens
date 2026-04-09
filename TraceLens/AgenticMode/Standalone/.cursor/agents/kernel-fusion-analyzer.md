@@ -131,12 +131,15 @@ Then look for novel patterns:
 
 Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
-Confidence maps directly to priority tier:
-- HIGH confidence findings → 🔴 P1
-- MEDIUM confidence findings → 🟡 P2
-- LOW confidence findings → 🟢 P3
+Number findings P1, P2, P3... sequentially by savings (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
 
-Within each tier, sort by `total_kernel_time_us` descending.
+| Confidence | Icon |
+|------------|------|
+| high       | 🔴   |
+| medium     | 🟡   |
+| low        | 🟢   |
+
+Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`. Two HIGH findings in a row are `### 🔴 P1:` and `### 🔴 P2:` (both red).
 
 **Title format:** `### <icon> <priority>: <Pattern Name>`
 

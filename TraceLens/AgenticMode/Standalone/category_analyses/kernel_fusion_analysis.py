@@ -63,7 +63,7 @@ _NORM_NAME_PATTERNS = [
 
 _CONFIDENCE_NAME_HINTS = {
     "attention": ("attention", "sdpa", "self_attn"),
-    "norm": ("rmsnorm", "rms_norm", "layernorm", "layer_norm"),
+    "norm": ("rmsnorm", "rms_norm", "layernorm", "layer_norm", "batchnorm", "batch_norm"),
     "mlp": ("mlp",),
     "rope": ("rotary", "rope", "apply_rotary"),
     "siglu": ("silu", "swiglu"),
