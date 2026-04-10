@@ -625,6 +625,8 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
 
 ## Step 10: Generate Final Report (<output_dir>/standalone_analysis.md)
 
+**CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly. Subagents lack the full template context and produce reports that violate formatting guidelines. The orchestrator has already read all findings files and the template — it must perform the substitution itself using `<prefix>` commands (e.g., `tee`, `sed`, or Python one-liners).
+
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
 2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
