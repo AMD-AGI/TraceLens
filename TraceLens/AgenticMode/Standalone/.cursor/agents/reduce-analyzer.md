@@ -78,7 +78,8 @@ Execute the analysis script using the command prefix:
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/reduce_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --comparison_scope <comparison_scope>
 ```
 
 ### Step 2: Read Metrics

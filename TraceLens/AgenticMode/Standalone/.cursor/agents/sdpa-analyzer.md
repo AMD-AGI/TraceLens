@@ -69,7 +69,8 @@ Execute the analysis script using the command prefix. Pass `--category` to speci
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/sdpa_analysis.py \
   --output-dir <output_dir> \
-  --category <sdpa>
+  --category <sdpa> \
+  --comparison_scope <comparison_scope>
 ```
 
 Where `<sdpa>` is `sdpa_fwd` or `sdpa_bwd`.
