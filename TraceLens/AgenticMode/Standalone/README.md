@@ -4,7 +4,7 @@ Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# TraceLens Agentic Mode: Standalone Trace Analysis
+# TraceLens Agentic Mode: Standalone + Comparative Trace Analysis
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
