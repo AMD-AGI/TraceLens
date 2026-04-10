@@ -58,10 +58,14 @@ def _make_diff_stats_row(
     concrete_inputs="",
     nn_module_stack="root",
     nn_module_parent="root",
+    cpu_op_uid=None,
 ):
+    if cpu_op_uid is None:
+        cpu_op_uid = (lca_id, name, source)
     return {
         "name": name,
         "cpu_op_name": cpu_op_name,
+        "cpu_op_uid": cpu_op_uid,
         "source": source,
         "Input Dims": input_dims,
         "Input Strides": input_strides,
@@ -1079,9 +1083,10 @@ class TestBuildTrace2TimeLookup:
     """Verify the lookup mapping from trace1 (name, args) → trace2 kernel time sum."""
 
     def test_empty_df_returns_empty_dict(self):
-        lookup, lca_ids = _build_trace2_time_lookup(pd.DataFrame())
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame())
         assert lookup == {}
         assert lca_ids == {}
+        assert lc == {}
 
     def test_no_trace1_rows_returns_empty(self):
         rows = [
@@ -1094,9 +1099,10 @@ class TestBuildTrace2TimeLookup:
                 1,
             ),
         ]
-        lookup, lca_ids = _build_trace2_time_lookup(pd.DataFrame(rows))
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         assert lookup == {}
         assert lca_ids == {}
+        assert lc == {}
 
     def test_single_lca_single_kernel(self):
         rows = [
@@ -1121,10 +1127,11 @@ class TestBuildTrace2TimeLookup:
                 input_type="float",
             ),
         ]
-        lookup, lca_ids = _build_trace2_time_lookup(pd.DataFrame(rows))
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         key = ("aten::mm", "((32,64))", "float", "", "")
         assert key in lookup
         assert lookup[key] == pytest.approx(80.0)
+        assert lc[key] == 1
 
     def test_multiple_lcas_same_args_aggregated(self):
         """Two LCAs with the same trace1 (name, args) should have their trace2 times summed."""
@@ -1170,9 +1177,62 @@ class TestBuildTrace2TimeLookup:
                 input_type="float",
             ),
         ]
-        lookup, lca_ids = _build_trace2_time_lookup(pd.DataFrame(rows))
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         key = ("aten::mm", "(32,64)", "float", "", "")
         assert lookup[key] == pytest.approx(85.0)  # 40 + 45
+        assert lc[key] == 2
+
+    def test_multiple_lcas_same_key_unions_cpu_op_uids(self):
+        """Same tuple key from two LCAs: count is unique trace2 cpu_op_uid, not row count."""
+        shared_uid = 4242
+        rows = [
+            _make_diff_stats_row(
+                "k1",
+                "aten::mm",
+                "trace1",
+                50.0,
+                "aten::mm",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+            ),
+            _make_diff_stats_row(
+                "k2",
+                "aten::mm",
+                "trace2",
+                40.0,
+                "aten::mm",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                cpu_op_uid=shared_uid,
+            ),
+            _make_diff_stats_row(
+                "k3",
+                "aten::mm",
+                "trace1",
+                60.0,
+                "aten::mm",
+                20,
+                input_dims="[32,64]",
+                input_type="float",
+            ),
+            _make_diff_stats_row(
+                "k4",
+                "aten::mm",
+                "trace2",
+                45.0,
+                "aten::mm",
+                20,
+                input_dims="[32,64]",
+                input_type="float",
+                cpu_op_uid=shared_uid,
+            ),
+        ]
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
+        key = ("aten::mm", "(32,64)", "float", "", "")
+        assert lookup[key] == pytest.approx(85.0)
+        assert lc[key] == 1
 
     def test_different_args_produce_different_keys(self):
         rows = [
@@ -1217,10 +1277,12 @@ class TestBuildTrace2TimeLookup:
                 input_type="float",
             ),
         ]
-        lookup, lca_ids = _build_trace2_time_lookup(pd.DataFrame(rows))
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         assert len(lookup) == 2
         assert lookup[("aten::mm", "(32,64)", "float", "", "")] == pytest.approx(40.0)
         assert lookup[("aten::mm", "(64,128)", "float", "", "")] == pytest.approx(90.0)
+        assert lc[("aten::mm", "(32,64)", "float", "", "")] == 1
+        assert lc[("aten::mm", "(64,128)", "float", "", "")] == 1
 
     def test_trace1_only_lca_returns_zero_trace2_time(self):
         rows = [
@@ -1233,17 +1295,18 @@ class TestBuildTrace2TimeLookup:
                 10,
             ),
         ]
-        lookup, lca_ids = _build_trace2_time_lookup(pd.DataFrame(rows))
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         key = ("aten::mm", "", "", "", "")
         assert key in lookup
         assert lookup[key] == pytest.approx(0.0)
+        assert lc[key] == 0
 
 
 # ---------------------------------------------------------------------------
 # Tests: _enrich_sheet_with_trace2
 # ---------------------------------------------------------------------------
 class TestEnrichSheetWithTrace2:
-    """Verify that trace1 perf sheets get speedup and delta columns (no trace2 time column)."""
+    """Verify trace1 perf sheets get speedup, delta, trace2 time, and operation_count_trace2."""
 
     def test_empty_sheet_returned_unchanged(self):
         df = pd.DataFrame()
@@ -1272,14 +1335,19 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        lookup = {("aten::mm", "(32,64)", "float", "", ""): 80.0}
-        result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
+        key = ("aten::mm", "(32,64)", "float", "", "")
+        lookup = {key: 80.0}
+        result = _enrich_sheet_with_trace2(
+            df, lookup, "Kernel Time (µs)_sum", count_lookup={key: 3}
+        )
 
-        assert "Kernel Time trace2 (µs)_sum" not in result.columns
+        assert "Kernel Time (µs)_trace2_sum" in result.columns
+        assert "operation_count_trace2" in result.columns
         assert "speedup (trace2/trace1)" in result.columns
         assert "delta_us (trace2 - trace1)" in result.columns
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-20.0)
+        assert result.iloc[0]["operation_count_trace2"] == 3.0
 
     def test_unmatched_row_gets_nan(self):
         df = pd.DataFrame(
@@ -1342,8 +1410,44 @@ class TestEnrichSheetWithTrace2:
         kt_idx = cols.index("Kernel Time (µs)_sum")
         assert cols[kt_idx + 1] == "speedup (trace2/trace1)"
         assert cols[kt_idx + 2] == "delta_us (trace2 - trace1)"
+        assert cols[kt_idx + 3] == "Kernel Time (µs)_trace2_sum"
+        assert cols[kt_idx + 4] == "operation_count_trace2"
+        assert result.iloc[0]["Kernel Time (µs)_trace2_sum"] == 40.0
+        import numpy as np
+
+        assert np.isnan(result.iloc[0]["operation_count_trace2"])
         assert "debug_trace2_time_us" not in cols
         assert "debug_lca_ids" not in cols
+
+    def test_debug_inserts_lca_ids_after_trace2_column(self):
+        df = pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "Input Dims": [""],
+                "Input type": [""],
+                "Input Strides": [""],
+                "Concrete Inputs": [""],
+                "Kernel Time (µs)_sum": [50.0],
+            }
+        )
+        key = ("aten::mm", "", "", "", "")
+        lookup = {key: 40.0}
+        lca_ids = {key: [101, 102]}
+        result = _enrich_sheet_with_trace2(
+            df,
+            lookup,
+            "Kernel Time (µs)_sum",
+            lca_ids_lookup=lca_ids,
+            count_lookup={key: 2},
+            debug=True,
+        )
+        cols = list(result.columns)
+        kt_idx = cols.index("Kernel Time (µs)_sum")
+        assert cols[kt_idx + 3] == "Kernel Time (µs)_trace2_sum"
+        assert cols[kt_idx + 4] == "operation_count_trace2"
+        assert cols[kt_idx + 5] == "debug_lca_ids"
+        assert result.iloc[0]["Kernel Time (µs)_trace2_sum"] == 40.0
+        assert result.iloc[0]["operation_count_trace2"] == 2.0
 
     def test_works_with_ops_unique_args_column(self):
         """Verify enrichment works with 'total_direct_kernel_time_sum' column."""
@@ -1538,22 +1642,24 @@ class TestBuildLCAConsolidation:
     """Verify dominant-op identification and time transfer computation."""
 
     def test_empty_df(self):
-        adds, subs, t2map, lca_ids = _build_lca_consolidation(pd.DataFrame())
+        adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame())
         assert adds == {}
         assert subs == {}
         assert t2map == {}
         assert lca_ids == {}
+        assert t2cnt == {}
 
     def test_single_op_lca_produces_no_adjustments(self):
         rows = [
             _make_diff_stats_row("k1", "aten::mm", "trace1", 100.0, "mm", 10),
             _make_diff_stats_row("k2", "aten::mm", "trace2", 80.0, "mm", 10),
         ]
-        adds, subs, t2map, lca_ids = _build_lca_consolidation(pd.DataFrame(rows))
+        adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame(rows))
         assert adds == {}
         assert subs == {}
         assert t2map == {}
         assert lca_ids == {}
+        assert t2cnt == {}
 
     def test_multi_op_lca_dominant_selection(self):
         """Dominant op is the one with highest total kernel time."""
@@ -1566,7 +1672,7 @@ class TestBuildLCAConsolidation:
                 "flash_k", "flash_attn::bwd", "trace2", 300.0, "lca", 99
             ),
         ]
-        adds, subs, t2map, lca_ids = _build_lca_consolidation(pd.DataFrame(rows))
+        adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame(rows))
 
         dominant_key = ("aiter::fmha_v3_bwd", "", "", "", "")
         non_dom_key = ("aten::fill_", "", "", "", "")
@@ -1579,6 +1685,7 @@ class TestBuildLCAConsolidation:
 
         assert dominant_key in t2map
         assert t2map[dominant_key] == pytest.approx(300.0)
+        assert t2cnt[dominant_key] == 1
 
     def test_multi_op_lca_multiple_instances_aggregate(self):
         """Multiple multi-op LCAs with same ops accumulate adjustments."""
@@ -1594,7 +1701,7 @@ class TestBuildLCAConsolidation:
                 "flash_k2", "flash_attn::bwd", "trace2", 350.0, "lca", 2
             ),
         ]
-        adds, subs, t2map, lca_ids = _build_lca_consolidation(pd.DataFrame(rows))
+        adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame(rows))
 
         dominant_key = ("aiter::fmha", "", "", "", "")
         non_dom_key = ("aten::fill_", "", "", "", "")
@@ -1602,6 +1709,7 @@ class TestBuildLCAConsolidation:
         assert adds[dominant_key] == pytest.approx(50.0)  # 20 + 30
         assert subs[non_dom_key] == pytest.approx(50.0)
         assert t2map[dominant_key] == pytest.approx(600.0)  # 250 + 350
+        assert t2cnt[dominant_key] == 2
 
 
 # ---------------------------------------------------------------------------

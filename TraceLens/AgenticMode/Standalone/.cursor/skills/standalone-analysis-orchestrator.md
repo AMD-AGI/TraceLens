@@ -173,7 +173,6 @@ Do **not** pass `--extension_*` on the trace2 command.
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
-  --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels
 ```
@@ -223,7 +222,12 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir>
+  --comparison-scope <comparison_scope>
 ```
+
+**Perf CSV directories by scope:** 
+**`standalone`** → `<output_dir>/perf_report_csvs`. 
+**`comparative`** → trace 1 from `<output_dir>/perf_report_trace1_csvs`, trace 2 from `<output_dir>/perf_report_trace2_csvs`
 
 This script performs:
 - **Step 2:** Assess GPU utilization (computation, idle, communication times)

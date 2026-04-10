@@ -139,14 +139,12 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
 
-<!-- === STANDALONE P-item cards and COMPARATIVE P-item cards === -->
-<!-- Impact: range from closing efficiency gaps to 75–100% of roofline (pre-computed). -->
-
 ### 🔴 P1: <Brief Title>
 
 **Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
+
 <!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
@@ -165,6 +163,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
 **Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
+
 → *See [Detailed Analysis: Compute kernel insights > P2](#detailed-analysis-compute-p2) for details*
 
 ---
@@ -298,18 +297,18 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Impact estimate:** [Rendered from metadata → impact_estimates]
 
 <!-- === COMPARATIVE Compute Kernel Data table === -->
-<!-- In comparative mode, the Data table includes columns for both traces so the reader can
-     see where the gap originates. Efficiency column is replaced by the direct time comparison.
-     Shape columns are sourced from `Input Dims` in ops CSV / TraceDiff `diff_stats`. -->
+<!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = Kernel Time (µs)_trace2_sum / 1000 when
+     present; else delta_us + t1, or —. Count T1/T2 = operation_count / operation_count_trace2 when
+     present. -->
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>
 **Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
 **Data:** [1 sentence summary of table]
 
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Shape (T1) | Shape (T2) | FLOPS/Byte (T1/T2) | Bound (T1/T2) |
-|-----------|-------------------|-------------------|---------------|------------|------------|---------------------|---------------|
-| ...       | ...               | ...               | .../...       | ...        | ...        | .../...             | .../...       |
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-------------------|-------------------|---------------|-----------------|------------|
+| ...       | ...               | ...               | .../...       | ...             | ...        |
 
 **Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]

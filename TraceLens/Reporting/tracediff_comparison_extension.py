@@ -10,11 +10,14 @@ Use with::
 
     TraceLens_generate_perf_report_pytorch \\
         --profile_json_path trace1.json \\
-        --extension_file <path/to/this/file.py> \\
-        --extension_args /path/to/trace2.json
+        --extension-file <path/to/this/file.py> \\
+        --extension-args /path/to/trace2.json
 
-This runs TraceDiff in memory, then adds **speedup** and **delta** only to
-``unified_perf_summary`` (``Kernel Time (µs)_sum``). Op-category workbook tabs
+This runs TraceDiff in memory, then adds **speedup**, **delta**,
+``Kernel Time (µs)_trace2_sum``, and **operation_count_trace2** (count of
+distinct ``cpu_op_uid`` values on trace2 ``diff_stats`` rows aligned to the
+same key as trace2 kernel time) to ``unified_perf_summary`` (beside
+``Kernel Time (µs)_sum`` / ``operation_count``). Op-category workbook tabs
 (``GEMM``, ``CONV_bwd``, etc.) and launcher sheets are unchanged—enough for
 workflows that consume unified summary only (e.g. AgenticMode standalone).
 When ``unified_perf_summary`` is non-empty, diff rows use ``cpu_op_uid`` and
@@ -158,6 +161,20 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
 
 def _normalize_val(v: str) -> str:
     return v.replace("[", "(").replace("]", ")").replace(",)", ")").strip()
+
+
+def _trace2_cpu_op_uid_set_for_lca(trace2: pd.DataFrame, lca_id) -> Set[Any]:
+    """Distinct ``cpu_op_uid`` values for trace2 ``diff_stats`` rows under ``lca_id``.
+
+    If ``cpu_op_uid`` is missing or all null (e.g. synthetic test frames), fall
+    back to row indices so each row still counts as distinct.
+    """
+    sub = trace2[trace2["lowest_common_ancestor_id"] == lca_id]
+    if sub.empty:
+        return set()
+    if "cpu_op_uid" in sub.columns and sub["cpu_op_uid"].notna().any():
+        return set(sub["cpu_op_uid"].dropna().tolist())
+    return set(sub.index.tolist())
 
 
 def _make_str_key(name, row, arg_cols=_ARG_COLS):
@@ -307,8 +324,14 @@ def _build_lca_consolidation(
     diff_stats_df: pd.DataFrame,
     trace1_tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
-) -> Tuple[Dict[tuple, float], Dict[tuple, float], Dict[tuple, float], Dict[tuple, List]]:
-    empty = ({}, {}, {}, {})
+) -> Tuple[
+    Dict[tuple, float],
+    Dict[tuple, float],
+    Dict[tuple, float],
+    Dict[tuple, List],
+    Dict[tuple, int],
+]:
+    empty = ({}, {}, {}, {}, {})
     if diff_stats_df.empty:
         return empty
 
@@ -332,6 +355,7 @@ def _build_lca_consolidation(
     time_additions: Dict[tuple, float] = {}
     time_subtractions: Dict[tuple, float] = {}
     dominant_trace2_map: Dict[tuple, float] = {}
+    dominant_trace2_uid_sets: Dict[tuple, Set[Any]] = {}
     dominant_lca_ids: Dict[tuple, List] = {}
     psk = perf_summary_keys if perf_summary_keys is not None else set()
 
@@ -350,10 +374,14 @@ def _build_lca_consolidation(
         if dominant_key is None:
             continue
 
-        t2_time = lca_t2_time.get(lca_id, 0.0)
+        t2_time = float(lca_t2_time.get(lca_id, 0.0))
+        t2_uid_set = _trace2_cpu_op_uid_set_for_lca(t2, lca_id)
         dominant_trace2_map[dominant_key] = (
             dominant_trace2_map.get(dominant_key, 0.0) + t2_time
         )
+        dominant_trace2_uid_sets[dominant_key] = dominant_trace2_uid_sets.get(
+            dominant_key, set()
+        ).union(t2_uid_set)
         dominant_lca_ids.setdefault(dominant_key, []).append(lca_id)
 
         for op_name, op_total_time in op_times.items():
@@ -375,7 +403,15 @@ def _build_lca_consolidation(
                 time_additions.get(dominant_key, 0.0) + op_total_time
             )
 
-    return time_additions, time_subtractions, dominant_trace2_map, dominant_lca_ids
+    dominant_trace2_count = {k: len(v) for k, v in dominant_trace2_uid_sets.items()}
+
+    return (
+        time_additions,
+        time_subtractions,
+        dominant_trace2_map,
+        dominant_lca_ids,
+        dominant_trace2_count,
+    )
 
 
 def _apply_lca_consolidation(
@@ -429,19 +465,19 @@ def _build_trace2_time_lookup(
     diff_stats_df: pd.DataFrame,
     tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
-) -> Tuple[Dict[tuple, float], Dict[tuple, List]]:
+) -> Tuple[Dict[tuple, float], Dict[tuple, List], Dict[tuple, int]]:
     if diff_stats_df.empty:
-        return {}, {}
+        return {}, {}, {}
 
     df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
     if df.empty:
-        return {}, {}
+        return {}, {}, {}
 
     trace1 = df[df["source"] == "trace1"]
     trace2 = df[df["source"] == "trace2"]
 
     if trace1.empty:
-        return {}, {}
+        return {}, {}, {}
 
     lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["kernel_time"].sum()
 
@@ -451,8 +487,10 @@ def _build_trace2_time_lookup(
 
     lookup: Dict[tuple, float] = {}
     lca_ids_lookup: Dict[tuple, List] = {}
+    lookup_uid_sets: Dict[tuple, Set[Any]] = {}
     for lca_id, grp in lca_groups:
-        t2_time = lca_trace2_time.get(lca_id, 0.0)
+        t2_time = float(lca_trace2_time.get(lca_id, 0.0))
+        t2_uid_set = _trace2_cpu_op_uid_set_for_lca(trace2, lca_id)
 
         unique_ops = grp["cpu_op_name"].unique()
         if len(unique_ops) > 1:
@@ -468,9 +506,15 @@ def _build_trace2_time_lookup(
         if key is None:
             continue
         lookup[key] = lookup.get(key, 0.0) + t2_time
+        lookup_uid_sets[key] = lookup_uid_sets.get(key, set()).union(t2_uid_set)
         lca_ids_lookup.setdefault(key, []).append(lca_id)
 
-    return lookup, lca_ids_lookup
+    lookup_count = {k: len(v) for k, v in lookup_uid_sets.items()}
+    return lookup, lca_ids_lookup, lookup_count
+
+
+_TRACE2_KERNEL_TIME_COL = "Kernel Time (µs)_trace2_sum"
+_TRACE2_OP_COUNT_COL = "operation_count_trace2"
 
 
 def _enrich_sheet_with_trace2(
@@ -481,9 +525,10 @@ def _enrich_sheet_with_trace2(
     tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
     lca_ids_lookup: Optional[Dict[tuple, List]] = None,
+    count_lookup: Optional[Dict[tuple, int]] = None,
     debug: bool = False,
 ) -> pd.DataFrame:
-    """Add speedup and delta columns only (trace2 times from *lookup*)."""
+    """Add speedup, delta, trace2 kernel time, and trace2 unique-``cpu_op_uid`` count."""
     if df_sheet.empty or not lookup:
         return df_sheet
 
@@ -491,18 +536,24 @@ def _enrich_sheet_with_trace2(
 
     psk = perf_summary_keys if perf_summary_keys is not None else set()
     uid_cache: Dict = {}
+    clookup = count_lookup if count_lookup is not None else {}
 
     trace2_times = []
-    lca_id_lists = []
+    trace2_counts: List[float] = []
+    lca_id_lists: List[str] = []
+    need_lca_debug = debug and lca_ids_lookup is not None
     for _, row in df.iterrows():
         key = _enrichment_row_lookup_key(row, tree, psk, uid_cache)
         trace2_times.append(lookup.get(key, np.nan))
-        if debug and lca_ids_lookup is not None:
+        cv = clookup.get(key)
+        trace2_counts.append(np.nan if cv is None else float(cv))
+        if need_lca_debug:
             lca_id_lists.append(str(lca_ids_lookup.get(key, [])))
 
     col_idx = df.columns.get_loc(kernel_time_col)
     t1 = df[kernel_time_col]
     t2 = pd.Series(trace2_times, index=df.index)
+    c2 = pd.Series(trace2_counts, index=df.index)
 
     df.insert(
         col_idx + 1,
@@ -514,14 +565,19 @@ def _enrich_sheet_with_trace2(
         "delta_us (trace2 - trace1)",
         t2 - t1,
     )
+    df.insert(
+        col_idx + 3,
+        _TRACE2_KERNEL_TIME_COL,
+        t2,
+    )
+    df.insert(
+        col_idx + 4,
+        _TRACE2_OP_COUNT_COL,
+        c2,
+    )
     if debug:
         df.insert(
-            col_idx + 3,
-            "debug_trace2_time_us",
-            t2,
-        )
-        df.insert(
-            col_idx + 4,
+            col_idx + 5,
             "debug_lca_ids",
             lca_id_lists if lca_id_lists else "[]",
         )
@@ -534,15 +590,20 @@ def _merge_dominant_into_lookup(
     dominant_t2_map: Dict[tuple, float],
     diff_stats_lca_ids: Optional[Dict[tuple, List]] = None,
     dominant_lca_ids: Optional[Dict[tuple, List]] = None,
-) -> Tuple[Dict[tuple, float], Dict[tuple, List]]:
+    diff_count_lookup: Optional[Dict[tuple, int]] = None,
+    dominant_t2_count: Optional[Dict[tuple, int]] = None,
+) -> Tuple[Dict[tuple, float], Dict[tuple, List], Dict[tuple, int]]:
     merged = dict(diff_stats_lookup)
     merged_lca: Dict[tuple, List] = dict(diff_stats_lca_ids or {})
+    merged_count: Dict[tuple, int] = dict(diff_count_lookup or {})
     for key, val in dominant_t2_map.items():
         if key not in merged:
             merged[key] = val
             if dominant_lca_ids and key in dominant_lca_ids:
                 merged_lca[key] = dominant_lca_ids[key]
-    return merged, merged_lca
+            if dominant_t2_count and key in dominant_t2_count:
+                merged_count[key] = int(dominant_t2_count[key])
+    return merged, merged_lca, merged_count
 
 
 def _enrich_consolidated_perf_sheets(
@@ -552,9 +613,10 @@ def _enrich_consolidated_perf_sheets(
     trace1_tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
     lca_ids_lookup: Optional[Dict[tuple, List]] = None,
+    count_lookup: Optional[Dict[tuple, int]] = None,
     debug: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    """Add speedup/delta only to ``unified_perf_summary``."""
+    """Add speedup, delta, trace2 time, and ``operation_count_trace2`` to ``unified_perf_summary``."""
     result: Dict[str, pd.DataFrame] = {}
     kt_col = _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA
     for sheet_name, df_sheet in consolidated_t1.items():
@@ -574,6 +636,7 @@ def _enrich_consolidated_perf_sheets(
             tree=trace1_tree,
             perf_summary_keys=perf_summary_keys,
             lca_ids_lookup=lca_ids_lookup,
+            count_lookup=count_lookup,
             debug=debug,
         )
     return result
@@ -593,28 +656,34 @@ def enrich_perf_report_dict_inplace(
         ups if isinstance(ups, pd.DataFrame) else pd.DataFrame()
     )
 
-    time_additions, time_subtractions, dominant_t2_map, dominant_lca_ids = (
-        _build_lca_consolidation(
-            diff_stats_df,
-            trace1_tree=trace1_tree,
-            perf_summary_keys=perf_summary_keys,
-        )
+    (
+        time_additions,
+        time_subtractions,
+        dominant_t2_map,
+        dominant_lca_ids,
+        dominant_t2_count,
+    ) = _build_lca_consolidation(
+        diff_stats_df,
+        trace1_tree=trace1_tree,
+        perf_summary_keys=perf_summary_keys,
     )
     consolidated_t1 = _apply_lca_consolidation(
         {k: v.copy() for k, v in perf_dfs.items()},
         time_additions,
         time_subtractions,
     )
-    diff_lookup, diff_lca_ids = _build_trace2_time_lookup(
+    diff_lookup, diff_lca_ids, diff_count_lookup = _build_trace2_time_lookup(
         diff_stats_df,
         tree=trace1_tree,
         perf_summary_keys=perf_summary_keys,
     )
-    lookup, merged_lca_ids = _merge_dominant_into_lookup(
+    lookup, merged_lca_ids, merged_count_lookup = _merge_dominant_into_lookup(
         diff_lookup,
         dominant_t2_map,
         diff_stats_lca_ids=diff_lca_ids,
         dominant_lca_ids=dominant_lca_ids,
+        diff_count_lookup=diff_count_lookup,
+        dominant_t2_count=dominant_t2_count,
     )
     return _enrich_consolidated_perf_sheets(
         consolidated_t1,
@@ -622,6 +691,7 @@ def enrich_perf_report_dict_inplace(
         trace1_tree=trace1_tree,
         perf_summary_keys=perf_summary_keys,
         lca_ids_lookup=merged_lca_ids if debug else None,
+        count_lookup=merged_count_lookup,
         debug=debug,
     )
 
@@ -671,6 +741,9 @@ def postprocess_perf_report_dataframes_extension(
         out.update(enriched)
         if debug:
             out["diff_stats"] = diff_stats_df
-        print("[TraceDiff] Added speedup and delta to unified_perf_summary only.")
+        print(
+            "[TraceDiff] Added speedup, delta, Kernel Time (µs)_trace2_sum, "
+            "and operation_count_trace2 to unified_perf_summary only."
+        )
 
     return out

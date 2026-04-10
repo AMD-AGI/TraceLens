@@ -51,6 +51,39 @@ FUSION_ALREADY_FUSED = [
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
+def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) -> dict:
+    """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows."""
+    gpu_data = {}
+    for _, row in gpu_timeline.iterrows():
+        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
+    return {
+        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
+        "computation_time_percent": gpu_data.get("computation_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
+            "percent", 0
+        ),
+        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
+    }
+
+
+def _perf_csv_dirs_for_scope(comparison_scope: str, output_dir: str):
+    """Return (trace1_csv_dir, trace2_csv_dir_or_none) for standalone vs comparative."""
+    if comparison_scope == 'standalone':
+        return (
+            os.path.join(output_dir, "perf_report_csvs"),
+            None,
+        )
+    if comparison_scope == "comparative":
+        return (
+            os.path.join(output_dir, "perf_report_trace1_csvs"),
+            os.path.join(output_dir, "perf_report_trace2_csvs"),
+        )
+
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
     """Split Data Moved into (data_in_mb, data_out_mb) using op type and shapes."""
     half = (data_moved_mb / 2, data_moved_mb / 2) if data_moved_mb else (None, None)
@@ -132,6 +165,15 @@ def main():
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
+        "--comparison-scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: read <output-dir>/perf_report_csvs (single trace). "
+            "comparative: trace 1 from perf_report_trace1_csvs, trace 2 from perf_report_trace2_csvs."
+        ),
+    )
+    parser.add_argument(
         "--disable_pseudo_ops",
         action="store_false",
         dest="enable_pseudo_ops",
@@ -145,7 +187,8 @@ def main():
     platform = args.platform
     output_dir = args.output_dir
     enable_pseudo_ops = args.enable_pseudo_ops
-    csv_dir = f"{output_dir}/perf_report_csvs"
+    comparison_scope = args.comparison_scope
+    trace1_csv_dir, trace2_csv_dir = _perf_csv_dirs_for_scope(comparison_scope, output_dir)
 
     print("=" * 80)
     print("TRACELENS AGENTICMODE - ORCHESTRATOR PREPARATION")
@@ -153,6 +196,10 @@ def main():
     print(f"Platform: {platform}")
     print(f"Trace: {trace_path}")
     print(f"Output: {output_dir}")
+    print(f"Comparison scope: {comparison_scope}")
+    print(f"Trace 1 perf CSVs: {trace1_csv_dir}")
+    if trace2_csv_dir is not None:
+        print(f"Trace 2 perf CSVs: {trace2_csv_dir}")
     print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("=" * 80)
 
@@ -174,27 +221,25 @@ def main():
     # ============================================================================
     print("\n[STEP 2] Assessing GPU Utilization...")
 
-    gpu_timeline = pd.read_csv(f"{csv_dir}/gpu_timeline.csv")
+    gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
+    gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
+        gpu_timeline
+    )
 
-    # The CSV has columns: type, time ms, percent
-    # Convert to dict for easy lookup
-    gpu_data = {}
-    for _, row in gpu_timeline.iterrows():
-        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
 
-    gpu_utilization_metrics = {
-        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
-        "computation_time_percent": gpu_data.get("computation_time", {}).get(
-            "percent", 0
-        ),
-        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
-            "percent", 0
-        ),
-        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
-            "percent", 0
-        ),
-        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
-    }
+    if comparison_scope == "comparative" and trace2_csv_dir is not None:
+        trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
+            pd.read_csv(os.path.join(trace2_csv_dir, "gpu_timeline.csv"))
+        )
+        with open(
+            os.path.join(output_dir, "metadata", "trace2_gpu_utilization.json"), "w"
+        ) as f:
+            json.dump(trace2_gpu_utilization, f, indent=2)
+        trace2_ops_summary_by_category = json.loads(
+            pd.read_csv(
+                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
+            ).to_json(orient="records")
+        )
 
     print(f"\nGPU Utilization Metrics:")
     print(f"  Total Time: {gpu_utilization_metrics['total_time_ms']:.2f} ms")
@@ -213,7 +258,7 @@ def main():
     # ============================================================================
     print("\n[STEP 3] Identifying Top Operations...")
 
-    ops_summary = pd.read_csv(f"{csv_dir}/ops_summary.csv")
+    ops_summary = pd.read_csv(os.path.join(trace1_csv_dir, "ops_summary.csv"))
 
     # Sort by total_direct_kernel_time_ms if available, else by time column
     if "total_direct_kernel_time_ms" in ops_summary.columns:
@@ -259,7 +304,9 @@ def main():
         print(f"  ✓ Tree has {len(tree.events)} events")
 
         # Read unified performance summary
-        unified_df = pd.read_csv(f"{csv_dir}/unified_perf_summary.csv")
+        unified_df = pd.read_csv(
+            os.path.join(trace1_csv_dir, "unified_perf_summary.csv")
+        )
 
         # Get unique categories
         categories = unified_df["op category"].unique()
@@ -692,7 +739,7 @@ def main():
                 )
 
             # Post-process: attention narrowing + data movement enrichment
-            csv_path = f"{output_dir}/perf_report_csvs/unified_perf_summary.csv"
+            csv_path = os.path.join(trace1_csv_dir, "unified_perf_summary.csv")
             if os.path.exists(csv_path):
                 perf_lookup = _build_kernel_perf_lookup(csv_path)
 
@@ -773,7 +820,7 @@ def main():
     # ============================================================================
     print("\n[STEP 5] Filtering and Exporting Category Data...")
 
-    unified_df = pd.read_csv(f"{csv_dir}/unified_perf_summary.csv")
+    unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
@@ -1048,10 +1095,14 @@ def main():
         "platform": platform,
         "trace_path": trace_path,
         "output_dir": output_dir,
+        "comparison_scope": comparison_scope,
         "gpu_utilization": gpu_utilization_metrics,
         "categories": exported_categories,
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
     }
+    if comparison_scope == "comparative" and trace2_gpu_utilization is not None:
+        manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
+        manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
 
     manifest_file = f"{output_dir}/category_data/category_manifest.json"
     with open(manifest_file, "w") as f:
@@ -1072,6 +1123,8 @@ def main():
     print(f"✓ Orchestrator Preparation Complete (Steps 2-5)")
     print(f"✓ Exported {len(exported_categories)} categories")
     print(f"✓ Manifest saved: {manifest_file}")
+    if comparison_scope == "comparative":
+        print(f"✓ metadata/trace2_gpu_utilization.json + manifest trace2_* fields")
     print(f"{'='*80}")
 
 
