@@ -7,7 +7,7 @@
 """Comparative cumulative projection plot for standalone + TraceDiff extension.
 
 Builds per-operation Trace 1 / Trace 2 kernel times from
-``perf_report_csvs/unified_perf_summary.csv``, then uses the same stacked
+``perf_report_trace1_csvs/unified_perf_summary.csv`` then uses the same stacked
 **Baseline → Projection** (optional **Target**) chart as
 ``AgenticMode/Comparative/Analysis/plotting_manual.py`` (`CumulativeProjectionChart`):
 
@@ -170,14 +170,14 @@ def generate_comparative_cumulative_plot(
         include_target_bar: If True, third bar shows Trace 2 category totals
             (same legend/stack colors). Default False: Baseline + Projection only.
         excel_path: If set, read ``unified_perf_summary`` from this workbook instead
-            of ``<output_dir>/perf_report_csvs/unified_perf_summary.csv``.
+            of ``<output_dir>/perf_report_trace1_csvs/unified_perf_summary.csv``.
         debug: Print per-category baseline / target / projection (ms) and row counts.
     """
     try:
         if excel_path:
             df, agg_col = load_unified_comparative_from_excel(excel_path)
         else:
-            perf_csvs = os.path.join(output_dir, "perf_report_csvs")
+            perf_csvs = os.path.join(output_dir, "perf_report_trace1_csvs")
             df, agg_col = load_unified_comparative_frame(perf_csvs)
         baseline_df, target_df = _build_baseline_target_frames(df, agg_col)
     except (FileNotFoundError, ValueError) as e:
@@ -329,8 +329,9 @@ def main() -> None:
 
     p = argparse.ArgumentParser(
         description=(
-            "Generate comparative cumulative projection chart from perf_report_csvs "
-            "or from perf_report.xlsx (plotting_manual CumulativeProjectionChart)."
+            "Generate comparative cumulative projection chart from "
+            "perf_report_trace1_csvs/ or from perf_report.xlsx "
+            "(plotting_manual CumulativeProjectionChart)."
         )
     )
     p.add_argument(
@@ -343,7 +344,9 @@ def main() -> None:
         "output_dir",
         nargs="?",
         default=None,
-        help="Directory for PNG/base64 (and perf_report_csvs/ when not using --excel)",
+        help=(
+            "Directory for PNG/base64 (and perf_report_trace1_csvs/ when not using --excel)"
+        ),
     )
     p.add_argument("trace1_label", help="Label for Trace 1 (primary profile)")
     p.add_argument("trace2_label", help="Label for Trace 2 (extension_args trace)")
