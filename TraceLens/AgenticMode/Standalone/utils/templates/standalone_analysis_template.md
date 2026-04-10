@@ -31,6 +31,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
      bar; right: throughput uncertainty band from same range, no uncertainty at baseline).
    - Comparative: plot shows gap-to-target per category (trace 1 vs trace 2 kernel times).
    If the plot was not generated (Step 9.5 failed), the placeholder is removed.
+   - `{{COMPARATIVE_CUMULATIVE_PLOT}}` (comparative only): Step 10.3 embeds a cumulative kernel-time figure from TraceDiff-enriched `unified_perf_summary.csv`; removed if generation is skipped.
 4. Compute Kernel Optimizations: P1-P3+ from category subagent findings.
    - Standalone: Impact estimates show a range (75–100% of roofline target), e.g. "~X.X–Y.Y ms savings (X.X–Y.Y% of E2E)".
    - Comparative: Impact estimates show gap to target trace, e.g. "~X.X ms gap to target (Y.Y% of E2E)".
@@ -42,9 +43,11 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 7. Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps).
 8. Priority icons are assigned by PRIORITY NUMBER, not severity:
    - Compute Kernel: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
+   - Kernel Fusion: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (by confidence: high → medium → low)
    - System-Level: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
 9. Detailed Analysis: A single `## Detailed Analysis` section contains
-   `### Compute Kernel Insights` then `### System-Level Insights`, each with
+   `### Compute Kernel Insights` then `### Kernel Fusion Insights` then
+   `### System-Level Insights`, each with
    `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching the optimization card titles and order.
    Each block has five required labels in order: **Identification:**, **Data:**,
    **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:**.
@@ -65,7 +68,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 # <Model> - <Platform> Standalone Analysis
 
 <!-- === COMPARATIVE title === -->
-# <Model> - Comparative Analysis: <Platform1> () vs <Platform2> (NVIDIA)
+# <Model> - Comparative Analysis: <Platform1> vs <Platform2>
 
 ## Executive Summary
 
@@ -83,15 +86,17 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 <!-- === COMPARATIVE Executive Summary === -->
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
 
-| Metric | Trace 1 -  (<Platform1>) | Trace 2 - NVIDIA (<Platform2>) | Difference |
+| Metric | Trace 1 - (<Platform1>) | Trace 2 - (<Platform2>) | Difference |
 |--------|----------------------------|-------------------------------|------------|
 | Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
-| Compute % | X% | Y% | +/-Z pp |
-| Idle % | X% | Y% | +/-Z pp |
-| Exposed Communication % | X% | Y% | +/-Z pp |
+| Compute % | X% | Y% | +/-Z% |
+| Idle % | X% | Y% | +/-Z% |
+| Exposed Communication % | X% | Y% | +/-Z% |
 | Top Bottleneck Category | Category (X%) | Category (Y%) | — |
 
 {{PERF_PLOT}}
+
+{{COMPARATIVE_CUMULATIVE_PLOT}}
 
 ## Warnings
 
@@ -130,23 +135,21 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 | 1 | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
 
 <!-- === COMPARATIVE Top Operations === -->
-<!-- Use **% of computation time** based on Trace 1 (). "Potential improvement" = Trace 1 category time − Trace 2 category time; positive means  is slower. Use "—" when trace 2 has no matching category data. -->
+<!-- Use **% of computation time** based on Trace 1. "Difference" = Trace 2 category time − Trace 1 category time; negative means Trace 2 is faster. Use "—" when trace 2 has no matching category data. -->
 
-| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
-|------|----------|-------------------|-------------------|-------------------|-----|-----------------------------|
-| 1 | ... | ... | ... | ... | ... | ~X ms (Y%) or — |
+| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
+|------|----------|-------------------|-------------------|-------------------|-----|-----------------|
+| 1 | ... | ... | ... | ... | ... | +/-X.X or — |
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
-
-<!-- === STANDALONE P-item cards and COMPARATIVE P-item cards === -->
-<!-- Impact: range from closing efficiency gaps to 75–100% of roofline (pre-computed). -->
 
 ### 🔴 P1: <Brief Title>
 
 **Insight**: [1 sentence - what's wrong]
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
+
 <!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
@@ -165,6 +168,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
 **Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
+
 → *See [Detailed Analysis: Compute kernel insights > P2](#detailed-analysis-compute-p2) for details*
 
 ---
@@ -187,23 +191,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ## Kernel Fusion Opportunities (Experimental)
 
-<!-- === STANDALONE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak). Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
-
-<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
-<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
-<!-- P1/P2/P3+ ordered by confidence then kernel time. -->
-<!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
-
-No kernel fusion opportunities detected.
-
-<!-- === COMPARATIVE Kernel Fusion === -->
-<!-- In comparative mode, kernel fusion analysis examines Trace 1 () fusion candidates only.
-     Cross-trace fusion mapping (identifying fused kernels in the NVIDIA trace and suggesting
-     equivalent fusions for ) is not yet supported. Future enhancement: use TraceDiff LCA
-     alignment to detect operations that are fused in Trace 2 but unfused in Trace 1. -->
-
-> **Note:** Kernel fusion analysis is experimental. In comparative mode, fusion candidates are identified from Trace 1 () only. Cross-trace fusion mapping (NVIDIA fused kernels →  equivalents) is not yet supported. Savings estimates use a roofline projection model (75-100% of peak).
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
 <!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
@@ -286,67 +274,60 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>
-**Identification:** [1-2 sentences - How this opportunity was surfaced. Must end with (source: <artifact> → <keys>).]
-**Data:** [1 sentence summary of table]
+**Identification:**
+**Data:**
 
 | Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound |
 |-----------|-----------------|---------------|-------|------------|------------|-------|
 | ...       | ...             | ...           | ...   | ...        | ...        | ...   |
 
-**Reasoning for Slowdown:** [2-3 sentences - Why the workload is slow as the trace shows. No micro-architecture speculation.]
-**Resolution:** [1-2 sentences - Why the suggested optimization helps — not merely restating what to do.]
-**Impact estimate:** [Rendered from metadata → impact_estimates]
+**Reasoning for Slowdown:**
+**Resolution:**
+**Impact estimate:**
 
 <!-- === COMPARATIVE Compute Kernel Data table === -->
-<!-- In comparative mode, the Data table includes columns for both traces so the reader can
-     see where the gap originates. Efficiency column is replaced by the direct time comparison.
-     Shape columns are sourced from `Input Dims` in ops CSV / TraceDiff `diff_stats`. -->
+<!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = Kernel Time (µs)_trace2_sum / 1000 when
+     present; else delta_us + t1, or —. Count T1/T2 = operation_count / operation_count_trace2 when
+     present. Difference (ms) = Trace 2 Time − Trace 1 Time (positive ⇒ more time on Trace 2), or —. -->
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>
 **Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
 **Data:** [1 sentence summary of table]
 
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Shape (T1) | Shape (T2) | FLOPS/Byte (T1/T2) | Bound (T1/T2) |
-|-----------|-------------------|-------------------|---------------|------------|------------|---------------------|---------------|
-| ...       | ...               | ...               | .../...       | ...        | ...        | .../...             | .../...       |
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+| ...       | ...               | ...               | .../...       | ...             | ...             | ...        |
 
 **Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]
 **Impact estimate:** [Rendered from metadata → impact_estimates]
 
-<!-- === COMPARATIVE Detailed Analysis disclaimer === -->
-<!-- In comparative mode: how Trace 1 is slower than Trace 2 for these operations — cite comparative kernel-time ratios, absolute time gaps -->
-
 ### Kernel Fusion Insights
-<!-- === STANDALONE Analysis === -->
 
-**REQUIRED: For each candidate in kernel_fusion_findings.md, include BOTH the Kernels table AND the Projection table below, sorted by savings descending. Do NOT summarize into a single table. If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available."**
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual savings depend on implementation feasibility and interaction effects.
 
+<!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
+<!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
+<!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available." -->
+
+<a id="detailed-analysis-fusion-1"></a>
 #### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-**Kernels:**
+**Identification:**
+
+**Data:**
 
 | Kernel | Type | Duration (us) | Perf model |
 |--------|------|--------------|------------|
 | <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
 
-**Projection:**
+**Impact estimate:**
 
-| Metric | Value |
-|--------|-------|
-| Bound type | compute / memory |
-| Fusion type | matrix_compute / memory_bound |
-| Kernels modelled | M of N |
-| Savings (low-mid-high) | X.XX - Y.YY - Z.ZZ ms |
-| E2E impact | X.XX - Z.ZZ% |
-
+<a id="detailed-analysis-fusion-2"></a>
 #### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-*Repeat the same Kernels + Projection format for each candidate.*
-
-<!-- === COMPARATIVE Analysis === -->
-<!-- In comparative mode: trace comparison based kernel fusion is work in progress -->
+*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-N`.*
 
 ### System-Level Insights
 
@@ -357,11 +338,11 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <a id="detailed-analysis-system-p1"></a>
 #### 🔴 P1: <Brief Title>
-**Identification:** [1-2 sentences - How this opportunity was surfaced. Must end with (source: <artifact> → <keys>).]
-**Data:** [1-2 sentences - System-level trace evidence — no kernel breakdown tables.]
-**Reasoning for Slowdown:** [2-3 sentences - Why the workload is slow as the trace shows. No micro-architecture speculation.]
-**Resolution:** [1-2 sentences - Why the suggested optimization helps — not merely restating what to do.]
-**Impact estimate:** [Rendered from metadata → impact_estimates]
+**Identification:**
+**Data:**
+**Reasoning for Slowdown:**
+**Resolution:**
+**Impact estimate:**
 
 ---
 
@@ -382,3 +363,13 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 - **Peak MAF (FP8)**: Z TFLOPS (if supported)
 - **Peak MAF (FP4)**: W TFLOPS (if supported)
 
+<!-- === COMPARATIVE Hardware Reference === -->
+<!-- Three-column table comparing Trace 1 and Trace 2 platform specs.
+     specs from arch/<platform>.json; specs from trace 2 metadata. -->
+
+| Reference | Trace 1 (<Platform1>) | Trace 2 (<Platform2>) |
+|-----------|-----------------------------|--------------------------------|
+| Peak HBM BW | X TB/s | Y TB/s |
+| Peak MAF (BF16) | X TFLOPS | Y TFLOPS |
+| Peak MAF (FP8) | X TFLOPS | Y TFLOPS |
+| Peak MAF (FP4) | X TFLOPS (if supported) | Y TFLOPS (if supported) |
