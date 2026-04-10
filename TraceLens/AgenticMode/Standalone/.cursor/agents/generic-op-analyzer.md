@@ -145,15 +145,35 @@ Sub-categories: W graph, V miscellaneous.
 
 ## Operations Breakdown
 
+Build operations breakdown tables from `metrics['operations']`
+
+When `comparison_scope` is `standalone`:
+
 | Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type | Sub-Category |
 |-----------|-------|-----------|---------------|------------|------------|------|--------------|
 
-**Column mappings:**
-- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
-- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. In **standalone** mode, format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`). In **comparative** mode, report it as **trace2/trace1 kernel-time ratio as a percentage**.
-- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
-- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
-- **Sub-Category**: Use `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`)
+**Standalone column mappings:**
+- **Count**: `operations[i].count` (total invocations, not unique signatures)
+- **Time (ms)**: `operations[i].time_ms` (Trace 1 kernel time)
+- **% of Category**: `operations[i].percent_of_category`
+- **Efficiency**: `operations[i].efficiency.efficiency_percent` formatted as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
+- **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
+- **Type**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
+- **Sub-Category**: `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`)
+
+**Comparative** — when `metrics['analysis_mode']` is `comparative`:
+
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) | Sub-Category |
+|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|--------------|
+
+**Comparative column mappings:**
+- **Trace 1 Time (ms)**: `operations[i].time_ms`
+- **Trace 2 Time (ms)**: `Kernel Time (µs)_trace2_sum / 1000` from the aligned row in `category_data/other_ops.csv`.
+- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operation_count_trace2` from the same CSV row. Format `T1 / T2` (use `—` for missing T2).
+- **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row.
+- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
+- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
+- **Sub-Category**: `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`)
 
 ## Key Findings
 
