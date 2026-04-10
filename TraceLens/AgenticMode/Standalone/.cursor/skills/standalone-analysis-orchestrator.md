@@ -78,7 +78,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      - Ask: "Please the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
 
 2. **Platform** → `<platform>`
-   - Ask: "Which platform are you analyzing?"
+   **`standalone`**: Ask: "Which platform are you analyzing?"
+   **`comparative`**: Ask: "Which platform is baseline trace (trace1)?"
    - Options:
      1. **MI300X**
      2. **MI325X**

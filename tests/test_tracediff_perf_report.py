@@ -59,6 +59,8 @@ def _make_diff_stats_row(
     nn_module_stack="root",
     nn_module_parent="root",
     cpu_op_uid=None,
+    busy_time=None,
+    thread_name="",
 ):
     if cpu_op_uid is None:
         cpu_op_uid = (lca_id, name, source)
@@ -67,11 +69,13 @@ def _make_diff_stats_row(
         "cpu_op_name": cpu_op_name,
         "cpu_op_uid": cpu_op_uid,
         "source": source,
+        "thread_name": thread_name,
         "Input Dims": input_dims,
         "Input Strides": input_strides,
         "Input type": input_type,
         "Concrete Inputs": concrete_inputs,
         "kernel_time": kernel_time,
+        "busy_time": busy_time,
         "lowest_common_ancestor_name": lca_name,
         "lowest_common_ancestor_id": lca_id,
         "nn_module_stack": nn_module_stack,
@@ -95,6 +99,7 @@ class TestSingleLCASingleKernel:
                 kernel_time=100.0,
                 lca_name="aten::mm",
                 lca_id=10,
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 name="gemm_kernel_v2",
@@ -103,6 +108,7 @@ class TestSingleLCASingleKernel:
                 kernel_time=80.0,
                 lca_name="aten::mm",
                 lca_id=10,
+                busy_time=80.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -146,10 +152,77 @@ class TestSingleLCASingleKernel:
 
 
 # ---------------------------------------------------------------------------
+# Test: multi-stream overlap — busy_time < sum(kernel_time)
+# ---------------------------------------------------------------------------
+class TestMultiStreamOverlap:
+    """When kernels run on multiple streams, busy_time (merged intervals)
+    is less than the sum of individual kernel durations."""
+
+    @pytest.fixture
+    def report(self):
+        rows = [
+            _make_diff_stats_row(
+                name="nhwcSliceCKernel",
+                cpu_op_name="aten::convolution_backward",
+                source="trace1",
+                kernel_time=100.0,
+                lca_name="aten::convolution_backward",
+                lca_id=50,
+                busy_time=150.0,
+            ),
+            _make_diff_stats_row(
+                name="cutlass_dgrad",
+                cpu_op_name="aten::convolution_backward",
+                source="trace1",
+                kernel_time=130.0,
+                lca_name="aten::convolution_backward",
+                lca_id=50,
+                busy_time=150.0,
+            ),
+            _make_diff_stats_row(
+                name="nhwcSliceCKernel",
+                cpu_op_name="aten::convolution_backward",
+                source="trace2",
+                kernel_time=100.0,
+                lca_name="aten::convolution_backward",
+                lca_id=50,
+                busy_time=120.0,
+            ),
+            _make_diff_stats_row(
+                name="cutlass_dgrad",
+                cpu_op_name="aten::convolution_backward",
+                source="trace2",
+                kernel_time=130.0,
+                lca_name="aten::convolution_backward",
+                lca_id=50,
+                busy_time=120.0,
+            ),
+        ]
+        df = pd.DataFrame(rows)
+        return _diff_to_summary_report(df)
+
+    def test_uses_busy_time_not_kernel_sum(self, report):
+        """busy_time (150) should be used, not sum(kernel_time) (230)."""
+        summary = report["tracediff_perf_summary"]
+        assert summary.iloc[0]["kernel_time_trace1_us"] == pytest.approx(150.0)
+        assert summary.iloc[0]["kernel_time_trace2_us"] == pytest.approx(120.0)
+
+    def test_speedup_uses_busy_time(self, report):
+        summary = report["tracediff_perf_summary"]
+        assert summary.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(
+            120.0 / 150.0
+        )
+
+    def test_delta_uses_busy_time(self, report):
+        summary = report["tracediff_perf_summary"]
+        assert summary.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-30.0)
+
+
+# ---------------------------------------------------------------------------
 # Test: single LCA with multiple kernels (summing)
 # ---------------------------------------------------------------------------
 class TestSingleLCAMultipleKernels:
-    """One LCA ID, multiple kernels per trace — kernel times must be summed."""
+    """One LCA ID, multiple kernels per trace — busy_time used for totals."""
 
     @pytest.fixture
     def report(self):
@@ -161,6 +234,7 @@ class TestSingleLCAMultipleKernels:
                 kernel_time=30.0,
                 lca_name="aten::batch_norm",
                 lca_id=42,
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 name="bn_var_kernel",
@@ -169,6 +243,7 @@ class TestSingleLCAMultipleKernels:
                 kernel_time=50.0,
                 lca_name="aten::batch_norm",
                 lca_id=42,
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 name="bn_norm_kernel",
@@ -177,6 +252,7 @@ class TestSingleLCAMultipleKernels:
                 kernel_time=20.0,
                 lca_name="aten::batch_norm",
                 lca_id=42,
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 name="fused_bn_kernel",
@@ -185,6 +261,7 @@ class TestSingleLCAMultipleKernels:
                 kernel_time=60.0,
                 lca_name="aten::batch_norm",
                 lca_id=42,
+                busy_time=60.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -232,6 +309,7 @@ class TestMultipleLCAs:
                 kernel_time=500.0,
                 lca_name="aten::mm",
                 lca_id=10,
+                busy_time=500.0,
             ),
             _make_diff_stats_row(
                 name="gemm_k_v2",
@@ -240,6 +318,7 @@ class TestMultipleLCAs:
                 kernel_time=400.0,
                 lca_name="aten::mm",
                 lca_id=10,
+                busy_time=400.0,
             ),
             # LCA 20: relu (small)
             _make_diff_stats_row(
@@ -249,6 +328,7 @@ class TestMultipleLCAs:
                 kernel_time=10.0,
                 lca_name="aten::relu",
                 lca_id=20,
+                busy_time=10.0,
             ),
             _make_diff_stats_row(
                 name="relu_k_v2",
@@ -257,6 +337,7 @@ class TestMultipleLCAs:
                 kernel_time=8.0,
                 lca_name="aten::relu",
                 lca_id=20,
+                busy_time=8.0,
             ),
             # LCA 30: conv (medium)
             _make_diff_stats_row(
@@ -266,6 +347,7 @@ class TestMultipleLCAs:
                 kernel_time=200.0,
                 lca_name="aten::conv2d",
                 lca_id=30,
+                busy_time=200.0,
             ),
             _make_diff_stats_row(
                 name="conv_k_v2",
@@ -274,6 +356,7 @@ class TestMultipleLCAs:
                 kernel_time=150.0,
                 lca_name="aten::conv2d",
                 lca_id=30,
+                busy_time=150.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -330,6 +413,7 @@ class TestMultipleCpuOpsPerLCA:
                 kernel_time=50.0,
                 lca_name="aten::miopen_convolution | aten::cudnn_convolution",
                 lca_id=92,
+                busy_time=80.0,
             ),
             _make_diff_stats_row(
                 name="conv_k_miopen_2",
@@ -338,6 +422,7 @@ class TestMultipleCpuOpsPerLCA:
                 kernel_time=30.0,
                 lca_name="aten::miopen_convolution | aten::cudnn_convolution",
                 lca_id=92,
+                busy_time=80.0,
             ),
             _make_diff_stats_row(
                 name="conv_k_cudnn",
@@ -346,6 +431,7 @@ class TestMultipleCpuOpsPerLCA:
                 kernel_time=120.0,
                 lca_name="aten::miopen_convolution | aten::cudnn_convolution",
                 lca_id=92,
+                busy_time=120.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -375,6 +461,7 @@ class TestMultipleDistinctCpuOpsPerLCA:
                 kernel_time=25.0,
                 lca_name="compound_op",
                 lca_id=99,
+                busy_time=60.0,
             ),
             _make_diff_stats_row(
                 name="k2",
@@ -383,6 +470,7 @@ class TestMultipleDistinctCpuOpsPerLCA:
                 kernel_time=35.0,
                 lca_name="compound_op",
                 lca_id=99,
+                busy_time=60.0,
             ),
             _make_diff_stats_row(
                 name="fused_k",
@@ -391,6 +479,7 @@ class TestMultipleDistinctCpuOpsPerLCA:
                 kernel_time=40.0,
                 lca_name="compound_op",
                 lca_id=99,
+                busy_time=40.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -425,6 +514,7 @@ class TestTrace2OnlyLCA:
                 kernel_time=75.0,
                 lca_name="aten::new_op",
                 lca_id=200,
+                busy_time=75.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -464,6 +554,7 @@ class TestTrace1OnlyLCA:
                 kernel_time=50.0,
                 lca_name="aten::old_op",
                 lca_id=300,
+                busy_time=50.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -507,6 +598,7 @@ class TestNaNLCADropped:
                 kernel_time=100.0,
                 lca_name="aten::mm",
                 lca_id=10,
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 name="valid_k2",
@@ -515,6 +607,7 @@ class TestNaNLCADropped:
                 kernel_time=90.0,
                 lca_name="aten::mm",
                 lca_id=10,
+                busy_time=90.0,
             ),
             {
                 "name": "orphan_kernel",
@@ -525,6 +618,7 @@ class TestNaNLCADropped:
                 "Input type": "",
                 "Concrete Inputs": "",
                 "kernel_time": 50.0,
+                "busy_time": 50.0,
                 "lowest_common_ancestor_name": None,
                 "lowest_common_ancestor_id": None,
                 "nn_module_stack": "",
@@ -555,6 +649,7 @@ class TestPassthroughSheets:
                 kernel_time=10.0,
                 lca_name="op",
                 lca_id=1,
+                busy_time=10.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -572,6 +667,7 @@ class TestPassthroughSheets:
                 kernel_time=10.0,
                 lca_name="op",
                 lca_id=1,
+                busy_time=10.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -593,6 +689,7 @@ class TestPassthroughSheets:
                 kernel_time=10.0,
                 lca_name="op",
                 lca_id=1,
+                busy_time=10.0,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -621,6 +718,7 @@ class TestRealisticScenario:
                 lca_id=134,
                 nn_module_stack="nn.Module: SimpleStemIN;nn.Module: BatchNorm2d",
                 nn_module_parent="nn.Module: BatchNorm2d",
+                busy_time=86.838,
             ),
             _make_diff_stats_row(
                 name="MIOpenBatchNormFwdTrainSpatialFinalMeanVariance",
@@ -629,6 +727,7 @@ class TestRealisticScenario:
                 kernel_time=52.76,
                 lca_name="aten::miopen_batch_norm | aten::native_batch_norm",
                 lca_id=134,
+                busy_time=86.838,
             ),
             _make_diff_stats_row(
                 name="MIOpenBatchNormFwdTrainSpatialNorm",
@@ -637,6 +736,7 @@ class TestRealisticScenario:
                 kernel_time=17.559,
                 lca_name="aten::miopen_batch_norm | aten::native_batch_norm",
                 lca_id=134,
+                busy_time=86.838,
             ),
             _make_diff_stats_row(
                 name="fill_kernel",
@@ -645,6 +745,7 @@ class TestRealisticScenario:
                 kernel_time=1.407,
                 lca_name="aten::miopen_batch_norm | aten::native_batch_norm",
                 lca_id=134,
+                busy_time=198.719,
             ),
             _make_diff_stats_row(
                 name="batch_norm_collect_statistics",
@@ -653,6 +754,7 @@ class TestRealisticScenario:
                 kernel_time=117.888,
                 lca_name="aten::miopen_batch_norm | aten::native_batch_norm",
                 lca_id=134,
+                busy_time=198.719,
             ),
             _make_diff_stats_row(
                 name="batch_norm_update_stats",
@@ -661,6 +763,7 @@ class TestRealisticScenario:
                 kernel_time=2.048,
                 lca_name="aten::miopen_batch_norm | aten::native_batch_norm",
                 lca_id=134,
+                busy_time=198.719,
             ),
             _make_diff_stats_row(
                 name="batch_norm_transform_input",
@@ -669,6 +772,7 @@ class TestRealisticScenario:
                 kernel_time=77.376,
                 lca_name="aten::miopen_batch_norm | aten::native_batch_norm",
                 lca_id=134,
+                busy_time=198.719,
             ),
             # LCA 92: convolution
             _make_diff_stats_row(
@@ -678,6 +782,7 @@ class TestRealisticScenario:
                 kernel_time=51.239,
                 lca_name="aten::miopen_convolution | aten::cudnn_convolution",
                 lca_id=92,
+                busy_time=51.239,
             ),
             _make_diff_stats_row(
                 name="implicit_convolve_sgemm",
@@ -686,6 +791,7 @@ class TestRealisticScenario:
                 kernel_time=128.096,
                 lca_name="aten::miopen_convolution | aten::cudnn_convolution",
                 lca_id=92,
+                busy_time=128.096,
             ),
         ]
         df = pd.DataFrame(rows)
@@ -1097,6 +1203,7 @@ class TestBuildTrace2TimeLookup:
                 50.0,
                 "op",
                 1,
+                busy_time=50.0,
             ),
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
@@ -1115,6 +1222,7 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[[32,64]]",
                 input_type="float",
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 "k2",
@@ -1125,10 +1233,11 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[[32,64]]",
                 input_type="float",
+                busy_time=80.0,
             ),
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
-        key = ("aten::mm", "((32,64))", "float", "", "")
+        key = ("aten::mm", "((32,64))", "float", "", "", "")
         assert key in lookup
         assert lookup[key] == pytest.approx(80.0)
         assert lc[key] == 1
@@ -1145,6 +1254,7 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=50.0,
             ),
             _make_diff_stats_row(
                 "k2",
@@ -1155,6 +1265,7 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=40.0,
             ),
             _make_diff_stats_row(
                 "k3",
@@ -1165,6 +1276,7 @@ class TestBuildTrace2TimeLookup:
                 20,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=60.0,
             ),
             _make_diff_stats_row(
                 "k4",
@@ -1175,10 +1287,11 @@ class TestBuildTrace2TimeLookup:
                 20,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=45.0,
             ),
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
-        key = ("aten::mm", "(32,64)", "float", "", "")
+        key = ("aten::mm", "(32,64)", "float", "", "", "")
         assert lookup[key] == pytest.approx(85.0)  # 40 + 45
         assert lc[key] == 2
 
@@ -1195,6 +1308,7 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=50.0,
             ),
             _make_diff_stats_row(
                 "k2",
@@ -1206,6 +1320,7 @@ class TestBuildTrace2TimeLookup:
                 input_dims="[32,64]",
                 input_type="float",
                 cpu_op_uid=shared_uid,
+                busy_time=40.0,
             ),
             _make_diff_stats_row(
                 "k3",
@@ -1216,6 +1331,7 @@ class TestBuildTrace2TimeLookup:
                 20,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=60.0,
             ),
             _make_diff_stats_row(
                 "k4",
@@ -1227,10 +1343,11 @@ class TestBuildTrace2TimeLookup:
                 input_dims="[32,64]",
                 input_type="float",
                 cpu_op_uid=shared_uid,
+                busy_time=45.0,
             ),
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
-        key = ("aten::mm", "(32,64)", "float", "", "")
+        key = ("aten::mm", "(32,64)", "float", "", "", "")
         assert lookup[key] == pytest.approx(85.0)
         assert lc[key] == 1
 
@@ -1245,6 +1362,7 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=50.0,
             ),
             _make_diff_stats_row(
                 "k2",
@@ -1255,6 +1373,7 @@ class TestBuildTrace2TimeLookup:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=40.0,
             ),
             _make_diff_stats_row(
                 "k3",
@@ -1265,6 +1384,7 @@ class TestBuildTrace2TimeLookup:
                 20,
                 input_dims="[64,128]",
                 input_type="float",
+                busy_time=100.0,
             ),
             _make_diff_stats_row(
                 "k4",
@@ -1275,14 +1395,56 @@ class TestBuildTrace2TimeLookup:
                 20,
                 input_dims="[64,128]",
                 input_type="float",
+                busy_time=90.0,
             ),
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         assert len(lookup) == 2
-        assert lookup[("aten::mm", "(32,64)", "float", "", "")] == pytest.approx(40.0)
-        assert lookup[("aten::mm", "(64,128)", "float", "", "")] == pytest.approx(90.0)
-        assert lc[("aten::mm", "(32,64)", "float", "", "")] == 1
-        assert lc[("aten::mm", "(64,128)", "float", "", "")] == 1
+        assert lookup[("aten::mm", "(32,64)", "float", "", "", "")] == pytest.approx(40.0)
+        assert lookup[("aten::mm", "(64,128)", "float", "", "", "")] == pytest.approx(90.0)
+        assert lc[("aten::mm", "(32,64)", "float", "", "", "")] == 1
+        assert lc[("aten::mm", "(64,128)", "float", "", "", "")] == 1
+
+    def test_busy_time_used_over_kernel_time_sum(self):
+        """When busy_time is present, lookup uses it instead of summing kernel_time."""
+        rows = [
+            _make_diff_stats_row(
+                "k1",
+                "aten::conv",
+                "trace1",
+                100.0,
+                "conv",
+                10,
+                input_dims="[2,224]",
+                input_type="float",
+                busy_time=100.0,
+            ),
+            _make_diff_stats_row(
+                "slice_k",
+                "aten::conv",
+                "trace2",
+                80.0,
+                "conv",
+                10,
+                input_dims="[2,224]",
+                input_type="float",
+                busy_time=50.0,
+            ),
+            _make_diff_stats_row(
+                "dgrad_k",
+                "aten::conv",
+                "trace2",
+                60.0,
+                "conv",
+                10,
+                input_dims="[2,224]",
+                input_type="float",
+                busy_time=50.0,
+            ),
+        ]
+        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
+        key = ("aten::conv", "(2,224)", "float", "", "", "")
+        assert lookup[key] == pytest.approx(50.0)
 
     def test_trace1_only_lca_returns_zero_trace2_time(self):
         rows = [
@@ -1293,10 +1455,11 @@ class TestBuildTrace2TimeLookup:
                 100.0,
                 "mm",
                 10,
+                busy_time=100.0,
             ),
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
-        key = ("aten::mm", "", "", "", "")
+        key = ("aten::mm", "", "", "", "", "")
         assert key in lookup
         assert lookup[key] == pytest.approx(0.0)
         assert lc[key] == 0
@@ -1310,7 +1473,7 @@ class TestEnrichSheetWithTrace2:
 
     def test_empty_sheet_returned_unchanged(self):
         df = pd.DataFrame()
-        lookup = {("aten::mm", "", "", "", ""): 100.0}
+        lookup = {("aten::mm", "", "", "", "", ""): 100.0}
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
         assert result.empty
 
@@ -1335,7 +1498,7 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        key = ("aten::mm", "(32,64)", "float", "", "")
+        key = ("aten::mm", "(32,64)", "float", "", "", "")
         lookup = {key: 80.0}
         result = _enrich_sheet_with_trace2(
             df, lookup, "Kernel Time (µs)_sum", count_lookup={key: 3}
@@ -1360,7 +1523,7 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        lookup = {("aten::relu", "(32)", "float", "", ""): 10.0}
+        lookup = {("aten::relu", "(32)", "float", "", "", ""): 10.0}
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
         import numpy as np
@@ -1379,7 +1542,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         lookup = {
-            ("aten::mm", "(32,64)", "float", "", ""): 150.0,
+            ("aten::mm", "(32,64)", "float", "", "", ""): 150.0,
         }
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
@@ -1403,7 +1566,7 @@ class TestEnrichSheetWithTrace2:
                 "TFLOPS/s_mean": [10.0],
             }
         )
-        lookup = {("aten::mm", "", "", "", ""): 40.0}
+        lookup = {("aten::mm", "", "", "", "", ""): 40.0}
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
         cols = list(result.columns)
@@ -1430,7 +1593,7 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [50.0],
             }
         )
-        key = ("aten::mm", "", "", "", "")
+        key = ("aten::mm", "", "", "", "", "")
         lookup = {key: 40.0}
         lca_ids = {key: [101, 102]}
         result = _enrich_sheet_with_trace2(
@@ -1461,7 +1624,7 @@ class TestEnrichSheetWithTrace2:
                 "total_direct_kernel_time_sum": [100.0],
             }
         )
-        lookup = {("aten::mm", "(32,64)", "float", "", ""): 70.0}
+        lookup = {("aten::mm", "(32,64)", "float", "", "", ""): 70.0}
         result = _enrich_sheet_with_trace2(df, lookup, "total_direct_kernel_time_sum")
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(70.0 / 100.0)
 
@@ -1476,7 +1639,7 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        lookup = {("aten::mm", "", "", "", ""): 0.0}
+        lookup = {("aten::mm", "", "", "", "", ""): 0.0}
         result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
 
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(0.0)
@@ -1494,7 +1657,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         original_cols = list(df.columns)
-        lookup = {("aten::mm", "", "", "", ""): 80.0}
+        lookup = {("aten::mm", "", "", "", "", ""): 80.0}
         _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
         assert list(df.columns) == original_cols
 
@@ -1518,6 +1681,7 @@ class TestEnrichmentViaBuildReport:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=200.0,
             ),
             _make_diff_stats_row(
                 "gemm_k2",
@@ -1528,6 +1692,7 @@ class TestEnrichmentViaBuildReport:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=150.0,
             ),
             _make_diff_stats_row(
                 "relu_k",
@@ -1538,6 +1703,7 @@ class TestEnrichmentViaBuildReport:
                 20,
                 input_dims="[32]",
                 input_type="float",
+                busy_time=30.0,
             ),
             _make_diff_stats_row(
                 "relu_k2",
@@ -1548,6 +1714,7 @@ class TestEnrichmentViaBuildReport:
                 20,
                 input_dims="[32]",
                 input_type="float",
+                busy_time=25.0,
             ),
         ]
         diff_df = pd.DataFrame(diff_rows)
@@ -1651,8 +1818,12 @@ class TestBuildLCAConsolidation:
 
     def test_single_op_lca_produces_no_adjustments(self):
         rows = [
-            _make_diff_stats_row("k1", "aten::mm", "trace1", 100.0, "mm", 10),
-            _make_diff_stats_row("k2", "aten::mm", "trace2", 80.0, "mm", 10),
+            _make_diff_stats_row(
+                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0
+            ),
+            _make_diff_stats_row(
+                "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0
+            ),
         ]
         adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame(rows))
         assert adds == {}
@@ -1664,18 +1835,38 @@ class TestBuildLCAConsolidation:
     def test_multi_op_lca_dominant_selection(self):
         """Dominant op is the one with highest total kernel time."""
         rows = [
-            _make_diff_stats_row("fill_k", "aten::fill_", "trace1", 25.0, "lca", 99),
             _make_diff_stats_row(
-                "fmha_k", "aiter::fmha_v3_bwd", "trace1", 500.0, "lca", 99
+                "fill_k",
+                "aten::fill_",
+                "trace1",
+                25.0,
+                "lca",
+                99,
+                busy_time=525.0,
             ),
             _make_diff_stats_row(
-                "flash_k", "flash_attn::bwd", "trace2", 300.0, "lca", 99
+                "fmha_k",
+                "aiter::fmha_v3_bwd",
+                "trace1",
+                500.0,
+                "lca",
+                99,
+                busy_time=525.0,
+            ),
+            _make_diff_stats_row(
+                "flash_k",
+                "flash_attn::bwd",
+                "trace2",
+                300.0,
+                "lca",
+                99,
+                busy_time=300.0,
             ),
         ]
         adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame(rows))
 
-        dominant_key = ("aiter::fmha_v3_bwd", "", "", "", "")
-        non_dom_key = ("aten::fill_", "", "", "", "")
+        dominant_key = ("aiter::fmha_v3_bwd", "", "", "", "", "")
+        non_dom_key = ("aten::fill_", "", "", "", "", "")
 
         assert dominant_key in adds
         assert adds[dominant_key] == pytest.approx(25.0)
@@ -1690,21 +1881,53 @@ class TestBuildLCAConsolidation:
     def test_multi_op_lca_multiple_instances_aggregate(self):
         """Multiple multi-op LCAs with same ops accumulate adjustments."""
         rows = [
-            _make_diff_stats_row("fill_k1", "aten::fill_", "trace1", 20.0, "lca", 1),
-            _make_diff_stats_row("fmha_k1", "aiter::fmha", "trace1", 400.0, "lca", 1),
             _make_diff_stats_row(
-                "flash_k1", "flash_attn::bwd", "trace2", 250.0, "lca", 1
+                "fill_k1",
+                "aten::fill_",
+                "trace1",
+                20.0,
+                "lca",
+                1,
+                busy_time=420.0,
             ),
-            _make_diff_stats_row("fill_k2", "aten::fill_", "trace1", 30.0, "lca", 2),
-            _make_diff_stats_row("fmha_k2", "aiter::fmha", "trace1", 600.0, "lca", 2),
             _make_diff_stats_row(
-                "flash_k2", "flash_attn::bwd", "trace2", 350.0, "lca", 2
+                "fmha_k1", "aiter::fmha", "trace1", 400.0, "lca", 1, busy_time=420.0
+            ),
+            _make_diff_stats_row(
+                "flash_k1",
+                "flash_attn::bwd",
+                "trace2",
+                250.0,
+                "lca",
+                1,
+                busy_time=250.0,
+            ),
+            _make_diff_stats_row(
+                "fill_k2",
+                "aten::fill_",
+                "trace1",
+                30.0,
+                "lca",
+                2,
+                busy_time=630.0,
+            ),
+            _make_diff_stats_row(
+                "fmha_k2", "aiter::fmha", "trace1", 600.0, "lca", 2, busy_time=630.0
+            ),
+            _make_diff_stats_row(
+                "flash_k2",
+                "flash_attn::bwd",
+                "trace2",
+                350.0,
+                "lca",
+                2,
+                busy_time=350.0,
             ),
         ]
         adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame(rows))
 
-        dominant_key = ("aiter::fmha", "", "", "", "")
-        non_dom_key = ("aten::fill_", "", "", "", "")
+        dominant_key = ("aiter::fmha", "", "", "", "", "")
+        non_dom_key = ("aten::fill_", "", "", "", "", "")
 
         assert adds[dominant_key] == pytest.approx(50.0)  # 20 + 30
         assert subs[non_dom_key] == pytest.approx(50.0)
@@ -1738,7 +1961,7 @@ class TestApplyLCAConsolidation:
                 }
             )
         }
-        adds = {("aiter::fmha", "", "", "", ""): 25.0}
+        adds = {("aiter::fmha", "", "", "", "", ""): 25.0}
         result = _apply_lca_consolidation(sheets, adds, {})
         assert result["ops"].iloc[0]["Kernel Time (µs)_sum"] == pytest.approx(525.0)
 
@@ -1755,7 +1978,7 @@ class TestApplyLCAConsolidation:
                 }
             )
         }
-        subs = {("aten::fill_", "", "", "", ""): 25.0}
+        subs = {("aten::fill_", "", "", "", "", ""): 25.0}
         result = _apply_lca_consolidation(sheets, {}, subs)
         assert result["ops"].iloc[0]["Kernel Time (µs)_sum"] == pytest.approx(75.0)
 
@@ -1772,7 +1995,7 @@ class TestApplyLCAConsolidation:
                 }
             )
         }
-        subs = {("aten::fill_", "", "", "", ""): 25.0}
+        subs = {("aten::fill_", "", "", "", "", ""): 25.0}
         result = _apply_lca_consolidation(sheets, {}, subs)
         assert len(result["ops"]) == 1
         assert result["ops"].iloc[0]["name"] == "aten::mm"
@@ -1790,8 +2013,8 @@ class TestApplyLCAConsolidation:
                 }
             )
         }
-        adds = {("aiter::fmha", "", "", "", ""): 25.0}
-        subs = {("aten::fill_", "", "", "", ""): 25.0}
+        adds = {("aiter::fmha", "", "", "", "", ""): 25.0}
+        subs = {("aten::fill_", "", "", "", "", ""): 25.0}
         result = _apply_lca_consolidation(sheets, adds, subs)
 
         fmha_row = result["ops"][result["ops"]["name"] == "aiter::fmha"].iloc[0]
@@ -1819,12 +2042,32 @@ class TestConsolidationViaReport:
     def consolidated_report(self):
         diff_rows = [
             # Multi-op LCA 99: fill_ (25us) + fmha (500us) → flash_bwd (300us)
-            _make_diff_stats_row("fill_k", "aten::fill_", "trace1", 25.0, "lca", 99),
             _make_diff_stats_row(
-                "fmha_k", "aiter::fmha_v3_bwd", "trace1", 500.0, "lca", 99
+                "fill_k",
+                "aten::fill_",
+                "trace1",
+                25.0,
+                "lca",
+                99,
+                busy_time=525.0,
             ),
             _make_diff_stats_row(
-                "flash_k", "flash_attn::bwd", "trace2", 300.0, "lca", 99
+                "fmha_k",
+                "aiter::fmha_v3_bwd",
+                "trace1",
+                500.0,
+                "lca",
+                99,
+                busy_time=525.0,
+            ),
+            _make_diff_stats_row(
+                "flash_k",
+                "flash_attn::bwd",
+                "trace2",
+                300.0,
+                "lca",
+                99,
+                busy_time=300.0,
             ),
             # Single-op LCA 10: mm (200us) → mm (150us)
             _make_diff_stats_row(
@@ -1836,6 +2079,7 @@ class TestConsolidationViaReport:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=200.0,
             ),
             _make_diff_stats_row(
                 "gemm_k2",
@@ -1846,6 +2090,7 @@ class TestConsolidationViaReport:
                 10,
                 input_dims="[32,64]",
                 input_type="float",
+                busy_time=150.0,
             ),
         ]
         diff_df = pd.DataFrame(diff_rows)

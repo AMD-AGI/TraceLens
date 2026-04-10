@@ -97,8 +97,14 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
         nn_module_stack = src["nn_module_stack"].iloc[0] if not src.empty else ""
         nn_module_parent = src["nn_module_parent"].iloc[0] if not src.empty else ""
 
-        kernel_time_trace1 = t1["kernel_time"].sum() if not t1.empty else 0.0
-        kernel_time_trace2 = t2["kernel_time"].sum() if not t2.empty else 0.0
+        if not t1.empty and "busy_time" in t1.columns and t1["busy_time"].notna().any():
+            kernel_time_trace1 = t1["busy_time"].iloc[0]
+        else:
+            kernel_time_trace1 = t1["kernel_time"].sum() if not t1.empty else 0.0
+        if not t2.empty and "busy_time" in t2.columns and t2["busy_time"].notna().any():
+            kernel_time_trace2 = t2["busy_time"].iloc[0]
+        else:
+            kernel_time_trace2 = t2["kernel_time"].sum() if not t2.empty else 0.0
         num_kernels_trace1 = len(t1)
         num_kernels_trace2 = len(t2)
         kernel_names_trace1 = t1["name"].tolist() if not t1.empty else []
@@ -184,10 +190,14 @@ def _make_str_key(name, row, arg_cols=_ARG_COLS):
         if val is None or (isinstance(val, float) and np.isnan(val)):
             val = row.get(f"{c}_first", "")
         parts.append(_normalize_val(str(val if val is not None else "")))
+    tn = row.get("thread_name", None)
+    if tn is None or (isinstance(tn, float) and np.isnan(tn)):
+        tn = row.get("thread_name_first", "")
+    parts.append(str(tn if tn is not None else ""))
     return tuple(parts)
 
 
-def _str_key_from_cpu_op_node(node) -> Tuple:
+def _str_key_from_cpu_op_node(node, tree=None) -> Tuple:
     """Same tuple key as perf sheets use for a trace-tree cpu_op node."""
     if node is None:
         return tuple()
@@ -196,6 +206,13 @@ def _str_key_from_cpu_op_node(node) -> Tuple:
     row = {
         c: str(args.get(c, "") if args.get(c) is not None else "") for c in _ARG_COLS
     }
+    tn = ""
+    if tree is not None:
+        pid = node.get("pid")
+        tid = node.get("tid")
+        if pid is not None and tid is not None:
+            tn = tree.metadata.get(pid, {}).get(tid, {}).get("thread_name", "")
+    row["thread_name"] = tn
     return _make_str_key(name, row)
 
 
@@ -232,7 +249,7 @@ def _find_perf_summary_matching_node(cpu_op_uid, tree, perf_summary_keys: Set[tu
     temp = node
     while temp is not None:
         if tree.event_to_category(temp) == "cpu_op":
-            k = _str_key_from_cpu_op_node(temp)
+            k = _str_key_from_cpu_op_node(temp, tree)
             if k in perf_summary_keys:
                 return temp
         p_uid = temp.get("parent")
@@ -246,7 +263,7 @@ def _find_perf_summary_matching_node(cpu_op_uid, tree, perf_summary_keys: Set[tu
         if child_node is None:
             continue
         if tree.event_to_category(child_node) == "cpu_op":
-            k = _str_key_from_cpu_op_node(child_node)
+            k = _str_key_from_cpu_op_node(child_node, tree)
             if k in perf_summary_keys:
                 return child_node
         queue.extend(ptc.get(child_uid, []))
@@ -275,7 +292,7 @@ def _tree_resolve_uid_to_key(
     if uid not in uid_cache:
         anc = _find_perf_summary_matching_node(uid, tree, perf_summary_keys)
         uid_cache[uid] = (
-            _str_key_from_cpu_op_node(anc)
+            _str_key_from_cpu_op_node(anc, tree)
             if anc is not None
             else _NO_UNIFIED_PERF_MATCH
         )
@@ -349,7 +366,11 @@ def _build_lca_consolidation(
     if not multi_lca_ids:
         return empty
 
-    lca_t2_time = t2.groupby("lowest_common_ancestor_id")["kernel_time"].sum()
+    _has_busy = "busy_time" in t2.columns and t2["busy_time"].notna().any()
+    if _has_busy:
+        lca_t2_time = t2.groupby("lowest_common_ancestor_id")["busy_time"].first()
+    else:
+        lca_t2_time = t2.groupby("lowest_common_ancestor_id")["kernel_time"].sum()
 
     uid_cache: Dict = {}
     time_additions: Dict[tuple, float] = {}
@@ -479,7 +500,15 @@ def _build_trace2_time_lookup(
     if trace1.empty:
         return {}, {}, {}
 
-    lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["kernel_time"].sum()
+    _has_busy = "busy_time" in trace2.columns and trace2["busy_time"].notna().any()
+    if _has_busy:
+        lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")[
+            "busy_time"
+        ].first()
+    else:
+        lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")[
+            "kernel_time"
+        ].sum()
 
     uid_cache: Dict = {}
     lca_groups = trace1.groupby("lowest_common_ancestor_id")

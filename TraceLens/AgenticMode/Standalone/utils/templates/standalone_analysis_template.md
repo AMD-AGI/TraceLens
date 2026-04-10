@@ -65,7 +65,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 # <Model> - <Platform> Standalone Analysis
 
 <!-- === COMPARATIVE title === -->
-# <Model> - Comparative Analysis: <Platform1> () vs <Platform2> (NVIDIA)
+# <Model> - Comparative Analysis: <Platform1> vs <Platform2>
 
 ## Executive Summary
 
@@ -83,7 +83,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 <!-- === COMPARATIVE Executive Summary === -->
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
 
-| Metric | Trace 1 -  (<Platform1>) | Trace 2 - NVIDIA (<Platform2>) | Difference |
+| Metric | Trace 1 - (<Platform1>) | Trace 2 - (<Platform2>) | Difference |
 |--------|----------------------------|-------------------------------|------------|
 | Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
 | Compute % | X% | Y% | +/-Z% |
@@ -134,7 +134,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 | Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
 |------|----------|-------------------|-------------------|-------------------|-----|-----------------------------|
-| 1 | ... | ... | ... | ... | ... | ~X ms (Y%) or — |
+| 1 | ... | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
@@ -283,16 +283,16 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- === COMPARATIVE Compute Kernel Data table === -->
 <!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = Kernel Time (µs)_trace2_sum / 1000 when
      present; else delta_us + t1, or —. Count T1/T2 = operation_count / operation_count_trace2 when
-     present. -->
+     present. Difference (ms) = Trace 2 Time − Trace 1 Time (positive ⇒ more time on Trace 2), or —. -->
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>
 **Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
 **Data:** [1 sentence summary of table]
 
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | FLOPS/Byte (T1) | Bound (T1) |
-|-----------|-------------------|-------------------|---------------|-----------------|------------|
-| ...       | ...               | ...               | .../...       | ...             | ...        |
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+| ...       | ...               | ...               | .../...       | ...             | ...             | ...        |
 
 **Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]
