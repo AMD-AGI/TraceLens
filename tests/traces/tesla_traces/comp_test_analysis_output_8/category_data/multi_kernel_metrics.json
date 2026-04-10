@@ -1,0 +1,53 @@
+{
+  "status": "SUCCESS",
+  "total_time_ms": 517.206,
+  "memcpy_summary": {
+    "total_count": 273,
+    "total_time_ms": 1.027,
+    "by_direction": {
+      "D2D": {
+        "count": 273,
+        "total_time_us": 1026.7,
+        "avg_time_us": 3.76,
+        "max_time_us": 4.8,
+        "total_bytes": 512772,
+        "avg_bytes": 1878.29
+      }
+    }
+  },
+  "nccl_summary": {
+    "total_count": 0,
+    "total_time_ms": 0.0,
+    "top_ops": []
+  },
+  "overlap_analysis": {
+    "total_time_us": 517205.87,
+    "computation_time_us": 507021.52,
+    "total_comm_time_us": 0,
+    "exposed_comm_time_us": 0,
+    "total_memcpy_time_us": 1026.7,
+    "exposed_memcpy_time_us": 1026.7,
+    "comm_overlap_ratio": null,
+    "memcpy_overlap_ratio": 0.0,
+    "comm_percent_of_total": 0.0,
+    "memcpy_percent_of_total": 0.2
+  },
+  "memcpy_assessment": {
+    "flagged": false,
+    "total_count": 273,
+    "total_time_ms": 1.027,
+    "percent_of_total": 0.2,
+    "issues": []
+  },
+  "nccl_blocking_assessment": {
+    "flagged": false,
+    "details": "No communication events detected"
+  },
+  "overlap_assessment": {
+    "flagged": false,
+    "details": "Insufficient communication data for overlap analysis"
+  },
+  "patterns_detected": [],
+  "cross_validation": null,
+  "impact_estimates": []
+}

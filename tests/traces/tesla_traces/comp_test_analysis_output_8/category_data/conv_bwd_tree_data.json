@@ -1,0 +1,20 @@
+{
+  "15577": {
+    "op_name": "aten::convolution_backward",
+    "ex_uid": 15577,
+    "input_dims": "((2, 896, 59, 91), (2, 896, 59, 91), (896, 896, 1, 1), (), (), (), (), (), (), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "15716": {
+    "op_name": "aten::convolution_backward",
+    "ex_uid": 15716,
+    "input_dims": "((2, 896, 59, 91), (2, 896, 59, 91), (896, 56, 3, 3), (), (), (), (), (), (), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}

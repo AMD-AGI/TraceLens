@@ -1,0 +1,246 @@
+{
+  "platform": "MI355X",
+  "trace_path": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/mi355_single_gpu.json",
+  "output_dir": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8",
+  "comparison_scope": "comparative",
+  "gpu_utilization": {
+    "total_time_ms": 517.205869140625,
+    "computation_time_percent": 96.95058291075424,
+    "exposed_comm_time_percent": 0.0,
+    "exposed_memcpy_time_percent": 0.1985089049235241,
+    "idle_time_percent": 2.85090818432223
+  },
+  "categories": [
+    {
+      "name": "cpu_idle",
+      "display_name": "CPU/Idle Analysis",
+      "skill": "cpu-idle-analysis",
+      "tier": "system",
+      "ops_count": 0,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/cpu_idle_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/cpu_idle_metadata.json",
+      "tree_data_file": null,
+      "priority": 0
+    },
+    {
+      "name": "multi_tensor_apply",
+      "display_name": "multi_tensor_apply",
+      "skill": "generic-op-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 7,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/multi_tensor_apply_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/multi_tensor_apply_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/multi_tensor_apply_tree_data.json",
+      "gpu_kernel_time_ms": 109.633,
+      "cpu_duration_ms": 79.667,
+      "sync_time_ms": 48.97,
+      "sync_ops_count": 1,
+      "has_sync_bottleneck": true
+    },
+    {
+      "name": "other",
+      "display_name": "other",
+      "skill": "generic-op-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 7,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/other_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/other_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/other_tree_data.json",
+      "gpu_kernel_time_ms": 24.122,
+      "cpu_duration_ms": 2.192,
+      "sync_time_ms": 0.039,
+      "sync_ops_count": 1,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "convolution",
+      "display_name": "Convolution",
+      "skill": "convolution-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 72,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/convolution_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/convolution_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/conv_bwd_tree_data.json",
+      "gpu_kernel_time_ms": 96.795,
+      "cpu_duration_ms": 61.94,
+      "sync_time_ms": 0.851,
+      "sync_ops_count": 2,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "gemm",
+      "display_name": "GEMM",
+      "skill": "gemm-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 15,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/gemm_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/gemm_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/gemm_tree_data.json",
+      "gpu_kernel_time_ms": 106.409,
+      "cpu_duration_ms": 9.107,
+      "sync_time_ms": 0.15,
+      "sync_ops_count": 1,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "norm",
+      "display_name": "Norm",
+      "skill": "norm-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 22,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/norm_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/norm_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/norm_fwd_tree_data.json",
+      "gpu_kernel_time_ms": 61.205,
+      "cpu_duration_ms": 27.97,
+      "sync_time_ms": 0,
+      "sync_ops_count": 0,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "reduce",
+      "display_name": "reduce",
+      "skill": "reduce-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 15,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/reduce_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/reduce_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/reduce_tree_data.json",
+      "gpu_kernel_time_ms": 18.248,
+      "cpu_duration_ms": 5.83,
+      "sync_time_ms": 0,
+      "sync_ops_count": 0,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "elementwise",
+      "display_name": "elementwise",
+      "skill": "elementwise-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 180,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/elementwise_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/elementwise_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/elementwise_tree_data.json",
+      "gpu_kernel_time_ms": 82.227,
+      "cpu_duration_ms": 31.726,
+      "sync_time_ms": 0.184,
+      "sync_ops_count": 4,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "sdpa_fwd",
+      "display_name": "SDPA_fwd",
+      "skill": "sdpa-analysis",
+      "tier": "compute_kernel",
+      "ops_count": 2,
+      "csv_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/sdpa_fwd_ops.csv",
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/sdpa_fwd_metadata.json",
+      "tree_data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/sdpa_fwd_tree_data.json",
+      "gpu_kernel_time_ms": 0.0,
+      "cpu_duration_ms": 1.485,
+      "sync_time_ms": 0,
+      "sync_ops_count": 0,
+      "has_sync_bottleneck": false
+    },
+    {
+      "name": "multi_kernel",
+      "display_name": "Multi-Kernel Issues",
+      "skill": "multi-kernel-analysis",
+      "tier": "system",
+      "ops_count": 0,
+      "csv_file": null,
+      "metadata_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/metadata/multi_kernel_metadata.json",
+      "data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/multi_kernel_data.json",
+      "tree_data_file": null
+    },
+    {
+      "name": "kernel_fusion",
+      "display_name": "Kernel Fusion Opportunities",
+      "skill": "kernel-fusion-analyzer",
+      "tier": "system",
+      "ops_count": 35,
+      "csv_file": null,
+      "metadata_file": null,
+      "data_file": "/home/khoffmey/dev/TraceLens/tests/traces/tesla_traces/comp_test_analysis_output_8/category_data/fusion_candidates.json",
+      "tree_data_file": null,
+      "gpu_kernel_time_ms": 0.0,
+      "cpu_duration_ms": 0.0,
+      "sync_time_ms": 0,
+      "sync_ops_count": 0,
+      "has_sync_bottleneck": false
+    }
+  ],
+  "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
+  "trace2_gpu_utilization": {
+    "total_time_ms": 626.7104165039062,
+    "computation_time_percent": 84.33006783008264,
+    "exposed_comm_time_percent": 0.0,
+    "exposed_memcpy_time_percent": 0.0578365643672432,
+    "idle_time_percent": 15.612095605550127
+  },
+  "trace2_ops_summary_by_category": [
+    {
+      "op category": "gemm",
+      "Count": 591,
+      "total_direct_kernel_time_ms": 95.788953125,
+      "Percentage (%)": 20.0091314103,
+      "Cumulative Percentage (%)": 20.0091314103
+    },
+    {
+      "op category": "multi_tensor_apply",
+      "Count": 7,
+      "total_direct_kernel_time_ms": 93.5925405273,
+      "Percentage (%)": 19.5503278963,
+      "Cumulative Percentage (%)": 39.5594593067
+    },
+    {
+      "op category": "elementwise",
+      "Count": 6508,
+      "total_direct_kernel_time_ms": 92.6108134766,
+      "Percentage (%)": 19.3452572183,
+      "Cumulative Percentage (%)": 58.9047165249
+    },
+    {
+      "op category": "norm",
+      "Count": 1024,
+      "total_direct_kernel_time_ms": 90.7384921875,
+      "Percentage (%)": 18.9541523832,
+      "Cumulative Percentage (%)": 77.8588689081
+    },
+    {
+      "op category": "convolution",
+      "Count": 1472,
+      "total_direct_kernel_time_ms": 90.4896557617,
+      "Percentage (%)": 18.9021735215,
+      "Cumulative Percentage (%)": 96.7610424296
+    },
+    {
+      "op category": "reduce",
+      "Count": 472,
+      "total_direct_kernel_time_ms": 13.6167167969,
+      "Percentage (%)": 2.8443642704,
+      "Cumulative Percentage (%)": 99.6054067
+    },
+    {
+      "op category": "other",
+      "Count": 68,
+      "total_direct_kernel_time_ms": 1.8890214844,
+      "Percentage (%)": 0.3945933,
+      "Cumulative Percentage (%)": 100.0
+    },
+    {
+      "op category": "sdpa_bwd",
+      "Count": 33,
+      "total_direct_kernel_time_ms": 0.0,
+      "Percentage (%)": 0.0,
+      "Cumulative Percentage (%)": 100.0
+    },
+    {
+      "op category": "sdpa_fwd",
+      "Count": 33,
+      "total_direct_kernel_time_ms": 0.0,
+      "Percentage (%)": 0.0,
+      "Cumulative Percentage (%)": 100.0
+    }
+  ]
+}

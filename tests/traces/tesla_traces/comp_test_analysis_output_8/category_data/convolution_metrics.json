@@ -1,0 +1,1799 @@
+{
+  "category": "convolution",
+  "status": "OK",
+  "analysis_mode": "comparative",
+  "total_time_ms": 96.795,
+  "percent_of_compute": 18.71,
+  "operation_count": 1472,
+  "operations": [
+    {
+      "name": "aten::convolution_backward",
+      "count": 152,
+      "time_ms": 14.801,
+      "percent_of_category": 15.29,
+      "efficiency": {
+        "tflops_achieved": 354.37,
+        "tb_s_achieved": 0.82,
+        "efficiency_percent": 39.56,
+        "bound_type": "compute",
+        "flops_per_byte": 430.06,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.028,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 72,
+      "time_ms": 11.15,
+      "percent_of_category": 11.52,
+      "efficiency": {
+        "tflops_achieved": 125.33,
+        "tb_s_achieved": 0.51,
+        "efficiency_percent": 55.34,
+        "bound_type": "compute",
+        "flops_per_byte": 246.22,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.028,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 56,
+      "time_ms": 6.571,
+      "percent_of_category": 6.79,
+      "efficiency": {
+        "tflops_achieved": 293.86,
+        "tb_s_achieved": 1.32,
+        "efficiency_percent": 42.98,
+        "bound_type": "compute",
+        "flops_per_byte": 222.84,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.006,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 24,
+      "time_ms": 5.837,
+      "percent_of_category": 6.03,
+      "efficiency": {
+        "tflops_achieved": 159.51,
+        "tb_s_achieved": 0.64,
+        "efficiency_percent": 105.03,
+        "bound_type": "compute",
+        "flops_per_byte": 250.53,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.006,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 4.724,
+      "percent_of_category": 4.88,
+      "efficiency": {
+        "tflops_achieved": 130.47,
+        "tb_s_achieved": 1.29,
+        "efficiency_percent": 252.98,
+        "bound_type": "memory",
+        "flops_per_byte": 100.85,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 152,
+      "time_ms": 4.468,
+      "percent_of_category": 4.62,
+      "efficiency": {
+        "tflops_achieved": 586.87,
+        "tb_s_achieved": 1.36,
+        "efficiency_percent": 50.8,
+        "bound_type": "compute",
+        "flops_per_byte": 430.06,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.025,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 3.54,
+      "percent_of_category": 3.66,
+      "efficiency": {
+        "tflops_achieved": 174.13,
+        "tb_s_achieved": 0.69,
+        "efficiency_percent": 103.48,
+        "bound_type": "compute",
+        "flops_per_byte": 251.63,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 24,
+      "time_ms": 2.859,
+      "percent_of_category": 2.95,
+      "efficiency": {
+        "tflops_achieved": 287.51,
+        "tb_s_achieved": 2.57,
+        "efficiency_percent": 67.92,
+        "bound_type": "memory",
+        "flops_per_byte": 111.93,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.01,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 2.496,
+      "percent_of_category": 2.58,
+      "efficiency": {
+        "tflops_achieved": 124.34,
+        "tb_s_achieved": 1.23,
+        "efficiency_percent": 213.45,
+        "bound_type": "memory",
+        "flops_per_byte": 101.13,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 72,
+      "time_ms": 2.484,
+      "percent_of_category": 2.57,
+      "efficiency": {
+        "tflops_achieved": 281.23,
+        "tb_s_achieved": 1.14,
+        "efficiency_percent": 107.03,
+        "bound_type": "compute",
+        "flops_per_byte": 246.22,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.02,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.993,
+      "percent_of_category": 2.06,
+      "efficiency": {
+        "tflops_achieved": 367.42,
+        "tb_s_achieved": 0.41,
+        "efficiency_percent": 53.46,
+        "bound_type": "compute",
+        "flops_per_byte": 907.04,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 72,
+      "time_ms": 1.964,
+      "percent_of_category": 2.03,
+      "efficiency": {
+        "tflops_achieved": 0.06,
+        "tb_s_achieved": 0.03,
+        "efficiency_percent": 39.02,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.03,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution",
+      "count": 56,
+      "time_ms": 1.789,
+      "percent_of_category": 1.85,
+      "efficiency": {
+        "tflops_achieved": 540.45,
+        "tb_s_achieved": 2.43,
+        "efficiency_percent": 63.55,
+        "bound_type": "compute",
+        "flops_per_byte": 222.84,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.038,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 1.659,
+      "percent_of_category": 1.71,
+      "efficiency": {
+        "tflops_achieved": 185.82,
+        "tb_s_achieved": 1.84,
+        "efficiency_percent": 71.54,
+        "bound_type": "memory",
+        "flops_per_byte": 100.85,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 72,
+      "time_ms": 1.642,
+      "percent_of_category": 1.7,
+      "efficiency": {
+        "tflops_achieved": 0.07,
+        "tb_s_achieved": 0.04,
+        "efficiency_percent": 50.53,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.028,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution",
+      "count": 24,
+      "time_ms": 1.562,
+      "percent_of_category": 1.61,
+      "efficiency": {
+        "tflops_achieved": 298.06,
+        "tb_s_achieved": 1.19,
+        "efficiency_percent": 95.68,
+        "bound_type": "compute",
+        "flops_per_byte": 250.53,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.013,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.497,
+      "percent_of_category": 1.55,
+      "efficiency": {
+        "tflops_achieved": 365.93,
+        "tb_s_achieved": 2.45,
+        "efficiency_percent": 57.59,
+        "bound_type": "memory",
+        "flops_per_byte": 149.2,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.471,
+      "percent_of_category": 1.52,
+      "efficiency": {
+        "tflops_achieved": 105.48,
+        "tb_s_achieved": 1.06,
+        "efficiency_percent": 161.57,
+        "bound_type": "memory",
+        "flops_per_byte": 99.86,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.44,
+      "percent_of_category": 1.49,
+      "efficiency": {
+        "tflops_achieved": 383.17,
+        "tb_s_achieved": 1.29,
+        "efficiency_percent": 42.75,
+        "bound_type": "compute",
+        "flops_per_byte": 296.6,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.399,
+      "percent_of_category": 1.45,
+      "efficiency": {
+        "tflops_achieved": 445.17,
+        "tb_s_achieved": 0.76,
+        "efficiency_percent": 53.92,
+        "bound_type": "compute",
+        "flops_per_byte": 586.43,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.295,
+      "percent_of_category": 1.34,
+      "efficiency": {
+        "tflops_achieved": 120.71,
+        "tb_s_achieved": 4.31,
+        "efficiency_percent": 74.89,
+        "bound_type": "memory",
+        "flops_per_byte": 28.0,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.194,
+      "percent_of_category": 1.23,
+      "efficiency": {
+        "tflops_achieved": 15.78,
+        "tb_s_achieved": 0.8,
+        "efficiency_percent": 218.19,
+        "bound_type": "memory",
+        "flops_per_byte": 19.64,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.047,
+      "percent_of_category": 1.08,
+      "efficiency": {
+        "tflops_achieved": 152.76,
+        "tb_s_achieved": 0.52,
+        "efficiency_percent": 23.87,
+        "bound_type": "compute",
+        "flops_per_byte": 293.41,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.027,
+      "percent_of_category": 1.06,
+      "efficiency": {
+        "tflops_achieved": 1.02,
+        "tb_s_achieved": 0.59,
+        "efficiency_percent": 173.41,
+        "bound_type": "memory",
+        "flops_per_byte": 1.71,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 1.012,
+      "percent_of_category": 1.05,
+      "efficiency": {
+        "tflops_achieved": 89.02,
+        "tb_s_achieved": 0.9,
+        "efficiency_percent": 1296.22,
+        "bound_type": "memory",
+        "flops_per_byte": 99.35,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 1.004,
+      "percent_of_category": 1.04,
+      "efficiency": {
+        "tflops_achieved": 307.02,
+        "tb_s_achieved": 1.22,
+        "efficiency_percent": 94.56,
+        "bound_type": "compute",
+        "flops_per_byte": 251.63,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 24,
+      "time_ms": 0.973,
+      "percent_of_category": 1.0,
+      "efficiency": {
+        "tflops_achieved": 428.29,
+        "tb_s_achieved": 3.83,
+        "efficiency_percent": 80.94,
+        "bound_type": "memory",
+        "flops_per_byte": 111.93,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.119,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.92,
+      "percent_of_category": 0.95,
+      "efficiency": {
+        "tflops_achieved": 392.22,
+        "tb_s_achieved": 0.53,
+        "efficiency_percent": 41.41,
+        "bound_type": "compute",
+        "flops_per_byte": 738.34,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.868,
+      "percent_of_category": 0.9,
+      "efficiency": {
+        "tflops_achieved": 158.97,
+        "tb_s_achieved": 2.12,
+        "efficiency_percent": 52.8,
+        "bound_type": "memory",
+        "flops_per_byte": 74.88,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.774,
+      "percent_of_category": 0.8,
+      "efficiency": {
+        "tflops_achieved": 178.17,
+        "tb_s_achieved": 1.21,
+        "efficiency_percent": 39.37,
+        "bound_type": "memory",
+        "flops_per_byte": 147.29,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 72,
+      "time_ms": 0.746,
+      "percent_of_category": 0.77,
+      "efficiency": {
+        "tflops_achieved": 0.08,
+        "tb_s_achieved": 0.04,
+        "efficiency_percent": 71.17,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.089,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.74,
+      "percent_of_category": 0.76,
+      "efficiency": {
+        "tflops_achieved": 209.75,
+        "tb_s_achieved": 2.07,
+        "efficiency_percent": 69.86,
+        "bound_type": "memory",
+        "flops_per_byte": 101.13,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.616,
+      "percent_of_category": 0.64,
+      "efficiency": {
+        "tflops_achieved": 63.57,
+        "tb_s_achieved": 3.12,
+        "efficiency_percent": 98.86,
+        "bound_type": "memory",
+        "flops_per_byte": 20.37,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 72,
+      "time_ms": 0.584,
+      "percent_of_category": 0.6,
+      "efficiency": {
+        "tflops_achieved": 0.1,
+        "tb_s_achieved": 0.05,
+        "efficiency_percent": 67.64,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.048,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 24,
+      "time_ms": 0.558,
+      "percent_of_category": 0.58,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 45.74,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.015,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.518,
+      "percent_of_category": 0.54,
+      "efficiency": {
+        "tflops_achieved": 528.88,
+        "tb_s_achieved": 3.54,
+        "efficiency_percent": 88.41,
+        "bound_type": "memory",
+        "flops_per_byte": 149.2,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 24,
+      "time_ms": 0.492,
+      "percent_of_category": 0.51,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 51.06,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.012,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.485,
+      "percent_of_category": 0.5,
+      "efficiency": {
+        "tflops_achieved": 161.27,
+        "tb_s_achieved": 5.76,
+        "efficiency_percent": 147.89,
+        "bound_type": "memory",
+        "flops_per_byte": 28.0,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.458,
+      "percent_of_category": 0.47,
+      "efficiency": {
+        "tflops_achieved": 795.89,
+        "tb_s_achieved": 0.88,
+        "efficiency_percent": 60.95,
+        "bound_type": "compute",
+        "flops_per_byte": 907.04,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.447,
+      "percent_of_category": 0.46,
+      "efficiency": {
+        "tflops_achieved": 694.4,
+        "tb_s_achieved": 1.18,
+        "efficiency_percent": 51.28,
+        "bound_type": "compute",
+        "flops_per_byte": 586.43,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.415,
+      "percent_of_category": 0.43,
+      "efficiency": {
+        "tflops_achieved": 665.57,
+        "tb_s_achieved": 2.24,
+        "efficiency_percent": 67.62,
+        "bound_type": "compute",
+        "flops_per_byte": 296.6,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.374,
+      "percent_of_category": 0.39,
+      "efficiency": {
+        "tflops_achieved": 1.4,
+        "tb_s_achieved": 0.82,
+        "efficiency_percent": 272.18,
+        "bound_type": "memory",
+        "flops_per_byte": 1.71,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.335,
+      "percent_of_category": 0.35,
+      "efficiency": {
+        "tflops_achieved": 231.43,
+        "tb_s_achieved": 2.32,
+        "efficiency_percent": 80.36,
+        "bound_type": "memory",
+        "flops_per_byte": 99.86,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.333,
+      "percent_of_category": 0.34,
+      "efficiency": {
+        "tflops_achieved": 539.26,
+        "tb_s_achieved": 0.73,
+        "efficiency_percent": 63.57,
+        "bound_type": "compute",
+        "flops_per_byte": 738.34,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.278,
+      "percent_of_category": 0.29,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 32.97,
+        "bound_type": "memory",
+        "flops_per_byte": 1.91,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.276,
+      "percent_of_category": 0.28,
+      "efficiency": {
+        "tflops_achieved": 162.71,
+        "tb_s_achieved": 1.64,
+        "efficiency_percent": 71.38,
+        "bound_type": "memory",
+        "flops_per_byte": 99.35,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.261,
+      "percent_of_category": 0.27,
+      "efficiency": {
+        "tflops_achieved": 36.25,
+        "tb_s_achieved": 1.85,
+        "efficiency_percent": 261.84,
+        "bound_type": "memory",
+        "flops_per_byte": 19.64,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 24,
+      "time_ms": 0.226,
+      "percent_of_category": 0.23,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 57.52,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.028,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.21,
+      "percent_of_category": 0.22,
+      "efficiency": {
+        "tflops_achieved": 0.03,
+        "tb_s_achieved": 0.02,
+        "efficiency_percent": 40.76,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 24,
+      "time_ms": 0.209,
+      "percent_of_category": 0.22,
+      "efficiency": {
+        "tflops_achieved": 0.02,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 58.2,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "cov": 0.041,
+      "high_variance": false
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.196,
+      "percent_of_category": 0.2,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 43.62,
+        "bound_type": "memory",
+        "flops_per_byte": 1.92,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.195,
+      "percent_of_category": 0.2,
+      "efficiency": {
+        "tflops_achieved": 0.15,
+        "tb_s_achieved": 0.08,
+        "efficiency_percent": 50.52,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.191,
+      "percent_of_category": 0.2,
+      "efficiency": {
+        "tflops_achieved": 0.15,
+        "tb_s_achieved": 0.08,
+        "efficiency_percent": 45.49,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.179,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 50.94,
+        "bound_type": "memory",
+        "flops_per_byte": 1.92,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.178,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 448.01,
+        "tb_s_achieved": 1.53,
+        "efficiency_percent": 60.64,
+        "bound_type": "compute",
+        "flops_per_byte": 293.41,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.178,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 0.04,
+        "tb_s_achieved": 0.02,
+        "efficiency_percent": 46.47,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.172,
+      "percent_of_category": 0.18,
+      "efficiency": {
+        "tflops_achieved": 401.76,
+        "tb_s_achieved": 5.37,
+        "efficiency_percent": 88.54,
+        "bound_type": "memory",
+        "flops_per_byte": 74.88,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.159,
+      "percent_of_category": 0.16,
+      "efficiency": {
+        "tflops_achieved": 433.16,
+        "tb_s_achieved": 2.94,
+        "efficiency_percent": 65.57,
+        "bound_type": "memory",
+        "flops_per_byte": 147.29,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.149,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 48.51,
+        "bound_type": "memory",
+        "flops_per_byte": 1.59,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.146,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 133.91,
+        "tb_s_achieved": 6.57,
+        "efficiency_percent": 143.13,
+        "bound_type": "memory",
+        "flops_per_byte": 20.37,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.145,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 53.59,
+        "bound_type": "memory",
+        "flops_per_byte": 1.91,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution_backward",
+      "count": 8,
+      "time_ms": 0.142,
+      "percent_of_category": 0.15,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 49.69,
+        "bound_type": "memory",
+        "flops_per_byte": 1.59,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.114,
+      "percent_of_category": 0.12,
+      "efficiency": {
+        "tflops_achieved": 0.13,
+        "tb_s_achieved": 0.06,
+        "efficiency_percent": 54.37,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.083,
+      "percent_of_category": 0.09,
+      "efficiency": {
+        "tflops_achieved": 0.04,
+        "tb_s_achieved": 0.02,
+        "efficiency_percent": 67.57,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.077,
+      "percent_of_category": 0.08,
+      "efficiency": {
+        "tflops_achieved": 0.19,
+        "tb_s_achieved": 0.1,
+        "efficiency_percent": 78.93,
+        "bound_type": "memory",
+        "flops_per_byte": 1.98,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.076,
+      "percent_of_category": 0.08,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 44.65,
+        "bound_type": "memory",
+        "flops_per_byte": 1.92,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.07,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 56.68,
+        "bound_type": "memory",
+        "flops_per_byte": 1.92,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.068,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": 0.05,
+        "tb_s_achieved": 0.02,
+        "efficiency_percent": 60.26,
+        "bound_type": "memory",
+        "flops_per_byte": 1.96,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.065,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 50.37,
+        "bound_type": "memory",
+        "flops_per_byte": 1.91,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.065,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 49.6,
+        "bound_type": "memory",
+        "flops_per_byte": 1.59,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.064,
+      "percent_of_category": 0.07,
+      "efficiency": {
+        "tflops_achieved": 0.01,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 62.31,
+        "bound_type": "memory",
+        "flops_per_byte": 1.91,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    },
+    {
+      "name": "aten::convolution",
+      "count": 8,
+      "time_ms": 0.061,
+      "percent_of_category": 0.06,
+      "efficiency": {
+        "tflops_achieved": 0.0,
+        "tb_s_achieved": 0.0,
+        "efficiency_percent": 52.48,
+        "bound_type": "memory",
+        "flops_per_byte": 1.59,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      }
+    }
+  ],
+  "category_specific": {
+    "transpose_count": 0,
+    "transpose_time_ms": 0,
+    "transpose_overhead_percent": 0.0,
+    "peak_maf_tflops": 1686,
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 8.109,
+      "savings_ms_low": 6.994,
+      "savings_ms_high": 8.946,
+      "confidence": "high",
+      "efficiency_pct": 39.56,
+      "bound_type": "compute",
+      "time_ms": 14.801,
+      "e2e_pct_low": 1.35,
+      "e2e_pct_high": 1.73
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 4.098,
+      "savings_ms_low": 2.923,
+      "savings_ms_high": 4.98,
+      "confidence": "high",
+      "efficiency_pct": 55.34,
+      "bound_type": "compute",
+      "time_ms": 11.15,
+      "e2e_pct_low": 0.57,
+      "e2e_pct_high": 0.96
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 3.343,
+      "savings_ms_low": 2.805,
+      "savings_ms_high": 3.747,
+      "confidence": "high",
+      "efficiency_pct": 42.98,
+      "bound_type": "compute",
+      "time_ms": 6.571,
+      "e2e_pct_low": 0.54,
+      "e2e_pct_high": 0.72
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 1.874,
+      "savings_ms_low": 1.442,
+      "savings_ms_high": 2.198,
+      "confidence": "medium",
+      "efficiency_pct": 50.8,
+      "bound_type": "compute",
+      "time_ms": 4.468,
+      "e2e_pct_low": 0.28,
+      "e2e_pct_high": 0.43
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 1.088,
+      "savings_ms_low": 0.942,
+      "savings_ms_high": 1.198,
+      "confidence": "medium",
+      "efficiency_pct": 39.02,
+      "bound_type": "memory",
+      "time_ms": 1.964,
+      "e2e_pct_low": 0.18,
+      "e2e_pct_high": 0.23
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.775,
+      "savings_ms_low": 0.572,
+      "savings_ms_high": 0.928,
+      "confidence": "medium",
+      "efficiency_pct": 53.46,
+      "bound_type": "compute",
+      "time_ms": 1.993,
+      "e2e_pct_low": 0.11,
+      "e2e_pct_high": 0.18
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.761,
+      "savings_ms_low": 0.714,
+      "savings_ms_high": 0.797,
+      "confidence": "medium",
+      "efficiency_pct": 23.87,
+      "bound_type": "compute",
+      "time_ms": 1.047,
+      "e2e_pct_low": 0.14,
+      "e2e_pct_high": 0.15
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.736,
+      "savings_ms_low": 0.619,
+      "savings_ms_high": 0.824,
+      "confidence": "medium",
+      "efficiency_pct": 42.75,
+      "bound_type": "compute",
+      "time_ms": 1.44,
+      "e2e_pct_low": 0.12,
+      "e2e_pct_high": 0.16
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.694,
+      "savings_ms_low": 0.536,
+      "savings_ms_high": 0.812,
+      "confidence": "medium",
+      "efficiency_pct": 50.53,
+      "bound_type": "memory",
+      "time_ms": 1.642,
+      "e2e_pct_low": 0.1,
+      "e2e_pct_high": 0.16
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.64,
+      "savings_ms_low": 0.27,
+      "savings_ms_high": 0.917,
+      "confidence": "medium",
+      "efficiency_pct": 67.92,
+      "bound_type": "memory",
+      "time_ms": 2.859,
+      "e2e_pct_low": 0.05,
+      "e2e_pct_high": 0.18
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.537,
+      "savings_ms_low": 0.393,
+      "savings_ms_high": 0.645,
+      "confidence": "medium",
+      "efficiency_pct": 53.92,
+      "bound_type": "compute",
+      "time_ms": 1.399,
+      "e2e_pct_low": 0.08,
+      "e2e_pct_high": 0.12
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.512,
+      "savings_ms_low": 0.348,
+      "savings_ms_high": 0.635,
+      "confidence": "medium",
+      "efficiency_pct": 57.59,
+      "bound_type": "memory",
+      "time_ms": 1.497,
+      "e2e_pct_low": 0.07,
+      "e2e_pct_high": 0.12
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.49,
+      "savings_ms_low": 0.273,
+      "savings_ms_high": 0.652,
+      "confidence": "medium",
+      "efficiency_pct": 63.55,
+      "bound_type": "compute",
+      "time_ms": 1.789,
+      "e2e_pct_low": 0.05,
+      "e2e_pct_high": 0.13
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.485,
+      "savings_ms_low": 0.412,
+      "savings_ms_high": 0.539,
+      "confidence": "medium",
+      "efficiency_pct": 41.41,
+      "bound_type": "compute",
+      "time_ms": 0.92,
+      "e2e_pct_low": 0.08,
+      "e2e_pct_high": 0.1
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.426,
+      "savings_ms_low": 0.368,
+      "savings_ms_high": 0.469,
+      "confidence": "medium",
+      "efficiency_pct": 39.37,
+      "bound_type": "memory",
+      "time_ms": 0.774,
+      "e2e_pct_low": 0.07,
+      "e2e_pct_high": 0.09
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.344,
+      "savings_ms_low": 0.257,
+      "savings_ms_high": 0.41,
+      "confidence": "medium",
+      "efficiency_pct": 52.8,
+      "bound_type": "memory",
+      "time_ms": 0.868,
+      "e2e_pct_low": 0.05,
+      "e2e_pct_high": 0.08
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.303,
+      "savings_ms_low": 0.077,
+      "savings_ms_high": 0.472,
+      "confidence": "medium",
+      "efficiency_pct": 71.54,
+      "bound_type": "memory",
+      "time_ms": 1.659,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.09
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.266,
+      "savings_ms_low": 0.218,
+      "savings_ms_high": 0.303,
+      "confidence": "medium",
+      "efficiency_pct": 45.74,
+      "bound_type": "memory",
+      "time_ms": 0.558,
+      "e2e_pct_low": 0.04,
+      "e2e_pct_high": 0.06
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.205,
+      "savings_ms_low": 0.157,
+      "savings_ms_high": 0.241,
+      "confidence": "medium",
+      "efficiency_pct": 51.06,
+      "bound_type": "memory",
+      "time_ms": 0.492,
+      "e2e_pct_low": 0.03,
+      "e2e_pct_high": 0.05
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.187,
+      "savings_ms_low": 0.002,
+      "savings_ms_high": 0.325,
+      "confidence": "medium",
+      "efficiency_pct": 74.89,
+      "bound_type": "memory",
+      "time_ms": 1.295,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.06
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.185,
+      "savings_ms_low": 0.141,
+      "savings_ms_high": 0.218,
+      "confidence": "medium",
+      "efficiency_pct": 51.28,
+      "bound_type": "compute",
+      "time_ms": 0.447,
+      "e2e_pct_low": 0.03,
+      "e2e_pct_high": 0.04
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.173,
+      "savings_ms_low": 0.156,
+      "savings_ms_high": 0.186,
+      "confidence": "medium",
+      "efficiency_pct": 32.97,
+      "bound_type": "memory",
+      "time_ms": 0.278,
+      "e2e_pct_low": 0.03,
+      "e2e_pct_high": 0.04
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.149,
+      "savings_ms_low": 0.051,
+      "savings_ms_high": 0.223,
+      "confidence": "medium",
+      "efficiency_pct": 69.86,
+      "bound_type": "memory",
+      "time_ms": 0.74,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.04
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.139,
+      "savings_ms_low": 0.038,
+      "savings_ms_high": 0.215,
+      "confidence": "medium",
+      "efficiency_pct": 71.17,
+      "bound_type": "memory",
+      "time_ms": 0.746,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.04
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.139,
+      "savings_ms_low": 0.086,
+      "savings_ms_high": 0.179,
+      "confidence": "medium",
+      "efficiency_pct": 60.95,
+      "bound_type": "compute",
+      "time_ms": 0.458,
+      "e2e_pct_low": 0.02,
+      "e2e_pct_high": 0.03
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.133,
+      "savings_ms_low": 0.057,
+      "savings_ms_high": 0.189,
+      "confidence": "medium",
+      "efficiency_pct": 67.64,
+      "bound_type": "memory",
+      "time_ms": 0.584,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.04
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.112,
+      "savings_ms_low": 0.096,
+      "savings_ms_high": 0.124,
+      "confidence": "medium",
+      "efficiency_pct": 40.76,
+      "bound_type": "memory",
+      "time_ms": 0.21,
+      "e2e_pct_low": 0.02,
+      "e2e_pct_high": 0.02
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.098,
+      "savings_ms_low": 0.082,
+      "savings_ms_high": 0.111,
+      "confidence": "medium",
+      "efficiency_pct": 43.62,
+      "bound_type": "memory",
+      "time_ms": 0.196,
+      "e2e_pct_low": 0.02,
+      "e2e_pct_high": 0.02
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.094,
+      "savings_ms_low": 0.041,
+      "savings_ms_high": 0.134,
+      "confidence": "medium",
+      "efficiency_pct": 67.62,
+      "bound_type": "compute",
+      "time_ms": 0.415,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.03
+    },
+    {
+      "operation": "aten::convolution_backward",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.092,
+      "savings_ms_low": 0.075,
+      "savings_ms_high": 0.104,
+      "confidence": "medium",
+      "efficiency_pct": 45.49,
+      "bound_type": "memory",
+      "time_ms": 0.191,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.02
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.091,
+      "savings_ms_low": 0.051,
+      "savings_ms_high": 0.121,
+      "confidence": "medium",
+      "efficiency_pct": 63.57,
+      "bound_type": "compute",
+      "time_ms": 0.333,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.02
+    },
+    {
+      "operation": "aten::convolution",
+      "category": "convolution",
+      "type": "kernel_tuning",
+      "savings_ms": 0.073,
+      "savings_ms_low": 0,
+      "savings_ms_high": 0.185,
+      "confidence": "medium",
+      "efficiency_pct": 80.94,
+      "bound_type": "memory",
+      "time_ms": 0.973,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.04
+    }
+  ]
+}

@@ -1,0 +1,536 @@
+{
+  "category": "gemm",
+  "status": "OK",
+  "analysis_mode": "comparative",
+  "total_time_ms": 106.409,
+  "percent_of_compute": 20.57,
+  "operation_count": 591,
+  "operations": [
+    {
+      "name": "aten::mm",
+      "count": 130,
+      "time_ms": 12.499,
+      "percent_of_category": 11.75,
+      "efficiency": {
+        "tflops_achieved": 1429.69,
+        "tb_s_achieved": 1.05,
+        "efficiency_percent": 91.15,
+        "bound_type": "compute",
+        "flops_per_byte": 1365.33,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 4096), (4096, 4096))",
+      "has_perf_model": true,
+      "cov": 0.013,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 130,
+      "time_ms": 12.47,
+      "percent_of_category": 11.72,
+      "efficiency": {
+        "tflops_achieved": 1432.92,
+        "tb_s_achieved": 1.05,
+        "efficiency_percent": 93.55,
+        "bound_type": "compute",
+        "flops_per_byte": 1365.33,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 4096), (4096, 4096))",
+      "has_perf_model": true,
+      "cov": 0.01,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::addmm",
+      "count": 130,
+      "time_ms": 11.611,
+      "percent_of_category": 10.91,
+      "efficiency": {
+        "tflops_achieved": 1542.54,
+        "tb_s_achieved": 1.13,
+        "efficiency_percent": 90.74,
+        "bound_type": "compute",
+        "flops_per_byte": 1365.39,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096,), (4096, 4096), (4096, 4096), (), ())",
+      "has_perf_model": true,
+      "cov": 0.046,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::addmm",
+      "count": 32,
+      "time_ms": 11.608,
+      "percent_of_category": 10.91,
+      "efficiency": {
+        "tflops_achieved": 1516.83,
+        "tb_s_achieved": 0.83,
+        "efficiency_percent": 81.73,
+        "bound_type": "compute",
+        "flops_per_byte": 1820.47,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((16384,), (4096, 4096), (4096, 16384), (), ())",
+      "has_perf_model": true,
+      "cov": 0.026,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 32,
+      "time_ms": 11.502,
+      "percent_of_category": 10.81,
+      "efficiency": {
+        "tflops_achieved": 1529.56,
+        "tb_s_achieved": 0.84,
+        "efficiency_percent": 86.64,
+        "bound_type": "compute",
+        "flops_per_byte": 1820.44,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 4096), (4096, 16384))",
+      "has_perf_model": true,
+      "cov": 0.007,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 32,
+      "time_ms": 11.31,
+      "percent_of_category": 10.63,
+      "efficiency": {
+        "tflops_achieved": 1555.52,
+        "tb_s_achieved": 0.85,
+        "efficiency_percent": 88.27,
+        "bound_type": "compute",
+        "flops_per_byte": 1820.44,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((16384, 4096), (4096, 4096))",
+      "has_perf_model": true,
+      "cov": 0.005,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 32,
+      "time_ms": 11.152,
+      "percent_of_category": 10.48,
+      "efficiency": {
+        "tflops_achieved": 1577.54,
+        "tb_s_achieved": 0.87,
+        "efficiency_percent": 89.5,
+        "bound_type": "compute",
+        "flops_per_byte": 1820.44,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 4096), (4096, 16384))",
+      "has_perf_model": true,
+      "cov": 0.009,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::addmm",
+      "count": 32,
+      "time_ms": 10.612,
+      "percent_of_category": 9.97,
+      "efficiency": {
+        "tflops_achieved": 1659.45,
+        "tb_s_achieved": 0.91,
+        "efficiency_percent": 92.58,
+        "bound_type": "compute",
+        "flops_per_byte": 1820.45,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096,), (4096, 16384), (16384, 4096), (), ())",
+      "has_perf_model": true,
+      "cov": 0.031,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 32,
+      "time_ms": 10.288,
+      "percent_of_category": 9.67,
+      "efficiency": {
+        "tflops_achieved": 1710.04,
+        "tb_s_achieved": 0.94,
+        "efficiency_percent": 100.49,
+        "bound_type": "compute",
+        "flops_per_byte": 1820.44,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 16384), (16384, 4096))",
+      "has_perf_model": true,
+      "cov": 0.009,
+      "high_variance": false,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 2,
+      "time_ms": 1.232,
+      "percent_of_category": 1.16,
+      "efficiency": {
+        "tflops_achieved": 1203.18,
+        "tb_s_achieved": 0.64,
+        "efficiency_percent": 66.52,
+        "bound_type": "compute",
+        "flops_per_byte": 1874.16,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((22080, 4096), (4096, 4096))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::addmm",
+      "count": 2,
+      "time_ms": 1.186,
+      "percent_of_category": 1.11,
+      "efficiency": {
+        "tflops_achieved": 1249.44,
+        "tb_s_achieved": 0.67,
+        "efficiency_percent": 71.82,
+        "bound_type": "compute",
+        "flops_per_byte": 1874.35,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096,), (22080, 4096), (4096, 4096), (), ())",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 2,
+      "time_ms": 0.892,
+      "percent_of_category": 0.84,
+      "efficiency": {
+        "tflops_achieved": 1661.5,
+        "tb_s_achieved": 0.89,
+        "efficiency_percent": 102.78,
+        "bound_type": "compute",
+        "flops_per_byte": 1874.16,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 22080), (22080, 4096))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 1,
+      "time_ms": 0.017,
+      "percent_of_category": 0.02,
+      "efficiency": {
+        "tflops_achieved": 62.29,
+        "tb_s_achieved": 1.98,
+        "efficiency_percent": 52.35,
+        "bound_type": "memory",
+        "flops_per_byte": 31.51,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((32, 4096), (4096, 4096))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::mm",
+      "count": 1,
+      "time_ms": 0.016,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 69.19,
+        "tb_s_achieved": 2.2,
+        "efficiency_percent": 55.88,
+        "bound_type": "memory",
+        "flops_per_byte": 31.51,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4096, 32), (32, 4096))",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    },
+    {
+      "name": "aten::addmm",
+      "count": 1,
+      "time_ms": 0.013,
+      "percent_of_category": 0.01,
+      "efficiency": {
+        "tflops_achieved": 80.87,
+        "tb_s_achieved": 2.57,
+        "efficiency_percent": 60.72,
+        "bound_type": "memory",
+        "flops_per_byte": 31.51,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 1686,
+        "resolved_peak_hbm_bw": 8.0,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((32,), (4096, 4096), (4096, 32), (), ())",
+      "has_perf_model": true,
+      "classification": {
+        "is_quantized": false,
+        "gemm_type": "regular"
+      }
+    }
+  ],
+  "category_specific": {
+    "quantized_count": 0,
+    "missing_perf_model_count": 0,
+    "peak_maf_tflops": 1686,
+    "peak_hbm_bw_tbs": 8.0
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0.765,
+      "savings_ms_low": 0,
+      "savings_ms_high": 2.121,
+      "confidence": "medium",
+      "efficiency_pct": 81.73,
+      "bound_type": "compute",
+      "time_ms": 11.608,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.41
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0.295,
+      "savings_ms_low": 0.139,
+      "savings_ms_high": 0.412,
+      "confidence": "medium",
+      "efficiency_pct": 66.52,
+      "bound_type": "compute",
+      "time_ms": 1.232,
+      "e2e_pct_low": 0.03,
+      "e2e_pct_high": 0.08
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0.213,
+      "savings_ms_low": 0.05,
+      "savings_ms_high": 0.334,
+      "confidence": "medium",
+      "efficiency_pct": 71.82,
+      "bound_type": "compute",
+      "time_ms": 1.186,
+      "e2e_pct_low": 0.01,
+      "e2e_pct_high": 0.06
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0.113,
+      "savings_ms_low": 0,
+      "savings_ms_high": 1.537,
+      "confidence": "medium",
+      "efficiency_pct": 86.64,
+      "bound_type": "compute",
+      "time_ms": 11.502,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.3
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0,
+      "savings_ms_low": 0,
+      "savings_ms_high": 1.106,
+      "confidence": "medium",
+      "efficiency_pct": 91.15,
+      "bound_type": "compute",
+      "time_ms": 12.499,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.21
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0,
+      "savings_ms_low": 0,
+      "savings_ms_high": 0.804,
+      "confidence": "medium",
+      "efficiency_pct": 93.55,
+      "bound_type": "compute",
+      "time_ms": 12.47,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.16
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0,
+      "savings_ms_low": 0,
+      "savings_ms_high": 1.075,
+      "confidence": "medium",
+      "efficiency_pct": 90.74,
+      "bound_type": "compute",
+      "time_ms": 11.611,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.21
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0,
+      "savings_ms_low": 0,
+      "savings_ms_high": 1.327,
+      "confidence": "medium",
+      "efficiency_pct": 88.27,
+      "bound_type": "compute",
+      "time_ms": 11.31,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.26
+    },
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0,
+      "savings_ms_low": 0,
+      "savings_ms_high": 1.171,
+      "confidence": "medium",
+      "efficiency_pct": 89.5,
+      "bound_type": "compute",
+      "time_ms": 11.152,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.23
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0,
+      "savings_ms_low": 0,
+      "savings_ms_high": 0.787,
+      "confidence": "medium",
+      "efficiency_pct": 92.58,
+      "bound_type": "compute",
+      "time_ms": 10.612,
+      "e2e_pct_low": 0.0,
+      "e2e_pct_high": 0.15
+    }
+  ]
+}

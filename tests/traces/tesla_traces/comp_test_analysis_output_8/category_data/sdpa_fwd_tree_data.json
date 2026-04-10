@@ -1,0 +1,20 @@
+{
+  "84308": {
+    "op_name": "FlashAttnFunc",
+    "ex_uid": 84308,
+    "input_dims": "((2, 2048, 32, 128), (2, 11040, 32, 128), (2, 11040, 32, 128), (), (), (), (), (), (), (), (), (), (), (), (), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  },
+  "84417": {
+    "op_name": "FlashAttnFunc",
+    "ex_uid": 84417,
+    "input_dims": "((2, 2048, 32, 128), (2, 2048, 32, 128), (2, 2048, 32, 128), (), (), (), (), (), (), (), (), (), (), (), (), (), ())",
+    "parent_chain": [],
+    "subtree": [],
+    "fusion_opportunity": false,
+    "notes": "Tree traversal simplified - using CSV data"
+  }
+}
