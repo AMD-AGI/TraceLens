@@ -26,6 +26,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+# TraceDiff comparison extension columns on unified_perf_summary-derived category CSVs.
+_COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
+_COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
+
 
 def perf_report_csv_dir(output_dir: str) -> str:
     """
@@ -209,11 +213,6 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
     return fallback_maf
 
 
-# TraceDiff comparison extension columns on unified_perf_summary-derived category CSVs.
-_COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
-_COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
-
-
 def _comparative_efficiency_percent_from_row(
     result: Dict[str, Any], row: pd.Series
 ) -> None:
@@ -249,24 +248,17 @@ def _comparative_efficiency_percent_from_row(
     result["warning"] = None
 
 
-def _standalone_efficiency_percent_from_row(row: pd.Series) -> Optional[float]:
-    """
-    Roofline utilization as a percent from ``Pct Roofline_mean`` (standalone traces).
-    """
-    pct = row.get("Pct Roofline_mean")
-    if pct is None or pd.isna(pct):
-        return None
-    return float(pct)
-
-
 def _apply_standalone_efficiency_percent(
     result: Dict[str, Any], row: pd.Series
 ) -> None:
-    """Set ``efficiency_percent`` from roofline column and roofline anomaly flags."""
-    solo_pct = _standalone_efficiency_percent_from_row(row)
-    if solo_pct is None:
+    """
+    Set ``efficiency_percent`` from ``Pct Roofline_mean`` (roofline utilization %)
+    and roofline anomaly flags when above 110%.
+    """
+    pct = row.get("Pct Roofline_mean")
+    if pct is None or pd.isna(pct):
         return
-    result["efficiency_percent"] = round(solo_pct, 2)
+    result["efficiency_percent"] = round(float(pct), 2)
     if result["efficiency_percent"] > 110:
         result["warning"] = (
             f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
@@ -339,12 +331,8 @@ def calculate_efficiency(
 
     if analysis_mode == "comparative":
         _comparative_efficiency_percent_from_row(result, row)
-    elif analysis_mode == "standalone":
-        _apply_standalone_efficiency_percent(result, row)
     else:
-        raise ValueError(
-            f"analysis_mode must be 'standalone' or 'comparative', got {analysis_mode!r}"
-        )
+        _apply_standalone_efficiency_percent(result, row)
 
     return result
 

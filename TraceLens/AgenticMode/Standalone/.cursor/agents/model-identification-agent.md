@@ -22,6 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
+- `comparison_scope`: `standalone` or `comparative`
 
 **Input (produced by script in Step 1):**
 - `<output_dir>/metadata/condensed_op_info.csv` — CSV with columns **name**, **Input type**, and **Input Dims** (extracted from the perf report by the script)
@@ -49,13 +50,13 @@ Write a JSON file with exactly these four keys:
 
 ### Step 1: Run the extraction script
 
-Execute the Python script so it reads `<output_dir>/perf_report_csvs/unified_perf_summary.csv`, extracts the **name**, **Input type**, and **Input Dims** columns, and writes `<output_dir>/metadata/condensed_op_info.csv`:
+Execute the Python script to extract the **name**, **Input type**, and **Input Dims** columns into `<output_dir>/metadata/condensed_op_info.csv`:
 
 ```bash
 <prefix> python3 -c "
 import sys
 from TraceLens.AgenticMode.Standalone.utils.report_utils import extract_condensed_op_info
-if not extract_condensed_op_info('<output_dir>'):
+if not extract_condensed_op_info('<output_dir>', '<comparison_scope>'):
     sys.exit(1)
 "
 ```
