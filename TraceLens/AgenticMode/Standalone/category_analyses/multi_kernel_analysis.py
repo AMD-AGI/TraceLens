@@ -230,7 +230,16 @@ def main():
     print(f"  ✓ Loaded multi-kernel data")
 
     # Read GPU timeline for total time reference
-    csv_dir = f"{output_dir}/perf_report_csvs"
+    manifest_path = f"{output_dir}/category_data/category_manifest.json"
+    scope = "standalone"
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r") as f:
+            scope = json.load(f).get("comparison_scope", "standalone")
+    csv_dir = (
+        f"{output_dir}/perf_report_trace1_csvs"
+        if scope == "comparative"
+        else f"{output_dir}/perf_report_csvs"
+    )
     total_time_ms = 0
     try:
         gpu_timeline = pd.read_csv(f"{csv_dir}/gpu_timeline.csv")

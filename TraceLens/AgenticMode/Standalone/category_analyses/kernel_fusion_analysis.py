@@ -343,18 +343,26 @@ def load_fusion_data(output_dir: str):
     """Load fusion candidates and platform arch config from analysis output."""
     fc_path = os.path.join(output_dir, "category_data", "fusion_candidates.json")
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    csv_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
 
     if not os.path.exists(fc_path):
         raise FileNotFoundError(f"Fusion candidates not found: {fc_path}")
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Perf summary CSV not found: {csv_path}")
 
     with open(fc_path, "r") as f:
         candidates = json.load(f)
 
-    with open(manifest_path, "r") as f:
-        manifest = json.load(f)
+    manifest = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+
+    scope = manifest.get("comparison_scope", "standalone")
+    csv_subdir = (
+        "perf_report_trace1_csvs" if scope == "comparative" else "perf_report_csvs"
+    )
+    csv_path = os.path.join(output_dir, csv_subdir, "unified_perf_summary.csv")
+
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Perf summary CSV not found: {csv_path}")
 
     return candidates, manifest, csv_path
 
