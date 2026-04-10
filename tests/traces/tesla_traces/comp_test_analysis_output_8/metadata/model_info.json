@@ -1,6 +1,0 @@
-{
-  "model": "Multimodal / hybrid (vision CNN + sequence transformer)",
-  "architecture": "CNN + Transformer",
-  "scale": "4096 hidden dim, 32 heads, 128 head dim; sequence lengths 2048–11040 (parameter count not inferrable)",
-  "precision": "BF16"
-}
