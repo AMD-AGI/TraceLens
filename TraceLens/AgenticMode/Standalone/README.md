@@ -65,7 +65,7 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 2. **Provide when prompted:**
    - Trace file path
-   - Platform (MI300X/MI325X/MI350X/MI355X/MI400)
+   - Platform (MI300X/MI325X/MI350X/MI355X/MI455X)
    - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name
@@ -102,9 +102,9 @@ agent --model claude-4.6-opus-high --print --force --trust \
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
 
 3. **Get results:**
-   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations
+   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with Compute Kernel Insights, Kernel Fusion Insights (three-label format: Identification, Data, Impact estimate), and System-Level Insights (five-label format).
    - **Additional outputs:**
-     - `system_findings/` - System-level analysis
+     - `system_findings/` - System-level and kernel fusion analysis
      - `category_findings/` - Per-category compute kernel analysis
 
 ---
@@ -119,11 +119,14 @@ analysis_output/
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data
 │   ├── category_manifest.json      # Category metadata, GPU utilization, tier info
 │   ├── multi_kernel_data.json      # Pre-computed memcpy/NCCL/overlap data
+│   ├── fusion_candidates.json      # Kernel fusion candidate modules
+│   ├── kernel_fusion_metrics.json  # Roofline savings estimates for fusion candidates
 │   ├── *_ops.csv
 │   ├── *_metrics.json
 │   └── *_tree_data.json
-├── system_findings/                # System-level analysis (CPU/idle, multi-kernel)
-│   └── *_findings.md
+├── system_findings/                # System-level analysis (CPU/idle, multi-kernel, fusion)
+│   ├── *_findings.md
+│   └── kernel_fusion_findings.md   # Kernel fusion analysis output
 ├── category_findings/              # Compute kernel analysis (markdown)
 │   └── *_findings.md
 └── metadata/                       # Category metadata JSONs
@@ -134,11 +137,12 @@ analysis_output/
 
 ## Architecture
 
-### Two-Tier Analysis Overview
+### Analysis Overview
 
-The analysis is split into two independent tiers that can be composed separately:
+The analysis is split into three independent tiers that can be composed separately:
 
 - **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
+- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings via a roofline projection model with 85% memory/compute pipeline overlap. Uses `orchestrator_prepare.py` (Step 4b) for candidate extraction and `kernel_fusion_analysis.py` for deterministic metrics, then invokes `kernel-fusion-analyzer` to generate findings.
 - **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
 
 Each tier writes to a separate findings directory and produces an independently composable report section.
@@ -148,19 +152,21 @@ flowchart TD
     Prep["Steps 0-5: TraceLens Perf Report"]
     Prep --> Step6["Step 6: System-Level Analysis"]
     Prep --> Step7["Step 7: Compute Kernel Analysis"]
-    
+
     Step6 --> CpuIdle["cpu-idle-analyzer"]
     Step6 --> MultiKernel["multi-kernel-analyzer"]
+    Step6 --> KernelFusion["kernel-fusion-analyzer"]
     CpuIdle --> SysFindings["system_findings/"]
     MultiKernel --> SysFindings
-    
+    KernelFusion --> SysFindings
+
     Step7 --> Gemm["gemm-analyzer"]
     Step7 --> Sdpa["sdpa-analyzer"]
     Step7 --> Others["other analyzers..."]
     Gemm --> CatFindings["category_findings/"]
     Sdpa --> CatFindings
     Others --> CatFindings
-    
+
     SysFindings --> Step8["Step 8: Validate"]
     CatFindings --> Step8
     Step8 --> Step9["Step 9: Aggregate"]
@@ -177,12 +183,12 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ```
 0.   Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
 1.   Generate Performance Report (branches on analysis mode: training vs inference)
-2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
 5.5. Model Identification (subagent) → metadata/model_info.json
-6.   System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
+6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
 7.   Compute Kernel Subagents (PARALLEL) → category_findings/
 8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
-9.   Aggregate Results: System-Level + Compute Kernel Recommendations
+9.   Aggregate Results: System-Level + Kernel Fusion + Compute Kernel Recommendations
 10.  Generate Final Report (standalone_analysis.md)
 ```
 
@@ -194,6 +200,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 |-------|---------|
 | `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
 | `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
+| `kernel-fusion-analyzer` | Identifies multi-kernel fusion opportunities and estimates savings via roofline model |
 
 **Compute Kernel (Step 7):**
 
@@ -245,13 +252,13 @@ Any major change to the agent -- orchestrator logic, sub-agent skills, pattern l
 
 ### 1. Run Evals
 
-After making a change, run the eval suite against the test cases in `evals/unit_test_traces.csv`. The suite validates **workflow correctness** (directory structure, required files, report formatting) and **output quality** (comparison against reference reports).
+After making a change, run the eval suite against the test cases in `evals/unit_test_traces.csv` (unit tests) or `evals/e2e_test_traces.csv` (full-model end-to-end traces). The suite validates **workflow correctness** (directory structure, required files, report formatting) and **output quality** (comparison against reference reports).
 
 See [evals/README.md](../../../evals/README.md) for full documentation on the eval harness, adding test cases, and interpreting results.
 
 ### 2. Run the Repeatability Study Before Merging
 
-The repeatability study runs each test case multiple times (default: 5) and aggregates pass rates across runs. This surfaces flaky behavior that a single eval pass would miss and is essential for robustness.
+The repeatability study runs each test case multiple times (default: 5) and aggregates pass rates across runs. Use `run_repeatability_parallel.sh` for concurrent execution with configurable `TEST_TRACES_CSV`, `SUITE_NAME`, and `MAX_PARALLEL`. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results, classify failures, and generate reports (`pr_report.md`, `fix_ticket_report.md`) with reproducer packages. This surfaces flaky behavior that a single eval pass would miss and is essential for robustness.
 
 ## Continual Learning
 
@@ -276,9 +283,4 @@ TraceLens Standalone Agentic analysis is currently an **experimental** feature.
 
 ### 🔄 In Progress
 
-- Validation at a sub-agent level and integration tests are crucial to assess performance.
-
-### 🚀 Future Improvements
-
-- Individual analyzers require detailed review (performance thresholds, LLM vs codified) and restructuring (codify deterministic performance recommendations vs. deploy LLMs for open-ended analysis).
-- Components of system-level analysis that can be codified should be moved into TraceLens.
+- Improving the performance and reliability of the agentic analysis pipeline.

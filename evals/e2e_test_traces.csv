@@ -1,0 +1,12 @@
+id,sub_category,trace_path,reference_dir,platform
+qwen1.5_mi300,full_model,evals/e2e_tests/qwen1.5_mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz,evals/e2e_tests/qwen1.5_mi300/analysis_output,MI300X
+16_owlv2_mi300,full_model,evals/e2e_tests/owlv2_mi300/google_owlv2-large-patch14-ensemble__1016001.json.gz,evals/e2e_tests/owlv2_mi300/analysis_output,MI300X
+01_act_checkpoint_mi300,full_model,evals/e2e_tests/act_checkpoint_mi300/rank0_iter16_18_act.json.gz,,MI300X
+04_ddp_resnet_mi325,full_model,evals/e2e_tests/ddp_resnet_mi325/mi325_rank4_iter16_18.json.gz,,MI325X
+06_llama3_2_mi300,full_model,evals/e2e_tests/llama3_2_mi300/llama3_2_mi300.pt.trace.json.gz,evals/e2e_tests/llama3_2_mi300/analysis_output,MI300X
+10_timesformer_mi300,full_model,evals/e2e_tests/timesformer_mi300/facebook_timesformer-base-finetuned-k400__1016002.json.gz,evals/e2e_tests/timesformer_mi300/analysis_output,MI300X
+12_nsfw_detection_mi300,full_model,evals/e2e_tests/nsfw_detection_mi300/Falconsai_nsfw_image_detection__1016002.json.gz,,MI300X
+14_bert_small_mi300,full_model,evals/e2e_tests/bert_small_mi300/gaunernst_bert-small-uncased__1016001.json.gz,,MI300X
+20_wan2.1_mi300,full_model,evals/e2e_tests/wan2.1_mi300/Wan-AI_Wan2.1-T2V-1.3B-Diffusers__1016009.json.gz,,MI300X
+21_llama_70b,full_model,evals/e2e_tests/llama_70b/rank0_trace_no_pyfn.json.gz,,MI300X
+dlrm_05_mi300,full_model,evals/e2e_tests/dlrm_mi300/rank5.json.gz,,MI300X

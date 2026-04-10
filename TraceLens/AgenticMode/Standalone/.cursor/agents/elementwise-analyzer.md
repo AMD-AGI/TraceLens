@@ -108,7 +108,6 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 **Special considerations:**
 - Simple elementwise ops (add, mul, copy) should achieve >70% of peak HBM BW
 - Complex elementwise ops may have lower efficiency
-- High count indicates fusion opportunities
 
 ### Step 5: Generate Markdown Tables
 
@@ -149,9 +148,8 @@ When `comparison_scope` is `standalone`:
 For each validated bottleneck, provide recommendations in both categories:
 
 **Algorithmic Recommendations:**
-- Fuse chains of elementwise ops (RMSNorm, LayerNorm patterns)
 - Use torch.compile to auto-fuse operations
-- Look for patterns like: mul → add → mul (normalization)
+- For fusion opportunities, defer to the kernel fusion analysis
 
 **Kernel Optimization Focus:**
 - If baseline ops (add, mul, copy) have low efficiency, investigate kernel issues
@@ -195,12 +193,6 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 ## Common Patterns for Elementwise Analysis
 
-### Fusion Opportunities
-- **Symptoms:** Many small elementwise ops in sequence
-- **Look for:** RMSNorm (mul, rsqrt, mul), LayerNorm patterns
-- **Algorithmic:** Fuse using torch.compile or custom Triton kernels
-- **Impact:** Can reduce memory traffic
-
 ### Low Baseline Efficiency
 - **Symptoms:** Simple ops (add_, mul, copy_) at <50% of peak HBM BW
 - **Expected:** >70% efficiency for these operations
@@ -219,7 +211,8 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 2. **Calculate efficiency** -
   **Standalone:** Compare achieved TB/s vs peak HBM BW (memory-bound elementwise). Elementwise ops should hit peak HBM BW
   **Comparative:** Compare achieved runtime in trace1 vs acheived runtime in trace2. use roofline fields only as supplementary context if needed
-4. **Fusion is primary algorithmic optimization** - Look for chains of ops
+3. **Memory-bound** - Elementwise ops should hit peak HBM BW
+4. **Fusion opportunities** - If chains of elementwise ops suggest fusion candidates, note the observation but defer fusion analysis to the kernel fusion module
 5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
 6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
 
@@ -230,4 +223,4 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 | Efficiency | Assessment |
 |------------|------------|
 | >70% | Good |
-| <70% | Significant gap - investigate kernel issues or fusion opportunities |
+| <70% | Significant gap - investigate kernel issues |

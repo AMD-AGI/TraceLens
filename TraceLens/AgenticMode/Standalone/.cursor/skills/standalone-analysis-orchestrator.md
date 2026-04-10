@@ -86,7 +86,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **MI325X**
      3. **MI350X**
      4. **MI355X**
-     5. **MI400**
+     5. **MI455X**
 
 3. **Analysis Mode** → `<analysis_mode>`
    - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
@@ -278,6 +278,7 @@ The following maps category names to their agent definition files. These files c
 | reduce | reduce-analyzer.md |
 | norm | norm-analyzer.md |
 | convolution | convolution-analyzer.md |
+| kernel_fusion | kernel-fusion-analyzer.md |
 | other | generic-op-analyzer.md |
 
 ---
@@ -460,6 +461,11 @@ When `<comparison_scope>`== `standalone`:
 - **`standalone`:** efficiency percentages are typically 0–100% roofline; flag >100% as anomaly per above
 - **`comparative`:** state efficiency semantics per `*_metrics.json` and agent docs
 - Always include operation count for context
+
+#### 3. Fusion-Tagged Operations
+
+- Operations with `fusion_flagged: true` in the metrics JSON are already covered by a high-confidence kernel fusion candidate — do **NOT** flag them as bottlenecks or write kernel_tuning recommendations
+- The analysis scripts already exclude them from `impact_estimates`
 
 ---
 

@@ -8,13 +8,17 @@ MAX_PARALLEL="${MAX_PARALLEL:-5}"
 NUM_REPEATS="${NUM_REPEATS:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
+TEST_IDS="${TEST_IDS:-}"
+SUITE_NAME="${SUITE_NAME:-eval}"
+SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
 REPO_ROOT="$(pwd)"
 STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
-RESULTS_ROOT="$EVALS_DIR/repeatability_results"
-TEST_TRACES_CSV="$EVALS_DIR/unit_test_traces.csv"
+RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
+REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 
 # ---------------------------------------------------------------------------
@@ -28,11 +32,12 @@ log_status() {
 }
 
 expand_archive() {
-    local archive="$EVALS_DIR/unit_tests.tar.gz"
-    local target="$EVALS_DIR/unit_tests"
+    local name="$1"
+    local archive="$EVALS_DIR/${name}.tar.gz"
+    local target="$EVALS_DIR/$name"
     if [[ -f "$archive" ]]; then
         if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
-            echo "Expanding unit_tests.tar.gz..."
+            echo "Expanding ${name}.tar.gz..."
             tar xzf "$archive" -C "$EVALS_DIR"
             echo "Done."
         fi
@@ -149,7 +154,8 @@ setup_semaphore() {
 
 mkdir -p "$RESULTS_ROOT"
 $DEXEC bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
-expand_archive
+expand_archive unit_tests
+expand_archive e2e_tests
 
 echo "========================================="
 echo "  Standalone Analysis Repeatability Test"
@@ -157,6 +163,9 @@ echo "  Node:         $(hostname)"
 echo "  Container:    $CONTAINER"
 echo "  Repeats:      $NUM_REPEATS"
 echo "  Max parallel: $MAX_PARALLEL"
+if [[ -n "$TEST_IDS" ]]; then
+    echo "  Test filter:  $TEST_IDS"
+fi
 echo "========================================="
 echo ""
 
@@ -164,6 +173,12 @@ setup_semaphore
 
 while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     [[ -z "$id" ]] && continue
+    if [[ -n "$TEST_IDS" ]]; then
+        case " $TEST_IDS " in
+            *" $id "*) ;;
+            *) continue ;;
+        esac
+    fi
 
     for ((i = 0; i < NUM_REPEATS; i++)); do
         read -u4  # acquire semaphore slot
@@ -181,3 +196,28 @@ echo "========================================="
 echo "  Repeatability test finished."
 echo "  Results in: $RESULTS_ROOT"
 echo "========================================="
+
+# ---------------------------------------------------------------------------
+# Post-processing: aggregate results and generate reports via Cursor agent
+# ---------------------------------------------------------------------------
+
+if [[ "$SKIP_POST_PROCESSING" == "1" ]]; then
+    echo ""
+    echo "  Post-processing skipped (SKIP_POST_PROCESSING=1)."
+    echo "  To run later: agent \"Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER\""
+else
+    mkdir -p "$REPORT_DIR"
+
+    echo ""
+    echo "========================================="
+    echo "  Running eval post-processing..."
+    echo "========================================="
+
+    (
+        cd "$EVALS_DIR"
+        agent --print --force --trust --output-format stream-json \
+            "Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER"
+    ) < /dev/null > "$REPORT_DIR/post_processing.ndjson" 2>&1
+
+    echo "  Post-processing complete. Reports in: $REPORT_DIR"
+fi
