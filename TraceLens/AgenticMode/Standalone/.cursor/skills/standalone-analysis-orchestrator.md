@@ -688,9 +688,7 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 
 ### 10.3 Comparative cumulative kernel-time plot (comparative scope only)
 
-When `<comparison_scope>` = **`comparative`**, after Step 10.2 (or immediately after the report file exists with `{{COMPARATIVE_CUMULATIVE_PLOT}}` in the comparative Executive Summary), run **one** command to build a **stacked Baseline → Projection** chart (same logic as Comparative `plotting_manual.py` / `CumulativeProjectionChart`: per-category `min(Trace1, Trace2)` for the projection bar) from TraceDiff-enriched `unified_perf_summary.csv`, and embed it in the markdown.
-
-**Data source:** `perf_report_csvs/unified_perf_summary.csv` from Step 1 (must have been generated with `--extension_file TraceLens/Reporting/tracediff_comparison_extension.py` and `--extension_args <trace2_path>` so `delta_us (trace2 - trace1)` / `speedup (trace2/trace1)` columns exist).
+When `<comparison_scope>` = **`comparative`**, after Step 10.2 (or immediately after the report file exists with `{{COMPARATIVE_CUMULATIVE_PLOT}}` in the comparative Executive Summary), run **one** command to build a **stacked Baseline → Projection** chart from TraceDiff-enriched `unified_perf_summary.csv`, and embed it in the markdown.
 
 **Labels:** Use the same naming you used in the report for the two traces (e.g. **Trace 1** = `<trace_path>` platform, **Trace 2** = comparison platform).
 
@@ -706,28 +704,10 @@ generate_and_embed_comparative_cumulative_plot(
     sys.argv[3],
     title=sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None,
 )
-\" '<output_dir>' '<Trace_1_short_label>' '<Trace_2_short_label>' '<Optional suptitle>'
+\" '<output_dir>' '<Plaform1>' '<Platform2>' '<Optional suptitle>'
 ```
 
-Example:
-
-```bash
-python3 -c \"
-import sys
-from TraceLens.AgenticMode.Standalone.utils.comparative_cumulative_plot import (
-    generate_and_embed_comparative_cumulative_plot,
-)
-generate_and_embed_comparative_cumulative_plot(
-    sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],
-)
-\" './analysis_output' 'B200 (Trace 1)' 'MI355 (Trace 2)' 'Cumulative kernel time (TraceDiff)'
-```
-
-- Writes `comparative_cumulative_kernel_time.png` and `comparative_cumulative_base64.txt` under `<output_dir>`.
-- Replaces `{{COMPARATIVE_CUMULATIVE_PLOT}}` with a markdown subsection and a base64 PNG (same portability pattern as `{{PERF_PLOT}}`).
 - If generation fails (missing CSV, no comparative columns), the placeholder is **removed** so the report stays valid.
-- Default chart: **two** bars (Trace 1 baseline + Projection). For a **third** bar showing Trace 2 category composition, call `generate_and_embed_comparative_cumulative_plot(..., include_target_bar=True)` or run `python3 .../comparative_cumulative_plot.py <dir> <t1> <t2> --include-target`.
-- To plot from a **`perf_report.xlsx`** (sheet `unified_perf_summary`) instead of CSV: `python3 .../comparative_cumulative_plot.py --excel /path/to/perf_report.xlsx '<t1>' '<t2>'` (writes PNG/base64 next to the workbook). Add `--debug` for a per-category baseline / target / projection table.
 
 For **`standalone`** scope, the comparative block (including `{{COMPARATIVE_CUMULATIVE_PLOT}}`) is deleted per template rules — no Step 10.3 run.
 
