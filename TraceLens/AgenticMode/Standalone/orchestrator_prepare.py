@@ -51,6 +51,66 @@ FUSION_ALREADY_FUSED = [
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
+def _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir: str) -> list:
+    """Build trace 2 ops summary grouped by enhanced category (op-name-based).
+
+    Uses unified_perf_summary.csv and get_enhanced_category() so that trace 2
+    categories match the trace 1 enhanced categories (e.g. CONV_fwd + CONV_bwd
+    merge into 'convolution', NORM_fwd + NORM_bwd merge into 'norm').
+    Falls back to ops_summary_by_category.csv if unified_perf_summary.csv is
+    not available.
+    """
+    unified_path = os.path.join(trace2_csv_dir, "unified_perf_summary.csv")
+    if not os.path.isfile(unified_path):
+        return json.loads(
+            pd.read_csv(
+                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
+            ).to_json(orient="records")
+        )
+
+    df = pd.read_csv(unified_path)
+    df["enhanced_category"], df["display_name"] = zip(
+        *df.apply(get_enhanced_category, axis=1)
+    )
+
+    if "Kernel Time (µs)_sum" in df.columns:
+        time_col = "Kernel Time (µs)_sum"
+        time_scale = 1 / 1000  # µs → ms
+    elif "total_direct_kernel_time_ms" in df.columns:
+        time_col = "total_direct_kernel_time_ms"
+        time_scale = 1.0
+    else:
+        return json.loads(
+            pd.read_csv(
+                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
+            ).to_json(orient="records")
+        )
+
+    count_col = (
+        "operation_count" if "operation_count" in df.columns else "enhanced_category"
+    )
+    grouped = (
+        df.groupby("enhanced_category")
+        .agg(
+            Count=(count_col, "sum" if count_col == "operation_count" else "size"),
+            total_direct_kernel_time_ms=(time_col, "sum"),
+        )
+        .reset_index()
+    )
+    grouped["total_direct_kernel_time_ms"] *= time_scale
+    total_time = grouped["total_direct_kernel_time_ms"].sum()
+    grouped["Percentage (%)"] = (
+        (grouped["total_direct_kernel_time_ms"] / total_time * 100)
+        if total_time > 0
+        else 0
+    )
+    grouped = grouped.sort_values("total_direct_kernel_time_ms", ascending=False)
+    grouped["Cumulative Percentage (%)"] = grouped["Percentage (%)"].cumsum()
+    grouped = grouped.rename(columns={"enhanced_category": "op category"})
+
+    return json.loads(grouped.to_json(orient="records"))
+
+
 def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) -> dict:
     """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows."""
     gpu_data = {}
@@ -73,7 +133,7 @@ def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) ->
 
 def _perf_csv_dirs_for_scope(comparison_scope: str, output_dir: str):
     """Return (trace1_csv_dir, trace2_csv_dir_or_none) for standalone vs comparative."""
-    if comparison_scope == 'standalone':
+    if comparison_scope == "standalone":
         return (
             os.path.join(output_dir, "perf_report_csvs"),
             None,
@@ -83,6 +143,7 @@ def _perf_csv_dirs_for_scope(comparison_scope: str, output_dir: str):
             os.path.join(output_dir, "perf_report_trace1_csvs"),
             os.path.join(output_dir, "perf_report_trace2_csvs"),
         )
+
 
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
     """Split Data Moved into (data_in_mb, data_out_mb) using op type and shapes."""
@@ -188,7 +249,9 @@ def main():
     output_dir = args.output_dir
     enable_pseudo_ops = args.enable_pseudo_ops
     comparison_scope = args.comparison_scope
-    trace1_csv_dir, trace2_csv_dir = _perf_csv_dirs_for_scope(comparison_scope, output_dir)
+    trace1_csv_dir, trace2_csv_dir = _perf_csv_dirs_for_scope(
+        comparison_scope, output_dir
+    )
 
     print("=" * 80)
     print("TRACELENS AGENTICMODE - ORCHESTRATOR PREPARATION")
@@ -226,7 +289,6 @@ def main():
         gpu_timeline
     )
 
-
     if comparison_scope == "comparative" and trace2_csv_dir is not None:
         trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
             pd.read_csv(os.path.join(trace2_csv_dir, "gpu_timeline.csv"))
@@ -235,10 +297,8 @@ def main():
             os.path.join(output_dir, "metadata", "trace2_gpu_utilization.json"), "w"
         ) as f:
             json.dump(trace2_gpu_utilization, f, indent=2)
-        trace2_ops_summary_by_category = json.loads(
-            pd.read_csv(
-                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
-            ).to_json(orient="records")
+        trace2_ops_summary_by_category = _build_trace2_ops_summary_by_enhanced_category(
+            trace2_csv_dir
         )
 
     print(f"\nGPU Utilization Metrics:")
