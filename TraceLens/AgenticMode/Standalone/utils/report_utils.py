@@ -16,14 +16,28 @@ import os
 import pandas as pd
 
 
-def extract_condensed_op_info(output_dir: str) -> bool:
+def extract_condensed_op_info(
+    output_dir: str, comparison_scope: str = "standalone"
+) -> bool:
     """Extract name, Input type, Input Dims to metadata/condensed_op_info.csv.
 
-    Reads perf_report_csvs/unified_perf_summary.csv and writes the three columns
-    for the condensed op info subagent. Returns True on success.
+    Reads unified_perf_summary.csv from the appropriate perf report CSV
+    directory and writes the three columns for the model-identification
+    subagent.  Returns True on success.
+
+    Args:
+        output_dir: Base analysis output directory.
+        comparison_scope: ``"standalone"`` (default) reads from
+            ``perf_report_csvs/``; ``"comparative"`` reads from
+            ``perf_report_trace1_csvs/``.
     """
     _CONDENSED_OP_INFO_COLUMNS = ("name", "Input type", "Input Dims")
-    csv_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+    csv_dir = (
+        "perf_report_trace1_csvs"
+        if comparison_scope == "comparative"
+        else "perf_report_csvs"
+    )
+    csv_path = os.path.join(output_dir, csv_dir, "unified_perf_summary.csv")
     if not os.path.isfile(csv_path):
         return False
     try:
