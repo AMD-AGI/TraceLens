@@ -57,15 +57,20 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 ### To run via Cursor chat:
 
-1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke:**
-   ```
-   Run standalone analysis on <path_to_trace.json>
-   ```
-
+1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke one of:**
+   - Standalone (single trace):
+     ```
+     Run standalone analysis on <path_to_trace.json>
+     ```
+   - Comparative (two traces):
+     ```
+     Run comparative analysis on <path_to_trace1.json> and <path_to_trace2.json>
+     ```
+     **NOTE**: Always pass **baseline** trace as trace1
 
 2. **Provide when prompted:**
-   - Trace file path
-   - Platform (MI300X/MI325X/MI350X/MI355X/MI455X)
+   - Trace file path(s)
+   - Platform (MI300X/MI325X/MI350X/MI355X/MI455X) of first trace
    - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name
@@ -75,7 +80,7 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
 
-**Cluster + container — default (training and eager inference non-vLLM/SGLang):**
+**Cluster + container — default (training and eager inference non-vLLM/SGLang), assuming standalone:**
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
@@ -111,6 +116,8 @@ All parameters are passed inline so no interactive prompts are needed. This is u
 
 ### Output Files
 
+**Standalone** layout:
+
 ```
 analysis_output/
 ├── standalone_analysis.md          # Stakeholder report
@@ -130,6 +137,32 @@ analysis_output/
 ├── category_findings/              # Compute kernel analysis (markdown)
 │   └── *_findings.md
 └── metadata/                       # Category metadata JSONs
+    └── *_metadata.json
+```
+
+**Comparative** layout:
+
+```
+analysis_output/
+├── standalone_analysis.md          # Stakeholder report
+├── perf_report_trace1.xlsx         # Excel performance report for primary trace
+├── perf_report_trace1_csvs/        # Trace 1 CSV exports
+├── perf_report_trace2.xlsx         # Excel performance report for comparison trace
+├── perf_report_trace2_csvs/        # Trace 2 CSV exports
+├── category_data/
+│   ├── category_manifest.json      
+│   ├── multi_kernel_data.json
+│   ├── fusion_candidates.json
+│   ├── kernel_fusion_metrics.json
+│   ├── *_ops.csv
+│   ├── *_metrics.json
+│   └── *_tree_data.json
+├── system_findings/
+│   ├── *_findings.md
+│   └── kernel_fusion_findings.md
+├── category_findings/
+│   └── *_findings.md
+└── metadata/
     └── *_metadata.json
 ```
 
@@ -181,8 +214,8 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ### Workflow Steps
 
 ```
-0.   Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
-1.   Generate Performance Report (branches on analysis mode: training vs inference)
+0.   Query User Inputs (Comparison scope, Trace path(s), Platform, Analysis Mode, Environment Setup)
+1.   Generate Performance Report (branches on analysis mode and comparison scope: one trace vs two + TraceDiff on Trace 1)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
 5.5. Model Identification (subagent) → metadata/model_info.json
 6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
