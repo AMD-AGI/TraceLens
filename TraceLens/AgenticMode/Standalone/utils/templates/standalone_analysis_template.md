@@ -31,6 +31,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
      bar; right: throughput uncertainty band from same range, no uncertainty at baseline).
    - Comparative: plot shows gap-to-target per category (trace 1 vs trace 2 kernel times).
    If the plot was not generated (Step 9.5 failed), the placeholder is removed.
+   - `{{COMPARATIVE_CUMULATIVE_PLOT}}` (comparative only): Step 10.3 embeds a cumulative kernel-time figure from TraceDiff-enriched `unified_perf_summary.csv`; removed if generation is skipped.
 4. Compute Kernel Optimizations: P1-P3+ from category subagent findings.
    - Standalone: Impact estimates show a range (75–100% of roofline target), e.g. "~X.X–Y.Y ms savings (X.X–Y.Y% of E2E)".
    - Comparative: Impact estimates show gap to target trace, e.g. "~X.X ms gap to target (Y.Y% of E2E)".
@@ -92,6 +93,8 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 | Top Bottleneck Category | Category (X%) | Category (Y%) | — |
 
 {{PERF_PLOT}}
+
+{{COMPARATIVE_CUMULATIVE_PLOT}}
 
 ## Warnings
 

@@ -522,6 +522,7 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     extension_file: Optional[str] = None,
+    extension_args: Optional[str] = None,
     # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
@@ -891,6 +892,24 @@ def generate_perf_report_pytorch(
                 dict_name2df.update(additional_dfs)
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
+        if hasattr(extension, "postprocess_perf_report_dataframes_extension"):
+            print(
+                f"Running postprocess_perf_report_dataframes_extension from {extension_path}"
+            )
+            post = getattr(extension, "postprocess_perf_report_dataframes_extension")
+            resolved_args = None
+            if extension_args and str(extension_args).strip():
+                resolved_args = os.path.abspath(
+                    os.path.expanduser(str(extension_args).strip())
+                )
+            dict_name2df = post(
+                dict_name2df,
+                perf_analyzer,
+                extension_args=resolved_args,
+                extension_file=extension_path,
+                enable_pseudo_ops=enable_pseudo_ops,
+            )
+
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
         # Ensure the output directory exists
@@ -1025,6 +1044,12 @@ def main():
         default=None,
         help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
     )
+    parser.add_argument(
+        "--extension_args",
+        type=str,
+        default=None,
+        help="Optional args for postprocess_perf_report_dataframes_extension (e.g. path to second trace for TraceDiff).",
+    )
 
     parser.add_argument(
         "--python_path",
@@ -1078,6 +1103,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         extension_file=args.extension_file,
+        extension_args=args.extension_args,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         group_by_parent_module=args.group_by_parent_module,
