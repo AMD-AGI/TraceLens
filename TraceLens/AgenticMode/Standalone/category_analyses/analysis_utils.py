@@ -27,6 +27,23 @@ import numpy as np
 import pandas as pd
 
 
+def perf_report_csv_dir(output_dir: str) -> str:
+    """
+    Directory containing perf-report CSV exports for the primary (Trace 1) trace.
+
+    When ``category_data/category_manifest.json`` exists and ``comparison_scope``
+    is ``comparative``, returns ``<output_dir>/perf_report_trace1_csvs``.
+    Otherwise returns ``<output_dir>/perf_report_csvs`` (standalone or missing manifest).
+    """
+    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            scope = json.load(f).get("comparison_scope", "standalone")
+        if scope == "comparative":
+            return os.path.join(output_dir, "perf_report_trace1_csvs")
+    return os.path.join(output_dir, "perf_report_csvs")
+
+
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
     Load CSV operations data and metadata JSON for a category.
@@ -195,6 +212,7 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
 # TraceDiff comparison extension columns on unified_perf_summary-derived category CSVs.
 _COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
+
 
 def _comparative_efficiency_percent_from_row(
     result: Dict[str, Any], row: pd.Series

@@ -25,7 +25,12 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
+from analysis_utils import (
+    parse_first_shape,
+    perf_report_csv_dir,
+    shape_aware_lookup,
+    write_metrics_json,
+)
 
 MAX_FUSION_KERNEL_COUNT = 15
 TARGET_HIGH = 100.0
@@ -355,11 +360,7 @@ def load_fusion_data(output_dir: str):
         with open(manifest_path, "r") as f:
             manifest = json.load(f)
 
-    scope = manifest.get("comparison_scope", "standalone")
-    csv_subdir = (
-        "perf_report_trace1_csvs" if scope == "comparative" else "perf_report_csvs"
-    )
-    csv_path = os.path.join(output_dir, csv_subdir, "unified_perf_summary.csv")
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "unified_perf_summary.csv")
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Perf summary CSV not found: {csv_path}")

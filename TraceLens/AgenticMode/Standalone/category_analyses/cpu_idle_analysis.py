@@ -17,24 +17,17 @@ Outputs cpu_idle_metrics.json with analysis results.
 import argparse
 import json
 import os
+import sys
 import pandas as pd
 from typing import Dict, Any, Optional
 
-
-def _resolve_csv_dir(output_dir: str) -> str:
-    """Return the perf-report CSV directory, respecting comparison_scope."""
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    if os.path.exists(manifest_path):
-        with open(manifest_path, "r") as f:
-            scope = json.load(f).get("comparison_scope", "standalone")
-        if scope == "comparative":
-            return os.path.join(output_dir, "perf_report_trace1_csvs")
-    return os.path.join(output_dir, "perf_report_csvs")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from analysis_utils import perf_report_csv_dir
 
 
 def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
     """Load GPU timeline data from CSV."""
-    csv_path = os.path.join(_resolve_csv_dir(output_dir), "gpu_timeline.csv")
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "gpu_timeline.csv")
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"GPU timeline not found: {csv_path}")
@@ -50,7 +43,7 @@ def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
 
 def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
     """Load operations summary for kernel analysis."""
-    csv_path = os.path.join(_resolve_csv_dir(output_dir), "ops_summary.csv")
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "ops_summary.csv")
 
     if not os.path.exists(csv_path):
         return None
