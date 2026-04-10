@@ -1,0 +1,314 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
+---
+name: Eval Post Processing
+description: Aggregate eval results, classify failures, and generate PR + fix-ticket reports from completed repeatability results.
+triggers:
+  - eval post processing
+  - run eval post processing
+tools:
+  - terminal
+  - file_read
+  - file_write
+---
+
+# Eval Post Processing
+
+Standalone skill invoked after the repeatability harness finishes, or manually on existing results. Aggregates per-run CSVs, classifies failures, and writes two markdown reports.
+
+## Inputs
+
+The prompt provides these key=value parameters:
+
+- **results_root**: path to the repeatability results tree (contains `<trace_id>/run_<n>/` directories)
+- **suite**: `unit` or `e2e`
+- **test_traces_csv**: path to the trace CSV used (e.g. `evals/e2e_test_traces.csv`)
+- **report_dir**: where to write output reports
+- **container**: Docker container name (used in reproducer commands)
+
+## Step 4 — Aggregate
+
+Run `aggregate_repeatability.py` to merge all per-run `eval_summary.csv` files and parse stream logs:
+
+```bash
+RESULTS_ROOT=<results_root> OUTPUT_DIR=<report_dir>/aggregates \
+  python3 evals/eval_utils/aggregate_repeatability.py
+```
+
+This produces three files in `<report_dir>/aggregates/`:
+
+- `aggregated_results.csv` — columns: `trace_id,run_id,eval_index,eval_category,issue_summary,result,details`
+- `pass_rate_summary.csv` — columns: `trace_id,<eval_index>,...,overall_pass_rate` (values like `13/15` or `N/A`)
+- `stream_diagnostics.csv` — columns: `trace_id,run_id,outcome,duration_ms,input_tokens,output_tokens,cache_read_tokens,turns,tool_calls,report_written,report_headers,last_step_reached`
+
+Verify the script exits 0 and all three files exist before proceeding.
+
+## Step 5 — Read and Classify
+
+Read these files:
+
+1. `<report_dir>/aggregates/aggregated_results.csv`
+2. `<report_dir>/aggregates/pass_rate_summary.csv`
+3. `<report_dir>/aggregates/stream_diagnostics.csv`
+4. `evals/eval_utils/report_section_rules.yaml` — classification guide (JSON format despite `.yaml` extension)
+5. `<test_traces_csv>` — for trace metadata (id, sub_category, platform, trace_path)
+
+### Splitting Unit Test vs E2E Test Cases
+
+Use the `sub_category` column from `<test_traces_csv>` to classify each trace:
+
+- **Unit test cases**: `sub_category` is NOT `full_model` (e.g., gemm, conv, attention, elementwise, moe)
+- **E2E test cases**: `sub_category` is `full_model`
+
+All subsequent metrics, tables, and failure analysis must be computed and reported **separately** for unit tests and e2e tests.
+
+From `aggregated_results.csv`, compute:
+
+- **Overall metrics**: count PASS, FAIL, MISSING rows; compute pass rate
+- **Unit test metrics**: same counts for unit test trace_ids only
+- **E2E test metrics**: same counts for e2e test trace_ids only
+- **Top failure issues**: group FAIL rows by `issue_summary`, count, sort descending — compute overall AND per-split
+- **Per-trace failure counts**: group FAIL rows by `trace_id`, count, sort descending — compute per-split
+
+From `stream_diagnostics.csv`, compute per-split:
+
+- **Success rate**: successful runs / total runs
+- **Average duration**: mean of `duration_ms` for successful runs
+
+### Classification
+
+Use `report_section_rules.yaml` as a guide to classify each FAIL row into:
+
+- **Base sections** (broad categories like "Reasoning", "Kernel Fusion", "Others"): match `eval_index`, `eval_category`, `issue_summary`, or `details` against `base_section_rules`. Unmatched rows go to "Others".
+- **Standalone sections** (report sections like "Detailed Analysis", "Executive Summary"): match against `standalone_section_rules`. Unmatched rows go to "Detailed Analysis".
+- **Failure modes** (likely cause + suggested fix): match against `failure_mode_rules`. You may improve on the suggested causes and fixes using your own judgment based on the failure details — the rules file is a starting point, not a rigid contract.
+
+## Step 6 — Write Reports
+
+Write two markdown files. Follow the exact structure below.
+
+### `<report_dir>/pr_report.md`
+
+```markdown
+# Automated Eval Report (PR)
+
+Generated at: `<ISO 8601 timestamp>`
+
+| Metric | Overall | Unit Tests | E2E Tests |
+|---|---|---|---|
+| PASS | <overall_pass> | <unit_pass> | <e2e_pass> |
+| FAIL | <overall_fail> | <unit_fail> | <e2e_fail> |
+| MISSING | <overall_missing> | <unit_missing> | <e2e_missing> |
+| Pass rate | <overall_rate>% | <unit_rate>% | <e2e_rate>% |
+
+## Failure Sections
+
+| Section | Failures |
+|---|---|
+| <base_section> | <count> |
+...
+
+## Top Failure Issues (Overall)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...top 10, sorted descending
+
+---
+
+## Unit Test Cases (<N> cases, <unit_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending (worst first)
+
+### Top Failures (Unit Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...top 10 for unit test cases only
+
+---
+
+## E2E Test Cases (<N> cases, <e2e_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending (worst first)
+
+### Top Failures (E2E Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...top 10 for e2e test cases only
+```
+
+Column definitions for the Per-Case Results table:
+- **Category**: the `sub_category` from the test traces CSV (e.g., gemm, conv, attention, moe, full_model)
+- **Pass Rate**: format as `<pass>/<total> (<pct>%)` matching `pass_rate_summary.csv`
+- **Runs**: `<successful_runs>/<total_runs>` from `stream_diagnostics.csv`
+- **Avg Duration**: mean of `duration_ms` (in seconds) for successful runs from `stream_diagnostics.csv`
+
+### `<report_dir>/fix_ticket_report.md`
+
+```markdown
+# Automated Eval Report (Fix Ticket)
+
+Generated at: `<ISO 8601 timestamp>`
+
+| Metric | Overall | Unit Tests | E2E Tests |
+|---|---|---|---|
+| PASS | <overall_pass> | <unit_pass> | <e2e_pass> |
+| FAIL | <overall_fail> | <unit_fail> | <e2e_fail> |
+| MISSING | <overall_missing> | <unit_missing> | <e2e_missing> |
+| Pass rate | <overall_rate>% | <unit_rate>% | <e2e_rate>% |
+
+---
+
+## Unit Test Cases (<N> cases, <unit_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending
+
+### Top Failures (Unit Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...all issues for unit test cases, sorted descending
+
+### Failure Modes (Unit Tests)
+
+| Issue | Count | Likely cause | Suggested fix |
+|---|---|---|---|
+| <issue_summary> | <count> | <cause> | <fix> |
+...top 8 unit test issues with cause/fix analysis
+
+### Top Reproducers (Unit Tests)
+
+| Trace/Case | Failures | Platform | Reproducer command |
+|---|---|---|---|
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+...top 5 unit test traces by failure count
+
+---
+
+## E2E Test Cases (<N> cases, <e2e_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending
+
+### Top Failures (E2E Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...all issues for e2e test cases, sorted descending
+
+### Failure Modes (E2E Tests)
+
+| Issue | Count | Likely cause | Suggested fix |
+|---|---|---|---|
+| <issue_summary> | <count> | <cause> | <fix> |
+...top 8 e2e test issues with cause/fix analysis
+
+### Top Reproducers (E2E Tests)
+
+| Trace/Case | Failures | Platform | Reproducer command |
+|---|---|---|---|
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+...top 5 e2e test traces by failure count
+```
+
+For the reproducer commands:
+- Use the `container` value from inputs
+- Use the **relative** path of `test_traces_csv` (e.g. `evals/combined_traces.csv`) — never embed absolute or user-specific paths
+- Omit `NUM_REPEATS` and `MAX_PARALLEL` so the script defaults (5 repeats, 5 parallel) are used, matching a standard eval run
+- The `platform` comes from the test traces CSV
+
+### Handling single-split runs
+
+If the test traces CSV contains **only unit tests** or **only e2e tests** (no `full_model` entries, or all `full_model` entries), still use the two-section format but note the empty section:
+
+```markdown
+## E2E Test Cases (0 cases)
+
+No e2e test cases in this run.
+```
+
+## Step 7 — Build Reproducer Packages
+
+Create a self-contained, assignable reproducer folder for each unique failure issue. These let a developer load the stream JSON into Cursor and debug the issue directly.
+
+**For each unique `issue_summary` in the FAIL rows:**
+
+1. Create a folder: `<report_dir>/reproducers/<sanitized_issue_name>/`
+   - Sanitize the name for filesystem use (lowercase, replace spaces/special chars with underscores, truncate to 80 chars)
+
+2. Write a `README.md` inside the folder with:
+   - Issue name and total failure count
+   - Table of affected traces (trace_id, run_id, platform, details snippet)
+   - The reproducer shell command for the worst-affected trace
+
+3. For each (trace_id, run_id) pair that hit this issue (limit to 3 representative examples):
+   - Copy the `analysis_stream.ndjson` from `<results_root>/<trace_id>/run_<run_id>/analysis_stream.ndjson` into the folder as `<trace_id>_run_<run_id>.ndjson`
+   - **Sanitize identifying paths**: replace the absolute repo root path with `$REPO_ROOT/` so the stream is portable
+   - Copy the `eval_summary.csv` from that run as `<trace_id>_run_<run_id>_eval_summary.csv`
+
+4. Compress the folder:
+   ```bash
+   tar -czf <report_dir>/reproducers/<sanitized_issue_name>.tar.gz \
+     -C <report_dir>/reproducers <sanitized_issue_name>/
+   ```
+
+The path sanitization command for each NDJSON (replaces the full repo root path):
+```bash
+REPO_ABS=$(cd "$(git rev-parse --show-toplevel)" && pwd)
+sed "s|${REPO_ABS}|\$REPO_ROOT|g" <source> > <dest>
+```
+
+After all issues are processed, print the count:
+```
+Built <N> reproducer packages in <report_dir>/reproducers/
+```
+
+## Step 8 — Save and Summarize
+
+1. Copy `<report_dir>` to `evals/eval_reports/latest/` (remove existing `latest/` first if present):
+   ```bash
+   rm -rf evals/eval_reports/latest
+   cp -r <report_dir> evals/eval_reports/latest
+   ```
+
+2. Print a summary to the user:
+   - Overall pass rate and PASS/FAIL/MISSING counts
+   - Top 3 worst-performing traces
+   - Top 3 failure issues
+   - **Explicitly print the full paths** to the generated outputs:
+     ```
+     PR report:          <report_dir>/pr_report.md
+     Fix-ticket report:  <report_dir>/fix_ticket_report.md
+     Reproducer packages: <report_dir>/reproducers/ (<N> issues)
+     Latest copy:        evals/eval_reports/latest/
+     ```

@@ -31,7 +31,6 @@ import os
 
 from TraceLens.util import TraceEventUtils
 
-
 # Global variable to store critical path UIDs
 CRITICAL_PATH_UIDS = set()
 

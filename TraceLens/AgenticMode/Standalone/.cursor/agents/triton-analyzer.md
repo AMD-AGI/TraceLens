@@ -56,6 +56,17 @@ Use vendor-agnostic terminology:
 
 ---
 
+## Performance Model Limitation
+
+> **Note:** TraceLens does not have dedicated performance models for Triton kernels.
+> Triton kernels are user-written custom GPU kernels with arbitrary compute and memory
+> access patterns. Without a kernel-specific performance model, FLOPS counts, byte
+> estimates, and roofline percentages cannot be reliably computed. This is why
+> efficiency-based bottleneck flagging, impact estimates, and optimization
+> recommendations are not produced for this category.
+
+---
+
 ## Analysis Workflow
 
 ### Step 1: Run Analysis Script
@@ -120,7 +131,7 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 
 ## Key Principles
 
-1. **Informational only** -- report time and operation data, draw no conclusions
+1. **Informational only** -- no performance model exists for user-written Triton kernels (see [Performance Model Limitation](#performance-model-limitation)); report time and operation data without drawing efficiency conclusions
 2. **No impact estimates** -- the metrics JSON contains an empty `impact_estimates` list by design
 3. **No recommendations** -- do not suggest algorithmic or kernel-level optimizations
 4. **Empty Impact Summary** -- the table header must exist (for orchestrator parsing) but must have zero rows

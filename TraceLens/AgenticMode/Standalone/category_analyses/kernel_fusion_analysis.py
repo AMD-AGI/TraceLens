@@ -27,11 +27,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
 
-MAX_FUSION_KERNEL_COUNT = 15
-TARGET_HIGH = 100.0
-TARGET_LOW = 75.0
-TARGET_MID = 87.5
-MIN_E2E_PCT = 2.0
+MAX_FUSION_KERNEL_COUNT = (
+    15  # Skip candidates with more kernels than this (too complex to fuse reliably)
+)
+
+TARGET_HIGH = 100.0  # Best-case savings target (100% of original time)
+TARGET_LOW = 75.0  # Mid-range savings target (75% of original time)
+TARGET_MID = 87.5  # Balanced savings target (87.5% of original time)
+MIN_E2E_PCT = 2.0  # Drop estimates whose best-case E2E impact is below this threshold
+OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
 _MATRIX_SPECS = frozenset(
     {
@@ -53,6 +57,38 @@ _NORM_TYPES = frozenset(
         "Norm",
     }
 )
+
+_NORM_NAME_PATTERNS = [
+    "batchnorm",
+    "layernorm",
+    "groupnorm",
+    "instancenorm",
+    "miopenbatchnorm",
+    "rmsnorm",
+]
+
+_CONFIDENCE_NAME_HINTS = {
+    "attention": ("attention", "sdpa", "self_attn"),
+    "norm": (
+        "rmsnorm",
+        "rms_norm",
+        "layernorm",
+        "layer_norm",
+        "batchnorm",
+        "batch_norm",
+    ),
+    "mlp": ("mlp",),
+    "rope": ("rotary", "rope", "apply_rotary"),
+    "siglu": ("silu", "swiglu"),
+}
+
+
+def _is_norm_kernel(kernel_info: dict) -> bool:
+    """Check if a kernel is a normalization op by type or kernel name."""
+    if kernel_info.get("type", "") in _NORM_TYPES:
+        return True
+    name = kernel_info.get("name", kernel_info.get("kernel_name", "")).lower()
+    return any(p in name for p in _NORM_NAME_PATTERNS)
 
 
 def build_kernel_perf_lookup(csv_path: str) -> Dict[str, Dict]:
@@ -126,7 +162,10 @@ def _split_into_subgroups(enriched_kernels):
 
 
 def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, target_pct):
-    """Compute roofline-projected savings for an elementwise sub-group."""
+    """Compute roofline-projected savings for an elementwise sub-group.
+
+    Blends between max (perfect overlap) and sum (no overlap) using OVERLAP_EFFICIENCY.
+    """
     modeled = [e for e in enriched if e["has_perf_data"]]
     if not modeled:
         return 0.0
@@ -163,11 +202,64 @@ def _roofline_savings_us(enriched, peak_bw_bytes_s, vector_maf, matrix_maf, targ
         if vector_gflops > 0
         else 0.0
     )
-    fused_time_us = max(memory_time_us, max(matrix_time_us, vector_time_us))
+
+    fused_optimal = max(memory_time_us, matrix_time_us, vector_time_us)
+    fused_sum = memory_time_us + matrix_time_us + vector_time_us
+    fused_time_us = fused_optimal + (1.0 - OVERLAP_EFFICIENCY) * (
+        fused_sum - fused_optimal
+    )
 
     unmodeled_time_us = sum(e["dur_us"] for e in enriched if not e["has_perf_data"])
     current_us = sum(e["dur_us"] for e in enriched)
     return max(0.0, current_us - fused_time_us - unmodeled_time_us)
+
+
+def _classify_confidence(candidate: dict, enriched: list) -> str:
+    """Classify fusion confidence from enriched kernel data + module name.
+
+    High   = module name matches a known pattern AND kernel composition confirms it.
+    Medium = one signal matches.
+    Low    = speculative.
+    """
+    bn = candidate.get("base_name", "").lower()
+    mn = candidate.get("module_name", "").lower()
+
+    name_signal = next(
+        (
+            p
+            for p, hints in _CONFIDENCE_NAME_HINTS.items()
+            if any(h in bn or h in mn for h in hints)
+        ),
+        None,
+    )
+
+    n_gemm = sum(1 for e in enriched if _is_matrix_op(e))
+    has_softmax = any("softmax" in e["name"].lower() for e in enriched)
+    has_rsqrt = any("rsqrt" in e["name"].lower() for e in enriched)
+    has_neg_cat = any("neg" in e["name"].lower() for e in enriched) and any(
+        "catarray" in e["name"].lower() or "cat_" in e["name"].lower() for e in enriched
+    )
+    n_non_gemm = len(enriched) - n_gemm
+
+    comp_signal = None
+    # Unfused attention: QK^T (GEMM) + Softmax + PV (GEMM) → minimum 2 GEMMs
+    if n_gemm >= 2 and has_softmax:
+        comp_signal = "attention"
+    # rsqrt is shared by RMSNorm, LayerNorm, GroupNorm — all valid fusion targets
+    elif has_rsqrt:
+        comp_signal = "norm"
+    elif n_gemm >= 2 and n_non_gemm >= 1:
+        comp_signal = "mlp"
+    elif has_neg_cat:
+        comp_signal = "rope"
+    elif n_gemm == 0 and len(enriched) >= 3:
+        comp_signal = "elementwise_chain"
+
+    if name_signal and comp_signal:
+        return "high"
+    if name_signal or comp_signal:
+        return "medium"
+    return "low"
 
 
 def compute_fusion_impact_estimates(
@@ -188,6 +280,10 @@ def compute_fusion_impact_estimates(
 
     Kernels without perf models use their measured trace time as-is
     and a warning is emitted.
+
+    Each estimate includes a deterministic ``confidence`` level (high / medium /
+    low) and the list of GPU kernel names (``affected_gpu_kernels``) so that
+    downstream compute-category scripts can skip fusion-covered operations.
     """
 
     vector_maf = peak_maf_tflops.get(
@@ -242,7 +338,7 @@ def compute_fusion_impact_estimates(
 
         non_matrix = [e for e in enriched if not _is_matrix_op(e)]
         if non_matrix and any(_is_matrix_op(e) for e in enriched):
-            if all(e["type"] in _NORM_TYPES for e in non_matrix):
+            if all(_is_norm_kernel(e) for e in non_matrix):
                 continue
 
         modeled_frac = len(modeled) / len(enriched)
@@ -315,6 +411,9 @@ def compute_fusion_impact_estimates(
             "kernel_count": len(kernels),
             "modeled_kernel_count": len(modeled),
         }
+
+        estimate["confidence"] = _classify_confidence(candidate, enriched)
+        estimate["affected_gpu_kernels"] = [e["name"] for e in enriched]
 
         if has_matrix_ops:
             estimate["fusion_type"] = "matrix_compute"
@@ -392,16 +491,21 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
     )
 
 
-def _filter_and_dedup(candidates: list) -> list:
-    """Filter by kernel count cap and deduplicate nested duplicates.
+def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:
+    """Filter by kernel count cap, drop tiny candidates, and deduplicate.
 
-    Two candidates with the same (instance_count, kernel_count, total_kernel_time_us)
-    are the same set of kernels captured at different nesting levels in the call tree.
-    Keep only the one with the shorter (more specific) module name.
+    Candidates whose total time can't reach MIN_E2E_PCT of baseline are
+    dropped early to avoid expensive downstream enrichment.
     """
     filtered = [
         c for c in candidates if c.get("kernel_count", 0) <= MAX_FUSION_KERNEL_COUNT
     ]
+
+    if baseline_ms > 0:
+        min_time_us = baseline_ms * 10 * MIN_E2E_PCT
+        filtered = [
+            c for c in filtered if c.get("total_kernel_time_us", 0) >= min_time_us
+        ]
 
     seen: dict = {}
     for c in filtered:
@@ -439,8 +543,10 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+
     raw_count = len(candidates)
-    candidates = _filter_and_dedup(candidates)
+    candidates = _filter_and_dedup(candidates, baseline_ms=baseline_ms)
     print(
         f"  Filtered: {raw_count} -> {len(candidates)} candidates "
         f"(max {MAX_FUSION_KERNEL_COUNT} kernels, deduped)"
@@ -466,7 +572,6 @@ def main():
 
     peak_bw_tbs = arch["peak_hbm_bw_tbs"]
     peak_maf_tflops = arch["max_achievable_tflops"]
-    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
 
     kernel_lookup = build_kernel_perf_lookup(csv_path)
 
@@ -497,11 +602,24 @@ def main():
     if warnings:
         metrics["warnings"] = warnings
 
+    high_confidence_kernel_map: Dict[str, str] = {}
+    for est in impact_estimates:
+        if est.get("confidence") == "high":
+            op_name = est["operation"]
+            for kn in est.get("affected_gpu_kernels", []):
+                if kn:
+                    high_confidence_kernel_map[kn] = op_name
+    metrics["high_confidence_kernel_map"] = high_confidence_kernel_map
+
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
     print(f"Kernel fusion analysis complete:")
     print(f"  Candidates: {len(candidates)}")
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total savings (mid): {total_savings_ms:.3f} ms")
+    high_count = sum(1 for e in impact_estimates if e.get("confidence") == "high")
+    print(
+        f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}"
+    )
     if warnings:
         print(f"  Warnings: {len(warnings)}")
     print(f"  Metrics written to: {output_path}")

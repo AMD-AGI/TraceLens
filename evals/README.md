@@ -68,7 +68,7 @@ Runs each test case `NUM_REPEATS` times (default: 5) serially. Results go to `ev
 
 ### Repeatability Study (parallel)
 
-Recommended for repeatability testing. Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit.
+Recommended for repeatability testing. Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)).
 
 ```bash
 CONTAINER=my_container bash evals/eval_scripts/run_repeatability_parallel.sh
@@ -79,18 +79,36 @@ Environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `CONTAINER` | (required) | Docker container name |
-| `MAX_PARALLEL` | 3 | Max concurrent jobs |
+| `MAX_PARALLEL` | 5 | Max concurrent jobs |
 | `NUM_REPEATS` | 5 | Repeats per test case |
 | `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
+| `TEST_TRACES_CSV` | `evals/unit_test_traces.csv` | Path to the trace CSV to use |
+| `RESULTS_ROOT` | `evals/repeatability_results` | Where per-run results are written |
+| `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
+| `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
+| `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
+| `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
-Full example:
+Full example (e2e suite, 3 repeats, 2 parallel):
 
 ```bash
-MAX_PARALLEL=5 NUM_REPEATS=3 CONTAINER=my_container \
+CONTAINER=my_container \
+SUITE_NAME=e2e \
+TEST_TRACES_CSV=evals/e2e_test_traces.csv \
+RESULTS_ROOT=evals/eval_reports/my_run/results/e2e_repeatability_results \
+REPORT_DIR=evals/eval_reports/my_run/reports \
+NUM_REPEATS=3 MAX_PARALLEL=2 \
     bash evals/eval_scripts/run_repeatability_parallel.sh
 ```
 
 Use a `screen` session to prevent disconnects during long runs. Each job cleans its output directory before starting to prevent stale results.
+
+To run evals without generating reports (e.g. to re-process later):
+
+```bash
+SKIP_POST_PROCESSING=1 CONTAINER=my_container \
+    bash evals/eval_scripts/run_repeatability_parallel.sh
+```
 
 ### Generate Golden References
 
@@ -129,6 +147,35 @@ agent --force "Run the workflow eval skill on <output_dir> for test case <id>. W
 ```bash
 cd evals
 agent --force "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
+```
+
+## Post-Processing Skill
+
+After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. This is defined in `.cursor/skills/eval-post-processing.md`.
+
+The skill performs four steps:
+
+1. **Aggregate** -- Runs `aggregate_repeatability.py` to merge all per-run `eval_summary.csv` files into `aggregated_results.csv`, `pass_rate_summary.csv`, and `stream_diagnostics.csv`.
+2. **Classify** -- Reads the aggregate CSVs and `report_section_rules.yaml` to classify failures into report sections and failure modes.
+3. **Write reports** -- Generates `pr_report.md` (concise summary for a PR comment) and `fix_ticket_report.md` (detailed failure modes, reproducers, and suggested fixes for an issue ticket).
+4. **Build reproducer packages** -- Creates a self-contained folder per failure issue with sanitized stream JSONs, eval summaries, and a README. Each folder is compressed into a `.tar.gz` that can be assigned to a developer for debugging with Cursor.
+
+### Re-running post-processing on existing results
+
+You can re-run the post-processing skill on any previous results without re-running the eval loop:
+
+```bash
+cd evals
+agent --print --force --trust \
+    "Run eval post processing on results_root=<results_root> suite=<suite> test_traces_csv=<csv_path> report_dir=<report_dir> container=<container>"
+```
+
+Example:
+
+```bash
+cd evals
+agent --print --force --trust \
+    "Run eval post processing on results_root=evals/eval_reports/my_run/results/e2e_repeatability_results suite=e2e test_traces_csv=evals/e2e_test_traces.csv report_dir=evals/eval_reports/my_run/reports container=modular_evals"
 ```
 
 ## Adding New Test Cases
@@ -195,22 +242,20 @@ Results are written to `evals/results/<id>/` (single run) or `evals/repeatabilit
 - `quality_llm_eval.ndjson` / `quality_llm_results.csv` -- LLM quality eval output.
 - `eval_summary.csv` -- merged results for the test case.
 
-### Aggregating Repeatability Results
+### Aggregated Results and Reports
 
-After repeatability runs complete, aggregate and analyze:
+After a repeatability run, the post-processing skill generates reports in `<REPORT_DIR>/`:
 
-```bash
-python evals/eval_utils/aggregate_repeatability.py
-```
-
-This produces three CSVs in `evals/eval_utils/output/`:
-
-- `pass_rate_summary.csv` -- per-trace, per-eval pass rates across all runs
-- `aggregated_results.csv` -- full eval results for every run
-- `stream_diagnostics.csv` -- per-run metadata (outcome, token usage, last step reached, whether the report was written)
+- `aggregates/aggregated_results.csv` -- full eval results for every (trace, run) pair
+- `aggregates/pass_rate_summary.csv` -- per-trace, per-eval pass rates across all runs
+- `aggregates/stream_diagnostics.csv` -- per-run metadata (outcome, token usage, last step reached, whether the report was written)
+- `pr_report.md` -- concise summary for posting as a PR comment
+- `fix_ticket_report.md` -- detailed failure analysis with failure modes, suggested fixes, and reproducer commands
+- `reproducers/` -- per-issue reproducer packages (`.tar.gz` files with sanitized stream JSONs for debugging)
 
 **What to look for:**
 
 - **Overall pass rate** should not regress compared to the baseline on `main`.
 - **Per-eval consistency** -- an eval that passes in 3/5 runs indicates flaky behavior that needs investigation.
 - **Stream diagnostics regressions** -- runs where the report was not written or the last step reached regressed (e.g., stuck at Step 7 instead of reaching Step 11) signal a reliability problem.
+- **Reproducer packages** -- assign the `.tar.gz` for a specific issue to a developer. They can extract it, load the stream JSON into Cursor, and debug the root cause.

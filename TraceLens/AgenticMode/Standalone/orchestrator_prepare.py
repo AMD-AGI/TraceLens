@@ -48,6 +48,13 @@ FUSION_ALREADY_FUSED = [
     "silu_and_mul",
     "SiluAndMul",
 ]
+_NORM_KERNEL_PATTERNS = [
+    "batchnorm",
+    "layernorm",
+    "groupnorm",
+    "instancenorm",
+    "rmsnorm",
+]
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
@@ -101,12 +108,48 @@ def _build_kernel_perf_lookup(csv_path):
     return dict(lookup)
 
 
+def _is_gemm_norm_only(entry):
+    """Reject GEMM + norm-only candidates (BN folding, not kernel fusion)."""
+    kernels = entry.get("kernels", [])
+    has_gemm = any(
+        k.get("type", "").upper() in ("GEMM", "GEMM (GENERIC)")
+        or "conv" in k.get("name", "").lower()
+        for k in kernels
+    )
+    if not has_gemm:
+        return False
+    non_gemm = [
+        k
+        for k in kernels
+        if k.get("type", "").upper() not in ("GEMM", "GEMM (GENERIC)")
+        and "conv" not in k.get("name", "").lower()
+    ]
+    if not non_gemm:
+        return False
+    return all(
+        any(p in k.get("name", "").lower() for p in _NORM_KERNEL_PATTERNS)
+        or k.get("type", "") in ("Elementwise Add", "Copy/Cast")
+        for k in non_gemm
+    )
+
+
+def _prefix_lookup(lookup, kname):
+    """Look up by exact key, falling back to prefix match for truncated CSV names."""
+    result = lookup.get(kname)
+    if result is not None:
+        return result
+    for csv_name in lookup:
+        if kname.startswith(csv_name) or csv_name.startswith(kname):
+            return lookup[csv_name]
+    return None
+
+
 def _extract_attention_core(kernels, perf_lookup):
     """If kernels contain unfused attention (softmax), return just QKt+softmax+PV."""
     name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
 
     def is_gemm(k):
-        entries = perf_lookup.get(k.get(name_key, ""), {})
+        entries = _prefix_lookup(perf_lookup, k.get(name_key, "")) or {}
         return any(e.get("op_category") == "GEMM" for e in entries.values())
 
     for i, k in enumerate(kernels):
@@ -128,7 +171,7 @@ def main():
         "--platform",
         required=True,
         choices=list_platforms(),
-        help="AMD platform (MI300X, MI325X, MI350X, MI355X, MI400)",
+        help="AMD platform (MI300X, MI325X, MI350X, MI355X, MI455X)",
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
@@ -662,11 +705,12 @@ def main():
                 seen_sibling_bases[sbase] = entry
                 sibling_seqs.append(entry)
 
-            # Build candidate summary -- minimal filtering, let the LLM decide fusability
             fusion_candidates = []
             for b in base_order:
                 m = seen_base[b]
                 if m["has_fused_kernel"] or m["eligible_kernel_count"] < 2:
+                    continue
+                if _is_gemm_norm_only(m):
                     continue
                 fusion_candidates.append(m)
 
@@ -729,6 +773,8 @@ def main():
 
                 for c in fusion_candidates:
                     for k in c.get("kernels", []):
+                        if k.get("data_in_mb") is not None:
+                            continue
                         kname = k.get("name", k.get("kernel_name", ""))
                         entry = shape_aware_lookup(
                             perf_lookup, kname, c.get("input_dims")
