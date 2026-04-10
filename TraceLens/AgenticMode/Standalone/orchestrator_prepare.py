@@ -171,7 +171,7 @@ def main():
         "--platform",
         required=True,
         choices=list_platforms(),
-        help="AMD platform (MI300X, MI325X, MI350X, MI355X, MI400)",
+        help="AMD platform (MI300X, MI325X, MI350X, MI355X, MI455X)",
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
