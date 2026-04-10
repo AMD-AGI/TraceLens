@@ -51,7 +51,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Aggregate Results: System-Level + Compute Kernel Recommendations
 10. Generate Final Report (composable System + Compute sections)
-10.1. Generate and Embed Performance Improvement Plot (single atomic call: plot_data + matplotlib PNG + base64 embed)
+10.1–10.2. Embed performance plot (`{{PERF_PLOT}}`) — see Steps 10 / 10.2 in body
+10.3. **Comparative only:** Cumulative TraceDiff plot (`{{COMPARATIVE_CUMULATIVE_PLOT}}`) — see Step 10.3
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 5.5, 6, 7). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -190,6 +191,8 @@ Do **not** pass `--extension_*` on the trace2 command.
   --enable_pseudo_ops \
   --group_by_num_kernels
 ```
+
+When `<comparison_scope>` = `comparative`, append the same `--extension_file` / `--extension_args <trace2_path>` pair as in the default-mode example (inference generator supports `--extension_args` for TraceDiff).
 
 **Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
 
@@ -693,6 +696,33 @@ generate_and_embed_plot(sys.argv[1], sys.argv[2])
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
+
+---
+
+### 10.3 Comparative cumulative kernel-time plot (comparative scope only)
+
+When `<comparison_scope>` = **`comparative`**, after Step 10.2 (or immediately after the report file exists with `{{COMPARATIVE_CUMULATIVE_PLOT}}` in the comparative Executive Summary), run **one** command to build a **stacked Baseline → Projection** chart from TraceDiff-enriched `unified_perf_summary.csv`, and embed it in the markdown.
+
+**Labels:** Use the same naming you used in the report for the two traces (e.g. **Trace 1** = `<trace_path>` platform, **Trace 2** = comparison platform).
+
+```bash
+<prefix> python3 -c \"
+import sys
+from TraceLens.AgenticMode.Standalone.utils.comparative_cumulative_plot import (
+    generate_and_embed_comparative_cumulative_plot,
+)
+generate_and_embed_comparative_cumulative_plot(
+    sys.argv[1],
+    sys.argv[2],
+    sys.argv[3],
+    title=sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None,
+)
+\" '<output_dir>' '<Plaform1>' '<Platform2>' '<Optional suptitle>'
+```
+
+- If generation fails (missing CSV, no comparative columns), the placeholder is **removed** so the report stays valid.
+
+For **`standalone`** scope, the comparative block (including `{{COMPARATIVE_CUMULATIVE_PLOT}}`) is deleted per template rules — no Step 10.3 run.
 
 ---
 
