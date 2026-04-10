@@ -50,8 +50,8 @@ The five labels below must appear **in this order**, each on its own line with a
 | Label | Purpose |
 |-------|---------|
 | `**Identification:**` | How these operations were deemed an optimization opportunity. Body text must use **plain language only** — no JSON keys, dotted paths, or internal variable names. **Must** end with a `(source: <artifact> → <keys>)` parenthetical as the final text. Artifact names and keys must be wrapped in backticks (e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). All JSON keys and internal variable names belong **exclusively** inside this parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table. Default columns: `Operation \| Kernel time (ms) \| % of category \| Count \| FLOPS/Byte \| Efficiency \| Bound`. Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
-| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
+| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table. **Standalone** default columns: `Operation \| Kernel time (ms) \| % of category \| Count \| FLOPS/Byte \| Efficiency \| Bound`. **Comparative** default columns: `Operation \| Trace 1 Time (ms) \| Trace 2 Time (ms) \| Count (T1/T2) \| FLOPS/Byte (T1) \| Bound (T1)`. Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. System uses the same format for both standalone and comparative modes. |
+| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*. **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** why Trace 1 is slower than Trace 2 for these operations — cite comparative kernel-time ratios, absolute time gaps, and structural differences. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the three-bullet format (see below); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` |
 
@@ -104,11 +104,25 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ### Rendering format
 
+#### Standalone
+
 Quantifiable:
 
 ```markdown
 - Low end (75% roofline target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
 - High end (100% roofline target): <high_e2e_ms> ms savings (<high_e2e_percent>% E2E)
+- Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
+```
+
+Non-quantifiable: `Impact estimate is not quantifiable from trace data.`
+
+#### Comparative (gap to target trace)
+
+Quantifiable:
+
+```markdown
+- Low end (75% gap target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
+- High end (100% gap target): <high_e2e_ms> ms savings (<high_e2e_percent>% E2E)
 - Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
 ```
 
@@ -121,7 +135,7 @@ Each sub-agent renders the impact bullets directly in its `## Detailed Analysis`
 Before writing findings, verify these items:
 
 1. **Card–Detailed Analysis consistency:** Every claim, number, and operation in the P-item card (Insight / Action / Impact) must be consistent with the corresponding Detailed Analysis block. Do not introduce numbers or claims in one that are absent from the other.
-2. **Data table columns** match the tier defaults (compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`; system: `Metric | Value | Flagged`).
+2. **Data table columns** match the tier defaults. Standalone compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`. Comparative compute: `Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | FLOPS/Byte (T1) | Bound (T1)`. System (both modes): `Metric | Value | Flagged`.
 3. **Final report slice** From `## Detailed Analysis` through the next `##`, include `### Compute Kernel Insights` and `### System-Level Insights`.
 4. **P-block body:** five required labels in order; each label starts at the beginning of a line.
 5. **Identification** before `(source:`: no JSON-path-shaped backticks except op names used as prose.

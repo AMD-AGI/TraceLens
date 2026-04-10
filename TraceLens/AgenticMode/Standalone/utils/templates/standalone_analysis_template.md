@@ -86,9 +86,9 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 | Metric | Trace 1 -  (<Platform1>) | Trace 2 - NVIDIA (<Platform2>) | Difference |
 |--------|----------------------------|-------------------------------|------------|
 | Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
-| Compute % | X% | Y% | +/-Z pp |
-| Idle % | X% | Y% | +/-Z pp |
-| Exposed Communication % | X% | Y% | +/-Z pp |
+| Compute % | X% | Y% | +/-Z% |
+| Idle % | X% | Y% | +/-Z% |
+| Exposed Communication % | X% | Y% | +/-Z% |
 | Top Bottleneck Category | Category (X%) | Category (Y%) | — |
 
 {{PERF_PLOT}}
