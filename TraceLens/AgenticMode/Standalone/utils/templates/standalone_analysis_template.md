@@ -130,11 +130,11 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 | 1 | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
 
 <!-- === COMPARATIVE Top Operations === -->
-<!-- Use **% of computation time** based on Trace 1 (). "Potential improvement" = Trace 1 category time − Trace 2 category time; positive means  is slower. Use "—" when trace 2 has no matching category data. -->
+<!-- Use **% of computation time** based on Trace 1. "Difference" = Trace 2 category time − Trace 1 category time; negative means Trace 2 is faster. Use "—" when trace 2 has no matching category data. -->
 
-| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
-|------|----------|-------------------|-------------------|-------------------|-----|-----------------------------|
-| 1 | ... | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
+| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
+|------|----------|-------------------|-------------------|-------------------|-----|-----------------|
+| 1 | ... | ... | ... | ... | ... | +/-X.X or — |
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
