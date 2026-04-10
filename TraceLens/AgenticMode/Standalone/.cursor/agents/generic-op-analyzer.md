@@ -159,10 +159,12 @@ Sub-categories: W graph, V miscellaneous.
 
 ### 1. <Operation Name>
 - **Time:** X ms (Y% of compute/memory)
-- **Standalone — Efficiency (compute-bound):** Z% of peak MAF (as applicable)
-- **Standalone — Efficiency (memory-bound):** Z% of peak HBM BW (as applicable)
-- **Comparative — Relative kernel time:** `efficiency_percent` = 100×t2/t1 when `analysis_mode` is `comparative`
-- *Standalone: use the template matching `bound_type` and delete the other peak line. Comparative: omit roofline-only lines if you only discuss trace2 ratio.*
+- **If `comparison_scope` is `standalone`:**
+  - When `bound_type` is **compute**: **Efficiency:** Z% of peak MAF (as applicable).
+  - When `bound_type` is **memory**: **Efficiency:** Z% of peak HBM BW (as applicable).
+  - Include only the line that matches `bound_type`; do not print both MAF and HBM lines.
+- **If `comparison_scope` is `comparative`:**
+  - **Relative kernel time:** `efficiency_percent` = 100×t2/t1 (trace2 kernel time divided by trace1, expressed as a percentage).
 - **Called from:** [parent chain context]
 - **What it does:** [LLM inference from name + kernel details + tree context]
 - **Possible miscategorization:** [Yes/No -- if it looks like a GEMM, reduce, etc.]
