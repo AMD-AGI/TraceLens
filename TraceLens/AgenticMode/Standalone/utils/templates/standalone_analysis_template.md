@@ -190,8 +190,10 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 ---
 
 ## Kernel Fusion Opportunities (Experimental)
-
+<!-- === STANDALONE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
+<!-- === COMPARATIVE Kernel Fusion === -->
+> **Note:** Kernel fusion analysis is experimental. In comparative mode, fusion candidates are identified from Trace 1 only. Cross-trace fusion mapping is not yet supported. Savings estimates use a roofline model.
 
 <!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
@@ -362,14 +364,3 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 - **Peak MAF (BF16)**: Y TFLOPS
 - **Peak MAF (FP8)**: Z TFLOPS (if supported)
 - **Peak MAF (FP4)**: W TFLOPS (if supported)
-
-<!-- === COMPARATIVE Hardware Reference === -->
-<!-- Three-column table comparing Trace 1 and Trace 2 platform specs.
-     specs from arch/<platform>.json; specs from trace 2 metadata. -->
-
-| Reference | Trace 1 (<Platform1>) | Trace 2 (<Platform2>) |
-|-----------|-----------------------------|--------------------------------|
-| Peak HBM BW | X TB/s | Y TB/s |
-| Peak MAF (BF16) | X TFLOPS | Y TFLOPS |
-| Peak MAF (FP8) | X TFLOPS | Y TFLOPS |
-| Peak MAF (FP4) | X TFLOPS (if supported) | Y TFLOPS (if supported) |
