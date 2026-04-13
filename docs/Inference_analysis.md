@@ -154,7 +154,7 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 #### Collection Parameters
 
-- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. Most inference serving benchmarks use `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio R. We recommend tracing `(((R+1)/2) * 5 * OSL) ± (16 * OSL / CONC)` execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details.
+- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. Most inference serving benchmarks use `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio R. We recommend tracing `(((R+1)/2) * 5 * OSL) ± (16 * OSL / CONC)` execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details. User might need to increase the timeout limit in certain inference frameworks to allow storing the trace in the middle of the execution (e.g., VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 for vLLM).
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh), an example to run the DSR-1 model using SGLang can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh), and an example to run DSR-1 using Atom can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp4_mi355x_atom.sh).
 
