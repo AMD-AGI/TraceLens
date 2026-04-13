@@ -12,10 +12,13 @@ Used by the Semantic Breakdown Agent for the LLM labeling step.
 
 import argparse
 import json
+import os
 import sys
 
-# Per-layer body mapping: offset within 16-kernel layer -> semantic_block
-# Based on pattern: period=16, MoE architecture (GPT-OSS with sliding/full attention)
+
+# Per-layer body mapping: offset within layer -> semantic_block.
+# Default template for MoE architecture (period=16). Use --config to infer ffn_type
+# from HuggingFace config; for other architectures, LLM labeling is preferred.
 LAYER_BODY_MAP = {
     0: "QKV Projection",
     1: "Rotary Embedding",
@@ -49,6 +52,38 @@ PREAMBLE_LABELS = [
 ]
 
 
+def _infer_architecture_and_ffn_type(args, classified):
+    """Infer architecture, ffn_type, and optional layer_types from config or classified."""
+    architecture = "unknown"
+    ffn_type = "moe"  # default for LAYER_BODY_MAP template
+    layer_types = None
+
+    if args.config and os.path.exists(args.config):
+        try:
+            with open(args.config) as f:
+                cfg = json.load(f)
+            tc = cfg.get("text_config", cfg)
+            num_experts = tc.get("num_experts", tc.get("num_local_experts", 0))
+            ffn_type = "moe" if num_experts > 0 else "dense"
+            architecture = tc.get("model_type", cfg.get("model_type", "unknown"))
+            layer_types = tc.get("layer_types")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    if architecture == "unknown":
+        # Infer ffn_type from classified kernel types if no config
+        moe_types = {"MoE GEMM", "MoE Finalize", "MoE Routing", "MoE Quantize"}
+        ktypes = {
+            c.get("kernel_type", "") for c in classified.get("classified_kernels", [])
+        }
+        if any(t in ktypes for t in moe_types):
+            ffn_type = "moe"
+        else:
+            ffn_type = "dense"
+
+    return architecture, ffn_type, layer_types
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("extracted_json", help="Path to extracted.json")
@@ -59,6 +94,10 @@ def main():
     )
     parser.add_argument(
         "--trace-path", default="", help="Source trace path for metadata"
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to HuggingFace config.json (optional, for architecture/ffn_type)",
     )
     args = parser.parse_args()
 
@@ -78,6 +117,9 @@ def main():
     num_layers = pattern["estimated_layers"]
 
     classified_by_idx = {c["index"]: c for c in classified["classified_kernels"]}
+    architecture, ffn_type, layer_types = _infer_architecture_and_ffn_type(
+        args, classified
+    )
 
     labeled = []
     for i, k in enumerate(kernels):
@@ -93,18 +135,17 @@ def main():
                 semantic = "Preamble: Embedding"
             layer = None
         elif i >= len(kernels) - epilogue_size:
-            # Epilogue
+            # Epilogue (heuristics: LM Head vs Final Norm; may need tuning per workload)
             epilogue_pos = i - (len(kernels) - epilogue_size)
-            if "nvjet" in name and "192" in name:
+            is_lm_head = "nvjet" in name or "lm_head" in name.lower()
+            if is_lm_head:
                 semantic = "Epilogue: LM Head"
             elif "rsqrt" in name.lower() or "mean" in name.lower():
                 semantic = "Epilogue: Final Norm"
             elif epilogue_pos == 0:
                 semantic = "Epilogue: Final Norm"
             else:
-                semantic = (
-                    "Epilogue: LM Head" if "nvjet" in name else "Epilogue: Final Norm"
-                )
+                semantic = "Epilogue: LM Head" if is_lm_head else "Epilogue: Final Norm"
             layer = None
         else:
             # Layer body
@@ -112,7 +153,9 @@ def main():
             layer = (i - preamble_size) // period
             semantic = LAYER_BODY_MAP.get(body_idx, "Post-MoE Residual Add")
             # Override by kernel type for robustness
-            if "Attention" in ktype and "fmha" in name:
+            if "Attention" in ktype and (
+                "fmha" in name.lower() or "unified_attention" in name.lower()
+            ):
                 semantic = "Attention"
             elif "KV Cache Store" in ktype:
                 semantic = "KV Cache Store"
@@ -151,10 +194,11 @@ def main():
         "source_file": args.trace_path or extracted.get("source_file", ""),
         "total_kernel_time_us": total_time,
         "model_info": {
-            "architecture": "GPT-OSS (MoE)",
+            "architecture": architecture,
             "num_layers": num_layers,
-            "ffn_type": "moe",
+            "ffn_type": ffn_type,
             "graph_mode": is_graph,
+            **({"layer_types": layer_types} if layer_types else {}),
         },
         "labeled_kernels": labeled,
     }

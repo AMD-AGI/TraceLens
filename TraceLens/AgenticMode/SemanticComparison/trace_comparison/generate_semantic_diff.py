@@ -8,7 +8,7 @@
 """
 Generate TraceDiff-compatible output from two semantic breakdowns.
 
-Takes two semantic_labels.json files (from the trace-semantic-breakdown skill)
+Takes two semantic_labels.json files (from the semantic breakdown pipeline)
 and produces output files identical in schema to TraceDiff's
 print_tracediff_report_files(), enabling the existing comparative mode
 (tracelens_diff_analyzer.py) to consume graph-mode trace comparisons.
@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trace_breakdow
 from category_mappings import (
     get_group,
     get_perf_category,
+    group_from_perf_category,
     format_input_dims,
 )
 
@@ -77,8 +78,11 @@ def load_shapes(path):
 def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
     """Build a list of row dicts matching TraceDiff's diff_stats.csv schema.
 
-    Each kernel becomes one row. Kernels are grouped by semantic_block,
-    which serves as the LCA equivalent.
+    Each kernel becomes one row.  Kernels are grouped by semantic_block,
+    which is the functional label (e.g. "QKV Projection") when available.
+
+    The kernel's ``nn_module`` field (set by apply_category_corrections.py)
+    is used for the nn_module columns.  Falls back to get_group / perf_category.
 
     Returns (rows, block_id_map) where block_id_map is {semantic_block: int}.
     """
@@ -90,15 +94,25 @@ def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
     )
     block_id_map = {block: idx for idx, block in enumerate(all_blocks_ordered)}
 
-    def _input_dims_for_block(block_name, shapes):
+    def _input_dims(k, shapes):
         if shapes is None:
             return ""
-        shape_info = shapes.get(block_name, {})
+        block = k["semantic_block"]
+        shape_info = shapes.get(block, {})
         pp = shape_info.get("perf_params", {})
         if not pp:
             return ""
-        pc = get_perf_category(block_name)
+        pc = k.get("perf_category") or get_perf_category(block)
         return format_input_dims(pp, pc)
+
+    def _nn_module(k):
+        if k.get("nn_module"):
+            return k["nn_module"]
+        block = k["semantic_block"]
+        grp = get_group(block)
+        if grp == "Others" and k.get("perf_category", "Others") != "Others":
+            grp = group_from_perf_category(k["perf_category"])
+        return grp
 
     rows = []
     for source_tag, kernels, shapes in [
@@ -107,21 +121,21 @@ def build_diff_stats(labeled_a, labeled_b, shapes_a, shapes_b):
     ]:
         for k in kernels:
             block = k["semantic_block"]
-            group = get_group(block)
+            nn_mod = _nn_module(k)
             rows.append(
                 {
                     "name": k["name"],
                     "cpu_op_name": block,
                     "source": source_tag,
-                    "Input Dims": _input_dims_for_block(block, shapes),
+                    "Input Dims": _input_dims(k, shapes),
                     "Input Strides": "",
                     "Input type": "",
                     "Concrete Inputs": "",
                     "kernel_time": k["dur"],
-                    "lowest_common_ancestor_name": group,
+                    "lowest_common_ancestor_name": nn_mod,
                     "lowest_common_ancestor_id": block_id_map[block],
-                    "nn_module_stack": group,
-                    "nn_module_parent": group,
+                    "nn_module_stack": nn_mod,
+                    "nn_module_parent": nn_mod,
                 }
             )
 
@@ -260,11 +274,23 @@ def build_merged_tree_text(block_id_map, labeled_a, labeled_b, name_a, name_b):
         b = k["semantic_block"]
         blocks_b.setdefault(b, []).append(k["name"])
 
+    block_nn_module = {}
+    for k in labeled_a + labeled_b:
+        b = k["semantic_block"]
+        if b not in block_nn_module:
+            if k.get("nn_module"):
+                block_nn_module[b] = k["nn_module"]
+            else:
+                grp = get_group(b)
+                if grp == "Others" and k.get("perf_category", "Others") != "Others":
+                    grp = group_from_perf_category(k["perf_category"])
+                block_nn_module[b] = grp
+
     all_blocks = list(block_id_map.keys())
 
     groups = OrderedDict()
     for block in all_blocks:
-        g = get_group(block)
+        g = block_nn_module.get(block, get_group(block))
         groups.setdefault(g, []).append(block)
 
     lines = []

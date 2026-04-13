@@ -8,9 +8,7 @@
 Shared category mappings and shape derivation formulas for semantic trace breakdown.
 
 Every semantic_block maps to a perf model category (GEMM, SDPA, Normalization,
-or Elementwise) that has a roofline formula. There are no "Other" or "Memory"
-categories -- the purpose of semantic labeling is to enable roofline analysis
-on graph-mode traces, so every label must be computable.
+Elementwise, or MemCpy).
 
 Defines:
   - SEMANTIC_BLOCK_TO_GROUP: low-level block -> high-level functional group
@@ -56,16 +54,45 @@ SEMANTIC_BLOCK_TO_GROUP = {
     "Activation": "Dense FFN",
     "Down Projection": "Dense FFN",
     "Post-FFN Residual Add": "Dense FFN",
+    # --- MemCpy ---
+    "MemCpy": "MemCpy",
     # --- Epilogue (optional -- may not be in graph mode traces) ---
     "Epilogue: Final Norm": "Epilogue",
     "Epilogue: LM Head": "Epilogue",
+    "Epilogue": "Epilogue",
+    # --- Indexed / alignment-generated labels (prefix matching) ---
+    # These cover labels produced by align_and_label.py: GEMM_0, GEMM_1, ...
+    "GEMM_": "Compute",
+    "SDPA_": "Attention",
+    "Normalization_": "Normalization",
+    "Elementwise_": "Elementwise",
+    "Quantization_": "Quantization",
+    "MemCpy_": "MemCpy",
+    "Others_": "Others",
+    # --- Anchor labels from alignment ---
+    "KV_Cache_Store": "Self-Attention",
+    "Rotary_Embedding": "Self-Attention",
+    "MoE_Routing": "MoE / FFN",
+    "MoE_Finalize": "MoE / FFN",
+    "MoE_Quantize": "MoE / FFN",
+    # --- Secondary-stream labels ---
+    "GEMM_secondary": "Secondary Stream",
+    "SDPA_secondary": "Secondary Stream",
+    "Normalization_secondary": "Secondary Stream",
+    "Elementwise_secondary": "Secondary Stream",
+    "Quantization_secondary": "Secondary Stream",
+    "MemCpy_secondary": "Secondary Stream",
+    "Others_secondary": "Secondary Stream",
+    # --- Uncovered / extra ---
+    "Uncovered": "Others",
+    "Preamble": "Preamble",
 }
 
 # ---------------------------------------------------------------------------
 # Perf-model categories (parallel to TraceLens PerfModel classes)
 #
-# EVERY block maps to one of: GEMM, SDPA, Normalization, Elementwise.
-# No "Other" or "Memory" -- everything has a roofline formula.
+# EVERY block maps to one of: GEMM, SDPA, Normalization, Elementwise,
+# Quantization, MemCpy, or Others (for unclassifiable kernels).
 # ---------------------------------------------------------------------------
 
 SEMANTIC_BLOCK_TO_PERF_CATEGORY = {
@@ -74,11 +101,11 @@ SEMANTIC_BLOCK_TO_PERF_CATEGORY = {
     "Q Projection": "GEMM",
     "KV Projection": "GEMM",
     "Output Projection": "GEMM",
-    "Router Gate": "GEMM",
-    "MoE GateUp+SwiGLU": "GEMM",
-    "MoE Down Projection": "GEMM",
-    "Shared Expert GateUp": "GEMM",
-    "Shared Expert Down": "GEMM",
+    "Router Gate": "GEMM-MoE",
+    "MoE GateUp+SwiGLU": "GEMM-MoE",
+    "MoE Down Projection": "GEMM-MoE",
+    "Shared Expert GateUp": "GEMM-MoE",
+    "Shared Expert Down": "GEMM-MoE",
     "GateUp Projection": "GEMM",
     "Gate Projection": "GEMM",
     "Up Projection": "GEMM",
@@ -92,6 +119,8 @@ SEMANTIC_BLOCK_TO_PERF_CATEGORY = {
     "FFN Norm": "Normalization",
     "Epilogue: Final Norm": "Normalization",
     "Preamble: Input Norm": "Normalization",
+    # MemCpy -- GPU memory copy operations (HtoD, DtoH, DtoD)
+    "MemCpy": "MemCpy",
     # Elementwise -- residual adds, activations, data movement, overhead
     "Post-Attn Residual Add": "Elementwise",
     "Post-FFN Residual Add": "Elementwise",
@@ -101,13 +130,64 @@ SEMANTIC_BLOCK_TO_PERF_CATEGORY = {
     "Rotary Embedding": "Elementwise",
     "KV Cache Store": "Elementwise",
     "Preamble: Embedding": "Elementwise",
-    "MoE Routing": "Elementwise",
-    "MoE Quantize": "Elementwise",
-    "MoE Finalize": "Elementwise",
+    "MoE Routing": "Elementwise-MoE",
+    "MoE Quantize": "Elementwise-MoE",
+    "MoE Finalize": "Elementwise-MoE",
+    # --- Indexed / alignment-generated labels (prefix matching) ---
+    "GEMM_": "GEMM",
+    "SDPA_": "SDPA",
+    "Normalization_": "Normalization",
+    "Elementwise_": "Elementwise",
+    "Quantization_": "Quantization",
+    "MemCpy_": "MemCpy",
+    "Others_": "Others",
+    # --- Anchor labels from alignment ---
+    "KV_Cache_Store": "Elementwise",
+    "Rotary_Embedding": "Elementwise",
+    "MoE_Routing": "Elementwise-MoE",
+    "MoE_Finalize": "Elementwise-MoE",
+    "MoE_Quantize": "Elementwise-MoE",
+    # --- Secondary-stream labels ---
+    "GEMM_secondary": "GEMM",
+    "SDPA_secondary": "SDPA",
+    "Normalization_secondary": "Normalization",
+    "Elementwise_secondary": "Elementwise",
+    "Quantization_secondary": "Quantization",
+    "MemCpy_secondary": "MemCpy",
+    "Others_secondary": "Others",
+    # --- Uncovered / extra / generic ---
+    "Uncovered": "Others",
+    "Others": "Others",
 }
 
-DEFAULT_GROUP = "Unknown"
-DEFAULT_PERF_CATEGORY = "Elementwise"
+DEFAULT_GROUP = "Others"
+DEFAULT_PERF_CATEGORY = "Others"
+
+# ---------------------------------------------------------------------------
+# Category refinement rules  (extensible)
+#
+# Each rule is a tuple: (suffix, base_categories, kernel_name_regex_pattern)
+#
+# When `refine_perf_category()` is called, it checks each rule in order:
+#   - If the current perf_category is in base_categories AND the combined
+#     kernel names match the regex, the category becomes "{base}-{suffix}".
+#   - First matching rule wins.
+#
+# To add a new sub-category, append a tuple here. The mapping tables and
+# report aggregation pick it up automatically.
+# ---------------------------------------------------------------------------
+
+import re
+
+CATEGORY_REFINEMENT_RULES = [
+    # (suffix, base_categories, kernel_name_regex_pattern)
+    (
+        "MoE",
+        ("GEMM", "Elementwise"),
+        r"(?i)moe|topkGating|MoeSorting|activationDeepSeek|fmoe",
+    ),
+    ("GDN", ("GEMM", "SDPA", "Elementwise"), r"(?i)gdn|gated.?delta"),
+]
 
 # ---------------------------------------------------------------------------
 # Timeline categories (aligned with TraceLens rocprof_analysis categories)
@@ -119,6 +199,9 @@ PERF_CATEGORY_TO_TIMELINE_CATEGORY = {
     "SDPA": "Attention",
     "Normalization": "Normalization",
     "Elementwise": "Elementwise",
+    "MemCpy": "MemCpy",
+    "Quantization": "Quantization",
+    "Others": "Other",
 }
 
 DEFAULT_TIMELINE_CATEGORY = "Other"
@@ -134,9 +217,41 @@ PERF_CATEGORY_TO_OP_CATEGORY = {
     "SDPA": "SDPA_fwd",
     "Normalization": "Norm",
     "Elementwise": "Elementwise",
+    "MemCpy": "MemCpy",
+    "Quantization": "Quantization",
+    "Others": "Others",
 }
 
 DEFAULT_OP_CATEGORY = "Elementwise"
+
+# Auto-register derived categories from CATEGORY_REFINEMENT_RULES so that
+# new rules don't require manually updating the mapping tables.
+for _suffix, _base_cats, _ in CATEGORY_REFINEMENT_RULES:
+    for _base in _base_cats:
+        _derived = f"{_base}-{_suffix}"
+        if (
+            _derived not in PERF_CATEGORY_TO_TIMELINE_CATEGORY
+            and _base in PERF_CATEGORY_TO_TIMELINE_CATEGORY
+        ):
+            PERF_CATEGORY_TO_TIMELINE_CATEGORY[_derived] = (
+                PERF_CATEGORY_TO_TIMELINE_CATEGORY[_base]
+            )
+        if (
+            _derived not in PERF_CATEGORY_TO_OP_CATEGORY
+            and _base in PERF_CATEGORY_TO_OP_CATEGORY
+        ):
+            PERF_CATEGORY_TO_OP_CATEGORY[_derived] = PERF_CATEGORY_TO_OP_CATEGORY[_base]
+        _prefix = f"{_derived}_"
+        if _prefix not in SEMANTIC_BLOCK_TO_PERF_CATEGORY:
+            SEMANTIC_BLOCK_TO_PERF_CATEGORY[_prefix] = _derived
+        _sec = f"{_derived}_secondary"
+        if _sec not in SEMANTIC_BLOCK_TO_PERF_CATEGORY:
+            SEMANTIC_BLOCK_TO_PERF_CATEGORY[_sec] = _derived
+        if _prefix not in SEMANTIC_BLOCK_TO_GROUP:
+            _base_group = SEMANTIC_BLOCK_TO_GROUP.get(f"{_base}_", DEFAULT_GROUP)
+            SEMANTIC_BLOCK_TO_GROUP[_prefix] = _base_group
+        if _sec not in SEMANTIC_BLOCK_TO_GROUP:
+            SEMANTIC_BLOCK_TO_GROUP[_sec] = "Secondary Stream"
 
 
 def get_timeline_category(semantic_block):
@@ -159,12 +274,12 @@ def format_input_dims(perf_params, perf_category):
     """
     if not perf_params:
         return ""
-    if perf_category == "GEMM":
+    if perf_category == "GEMM" or perf_category.startswith("GEMM-"):
         M = perf_params.get("M", 0)
         N = perf_params.get("N", 0)
         K = perf_params.get("K", 0)
         return f"(({M}, {K}), ({K}, {N}))"
-    if perf_category == "SDPA":
+    if perf_category == "SDPA" or perf_category.startswith("SDPA-"):
         B = perf_params.get("B", 1)
         H_Q = perf_params.get("H_Q", 0)
         N_Q = perf_params.get("N_Q", 0)
@@ -194,20 +309,68 @@ DTYPE_TO_BYTES = {
 
 
 def get_group(semantic_block):
+    if semantic_block.endswith("_preamble"):
+        return "Preamble"
+    if semantic_block.endswith("_epilogue"):
+        return "Epilogue"
+    if semantic_block in SEMANTIC_BLOCK_TO_GROUP:
+        return SEMANTIC_BLOCK_TO_GROUP[semantic_block]
     for prefix, group in SEMANTIC_BLOCK_TO_GROUP.items():
-        if semantic_block == prefix or semantic_block.startswith(prefix):
+        if semantic_block.startswith(prefix):
             return group
     return DEFAULT_GROUP
 
 
 def get_perf_category(semantic_block):
-    # Exact match first to avoid "Attention" matching "Attention Output Gate"
     if semantic_block in SEMANTIC_BLOCK_TO_PERF_CATEGORY:
         return SEMANTIC_BLOCK_TO_PERF_CATEGORY[semantic_block]
     for prefix, cat in SEMANTIC_BLOCK_TO_PERF_CATEGORY.items():
         if semantic_block.startswith(prefix):
             return cat
     return DEFAULT_PERF_CATEGORY
+
+
+_PERF_CATEGORY_TO_GROUP = {
+    "GEMM": "Compute",
+    "SDPA": "Attention",
+    "Normalization": "Normalization",
+    "Elementwise": "Elementwise",
+    "Quantization": "Quantization",
+    "MemCpy": "MemCpy",
+    "Others": "Others",
+}
+
+
+def group_from_perf_category(perf_category):
+    """Derive a semantic_group from perf_category (fallback for functional labels)."""
+    if perf_category in _PERF_CATEGORY_TO_GROUP:
+        return _PERF_CATEGORY_TO_GROUP[perf_category]
+    base = perf_category.split("-")[0] if "-" in perf_category else perf_category
+    return _PERF_CATEGORY_TO_GROUP.get(base, DEFAULT_GROUP)
+
+
+_compiled_cache = {}
+
+
+def _compiled(pattern):
+    """Return a compiled regex, caching for reuse."""
+    if pattern not in _compiled_cache:
+        _compiled_cache[pattern] = re.compile(pattern)
+    return _compiled_cache[pattern]
+
+
+def refine_perf_category(perf_category, kernel_names_a, kernel_names_b):
+    """Promote a base perf_category to a sub-category when kernel names match.
+
+    Iterates CATEGORY_REFINEMENT_RULES (first match wins). This catches
+    alignment-generated blocks (e.g. GEMM_2) whose semantic_block name has
+    no sub-category indicator but whose kernel names do.
+    """
+    combined = " ".join(filter(None, [kernel_names_a, kernel_names_b]))
+    for suffix, base_cats, pattern in CATEGORY_REFINEMENT_RULES:
+        if perf_category in base_cats and _compiled(pattern).search(combined):
+            return f"{perf_category}-{suffix}"
+    return perf_category
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +493,13 @@ def _elementwise_bytes(num_elems, bpe, *, unary=False):
 
 
 def derive_block_shapes(
-    semantic_block, model_cfg, num_tokens, context_length=None, layer_idx=None
+    semantic_block,
+    model_cfg,
+    num_tokens,
+    context_length=None,
+    layer_idx=None,
+    context_sum=None,
+    generation_sum=None,
 ):
     """Compute theoretical FLOPS and bytes for a semantic block.
 
@@ -340,6 +509,8 @@ def derive_block_shapes(
         num_tokens: number of active tokens (T)
         context_length: KV cache length for decode SDPA (defaults to num_tokens)
         layer_idx: layer index (used for alternating attention types)
+        context_sum: (optional) sum of N_Q for prefill requests (from annotation)
+        generation_sum: (optional) sum of N_Q for decode requests (from annotation)
 
     Returns:
         dict with keys: flops, bytes, perf_params (M/N/K etc.), or None if
@@ -356,7 +527,7 @@ def derive_block_shapes(
     is_linear_attn = False
     if layer_idx is not None and model_cfg["layer_types"]:
         lt = model_cfg["layer_types"]
-        if layer_idx < len(lt) and lt[layer_idx] == "linear_attention":
+        if layer_idx < len(lt) and lt[layer_idx] in ("linear_attention", "linear"):
             is_linear_attn = True
 
     if semantic_block == "QKV Projection":
@@ -508,13 +679,68 @@ def derive_block_shapes(
     # --- SDPA (includes any splitK reduce as part of the attention operation) ---
 
     if semantic_block == "Attention":
-        causal = T == ctx
-        flops = _sdpa_flops(1, T, n_heads, ctx, n_kv, d, d, causal)
-        bts = _sdpa_bytes(1, T, n_heads, ctx, n_kv, d, d, bpe)
-        return {
-            "flops": flops,
-            "bytes": bts,
-            "perf_params": {
+        # Hybrid models (e.g. Qwen3Next): "linear" layers use Mamba-like recurrence, not SDPA.
+        # Approximate as GEMM-like work on (T, ctx) state using linear attention head dims.
+        if layer_idx is not None and model_cfg.get("layer_types"):
+            lt = model_cfg["layer_types"]
+            if layer_idx < len(lt) and lt[layer_idx] == "linear":
+                lk = (
+                    model_cfg["linear_num_key_heads"] * model_cfg["linear_key_head_dim"]
+                )
+                lv = (
+                    model_cfg["linear_num_value_heads"]
+                    * model_cfg["linear_value_head_dim"]
+                )
+                h_lin = max(lk, lv, 1)
+                flops = 2 * T * ctx * h * h_lin // max(h, 1)
+                ne = T * h
+                bts = _binary_elementwise_bytes(ne, bpe)
+                return {
+                    "flops": max(flops, T * h),
+                    "bytes": bts,
+                    "perf_params": {
+                        "B": 1,
+                        "N_Q": T,
+                        "H_Q": model_cfg["linear_num_key_heads"],
+                        "N_KV": ctx,
+                        "H_KV": model_cfg["linear_num_value_heads"],
+                        "d_h_qk": model_cfg["linear_key_head_dim"],
+                        "d_h_v": model_cfg["linear_value_head_dim"],
+                        "causal": True,
+                        "linear_mixin": True,
+                    },
+                }
+
+        # When context_sum and generation_sum are available (mixed prefill-decode),
+        # use richer formula: prefill SDPA + decode SDPA.
+        if (
+            context_sum is not None
+            and generation_sum is not None
+            and (context_sum > 0 or generation_sum > 0)
+        ):
+            flops_prefill = _sdpa_flops(1, context_sum, n_heads, ctx, n_kv, d, d, True)
+            flops_decode = _sdpa_flops(
+                1, generation_sum, n_heads, ctx, n_kv, d, d, True
+            )
+            flops = flops_prefill + flops_decode
+            bts_prefill = _sdpa_bytes(1, context_sum, n_heads, ctx, n_kv, d, d, bpe)
+            bts_decode = _sdpa_bytes(1, generation_sum, n_heads, ctx, n_kv, d, d, bpe)
+            bts = bts_prefill + bts_decode
+            perf_params = {
+                "context_sum": context_sum,
+                "generation_sum": generation_sum,
+                "N_KV": ctx,
+                "H_Q": n_heads,
+                "H_KV": n_kv,
+                "d_h_qk": d,
+                "d_h_v": d,
+                "causal": True,
+            }
+        else:
+            causal = T == ctx
+            flops = _sdpa_flops(1, T, n_heads, ctx, n_kv, d, d, causal)
+            bts = _sdpa_bytes(1, T, n_heads, ctx, n_kv, d, d, bpe)
+            perf_params = {
                 "B": 1,
                 "N_Q": T,
                 "H_Q": n_heads,
@@ -523,7 +749,11 @@ def derive_block_shapes(
                 "d_h_qk": d,
                 "d_h_v": d,
                 "causal": causal,
-            },
+            }
+        return {
+            "flops": flops,
+            "bytes": bts,
+            "perf_params": perf_params,
         }
 
     # --- Rotary Embedding (elementwise on Q/K head dims) ---
@@ -600,10 +830,8 @@ def derive_block_shapes(
             "perf_params": {"num_elems": ne, "num_channels": h},
         }
 
-    if perf_cat == "Elementwise":
+    if perf_cat == "Elementwise" or perf_cat.startswith("Elementwise-"):
         ne = T * h
-        # Residual adds and gating are binary (read A + read B + write C).
-        # Activations (SiLU, GELU, etc.) are unary (read + write).
         _BINARY_BLOCKS = {
             "Post-Attn Residual Add",
             "Post-FFN Residual Add",

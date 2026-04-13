@@ -22,9 +22,6 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trace_breakdown"))
-from category_mappings import get_group, get_perf_category
-
 
 def verify(a_path, b_path, csv_path, name_a, name_b):
     errors = []
@@ -65,21 +62,14 @@ def verify(a_path, b_path, csv_path, name_a, name_b):
     if missing_from_csv:
         errors.append(f"A6.2 FAIL: Blocks missing from CSV: {sorted(missing_from_csv)}")
 
-    # --- A6.3: semantic_group / perf_category correctness ---
-    if "semantic_group" in csv_rows[0]:
-        for r in csv_rows:
-            expected_grp = get_group(r["semantic_block"])
-            if r["semantic_group"] != expected_grp:
-                errors.append(
-                    f"A6.3 FAIL: {r['semantic_block']}: semantic_group "
-                    f"'{r['semantic_group']}' != expected '{expected_grp}'"
-                )
-            expected_pc = get_perf_category(r["semantic_block"])
-            if r["perf_category"] != expected_pc:
-                errors.append(
-                    f"A6.3 FAIL: {r['semantic_block']}: perf_category "
-                    f"'{r['perf_category']}' != expected '{expected_pc}'"
-                )
+    # --- A6.3: semantic_group / perf_category presence ---
+    for r in csv_rows:
+        if not r.get("perf_category"):
+            errors.append(f"A6.3 FAIL: {r['semantic_block']}: perf_category is empty")
+        if "semantic_group" in r and not r["semantic_group"]:
+            warnings.append(
+                f"A6.3 WARNING: {r['semantic_block']}: semantic_group is empty"
+            )
 
     # --- A7.3: Total kernel count ---
     csv_a_count = sum(int(r[f"{name_a}_kernel_count"]) for r in csv_rows)

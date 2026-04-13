@@ -365,21 +365,57 @@ def build_ops_summary(labels_data):
     return df
 
 
-def build_gpu_timeline(labels_data):
+def build_gpu_timeline(labels_data, gpu_timeline=None):
     """Sheet 5: gpu_timeline -- GPU utilization breakdown.
 
-    For graph-mode traces, all kernel time is computation (no idle/comm/memcpy).
+    When gpu_timeline dict is provided (from metadata.json), use real metrics.
+    Otherwise use placeholder (all computation, no idle/comm/memcpy).
     """
-    total_us = sum(k["dur"] for k in labels_data["labeled_kernels"])
-    total_ms = total_us / 1000
-
-    rows = [
-        {"type": "total_time", "time ms": round(total_ms, 4), "percent": 100.0},
-        {"type": "computation_time", "time ms": round(total_ms, 4), "percent": 100.0},
-        {"type": "exposed_comm_time", "time ms": 0.0, "percent": 0.0},
-        {"type": "exposed_memcpy_time", "time ms": 0.0, "percent": 0.0},
-        {"type": "idle_time", "time ms": 0.0, "percent": 0.0},
-    ]
+    if gpu_timeline:
+        total_us = gpu_timeline.get("total_time_us", 0)
+        total_ms = total_us / 1000
+        comp_us = gpu_timeline.get("computation_time_us", 0)
+        comm_us = gpu_timeline.get("exposed_comm_time_us", 0)
+        memcpy_us = gpu_timeline.get("exposed_memcpy_time_us", 0)
+        idle_us = gpu_timeline.get("idle_time_us", 0)
+        pct = lambda x: round(100 * x / total_us, 1) if total_us > 0 else 0
+        rows = [
+            {"type": "total_time", "time ms": round(total_ms, 4), "percent": 100.0},
+            {
+                "type": "computation_time",
+                "time ms": round(comp_us / 1000, 4),
+                "percent": pct(comp_us),
+            },
+            {
+                "type": "exposed_comm_time",
+                "time ms": round(comm_us / 1000, 4),
+                "percent": pct(comm_us),
+            },
+            {
+                "type": "exposed_memcpy_time",
+                "time ms": round(memcpy_us / 1000, 4),
+                "percent": pct(memcpy_us),
+            },
+            {
+                "type": "idle_time",
+                "time ms": round(idle_us / 1000, 4),
+                "percent": gpu_timeline.get("idle_pct", 0),
+            },
+        ]
+    else:
+        total_us = sum(k["dur"] for k in labels_data["labeled_kernels"])
+        total_ms = total_us / 1000
+        rows = [
+            {"type": "total_time", "time ms": round(total_ms, 4), "percent": 100.0},
+            {
+                "type": "computation_time",
+                "time ms": round(total_ms, 4),
+                "percent": 100.0,
+            },
+            {"type": "exposed_comm_time", "time ms": 0.0, "percent": 0.0},
+            {"type": "exposed_memcpy_time", "time ms": 0.0, "percent": 0.0},
+            {"type": "idle_time", "time ms": 0.0, "percent": 0.0},
+        ]
     return pd.DataFrame(rows)
 
 
@@ -429,7 +465,14 @@ def main():
         "--gpu_arch", default=None, help="Path to GPU architecture JSON (for roofline)"
     )
     parser.add_argument(
-        "--output_csvs_dir", default=None, help="Directory to write per-sheet CSV files"
+        "--metadata",
+        default=None,
+        help="Path to metadata.json (from extract_trace_data --split-vllm) for gpu_timeline",
+    )
+    parser.add_argument(
+        "--output_csvs_dir",
+        default=None,
+        help="Directory to write per-sheet CSV files",
     )
     args = parser.parse_args()
 
@@ -443,6 +486,12 @@ def main():
         with open(args.gpu_arch) as f:
             gpu_arch = json.load(f)
 
+    gpu_timeline = None
+    if args.metadata and os.path.exists(args.metadata):
+        with open(args.metadata) as f:
+            metadata = json.load(f)
+        gpu_timeline = metadata.get("gpu_timeline")
+
     print("Building report sheets...", file=sys.stderr)
     dict_name2df = OrderedDict()
     dict_name2df["category_breakdown"] = build_category_breakdown(
@@ -455,7 +504,9 @@ def main():
         labels_data, shapes_data, gpu_arch
     )
     dict_name2df["ops_summary"] = build_ops_summary(labels_data)
-    dict_name2df["gpu_timeline"] = build_gpu_timeline(labels_data)
+    dict_name2df["gpu_timeline"] = build_gpu_timeline(
+        labels_data, gpu_timeline=gpu_timeline
+    )
 
     output_xlsx = args.output
     if output_xlsx is None and args.output_csvs_dir is None:
