@@ -123,7 +123,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 Write `<output_dir>/category_findings/elementwise_findings.md` using the command prefix.
 
-The findings file **must** include **Impact Summary** followed by **Detailed Analysis**.
+The findings file **must** include **Impact Summary**, then **Recommendations**, then **Detailed Analysis**.
 
 Impact Summary template:
 
@@ -132,7 +132,16 @@ Impact Summary template:
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
 |---------------|------|----------------------|-------------------------------|------------|
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
+
+## Recommendations
+
+### P1: <Brief Title>
+**Insight**: [1 sentence — what's wrong]
+**Action**: [1-2 sentences — what to do]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
 ```
+
+Each `## Recommendations` P-item must map 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank. **Insight** summarizes the bottleneck, **Action** merges algorithmic and kernel recommendations, **Impact** uses the `## Impact Summary` savings range.
 
 **Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
 
