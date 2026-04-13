@@ -128,7 +128,8 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 ### Top Operations
 
 <!-- === STANDALONE Top Operations === -->
-Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %). The last column shows both the time range and E2E % range when kernel_tuning estimates exist (e.g. "~770–9801 ms (1.4–17.3%)"); use "—" when no estimates.
+Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. For **Ops** column use `operation_count` from `category_data/<category>_metrics.json` (total invocations). The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %). The last column shows both the time range and E2E % range when kernel_tuning estimates exist (e.g. "~770–9801 ms (1.4–17.3%)"); use "—" when no estimates.
+
 
 | Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
 |------|----------|-----------|-------------------|-----|-------------------------------------|
