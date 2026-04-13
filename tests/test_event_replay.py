@@ -12,13 +12,23 @@ import subprocess
 
 import pytest
 import torch
-import torchvision.models as torchvision_models
+try:
+    import torchvision.models as torchvision_models
+except ImportError:
+    torchvision_models = None
 from torch.profiler import profile, record_function, ProfilerActivity
 import os
 from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
+from TraceLens.EventReplay.event_replay import (
+    SkipReplayError,
+    MIOPEN_FUSED_OP_MAP,
+    NON_REPLAYABLE_NAMES,
+)
 
 
 def profile_resnet(path=None):
+    if torchvision_models is None:
+        pytest.skip("torchvision is required for ResNet profiling tests")
     device = "cuda"
     dtype = torch.bfloat16
     model = torchvision_models.resnet18().to(device=device, dtype=dtype)
@@ -309,6 +319,180 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
     else:
         print("Batched replay completed successfully.")
         print(result.stdout)
+
+
+# --- Unit tests for MIOpen translation, SkipReplayError, and Tensor[] support ---
+
+
+def _make_conv_bias_event():
+    """Create a minimal ConvBias_ event dict for testing."""
+    return {
+        "name": "ConvBias_",
+        "args": {
+            "Input Dims": [[2, 64, 56, 56], [128, 64, 3, 3], [128]],
+            "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16"],
+            "Input Strides": [[200704, 3136, 56, 1], [576, 9, 3, 1], [1]],
+            "Concrete Inputs": ["", "", "", "1", "1"],
+        },
+    }
+
+
+class TestMiopenTranslation:
+    def test_translate_conv_bias_produces_convolution_name(self):
+        event = _make_conv_bias_event()
+        translated = EventReplayer._translate_miopen_fused_event(event)
+        assert translated["name"] == "aten::convolution"
+
+    def test_translate_conv_bias_has_9_args(self):
+        event = _make_conv_bias_event()
+        translated = EventReplayer._translate_miopen_fused_event(event)
+        assert len(translated["args"]["Concrete Inputs"]) == 9
+        assert len(translated["args"]["Input type"]) == 9
+        assert len(translated["args"]["Input Dims"]) == 9
+        assert len(translated["args"]["Input Strides"]) == 9
+
+    def test_translate_conv_bias_preserves_tensor_args(self):
+        event = _make_conv_bias_event()
+        translated = EventReplayer._translate_miopen_fused_event(event)
+        # First 3 args are tensors — dims/strides preserved, concrete inputs empty
+        assert translated["args"]["Input Dims"][0] == [2, 64, 56, 56]
+        assert translated["args"]["Input Dims"][1] == [128, 64, 3, 3]
+        assert translated["args"]["Input Dims"][2] == [128]
+        assert translated["args"]["Input type"][0] == "c10::BFloat16"
+
+    def test_translate_conv_bias_pads_convolution_params(self):
+        event = _make_conv_bias_event()
+        translated = EventReplayer._translate_miopen_fused_event(event)
+        concrete = translated["args"]["Concrete Inputs"]
+        # stride=[1,1], padding=[1,1], dilation=[1,1], transposed=false, output_padding=[0,0], groups=1
+        assert concrete[3] == "[1, 1]"
+        assert concrete[4] == "[1, 1]"
+        assert concrete[5] == "[1, 1]"
+        assert concrete[6] == "false"
+        assert concrete[7] == "[0, 0]"
+        assert concrete[8] == "1"
+
+    def test_translate_conv_bias_relu(self):
+        event = _make_conv_bias_event()
+        event["name"] = "ConvBiasReLU_"
+        translated = EventReplayer._translate_miopen_fused_event(event)
+        assert translated["name"] == "aten::convolution"
+
+    def test_translate_backward_variants(self):
+        for bwd_name in ["ConvBias_Backward", "ConvBiasReLU_Backward"]:
+            event = _make_conv_bias_event()
+            event["name"] = bwd_name
+            translated = EventReplayer._translate_miopen_fused_event(event)
+            assert translated["name"] == "aten::convolution_backward"
+
+    def test_conv_bias_event_replayer_lazy(self):
+        """Test that EventReplayer can process a ConvBias_ event in lazy mode."""
+        event = _make_conv_bias_event()
+        replayer = EventReplayer(event, lazy=True)
+        repro_info = replayer.get_repro_info()
+        assert repro_info["op_name"] == "aten::convolution"
+        assert len(repro_info["replay_ir"]["list_pos_args"]) > 0
+
+
+class TestSkipReplayError:
+    def test_non_replayable_ops_raise_skip(self):
+        for name in ["FlashAttnFunc", "LayerNormFn", "MoEDispatch"]:
+            event = {
+                "name": name,
+                "args": {
+                    "Input Dims": [],
+                    "Input type": [],
+                    "Input Strides": [],
+                    "Concrete Inputs": [],
+                },
+            }
+            with pytest.raises(SkipReplayError, match="custom op"):
+                EventReplayer(event, lazy=True)
+
+    def test_pseudo_ops_raise_skip(self):
+        for name in ["pseudo_op::my_op", "_LinearForward"]:
+            event = {
+                "name": name,
+                "args": {
+                    "Input Dims": [],
+                    "Input type": [],
+                    "Input Strides": [],
+                    "Concrete Inputs": [],
+                },
+            }
+            with pytest.raises(SkipReplayError, match="pseudo operation|pseudo operation"):
+                EventReplayer(event, lazy=True)
+
+    def test_normal_aten_op_does_not_raise_skip(self):
+        """A valid aten:: op should not raise SkipReplayError (it may fail at schema matching)."""
+        event = {
+            "name": "aten::add",
+            "args": {
+                "Input Dims": [[2, 3], [2, 3]],
+                "Input type": ["float", "float"],
+                "Input Strides": [[3, 1], [3, 1]],
+                "Concrete Inputs": ["", ""],
+            },
+        }
+        # Should raise ValueError (schema mismatch due to missing alpha arg), not SkipReplayError
+        with pytest.raises(ValueError):
+            EventReplayer(event, lazy=True)
+
+
+class TestTensorListSchemaMatch:
+    def test_tensor_list_schema_no_longer_raises(self):
+        """Verify that _is_schema_match doesn't raise ValueError for Tensor[] types."""
+        all_schemas = torch._C._jit_get_all_schemas()
+        cat_schemas = [s for s in all_schemas if s.name == "aten::cat"]
+        assert len(cat_schemas) > 0, "aten::cat schema not found"
+
+        event = {
+            "name": "aten::cat",
+            "args": {
+                "Input Dims": [[2, 3]],
+                "Input type": ["float"],
+                "Input Strides": [[3, 1]],
+                "Concrete Inputs": [""],
+            },
+        }
+        # Should not raise ValueError — it returns True or False
+        for schema in cat_schemas:
+            try:
+                result = EventReplayer._is_schema_match(event, schema)
+                # The result is a bool, not an exception
+                assert isinstance(result, bool)
+            except ValueError:
+                pytest.fail(
+                    "Tensor[] schema matching raised ValueError instead of returning bool"
+                )
+
+    def test_cat_event_replayer_lazy(self):
+        """Test that EventReplayer can process an aten::cat event in lazy mode."""
+        # aten::cat(Tensor[] tensors, int dim=0) -> Tensor
+        event = {
+            "name": "aten::cat",
+            "args": {
+                "Input Dims": [[2, 3], []],
+                "Input type": ["float", "Scalar"],
+                "Input Strides": [[3, 1], []],
+                "Concrete Inputs": ["", "0"],
+            },
+        }
+        replayer = EventReplayer(event, lazy=True)
+        repro_info = replayer.get_repro_info()
+        assert repro_info["op_name"] == "aten::cat"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Requires CUDA/HIP GPU"
+)
+class TestEndToEndConvBiasReplay:
+    def test_conv_bias_replay_executes(self):
+        """End-to-end test: ConvBias_ event is translated and replayed on GPU."""
+        event = _make_conv_bias_event()
+        replayer = EventReplayer(event, device="cuda", lazy=False)
+        # Should not raise
+        replayer.replay()
 
 
 # # --- Example Usage (remains the same logic) ---

@@ -81,6 +81,11 @@ def build_tensor(cfg: TensorCfg, device: str = "cuda") -> "torch.Tensor":
     return t
 
 
+def build_tensor_list(cfg_list: List[TensorCfg], device: str = "cuda") -> List["torch.Tensor"]:
+    """Build a list of tensors from a list of TensorCfg objects."""
+    return [build_tensor(cfg, device=device) for cfg in cfg_list]
+
+
 def summarize_tensor(tensor: "torch.Tensor") -> str:
     """
     Summarize the tensor information.

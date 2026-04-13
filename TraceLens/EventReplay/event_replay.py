@@ -21,6 +21,33 @@ from .utils import (
 )
 
 
+class SkipReplayError(Exception):
+    """Raised for operations that cannot be replayed (Python autograd functions, pseudo ops, etc.)."""
+    pass
+
+
+# Map MIOpen fused ops to their aten:: equivalents for replay
+MIOPEN_FUSED_OP_MAP = {
+    "ConvBias_": "aten::convolution",
+    "ConvBiasReLU_": "aten::convolution",
+    "ConvBias_Backward": "aten::convolution_backward",
+    "ConvBiasReLU_Backward": "aten::convolution_backward",
+}
+
+NON_REPLAYABLE_NAMES = {
+    "FlashAttnFunc", "FlashAttnFuncBackward",
+    "FusedAttnFuncBackward",
+    "EvoformerAttention", "LigerSiLUMulFunction",
+    "FusedRoPEFunc", "FusedRoPEFuncBackward",
+    "CrossEntropyFunction", "CrossEntropyFunctionBackward",
+    "MambaSplitConv1dScanCombinedFn", "MambaSplitConv1dScanCombinedFnBackward",
+    "MoEDispatch", "MoECombine", "MoEDispatchBackward", "MoECombineBackward",
+    "TokenPermuteMaskMap", "TokenPermuteMaskMapBackward",
+    "LayerNormFn", "LayerNormFnBackward",
+    "_OperationFuserAutogradFunction", "_OperationFuserAutogradFunctionBackward",
+}
+
+
 class EventReplayer:
     def __init__(
         self,
@@ -43,10 +70,64 @@ class EventReplayer:
         self.verbose = verbose
         self._setup()
 
+    def _check_replayable(self):
+        """Check if the operation can be replayed, raising SkipReplayError if not."""
+        name = self.event["name"]
+        if name in NON_REPLAYABLE_NAMES:
+            raise SkipReplayError(f"'{name}' is a custom op without a registered schema.")
+        if name.startswith("pseudo_op::") or name.startswith("_Linear") or name.startswith("_LayerNorm"):
+            raise SkipReplayError(f"'{name}' is a TraceLens pseudo operation.")
+
+    @staticmethod
+    def _translate_miopen_fused_event(event):
+        """Translate a MIOpen fused conv event into an aten::convolution-compatible event.
+
+        ConvBias_ args: [input, weight, bias, stride, padding]
+        aten::convolution args: [input, weight, bias, stride, padding, dilation, transposed, output_padding, groups]
+        """
+        op_name = event["name"]
+        input_dims = event["args"]["Input Dims"]
+        ndims = len(input_dims[0]) - 2  # spatial dims
+
+        concrete = list(event["args"]["Concrete Inputs"])
+        input_types = list(event["args"]["Input type"])
+        dims = list(event["args"]["Input Dims"])
+        strides = list(event["args"]["Input Strides"])
+
+        # Ensure stride and padding are lists (ConvBias_ stores them as scalars)
+        stride_val = concrete[3] if len(concrete) > 3 and concrete[3] != "" else "1"
+        padding_val = concrete[4] if len(concrete) > 4 and concrete[4] != "" else "0"
+        stride_list = f"[{', '.join([stride_val] * ndims)}]"
+        padding_list = f"[{', '.join([padding_val] * ndims)}]"
+        dilation_list = f"[{', '.join(['1'] * ndims)}]"
+        output_padding_list = f"[{', '.join(['0'] * ndims)}]"
+
+        translated = {
+            "name": MIOPEN_FUSED_OP_MAP[op_name],
+            "args": {
+                "Input Dims": dims[:3] + [[], [], [], [], [], []],
+                "Input type": (
+                    input_types[:3]
+                    + ["ScalarList", "ScalarList", "ScalarList", "Scalar", "ScalarList", "Scalar"]
+                ),
+                "Input Strides": strides[:3] + [[], [], [], [], [], []],
+                "Concrete Inputs": (
+                    concrete[:3]
+                    + [stride_list, padding_list, dilation_list, "false", output_padding_list, "1"]
+                ),
+            },
+        }
+        return translated
+
     def _setup(self):
         """
         Setup the event replayer by extracting relevant information from the event.
         """
+        self._check_replayable()
+
+        if self.event["name"] in MIOPEN_FUSED_OP_MAP:
+            self.event = EventReplayer._translate_miopen_fused_event(self.event)
+
         if self.verbose:
             print(f"Preparing {self.event['name']} event for replay")
         self.matched_schema = EventReplayer._search_schema(self.event, self.verbose)
@@ -60,13 +141,33 @@ class EventReplayer:
                 self.event_replay_IR, device=self.device
             )
 
+    @staticmethod
+    def _resolve_op(op_name):
+        """Resolve a PyTorch operation by name, trying multiple strategies."""
+        torch = _get_torch_or_raise()
+        try:
+            func, _ = torch._C._jit_get_operation(op_name)
+            return func
+        except Exception:
+            pass
+        if "::" in op_name:
+            namespace, name = op_name.split("::", 1)
+            try:
+                ns = getattr(torch.ops, namespace, None)
+                if ns is not None:
+                    op = getattr(ns, name, None)
+                    if op is not None:
+                        return op.default
+            except Exception:
+                pass
+        raise ValueError(f"Cannot resolve operation '{op_name}'")
+
     def replay(self):
         """
         Replay the event using the matched schema and event replay IR.
         """
-        torch = _get_torch_or_raise()
         # Get the function from the schema
-        func, _ = torch._C._jit_get_operation(self.event["name"])
+        func = EventReplayer._resolve_op(self.event["name"])
 
         # Call the function with the arguments
         if self.lazy:
@@ -200,9 +301,10 @@ class EventReplayer:
                 ):
                     is_match = False
             elif schema_type.startswith("Tensor["):
-                raise ValueError(
-                    f"Tensor list type not supported: {schema_type} as the tensor shapes are not provided in the event"
-                )
+                # Accept the match — individual tensor shapes aren't in the profile,
+                # but we'll create a single-element list with the available shape info
+                if profiled_type not in list_profile_tensor_types and profiled_type != "":
+                    is_match = False
             else:
                 # raise ValueError(f"Unknown schema type: {schema_type}")
                 # warning: if the schema type is not in the list, we will skip this case
@@ -273,7 +375,17 @@ class EventReplayer:
             ):
                 value = []
             else:
-                if arg_type in ["Tensor", "Tensor?", "Tensor(a!)"]:
+                if arg_type.startswith("Tensor["):
+                    if event["args"]["Input Dims"][idx] and event["args"]["Input type"][idx]:
+                        value = [TensorCfg(
+                            shape=event["args"]["Input Dims"][idx],
+                            dtype=event["args"]["Input type"][idx],
+                            strides=event["args"]["Input Strides"][idx],
+                            init="normal",
+                        )]
+                    else:
+                        value = []
+                elif arg_type in ["Tensor", "Tensor?", "Tensor(a!)"]:
                     init = "normal"
                     if evt_name == "aten::fill_":
                         # special case for fill_ where we don't need to initialize the tensor
@@ -340,14 +452,18 @@ class EventReplayer:
         pos_args = []
         for arg in event_replay_IR["list_pos_args"]:
             value = arg["value"]
-            if isinstance(value, TensorCfg):
+            if isinstance(value, list) and value and isinstance(value[0], TensorCfg):
+                pos_args.append([build_tensor(cfg, device=device) for cfg in value])
+            elif isinstance(value, TensorCfg):
                 pos_args.append(build_tensor(value, device=device))
             else:
                 pos_args.append(value)
         kwargs = {}
         for arg in event_replay_IR["list_kwargs"]:
             value = arg["value"]
-            if isinstance(value, TensorCfg):
+            if isinstance(value, list) and value and isinstance(value[0], TensorCfg):
+                kwargs[arg["arg_name"]] = [build_tensor(cfg, device=device) for cfg in value]
+            elif isinstance(value, TensorCfg):
                 kwargs[arg["arg_name"]] = build_tensor(value, device=device)
             else:
                 kwargs[arg["arg_name"]] = value
@@ -416,10 +532,14 @@ class EventReplayer:
         # Convert TensorCfg to dict for JSON serialization
         list_pos_args_copy, list_kwargs_copy = list_pos_args.copy(), list_kwargs.copy()
         for idx, val in enumerate(list_pos_args_copy):
-            if isinstance(val["value"], TensorCfg):
+            if isinstance(val["value"], list) and val["value"] and isinstance(val["value"][0], TensorCfg):
+                list_pos_args_copy[idx]["value"] = [v.__dict__ for v in val["value"]]
+            elif isinstance(val["value"], TensorCfg):
                 list_pos_args_copy[idx]["value"] = val["value"].__dict__
         for idx, val in enumerate(list_kwargs_copy):
-            if isinstance(val["value"], TensorCfg):
+            if isinstance(val["value"], list) and val["value"] and isinstance(val["value"][0], TensorCfg):
+                list_kwargs_copy[idx]["value"] = [v.__dict__ for v in val["value"]]
+            elif isinstance(val["value"], TensorCfg):
                 list_kwargs_copy[idx]["value"] = val["value"].__dict__
         dict_repro_info["replay_ir"] = {
             "list_pos_args": list_pos_args_copy,

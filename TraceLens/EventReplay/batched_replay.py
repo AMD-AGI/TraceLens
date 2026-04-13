@@ -7,21 +7,43 @@
 # run_repro.py
 import json
 import argparse
-import warnings
 import torch
-from utils import TensorCfg, build_tensor, benchmark_func
+from utils import TensorCfg, build_tensor
+
+MIOPEN_OP_PREFIXES = ("aten::miopen_", "aten::convolution")
+MIOPEN_FUSED_OPS = {"ConvBias_", "ConvBiasReLU_", "ConvBias_Backward", "ConvBiasReLU_Backward"}
+
+
+def _resolve_op(op_name):
+    """Resolve a PyTorch operation by name, trying multiple strategies."""
+    try:
+        func, _ = torch._C._jit_get_operation(op_name)
+        return func
+    except Exception:
+        pass
+    if "::" in op_name:
+        namespace, name = op_name.split("::", 1)
+        try:
+            ns = getattr(torch.ops, namespace, None)
+            if ns is not None:
+                op = getattr(ns, name, None)
+                if op is not None:
+                    return op.default
+        except Exception:
+            pass
+    raise ValueError(f"Cannot resolve operation '{op_name}'")
 
 
 def _get_args_kwargs_from_ir(
     event_replay_IR: dict[str, any], device: str = "cuda"
 ) -> tuple[list[any], dict[str, any]]:
-    # (Copy the implementation of _get_args_kwargs_from_ir from Step 1 here)
-    # ...
     pos_args = []
     for arg in event_replay_IR["list_pos_args"]:
         val = arg["value"]
-        # Check if the dict looks like a TensorCfg before attempting to create
-        if arg["arg_type"].startswith("Tensor") and val:
+        # Handle Tensor[] (list of tensors)
+        if arg["arg_type"].startswith("Tensor[") and isinstance(val, list):
+            pos_args.append([build_tensor(TensorCfg(**v), device=device) for v in val])
+        elif arg["arg_type"].startswith("Tensor") and val:
             cfg = TensorCfg(**val)  # Reconstruct from dict
             pos_args.append(build_tensor(cfg, device=device))
         else:
@@ -31,7 +53,9 @@ def _get_args_kwargs_from_ir(
     for arg in event_replay_IR["list_kwargs"]:
         val = arg["value"]
         key = arg["arg_name"]
-        if arg["arg_type"].startswith("Tensor"):
+        if arg["arg_type"].startswith("Tensor[") and isinstance(val, list):
+            kwargs[key] = [build_tensor(TensorCfg(**v), device=device) for v in val]
+        elif arg["arg_type"].startswith("Tensor") and val:
             cfg = TensorCfg(**val)  # Reconstruct from dict
             kwargs[key] = build_tensor(cfg, device=device)
         else:
@@ -97,17 +121,30 @@ if __name__ == "__main__":
 
     # --- Replay Operations ---
     replayed_count = 0
+    total_invocations = 0
     errors = 0
+    skipped = 0
 
     for i, repro_info in enumerate(repro_data_list):
 
         op_name = repro_info["op_name"]
         replay_ir = repro_info["replay_ir"]
-        print(f"\n[{replayed_count + 1}/{len(repro_data_list)}] Replaying: {op_name}")
+        count = repro_info.get("count", 1)
+
+        # Filter to MIOpen/convolution ops only
+        is_miopen = op_name.startswith(MIOPEN_OP_PREFIXES) or op_name in MIOPEN_FUSED_OPS
+        passes_op_filter = args.op_filter is None or args.op_filter in op_name
+        if not is_miopen or not passes_op_filter:
+            if args.verbose:
+                print(f"  Skipping non-MIOpen op: {op_name}")
+            skipped += 1
+            continue
+
+        print(f"\n[{i + 1}/{len(repro_data_list)}] Replaying: {op_name} (x{count})")
 
         # Get the PyTorch operation function
         try:
-            func, _ = torch._C._jit_get_operation(op_name)
+            func = _resolve_op(op_name)
         except Exception as e:
             print(
                 f"  Error: Could not find PyTorch operation '{op_name}'. Is the PyTorch version compatible? Error: {e}"
@@ -137,62 +174,36 @@ if __name__ == "__main__":
             errors += 1
             continue  # Skip to next operation
 
-        # Execute the operation
-        # Optionally add synchronization for accurate timing if needed (cuda specific)
+        # Execute the operation count times
         if args.device == "cuda":
             torch.cuda.synchronize()
-        # --- Call the function ---
         try:
-            result = func(*pos_args, **kwargs)
+            for _ in range(count):
+                func(*pos_args, **kwargs)
         except Exception as e:
             print(f"  Error: Failed to execute '{op_name}'. Error: {e}")
             if args.stop_on_error:
                 raise
             errors += 1
             continue
-        # --- Benchmark the function ---
-        mean_time_us = benchmark_func(
-            lambda: func(*pos_args, **kwargs), args.device, warmup=50, avg_steps=100
-        )
-        print(f"  Average time taken: {mean_time_us:.2f} microseconds")
-        if "count" in repro_info:
-            count_workload = repro_info["count"]
-            total_time_us = mean_time_us * count_workload
-            print(f"  Count in workload: {count_workload}")
-            print(f"  Est time in workload: {total_time_us:.2f} microseconds")
-        # --- Optionally sync again ---
         if args.device == "cuda":
             torch.cuda.synchronize()
 
         if args.verbose:
             print(f"  Successfully executed {op_name}.")
-            # Optionally print result info (be careful with large tensors)
-            if isinstance(result, torch.Tensor):
-                print(
-                    f"  Result: Tensor(shape={result.shape}, dtype={result.dtype}, device={result.device})"
-                )
-            elif isinstance(result, (list, tuple)) and any(
-                isinstance(r, torch.Tensor) for r in result
-            ):
-                for r in result:
-                    if isinstance(r, torch.Tensor):
-                        print(
-                            f"  Result: Tensor(shape={r.shape}, dtype={r.dtype}, device={r.device})"
-                        )
-                    else:
-                        print(f"  Result: {r}")
-            else:
-                print(f"  Result: {result}")
 
         replayed_count += 1
+        total_invocations += count
 
     # --- Final Summary ---
     print("\n--- Replay Summary ---")
-    print(f"Total operations in file: {len(repro_data_list)}")
+    print(f"Total unique operations in file: {len(repro_data_list)}")
+    print(f"Skipped (non-MIOpen): {skipped}")
     if args.op_filter:
-        print(f"Filter applied: '{args.op_filter}'")
-    print(f"Attempted replays: {replayed_count}")
-    print(f"Successful replays: {replayed_count - errors}")
+        print(f"Op filter applied: '{args.op_filter}'")
+    print(f"Attempted replays: {replayed_count + errors}")
+    print(f"Successful replays: {replayed_count}")
+    print(f"Total invocations: {total_invocations}")
     print(f"Errors encountered: {errors}")
     print("----------------------")
 
