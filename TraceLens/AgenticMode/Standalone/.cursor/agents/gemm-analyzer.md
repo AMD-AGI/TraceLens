@@ -158,7 +158,16 @@ GEMMs account for X% of compute time. Average efficiency: Y%.
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
 |---------------|------|----------------------|-------------------------------|------------|
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
+
+## Recommendations
+
+### P1: <Brief Title>
+**Insight**: [1 sentence — from Issue in Key Bottlenecks]
+**Action**: [1-2 sentences — merged Algorithmic + Kernel from Key Bottlenecks]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
 ```
+
+Each `## Recommendations` P-item must map 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank. Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
 
 **Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
 

@@ -456,6 +456,8 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 All subagents must complete before proceeding to Step 8.
 Each subagent writes its findings to `category_findings/<category>_findings.md`.
 
+**Self-check:** After all compute kernel subagents complete, verify that every category in the manifest with `tier: compute_kernel` has a corresponding `category_findings/<category>_findings.md` file. If any are missing, invoke the subagent for that category before proceeding to Step 8.
+
 ### 7.4 Verify Outputs and Collect Errors
 
 After all subagents complete:
@@ -597,6 +599,7 @@ If the plot fails or is skipped, proceed to Step 10 without the plot and note th
    - `category_findings/*.md` (compute kernel P-items)
    - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
+   - **Card sourcing:** For each findings file, read the `## Recommendations` section and copy its P-items directly into the corresponding report card slots. The labels (`Insight/Action/Impact` for compute, `Insight/Action` for system) already match the card format — do not translate or rename them. Assign priority icons (🔴 P1 → 🟡 P2 → 🟢 P3+) and add Detailed Analysis links.
 4. **Paste `## Detailed Analysis`:** For each P-item in priority order, take the `## Detailed Analysis` candidate from the matching `category_findings/*.md` or `system_findings/*.md` file and place it in the report.
 
 The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
@@ -606,8 +609,6 @@ The report at `<output_dir>/standalone_analysis.md` must use these exact `##` he
 4. `## System-Level Optimizations`
 5. `## Detailed Analysis`
 6. `## Appendix`
-
-Each compute kernel P-item must use **Insight** / **Action** / **Impact** fields.
 
 Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 

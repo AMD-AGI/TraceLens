@@ -176,6 +176,13 @@ Operations skipped: [list op names from communication_ops_skipped.op_names]
 |---------------|------|----------------------|-------------------------------|------------|
 | <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
 
+## Recommendations
+
+### P1: <Brief Title>
+**Insight**: [1 sentence — from Key Findings analysis]
+**Action**: [1-2 sentences — merged Algorithmic + Kernel from Key Findings]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
+
 ## Notes
 - Communication kernels (NCCL/RCCL) are excluded from this analysis — use TraceLens's NCCL Analyzer
 - Communication overlap and memcpy patterns are covered in the Multi-Kernel system findings

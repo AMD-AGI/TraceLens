@@ -188,6 +188,10 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 <!-- When not quantifiable: **Impact estimate:** Impact estimate is not quantifiable from trace data. -->
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 If no fusion opportunities detected:
@@ -195,6 +199,10 @@ If no fusion opportunities detected:
 # Kernel Fusion Analysis Summary (Experimental)
 
 No kernel fusion opportunities detected.
+
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 ---
