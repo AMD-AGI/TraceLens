@@ -75,7 +75,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 3. **Analysis Mode** → `<analysis_mode>`
    - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
    - Options:
-     1. **Default (training and eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
+     1. **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
      2. **Inference analysis (vLLM/SGLang)** (`<analysis_mode>` = `inference`) — uses `TraceLens_generate_perf_report_pytorch_inference`
    - If **Inference (vLLM/SGLang)** is selected, ask **Execution Mode** → `<inference_exec_mode>`:
      1. **Eager mode** (`<inference_exec_mode>` = `eager`) — only the trace file is needed
@@ -136,7 +136,7 @@ Write the resolved template (with actual node/container/venv/tracelens_dir value
 
 Use the analysis mode selected in Step 0 to determine which CLI tool to run.
 
-**Default (training and eager inference)** (analysis_mode = `default`):
+**Default (training and non-vLLM/SGLang eager inference)** (analysis_mode = `default`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
@@ -667,7 +667,7 @@ If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whethe
 
 - **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user and **abort**.
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports eager-mode PyTorch traces only. **Abort** -- do not retry or continue.
+  - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
   - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported. Do **NOT** abort. If inference_exec_mode is `eager` (no capture folder was provided), log a warning that analysis may be limited without graph capture traces, but continue.
 
 ### Before Invoking Subagents
