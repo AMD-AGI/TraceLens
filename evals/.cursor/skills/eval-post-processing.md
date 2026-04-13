@@ -54,7 +54,7 @@ Read these files:
 1. `<report_dir>/aggregates/aggregated_results.csv`
 2. `<report_dir>/aggregates/pass_rate_summary.csv`
 3. `<report_dir>/aggregates/stream_diagnostics.csv`
-4. `evals/eval_utils/report_section_rules.yaml` — classification guide (JSON format despite `.yaml` extension)
+4. `evals/eval_utils/report_section_rules.yaml` — classification guide (YAML format, load with `yaml.safe_load()`)
 5. `<test_traces_csv>` — for trace metadata (id, sub_category, platform, trace_path)
 
 ### Splitting Unit Test vs E2E Test Cases
