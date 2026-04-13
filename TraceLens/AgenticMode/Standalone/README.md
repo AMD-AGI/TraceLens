@@ -75,7 +75,7 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
 
-**Cluster + container — default (training and eager inference non-vLLM/SGLang):**
+**Cluster + container — default (training and non-vLLM/SGLang eager inference):**
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
@@ -223,7 +223,7 @@ The orchestrator supports two analysis modes, selected during Step 0:
 
 | Mode | Script | Use Case |
 |------|--------|----------|
-| **Default (training and eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training traces, eager inference traces |
+| **Default (training and non-vLLM/SGLang eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang eager inference traces |
 | **Inference (vLLM/SGLang)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang traces in eager mode or graph replay + capture mode |
 
 For inference mode, the orchestrator also asks for the execution mode:
