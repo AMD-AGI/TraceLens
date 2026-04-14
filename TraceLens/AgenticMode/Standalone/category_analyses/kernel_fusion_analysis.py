@@ -23,18 +23,25 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_STANDALONE_DIR = os.path.dirname(_THIS_DIR)
+sys.path.insert(0, _THIS_DIR)
+sys.path.insert(0, _STANDALONE_DIR)
 
-from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
+from analysis_utils import (
+    TARGET_HIGH,
+    TARGET_LOW,
+    TARGET_MID,
+    parse_first_shape,
+    shape_aware_lookup,
+    write_metrics_json,
+)
 from utils.arch_utils import load_arch
 
 MAX_FUSION_KERNEL_COUNT = (
     15  # Skip candidates with more kernels than this (too complex to fuse reliably)
 )
 
-TARGET_HIGH = 100.0  # Best-case savings target (100% of original time)
-TARGET_LOW = 75.0  # Mid-range savings target (75% of original time)
-TARGET_MID = 87.5  # Balanced savings target (87.5% of original time)
 MIN_E2E_PCT = 2.0  # Drop estimates whose best-case E2E impact is below this threshold
 OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
@@ -561,6 +568,12 @@ def main():
     try:
         arch = load_arch_config(args.output_dir, platform)
     except FileNotFoundError as e:
+        error_metrics = {
+            "category": "kernel_fusion",
+            "status": "ERROR",
+            "error": str(e),
+        }
+        write_metrics_json(error_metrics, args.output_dir, "kernel_fusion")
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

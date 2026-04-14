@@ -32,12 +32,19 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    classify_other_operation,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.gemm_analysis import (
     detect_quantized_gemm,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.sdpa_analysis import (
     detect_flash_attention,
-    detect_softmax,
-    detect_transpose,
     detect_paged_attention,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.reduce_analysis import (
+    detect_softmax,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.other_analysis import (
+    classify_other_operation,
 )
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
     generate_priority_data,
@@ -383,11 +390,6 @@ def test_detect_flash_attention():
 def test_detect_softmax():
     assert detect_softmax("aten::softmax") is True
     assert detect_softmax("aten::mm") is False
-
-
-def test_detect_transpose():
-    assert detect_transpose("aten::transpose") is True
-    assert detect_transpose("aten::mm") is False
 
 
 def test_detect_paged_attention():

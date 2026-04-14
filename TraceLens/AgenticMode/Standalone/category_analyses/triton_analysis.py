@@ -13,24 +13,15 @@ Computes metrics for Triton kernels and outputs JSON for subagent processing.
 import argparse
 import sys
 import os
+
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    write_metrics_json,
+    get_peak_specs,
+    run_category_analysis,
 )
-
-
-def get_triton_config():
-    """Return Triton-specific configuration."""
-    return {
-        "extra_fields": ["FLOPS/Byte"],
-        "operation_classifier": classify_triton_operation,
-    }
 
 
 def classify_triton_operation(op_name: str, row) -> dict:
@@ -52,7 +43,6 @@ def classify_triton_operation(op_name: str, row) -> dict:
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract Triton-specific aggregate metrics."""
-    # Count by bound type
     compute_bound = 0
     memory_bound = 0
 
@@ -67,12 +57,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
     return {
         "compute_bound_count": compute_bound,
         "memory_bound_count": memory_bound,
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        **get_peak_specs(metadata),
     }
 
 
@@ -81,33 +66,16 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Output directory")
     args = parser.parse_args()
 
-    try:
-        ops_df, metadata = load_category_data(args.output_dir, "triton")
-    except FileNotFoundError as e:
-        error_metrics = {"category": "triton", "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, "triton")
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    config = get_triton_config()
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-
-    time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(ops_df, metadata, config)
-    category_specific = extract_category_specific(ops_df, metadata)
-
-    metrics = {
-        "category": "triton",
-        "status": "OK",
-        **time_metrics,
-        "operations": operations,
-        "category_specific": category_specific,
-        "impact_estimates": [],
-    }
-
-    output_path = write_metrics_json(metrics, args.output_dir, "triton")
-    print(f"Metrics written to: {output_path}")
+    run_category_analysis(
+        category="triton",
+        output_dir=args.output_dir,
+        config={
+            "extra_fields": ["FLOPS/Byte"],
+            "operation_classifier": classify_triton_operation,
+        },
+        extract_fn=extract_category_specific,
+        compute_impact=False,
+    )
 
 
 if __name__ == "__main__":
