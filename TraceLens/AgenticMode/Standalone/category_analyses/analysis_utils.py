@@ -484,102 +484,6 @@ def compute_impact_estimates(
     return sorted(estimates, key=lambda x: x["savings_ms"], reverse=True)
 
 
-def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
-    """
-    Aggregate impact_estimates from all *_metrics.json files into a single
-    plot_data.json consumed by the performance improvement plot script.
-
-    Only kernel_tuning estimates with high/medium confidence are included
-    in the plot recommendations. All estimates (including system and
-    algorithmic) are collected in all_estimates for the report.
-
-    Args:
-        output_dir: Base output directory containing category_data/
-        max_recommendations: Max number of recommendations for the plot
-
-    Returns:
-        Path to written plot_data.json
-    """
-    out_path = f"{output_dir}/plot_data.json"
-    category_data_dir = f"{output_dir}/category_data"
-    manifest_path = f"{category_data_dir}/category_manifest.json"
-
-    try:
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
-
-        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
-
-        all_estimates: List[dict] = []
-        for fname in sorted(os.listdir(category_data_dir)):
-            if not fname.endswith("_metrics.json"):
-                continue
-            fpath = os.path.join(category_data_dir, fname)
-            with open(fpath, "r") as f:
-                metrics = json.load(f)
-            if metrics.get("status") in ("ERROR", "NO_DATA"):
-                continue
-            all_estimates.extend(metrics.get("impact_estimates", []))
-
-        category_savings = defaultdict(
-            lambda: {
-                "savings_ms": 0,
-                "savings_ms_low": 0,
-                "savings_ms_high": 0,
-                "count": 0,
-                "ops": [],
-            }
-        )
-        for e in all_estimates:
-            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
-                "high",
-                "medium",
-            ):
-                cat = e["category"]
-                category_savings[cat]["savings_ms"] += e["savings_ms"]
-                category_savings[cat]["savings_ms_low"] += e.get(
-                    "savings_ms_low", e["savings_ms"]
-                )
-                category_savings[cat]["savings_ms_high"] += e.get(
-                    "savings_ms_high", e["savings_ms"]
-                )
-                category_savings[cat]["count"] += 1
-                category_savings[cat]["ops"].append(e.get("operation", ""))
-
-        plot_recs = sorted(
-            [
-                {
-                    "category": cat,
-                    "savings_ms": round(v["savings_ms"], 3),
-                    "savings_ms_low": round(v["savings_ms_low"], 3),
-                    "savings_ms_high": round(v["savings_ms_high"], 3),
-                    "operation_count": v["count"],
-                    "type": "kernel_tuning",
-                }
-                for cat, v in category_savings.items()
-            ],
-            key=lambda x: x["savings_ms"],
-            reverse=True,
-        )[:max_recommendations]
-
-        plot_data = {
-            "baseline_ms": baseline_ms,
-            "recommendations": plot_recs,
-            "all_estimates": all_estimates,
-        }
-    except Exception:
-        plot_data = {
-            "baseline_ms": 0,
-            "recommendations": [],
-            "all_estimates": [],
-        }
-
-    with open(out_path, "w") as f:
-        json.dump(plot_data, f, indent=2)
-
-    return out_path
-
-
 def parse_first_shape(dims_str):
     """Extract first input tensor shape as a hashable tuple from an Input Dims string."""
     if dims_str is None or (isinstance(dims_str, float) and pd.isna(dims_str)):
@@ -614,6 +518,7 @@ def shape_aware_lookup(table, kname, input_dims=None):
 REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
+    "Kernel Fusion Opportunities (Experimental)",
     "System-Level Optimizations",
     "Detailed Analysis",
     "Appendix",

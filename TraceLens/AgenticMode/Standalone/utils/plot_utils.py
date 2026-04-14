@@ -17,8 +17,8 @@ Public API:
 import base64
 import json
 import os
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
-    generate_plot_data,
+from TraceLens.AgenticMode.Standalone.utils.report_utils import (
+    generate_priority_data,
 )
 import re
 
@@ -235,16 +235,16 @@ def generate_perf_plot(
     Returns:
         True if the figure was written, False if inputs were missing or invalid.
     """
-    plot_data_path = os.path.join(output_dir, "plot_data.json")
+    plot_data_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(plot_data_path):
         try:
-            generate_plot_data(output_dir)
+            generate_priority_data(output_dir)
         except Exception as e:
-            print(f"plot_data generation failed: {e}")
+            print(f"priority_data generation failed: {e}")
             return False
 
     if not os.path.exists(plot_data_path):
-        print(f"plot_data.json not found at {plot_data_path} - skipping plot")
+        print(f"priority_data.json not found at {plot_data_path} - skipping plot")
         return False
 
     with open(plot_data_path, "r") as f:

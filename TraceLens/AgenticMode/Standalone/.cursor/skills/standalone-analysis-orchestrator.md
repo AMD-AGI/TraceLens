@@ -47,7 +47,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Aggregate Results: System-Level + Compute Kernel Recommendations
 10. Generate Final Report (composable System + Compute sections)
-10.1. Generate and Embed Performance Improvement Plot (single atomic call: plot_data + matplotlib PNG + base64 embed)
+10.1. Generate and Embed Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 5.5, 6, 7). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -114,7 +114,7 @@ ssh <node> "find / -maxdepth 5 -type d -name 'TraceLens' 2>/dev/null | head -5"
 ssh <node> "docker exec <container> bash -c 'find / -maxdepth 5 -type d -name TraceLens 2>/dev/null | head -5'"
 ```
 
-Pick the result that contains `TraceLens/AgenticMode/` and store it as `<tracelens_dir>`.
+Pick the result containing `AgenticMode/` and strip the trailing `/TraceLens` to get `<tracelens_dir>`.
 
 Build the cluster prefix using this lookup:
 
@@ -124,7 +124,13 @@ Build the cluster prefix using this lookup:
 | Yes | No | `ssh <node> "docker exec <container> bash -c 'cd <tracelens_dir> && {CMD}'"` |
 | No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
 
-Write the resolved template (with actual node/container/venv/tracelens_dir values substituted) to `<output_dir>/cache/cmd_prefix.txt`.
+Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validate it works:
+
+```bash
+<prefix> python3 -c "import TraceLens; print('PREFIX_OK')"
+```
+
+If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
 
 ### Command Execution Pattern
 
@@ -214,33 +220,9 @@ This script performs:
 
 ## Step 5.5: Model Identification (Subagent)
 
-Launch a Task subagent (generalPurpose) with the full contents of `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` and context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
 
 Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace". Wait for completion before proceeding further.
-
----
-
-## Agent File Map
-
-The following maps category names to their agent definition files. These files contain specialized analysis instructions, severity thresholds, root cause patterns, and finding templates for each category.
-
-**Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
-
-| Category | Agent File |
-|----------|-----------|
-| cpu_idle | cpu-idle-analyzer.md |
-| multi_kernel | multi-kernel-analyzer.md |
-| gemm | gemm-analyzer.md |
-| sdpa_fwd | sdpa-analyzer.md |
-| sdpa_bwd | sdpa-analyzer.md |
-| moe_fused | moe-analyzer.md |
-| elementwise | elementwise-analyzer.md |
-| triton | triton-analyzer.md |
-| reduce | reduce-analyzer.md |
-| norm | norm-analyzer.md |
-| convolution | convolution-analyzer.md |
-| kernel_fusion | kernel-fusion-analyzer.md |
-| other | generic-op-analyzer.md |
 
 ---
 
@@ -264,58 +246,50 @@ This prints `system_categories` and `compute_categories` lists. Use `system_cate
 
 ### 6.2 Launch System-Level Subagents in PARALLEL
 
-Launch **both** sub-agents simultaneously using the Task tool. Do NOT wait between invocations.
+Launch system-level sub-agents simultaneously using the Task tool. Do NOT wait between invocations.
 
-**For each system-level subagent:**
+**System-Level Agent File Map:**
 
-1. **Read** the agent definition file from the Agent File Map:
-   `TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md`
+**Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
 
-2. **Launch a Task subagent** (subagent_type: generalPurpose) with a prompt that includes:
-   - The **full contents** of the agent definition file (this provides the specialized
-     analysis instructions, severity thresholds, and finding templates)
-   - The execution context appended after the agent instructions
-
-**System-Level Subagent Mapping:**
-
-- `cpu_idle` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/cpu-idle-analyzer.md` (invoke if `idle_flagged` is `true`)
-- `multi_kernel` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/multi-kernel-analyzer.md` (invoke if memcpy/NCCL events exist in trace)
-- `kernel_fusion` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/kernel-fusion-analyzer.md` (invoke if `kernel_fusion` category exists in manifest)
+| Category | Agent file |
+|----------|-----------|
+| `cpu_idle` | `cpu-idle-analyzer.md` |
+| `multi_kernel` | `multi-kernel-analyzer.md` |
+| `kernel_fusion` | `kernel-fusion-analyzer.md` |
 
 **Invocation conditions:**
 - **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 - **Kernel Fusion**: `kernel_fusion` category exists in manifest
 
-**Task prompt structure for each subagent:**
+**Task prompt structure for each system-level subagent:**
+
+The subagent reads its own agent file — the orchestrator does NOT read or paste agent file contents.
 
 ```
-Read the agent file first:
+Read and follow the FULL instructions in:
   TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md
-
-Then launch a Task subagent with the following prompt:
-
----BEGIN AGENT INSTRUCTIONS---
-<full contents of the agent .md file>
----END AGENT INSTRUCTIONS---
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template
+  with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - Input files: <list from agent file's "Input files" section>
 - Output file: <from agent file's "Output file" section>
 
-Follow the agent instructions above to complete the analysis.
+Execute every step in the agent file. Return "DONE" when complete.
 ```
 
-**CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script using the command prefix
-2. Reading the metrics JSON output
-3. Identifying issues and generating findings
+**CRITICAL:** The orchestrator does NOT read agent files or run analysis scripts. Each sub-agent is responsible for:
+1. Reading its own agent `.md` file
+2. Running its Python script using the command prefix
+3. Reading the metrics JSON output
+4. Identifying issues and generating findings
 
 ### 6.3 Wait for System-Level Subagents to Complete
 
-Both subagents must complete before proceeding to Step 7.
+The three subagents must complete before proceeding to Step 7.
 Each writes findings to `system_findings/<name>_findings.md`.
 
 ### 6.4 Verify System Outputs
@@ -331,124 +305,120 @@ After both subagents complete:
 
 ## Step 7: Invoke Compute Kernel Subagents (PARALLEL)
 
-Compute kernel analysis examines individual operation category efficiency. CPU/Idle is NOT in this tier -- it was handled in Step 6.
+Compute kernel analysis examines individual operation category efficiency.
 
 **Output directory:** `category_findings/`
 
 ### 7.1 Read Manifest and Identify Compute Kernel Categories
 
-Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1 (no need to re-read the manifest).
+Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 
-### 7.2 Launch ALL Compute Kernel Subagents in PARALLEL
+### 7.2 Launch Compute Kernel Subagents in PARALLEL
 
-For each category in `compute_categories`, launch the corresponding subagent **simultaneously** using the Task tool. Do NOT wait between invocations - launch all at once.
+**Compute Kernel Agent File Map:**
 
-**For each compute kernel subagent:**
+| Category | Agent file |
+|----------|-----------|
+| `gemm` | `gemm-analyzer.md` |
+| `sdpa_fwd` | `sdpa-analyzer.md` |
+| `sdpa_bwd` | `sdpa-analyzer.md` |
+| `elementwise` | `elementwise-analyzer.md` |
+| `reduce` | `reduce-analyzer.md` |
+| `triton` | `triton-analyzer.md` |
+| `moe_fused` | `moe-analyzer.md` |
+| `norm` | `norm-analyzer.md` |
+| `convolution` | `convolution-analyzer.md` |
+| `other` | `generic-op-analyzer.md` |
 
-1. **Read** the agent definition file from the Agent File Map:
-   `TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md`
+**Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
 
-2. **Launch a Task subagent** (subagent_type: generalPurpose) with a prompt that includes:
-   - The **full contents** of the agent definition file
-   - The execution context
-   - The CRITICAL CONSTRAINTS (from Section 7, below)
+#### Partitioning: Mapped vs Unmapped Categories
 
-**Compute Kernel Subagent Mapping:**
+Partition `compute_categories` into two groups:
 
-- `gemm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/gemm-analyzer.md`
-- `sdpa_fwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` (pass `--category sdpa_fwd`)
-- `sdpa_bwd` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/sdpa-analyzer.md` (pass `--category sdpa_bwd`)
-- `elementwise` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/elementwise-analyzer.md`
-- `reduce` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/reduce-analyzer.md`
-- `triton` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/triton-analyzer.md`
-- `moe_fused` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/moe-analyzer.md`
-- `norm` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/norm-analyzer.md`
-- `convolution` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/convolution-analyzer.md`
-- `other` → Read `TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md`
+- **Mapped**: category exists in the Agent File Map above → gets a dedicated subagent
+- **Unmapped**: category is NOT in the Agent File Map → goes into a single **batched generic** subagent/ `other` is a special case: it IS in  the map but uses `generic-op-analyzer.md`. Include it in the batched generic subagent alongside unmapped categories.
 
-**Task prompt structure for each subagent:**
+Launch all subagents simultaneously in a single parallel batch:
+- One **dedicated subagent** per mapped category
+- One **batched generic subagent** for all unmapped + `other` categories (if any)
 
+---
+
+#### Shared Compute Kernel Preamble
+
+Include this block in every compute kernel subagent prompt (dedicated and batched):
+
+<Shared Compute Kernel Preamble>:
 ```
-Read the agent file first:
-  TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md
-
-Then launch a Task subagent with the following prompt:
-
----BEGIN AGENT INSTRUCTIONS---
-<full contents of the agent .md file>
----END AGENT INSTRUCTIONS---
+**CRITICAL - READ FIRST:**
+- Use GPU kernel time (not CPU duration) for all bottleneck analysis
+- Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
 
 **CRITICAL CONSTRAINTS:**
-<include the constraints from the orchestrator skill Section 7 below>
+1. Any efficiency > 100% → `[ANOMALY] - verify measurement`
+2. Status must be SUCCESS or ERROR; times in ms; efficiencies as percentages
+3. Operations with `fusion_flagged: true` in the metrics JSON are already covered by
+   a high-confidence kernel fusion candidate — do NOT flag them as bottlenecks or write
+   kernel_tuning recommendations. The analysis scripts already exclude them from `impact_estimates`.
 
 **Execution Context:**
 - Output directory: <output_dir>
-- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
-- Input files: category_data/<category>_ops.csv, metadata/<category>_metadata.json,
-  category_data/<category>_tree_data.json (if available)
-- Output file: category_findings/<category>_findings.md
-
-Follow the agent instructions above to complete the analysis.
+- Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template
+  with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 ```
 
-**CRITICAL:** The orchestrator does NOT generate and run any analysis scripts. Each sub-agent is responsible for:
-1. Running its Python script using the command prefix
-2. Reading the metrics JSON output
-3. Identifying bottlenecks and generating findings
-
 ---
 
-### CRITICAL CONSTRAINTS for Compute Kernel Subagents
+#### Dedicated Compute Kernel Subagent Prompt
 
-Include these constraints in EVERY compute kernel subagent invocation prompt:
-
-#### 1. Flag Efficiency Anomalies
-
-- Any efficiency > 100% **MUST** be noted as `[ANOMALY] - verify measurement`
-- Do **NOT** use > 100% values to claim "excellent performance"
-- Report the anomaly but base recommendations on other operations
-- Efficiency anomalies indicate:
-  - Wrong peak spec for the platform
-  - Measurement timing issues
-  - Workload characteristics outside normal bounds
-
-#### 2. Output Consistency
-
-- Status must be `SUCCESS` or `ERROR`
-- Time values in milliseconds (ms) unless otherwise noted
-- Efficiency values as percentages (0-100% typically; flag >100% as anomaly)
-- Always include operation count for context
-
-#### 3. Fusion-Tagged Operations
-
-- Operations with `fusion_flagged: true` in the metrics JSON are already covered by a high-confidence kernel fusion candidate — do **NOT** flag them as bottlenecks or write kernel_tuning recommendations
-- The analysis scripts already exclude them from `impact_estimates`
-
----
-
-**Compute Kernel Subagent Prompt Template:**
-
-When invoking a compute kernel subagent, use this template:
+For each mapped category, launch a Task (subagent_type: generalPurpose):
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
 
-**CRITICAL - READ FIRST:**
-- Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
-- When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
+<Shared Compute Kernel Preamble>
 
-**Platform Specs:**
-- Peak HBM BW: {peak_hbm_bw} TB/s
-- Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
-- Impact estimates assume tuning can reach 75–100% of roofline (midpoint 87.5% used for plots)
+Read and follow the FULL instructions in:
+  TraceLens/AgenticMode/Standalone/.cursor/agents/{agent_file}
 
-**Input files:**
-- category_data/{category}_ops.csv
-- metadata/{category}_metadata.json
-- category_data/{category}_tree_data.json (if available)
+- Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
+  category_data/{category}_tree_data.json (if available)
+- Output file: category_findings/{category}_findings.md
 
-**Output:** category_findings/{category}_findings.md
+Execute every step in the agent file. Return "DONE" when complete.
+```
+
+---
+
+#### Batched Generic Subagent Prompt
+
+If `generic_batch` is non-empty, launch ONE Task (subagent_type: generalPurpose) that handles all generic categories sequentially:
+
+```
+You are analyzing multiple operation categories for a PyTorch trace on {platform}.
+
+<Shared Compute Kernel Preamble>
+
+Read the analysis instructions ONCE from:
+  TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md
+
+Then apply that workflow sequentially to EACH of these categories:
+{for each cat in generic_batch}
+  - {cat}: run `other_analysis.py --category {cat} --output-dir <output_dir>`,
+    read {cat}_metrics.json, write category_findings/{cat}_findings.md
+{end for}
+
+For the category named "other" (if present in the list): run `other_analysis.py`
+without the --category flag (it defaults to "other").
+
+- For each category {cat}, input files are: category_data/{cat}_ops.csv,
+  metadata/{cat}_metadata.json, category_data/{cat}_tree_data.json (if available)
+- For each category {cat}, output file is: category_findings/{cat}_findings.md
+- After writing each findings file, run:
+  write_impact_estimates('<output_dir>', '{cat}', 'compute')
+
+Process all categories. Return "DONE" when all are complete.
 ```
 
 ### 7.3 Wait for All Compute Kernel Subagents to Complete
@@ -456,7 +426,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 All subagents must complete before proceeding to Step 8.
 Each subagent writes its findings to `category_findings/<category>_findings.md`.
 
-**Self-check:** After all compute kernel subagents complete, verify that every category in the manifest with `tier: compute_kernel` has a corresponding `category_findings/<category>_findings.md` file. If any are missing, invoke the subagent for that category before proceeding to Step 8.
+**Self-check:** After all compute kernel subagents complete, verify that every category in the manifest with `tier: compute_kernel` has a corresponding `category_findings/<category>_findings.md` file. If any are missing, re-iinvoke the subagent for that category before proceeding to Step 8.
 
 ### 7.4 Verify Outputs and Collect Errors
 
@@ -501,21 +471,19 @@ load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
-Then read the individual findings files using the command prefix as needed for report assembly.
-
 ### Aggregate Compute Kernel Recommendations
 
-Compute kernel recommendations address individual operation efficiency. Each subagent has produced algorithmic and kernel optimization recommendations. Consolidate these, cross-reference with `top_ops`, and prioritize by impact.
+Compute kernel recommendations address operation efficiency at the **category level**. Each subagent has produced algorithmic and kernel optimization recommendations. Consolidate these into one P-item per category, cross-reference with `top_ops`, and prioritize by total impact.
 
 **Compute Kernel Prioritization:**
 
-Select kernels in top_ops and order by highest impact on end-to-end time. Focus on areas with low efficiency and high category time.
+Create **one P-item per category**. Read `priority_data.json` (generated in Step 9.5.2) and use its `priorities` array directly: P1 = rank 1, P2 = rank 2, P3+ = rest. Categories with `source: "manifest_fallback"` use Impact: "Not quantifiable from trace data".
 
 | Priority | Icon | Criteria |
 |----------|------|----------|
-| P1 | 🔴 | In top_ops + (Sorted by efficiency and high category %) |
-| P2 | 🟡 | In top_ops + (Sorted by efficiency and high category %) |
-| P3+ | 🟢 | In top_ops + (Sorted by efficiency and high category %) |
+| P1 | 🔴 | `priorities[0]` — category with highest total savings |
+| P2 | 🟡 | `priorities[1]` — second-highest |
+| P3+ | 🟢 | `priorities[2:]` — remaining (quantified then unmodeled) |
 
 **Compute Kernel Icon Mapping (by priority number, NOT severity):**
 
@@ -542,7 +510,6 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 **CRITICAL: No-Issue Handling:**
 - If **all** system-level analyses report no actionable issues (idle <= 15% and all multi-kernel assessments have `flagged: false`), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
 - Instead, display a short summary: "No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead."
-- This avoids misleading stakeholders with a red P1 icon for a non-issue.
 
 **System-Level Icon Mapping (by priority number, NOT severity):**
 
@@ -564,15 +531,15 @@ Assign priorities sequentially starting from P1 based on which analyses are pres
 <prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
 ```
 
-### 9.5.2 Generate plot_data.json
+### 9.5.2 Generate priority_data.json
 
-Run the `generate_plot_data()` utility to aggregate all `impact_estimates` from `*_metrics.json` files into a single `plot_data.json`:
+Run `generate_priority_data()` to aggregate all `impact_estimates` from `*_metrics.json` files and manifest fallback categories into `priority_data.json` — the single source of truth for both report P-item ordering and the plot:
 
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import generate_plot_data
-generate_plot_data(sys.argv[1])
+from TraceLens.AgenticMode.Standalone.utils.report_utils import generate_priority_data
+generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```
 
@@ -586,7 +553,7 @@ generate_perf_plot(sys.argv[1], sys.argv[2])
 \" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
 
-If the plot fails or is skipped, proceed to Step 10 without the plot and note the failure in the report.
+If the plot fails, retry once. If still failing, proceed to Step 10 without the plot.
 
 ---
 
@@ -610,7 +577,6 @@ The report at `<output_dir>/standalone_analysis.md` must use these exact `##` he
 5. `## Detailed Analysis`
 6. `## Appendix`
 
-Validate the report before sharing the priority recommendations on the chat and prompt the user to review the report.
 
 ### 10.1 Validate Report Structure (Retry up to 2x)
 
@@ -638,15 +604,13 @@ print('PASS: All required sections present')
 2. Check if the report contains similar but incorrectly named headers (e.g., `## Compute Kernel Analysis` instead of `## Compute Kernel Optimizations`, or `## System-Level Analysis` instead of `## System-Level Optimizations`) and rename them to match the exact required names using string replacement. Do NOT rewrite the report from scratch.
 3. If sections are entirely absent, add them with the correct `##` headers, keeping existing content
 4. Run validation again
-5. Maximum 3 retry attempts. If still failing after retry, proceed to Step 10.2 with a warning
+5. Maximum 2 retry attempts. If still failing after retry, proceed to Step 10.2 with a warning
 
 ---
 
 ### 10.2 Generate and Embed Performance Improvement Plot
 
-After writing `standalone_analysis.md` with the `{{PERF_PLOT}}` placeholder, run a **single command** that generates `plot_data.json`, renders `perf_improvement.png`, and embeds the base64-encoded plot into the report.
-
-**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+Render `perf_improvement.png`, and embed the base64-encoded plot into the report.
 
 ```bash
 <prefix> python3 -c \"
@@ -666,16 +630,10 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 
 If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
 
-- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user and **abort**.
+- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user.
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
   - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
-  - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported. Do **NOT** abort. If inference_exec_mode is `eager` (no capture folder was provided), log a warning that analysis may be limited without graph capture traces, but continue.
-
-### Before Invoking Subagents
-- Read `category_data/category_manifest.json` to get valid categories
-- Use `tier` field to determine which subagents belong to Step 6 (system) vs Step 7 (compute kernel)
-- Only invoke subagents for categories that exist in manifest
-- Skip categories with no operations
+  - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.
 
 ### After System-Level Subagents Complete (Step 6)
 - Check each file in `system_findings/` for "Status: ERROR"
@@ -695,12 +653,4 @@ If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whethe
 - If no errors, omit the Warnings section entirely
 
 
----
-
-## Efficiency Thresholds (General)
-
-| Efficiency | Assessment |
-|------------|------------|
-| >70% | Good |
-| <70% | Needs investigation |
 
