@@ -1103,8 +1103,13 @@ class TraceToTree(BaseTraceToTree):
             leaf_fwd_ts = -1
             for uid in uids:
                 event = self.events_by_uid[uid]
-                # Skip events on the same thread as the backward autograd event
-                if event.get("pid") == bwd_pid and event.get("tid") == bwd_tid:
+                # Skip events with autograd::engine::evaluate_function or backward in name
+                if (
+                    event.get("name", "").startswith(
+                        "autograd::engine::evaluate_function:"
+                    )
+                    or "backward" in event.get("name", "").lower()
+                ):
                     continue
                 # This is a forward event - check if it's the latest (leaf)
                 ts = event.get(TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp, 0)
