@@ -164,7 +164,7 @@ Additionally include:
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run (pass `<sdpa>` as the second argument):
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', '<sdpa>', 'compute')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', '<sdpa>', 'compute')"
 ```
 
 ---

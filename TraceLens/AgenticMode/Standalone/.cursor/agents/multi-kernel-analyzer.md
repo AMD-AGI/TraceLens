@@ -209,7 +209,7 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 Run the script below, then render impact bullets in your `## Detailed Analysis` block per `sub_agent_spec.md`.
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'multi_kernel', 'system')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'multi_kernel', 'system')"
 ```
 
 ---

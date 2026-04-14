@@ -47,17 +47,6 @@ def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
     return pd.read_csv(csv_path)
 
 
-def load_manifest(output_dir: str) -> Dict:
-    """Load category manifest for metadata."""
-    manifest_path = f"{output_dir}/category_data/category_manifest.json"
-
-    if os.path.exists(manifest_path):
-        with open(manifest_path, "r") as f:
-            return json.load(f)
-
-    return {}
-
-
 def analyze_kernel_patterns(ops_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     """Analyze kernel patterns to identify overhead sources."""
     patterns = {

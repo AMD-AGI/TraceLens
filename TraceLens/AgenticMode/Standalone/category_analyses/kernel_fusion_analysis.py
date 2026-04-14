@@ -26,6 +26,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
+from utils.arch_utils import load_arch
 
 MAX_FUSION_KERNEL_COUNT = (
     15  # Skip candidates with more kernels than this (too complex to fuse reliably)
@@ -472,23 +473,16 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
                         "max_achievable_tflops": meta["max_achievable_tflops"],
                     }
 
-    arch_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "utils",
-        "arch",
-        f"{platform}.json",
-    )
-    if os.path.exists(arch_path):
-        with open(arch_path, "r") as f:
-            arch = json.load(f)
+    try:
+        arch = load_arch(platform)
         return {
             "peak_hbm_bw_tbs": arch["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": arch["max_achievable_tflops"],
         }
-
-    raise FileNotFoundError(
-        f"No arch config found for platform {platform} in metadata or arch JSON"
-    )
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"No arch config found for platform {platform} in metadata or arch JSON"
+        )
 
 
 def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:

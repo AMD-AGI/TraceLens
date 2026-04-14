@@ -488,7 +488,7 @@ Run `generate_priority_data()` to aggregate all `impact_estimates` from `*_metri
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.report_utils import generate_priority_data
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_priority_data
 generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```

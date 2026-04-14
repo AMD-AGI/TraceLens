@@ -13,10 +13,15 @@ for the standalone report pipeline.
 
 import json
 import os
-from collections import defaultdict
-from typing import List
-
+import re
 import pandas as pd
+
+
+def load_manifest(output_dir: str) -> dict:
+    """Load and return the category manifest JSON from output_dir."""
+    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
+    with open(manifest_path) as f:
+        return json.load(f)
 
 
 def extract_condensed_op_info(output_dir: str) -> bool:
@@ -48,9 +53,7 @@ def load_manifest_categories(output_dir):
         system_categories: list of category dicts with tier == 'system'
         compute_categories: list of category dicts with tier == 'compute_kernel'
     """
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+    manifest = load_manifest(output_dir)
 
     categories = manifest.get("categories", [])
     result = {
@@ -86,6 +89,22 @@ def load_manifest_categories(output_dir):
     return result
 
 
+def _scan_findings_dir(output_dir: str, subdir: str) -> dict:
+    """Read all *_findings.md files from a subdirectory.
+
+    Returns ``{category_name: file_content}`` for every findings file found.
+    Returns an empty dict if the directory does not exist.
+    """
+    findings_dir = os.path.join(output_dir, subdir)
+    result = {}
+    if os.path.isdir(findings_dir):
+        for f in os.listdir(findings_dir):
+            if f.endswith("_findings.md"):
+                with open(os.path.join(findings_dir, f)) as fh:
+                    result[f.replace("_findings.md", "")] = fh.read()
+    return result
+
+
 def load_findings(output_dir):
     """Load all findings from system-level and compute kernel subagents.
 
@@ -97,43 +116,30 @@ def load_findings(output_dir):
         manifest: the full category manifest dict
         top_ops: list of top operations from the manifest
     """
+    raw_system = _scan_findings_dir(output_dir, "system_findings")
     system_findings = {}
     failed_system = []
-    system_dir = os.path.join(output_dir, "system_findings")
+    for name, content in raw_system.items():
+        if "Status: ERROR" in content:
+            failed_system.append({"category": name, "content": content})
+        else:
+            system_findings[name] = content
 
-    if os.path.isdir(system_dir):
-        for f in os.listdir(system_dir):
-            if f.endswith("_findings.md"):
-                with open(os.path.join(system_dir, f)) as fh:
-                    content = fh.read()
-                    name = f.replace("_findings.md", "")
-                    if "Status: ERROR" in content:
-                        failed_system.append({"category": name, "content": content})
-                    else:
-                        system_findings[name] = content
-
+    raw_compute = _scan_findings_dir(output_dir, "category_findings")
     compute_findings = {}
     failed_compute = []
-    compute_dir = os.path.join(output_dir, "category_findings")
-
-    if os.path.isdir(compute_dir):
-        for f in os.listdir(compute_dir):
-            if f.endswith("_findings.md"):
-                with open(os.path.join(compute_dir, f)) as fh:
-                    content = fh.read()
-                    name = f.replace("_findings.md", "")
-                    if "Status: ERROR" in content:
-                        failed_compute.append({"category": name, "content": content})
-                    else:
-                        compute_findings[name] = content
+    for name, content in raw_compute.items():
+        if "Status: ERROR" in content:
+            failed_compute.append({"category": name, "content": content})
+        else:
+            compute_findings[name] = content
 
     manifest = {}
     top_ops = []
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
     if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-            top_ops = manifest.get("top_operations", [])
+        manifest = load_manifest(output_dir)
+        top_ops = manifest.get("top_operations", [])
 
     result = {
         "system_findings": system_findings,
@@ -160,162 +166,85 @@ def load_findings(output_dir):
     return result
 
 
-def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str:
-    """Aggregate impact_estimates into priority_data.json — the single
-    deterministic source of truth for both report P-item ordering and the
-    performance improvement plot.
+def _non_quantifiable_entry() -> dict:
+    """Return a single non-quantifiable impact estimate entry."""
+    return {
+        "low_e2e_ms": None,
+        "high_e2e_ms": None,
+        "low_e2e_percent": None,
+        "high_e2e_percent": None,
+        "quantifiable": False,
+    }
 
-    Produces three top-level arrays:
-      - ``priorities``: ranked category list for report P-items (quantified
-        categories sorted by savings_ms, then unmodeled categories with
-        >5% of compute time sorted by gpu_kernel_time_ms)
-      - ``recommendations``: same quantified categories, used by the plot
-      - ``all_estimates``: flat list of every per-operation estimate
 
-    Args:
-        output_dir: Base output directory containing category_data/
-        max_recommendations: Max categories in the plot recommendations
+def write_impact_estimates(output_dir: str, category: str, tier: str) -> None:
+    """Write ``impact_estimates`` to metadata JSON for a category.
 
-    Returns:
-        Path to written priority_data.json
+    Compute tier: reads per-operation estimates from *_metrics.json and builds
+    one rollup entry per reasoning-candidate block in the findings file.
+
+    System tier: writes one non-quantifiable entry per reasoning-candidate block.
+    If no candidates exist, writes an empty array.
     """
-    out_path = os.path.join(output_dir, "priority_data.json")
-    category_data_dir = os.path.join(output_dir, "category_data")
-    manifest_path = os.path.join(category_data_dir, "category_manifest.json")
+    meta_path = os.path.join(output_dir, "metadata", f"{category}_metadata.json")
+    with open(meta_path) as f:
+        meta = json.load(f)
 
-    try:
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
+    subdir = "system_findings" if tier == "system" else "category_findings"
+    findings_path = os.path.join(output_dir, subdir, f"{category}_findings.md")
+    if os.path.isfile(findings_path):
+        with open(findings_path) as f:
+            n_candidates = len(re.findall(r"<!-- reasoning-candidate", f.read()))
+    else:
+        n_candidates = 0
 
-        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
-        computation_pct = manifest.get("gpu_utilization", {}).get(
-            "computation_time_percent", 0
+    if tier == "system":
+        meta["impact_estimates"] = [_non_quantifiable_entry()] * n_candidates
+    else:
+        metrics_path = os.path.join(
+            output_dir, "category_data", f"{category}_metrics.json"
         )
-        computation_time_ms = baseline_ms * computation_pct / 100
-        threshold_ms = computation_time_ms * 0.05
+        with open(metrics_path) as f:
+            metrics = json.load(f)
+        estimates = metrics.get("impact_estimates", [])
 
-        all_estimates: List[dict] = []
-        for fname in sorted(os.listdir(category_data_dir)):
-            if not fname.endswith("_metrics.json"):
-                continue
-            fpath = os.path.join(category_data_dir, fname)
-            with open(fpath, "r") as f:
-                metrics = json.load(f)
-            if metrics.get("status") in ("ERROR", "NO_DATA"):
-                continue
-            all_estimates.extend(metrics.get("impact_estimates", []))
-
-        category_savings: dict = defaultdict(
-            lambda: {
-                "savings_ms": 0,
-                "savings_ms_low": 0,
-                "savings_ms_high": 0,
-                "count": 0,
-                "ops": [],
+        if n_candidates == 0:
+            meta["impact_estimates"] = []
+        elif estimates:
+            low = round(sum(e.get("savings_ms_low", 0) for e in estimates), 3)
+            high = round(sum(e.get("savings_ms_high", 0) for e in estimates), 3)
+            low_pct = round(sum(e.get("e2e_pct_low", 0) for e in estimates), 2)
+            high_pct = round(sum(e.get("e2e_pct_high", 0) for e in estimates), 2)
+            rollup = {
+                "low_e2e_ms": low,
+                "high_e2e_ms": high,
+                "low_e2e_percent": low_pct,
+                "high_e2e_percent": high_pct,
+                "quantifiable": True,
             }
-        )
-        for e in all_estimates:
-            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
-                "high",
-                "medium",
-            ):
-                cat = e["category"]
-                category_savings[cat]["savings_ms"] += e["savings_ms"]
-                category_savings[cat]["savings_ms_low"] += e.get(
-                    "savings_ms_low", e["savings_ms"]
-                )
-                category_savings[cat]["savings_ms_high"] += e.get(
-                    "savings_ms_high", e["savings_ms"]
-                )
-                category_savings[cat]["count"] += 1
-                category_savings[cat]["ops"].append(e.get("operation", ""))
-
-        plot_recs = sorted(
-            [
-                {
-                    "category": cat,
-                    "savings_ms": round(v["savings_ms"], 3),
-                    "savings_ms_low": round(v["savings_ms_low"], 3),
-                    "savings_ms_high": round(v["savings_ms_high"], 3),
-                    "operation_count": v["count"],
-                    "type": "kernel_tuning",
-                }
-                for cat, v in category_savings.items()
-            ],
-            key=lambda x: x["savings_ms"],
-            reverse=True,
-        )[:max_recommendations]
-
-        cat_display = {}
-        for cat_entry in manifest.get("categories", []):
-            cat_display[cat_entry["name"]] = cat_entry.get(
-                "display_name", cat_entry["name"]
-            )
-
-        priorities: List[dict] = []
-        for rank, rec in enumerate(plot_recs, 1):
-            priorities.append(
-                {
-                    "rank": rank,
-                    "category": rec["category"],
-                    "display_name": cat_display.get(
-                        rec["category"], rec["category"]
-                    ),
-                    "savings_ms": rec["savings_ms"],
-                    "savings_ms_low": rec["savings_ms_low"],
-                    "savings_ms_high": rec["savings_ms_high"],
-                    "source": "impact_estimates",
-                }
-            )
-
-        quantified_cats = set(category_savings.keys())
-        unmodeled = []
-        for cat_entry in manifest.get("categories", []):
-            cat_name = cat_entry.get("name")
-            if cat_entry.get("tier") != "compute_kernel":
-                continue
-            if cat_name in quantified_cats:
-                continue
-            gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
-            if gpu_time >= threshold_ms:
-                unmodeled.append(
+            if n_candidates == 1:
+                meta["impact_estimates"] = [rollup]
+            else:
+                per_candidate = round(low / n_candidates, 3)
+                per_high = round(high / n_candidates, 3)
+                per_low_pct = round(low_pct / n_candidates, 2)
+                per_high_pct = round(high_pct / n_candidates, 2)
+                meta["impact_estimates"] = [
                     {
-                        "category": cat_name,
-                        "display_name": cat_entry.get("display_name", cat_name),
-                        "gpu_kernel_time_ms": round(gpu_time, 3),
+                        "low_e2e_ms": per_candidate,
+                        "high_e2e_ms": per_high,
+                        "low_e2e_percent": per_low_pct,
+                        "high_e2e_percent": per_high_pct,
+                        "quantifiable": True,
                     }
-                )
-        unmodeled.sort(key=lambda x: x["gpu_kernel_time_ms"], reverse=True)
+                    for _ in range(n_candidates)
+                ]
+        else:
+            meta["impact_estimates"] = [_non_quantifiable_entry()] * n_candidates
 
-        next_rank = len(priorities) + 1
-        for entry in unmodeled:
-            priorities.append(
-                {
-                    "rank": next_rank,
-                    "category": entry["category"],
-                    "display_name": entry["display_name"],
-                    "savings_ms": None,
-                    "gpu_kernel_time_ms": entry["gpu_kernel_time_ms"],
-                    "source": "manifest_fallback",
-                }
-            )
-            next_rank += 1
-
-        priority_data = {
-            "baseline_ms": baseline_ms,
-            "priorities": priorities,
-            "recommendations": plot_recs,
-            "all_estimates": all_estimates,
-        }
-    except Exception:
-        priority_data = {
-            "baseline_ms": 0,
-            "priorities": [],
-            "recommendations": [],
-            "all_estimates": [],
-        }
-
-    with open(out_path, "w") as f:
-        json.dump(priority_data, f, indent=2)
-
-    return out_path
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(
+        f"Impact estimates written: {len(meta['impact_estimates'])} entries "
+        f"to {meta_path}"
+    )
