@@ -158,7 +158,7 @@ Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- CONDITIONAL: If NO actionable system-level issues found (idle <= 15% and all multi-kernel assessments flagged: false), use Template A. -->
-<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if idle > 15%. -->
+<!-- Otherwise, number priorities sequentially: CPU/Idle first (if idle > 15%), then multi-kernel issues by severity. -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. -->
 <!-- System-level recommendations have NO **Impact** field -- impact is not quantifiable for system-level issues. -->
@@ -205,7 +205,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Detailed Analysis
 
-<!-- Paste reasoning blocks from sub-agent findings, renaming headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
+<!-- Paste reasoning blocks from sub-agent findings, augment headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
 <!-- Detailed Analysis labels per rule 9 — do not use these labels in optimization cards above -->
 <!-- Impact estimate bullets are rendered by each sub-agent from metadata/*.json → impact_estimates (same source as card Impact). -->
 

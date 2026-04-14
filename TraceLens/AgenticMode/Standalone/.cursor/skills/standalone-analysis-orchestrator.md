@@ -45,7 +45,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
-9. Aggregate Results: System-Level + Compute Kernel Recommendations
+9. Prepare Report Data (load_findings)
 10. Generate Final Report (composable System + Compute sections)
 10.1. Generate and Embed Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
 ```
@@ -459,9 +459,7 @@ This runs four checks:
 
 ---
 
-## Step 9: Aggregate Results -- Two-Tier Recommendations
-
-### Read Findings from BOTH Tiers
+## Step 9: Prepare Report Data
 
 ```bash
 <prefix> python3 -c \"
@@ -470,54 +468,6 @@ from TraceLens.AgenticMode.Standalone.utils.report_utils import load_findings
 load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
-
-### Aggregate Compute Kernel Recommendations
-
-Compute kernel recommendations address operation efficiency at the **category level**. Each subagent has produced algorithmic and kernel optimization recommendations. Consolidate these into one P-item per category, cross-reference with `top_ops`, and prioritize by total impact.
-
-**Compute Kernel Prioritization:**
-
-Create **one P-item per category**. Read `priority_data.json` (generated in Step 9.5.2) and use its `priorities` array directly: P1 = rank 1, P2 = rank 2, P3+ = rest. Categories with `source: "manifest_fallback"` use Impact: "Not quantifiable from trace data".
-
-| Priority | Icon | Criteria |
-|----------|------|----------|
-| P1 | 🔴 | `priorities[0]` — category with highest total savings |
-| P2 | 🟡 | `priorities[1]` — second-highest |
-| P3+ | 🟢 | `priorities[2:]` — remaining (quantified then unmodeled) |
-
-**Compute Kernel Icon Mapping (by priority number, NOT severity):**
-
-| Priority | Icon |
-|----------|------|
-| P1 | 🔴 |
-| P2 | 🟡 |
-| P3+ | 🟢 |
-
-### Aggregate System-Level Recommendations
-
-System-level recommendations address pipeline/framework issues that affect ALL operations.
-
-**System-Level Prioritization:**
-
-Assign priorities sequentially starting from P1 based on which analyses are present. If CPU/Idle is below threshold, multi-kernel issues start at P1.
-
-| Order | Source | Criteria | Included When |
-|-------|--------|----------|---------------|
-| First | CPU/Idle | `idle_time_percent > 15%` | Only if idle exceeds 15% threshold |
-| Next | Multi-Kernel | Flagged multi-kernel issue (memcpy/NCCL blocking/overlap) | Only if `flagged` is `true` for any assessment |
-| Next | Multi-Kernel | Additional flagged multi-kernel issue | If multiple assessments are flagged |
-
-**CRITICAL: No-Issue Handling:**
-- If **all** system-level analyses report no actionable issues (idle <= 15% and all multi-kernel assessments have `flagged: false`), do **NOT** generate any P1/P2/P3 recommendations for the System-Level Optimizations section.
-- Instead, display a short summary: "No system-level bottlenecks detected. GPU activity breakdown shows X% computation, with negligible memcpy and communication overhead."
-
-**System-Level Icon Mapping (by priority number, NOT severity):**
-
-| Priority | Icon |
-|----------|------|
-| P1 | 🔴 |
-| P2 | 🟡 |
-| P3+ | 🟢 |
 
 ---
 
@@ -566,8 +516,9 @@ If the plot fails, retry once. If still failing, proceed to Step 10 without the 
    - `category_findings/*.md` (compute kernel P-items)
    - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
-   - **Card sourcing:** For each findings file, read the `## Recommendations` section and copy its P-items directly into the corresponding report card slots. The labels (`Insight/Action/Impact` for compute, `Insight/Action` for system) already match the card format — do not translate or rename them. Assign priority icons (🔴 P1 → 🟡 P2 → 🟢 P3+) and add Detailed Analysis links.
-4. **Paste `## Detailed Analysis`:** For each P-item in priority order, take the `## Detailed Analysis` candidate from the matching `category_findings/*.md` or `system_findings/*.md` file and place it in the report.
+   - `priority_data.json` — use `priorities` array for compute kernel P-item ordering (P1 = rank 1, P2 = rank 2, P3+ = rest). Categories with `source: "manifest_fallback"` use Impact: "Not quantifiable from trace data".
+   - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
+   - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
 The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`

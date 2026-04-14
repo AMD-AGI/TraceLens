@@ -200,18 +200,13 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 | H2D | ... | ... | ... | ... |
 | D2D | ... | ... | ... | ... |
 
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
 ```
 
-**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
-
-**Impact estimates are not produced for system-level analyses.** The Impact Summary table header must be present but must have **zero data rows**. Do NOT estimate savings for overlap improvement, memcpy reduction, or any other system-level recommendation.
+**Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
 
 ### Step 7: Write Impact Estimates to Metadata
 
-Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+Run the script below, then render impact bullets in your `## Detailed Analysis` block per `sub_agent_spec.md`.
 
 ```bash
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'multi_kernel', 'system')"
