@@ -34,6 +34,7 @@ TARGET_MID = 87.5
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),
     ("rocm_aiter", "AITER"),
+    ("fbgemm", "FBGEMM"),
     ("miopen", "MIOpen"),
     ("triton", "Triton"),
 ]

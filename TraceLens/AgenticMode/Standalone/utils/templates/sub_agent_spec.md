@@ -61,11 +61,16 @@ reasoning candidate at the same rank.
 **Compute tier:**
 
 ```markdown
-### P1: <Brief Title>
+### P1: <Brief Title> (<Library>)
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
 ```
+
+**Library parenthetical:** Collect the unique non-null `library` values from
+the bottleneck operations in the metrics JSON. Append them comma-separated
+in parentheses after the title. All `library: null`: omit the parenthetical
+entirely.
 
 **System tier:**
 
