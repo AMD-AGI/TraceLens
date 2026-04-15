@@ -643,8 +643,4 @@ Balancing complete trace capture versus analysis complexity.
 
 **Last Updated:** April 2026
 **Maintainers:** AMD-AGI Performance and Optimization Team
-<<<<<<< HEAD
 **Repository:** [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens)
-=======
-**Repository:** [github.com/AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)
->>>>>>> origin/main
