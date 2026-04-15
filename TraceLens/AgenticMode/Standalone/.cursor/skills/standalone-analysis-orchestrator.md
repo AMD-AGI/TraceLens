@@ -41,16 +41,15 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 0. Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
 1. Generate Performance Report (branches on analysis mode: training vs inference)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
-5.5. Model Identification (subagent) → metadata/model_info.json
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
-9. Prepare Report Data (load_findings)
-10. Generate Final Report (composable System + Compute sections)
-10.1. Generate and Embed Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
+9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
+10. Generate Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
+11. Generate Final Report (composable System + Compute sections)
 ```
 
-**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 5.5, 6, 7). All other steps must be performed directly by the orchestrator using the command prefix.
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
 
 ---
 
@@ -215,14 +214,6 @@ This script performs:
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
 - `category_findings/` - Directory for compute kernel analysis outputs
-
----
-
-## Step 5.5: Model Identification (Subagent)
-
-Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
-
-Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace". Wait for completion before proceeding further.
 
 ---
 
@@ -459,7 +450,7 @@ This runs four checks:
 
 ---
 
-## Step 9: Prepare Report Data
+## Step 9: Prepare Report Data + Model Identification
 
 ```bash
 <prefix> python3 -c \"
@@ -469,19 +460,25 @@ load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
+### 9.1 Model Identification (Subagent)
+
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
+
+Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
+
 ---
 
-## Step 9.5: Generate Performance Improvement Plot
+## Step 10: Generate Performance Improvement Plot
 
 **Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
 
-### 9.5.1 Ensure matplotlib is available
+### 10.1 Ensure matplotlib is available
 
 ```bash
 <prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
 ```
 
-### 9.5.2 Generate priority_data.json
+### 10.2 Generate priority_data.json
 
 Run `generate_priority_data()` to aggregate all `impact_estimates` from `*_metrics.json` files and manifest fallback categories into `priority_data.json` — the single source of truth for both report P-item ordering and the plot:
 
@@ -493,7 +490,7 @@ generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```
 
-### 9.5.3 Generate Plot and Base64 File
+### 10.3 Generate Plot and Base64 File
 
 ```bash
 <prefix> python3 -c \"
@@ -503,14 +500,14 @@ generate_perf_plot(sys.argv[1], sys.argv[2])
 \" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
 ```
 
-If the plot fails, retry once. If still failing, proceed to Step 10 without the plot.
+If the plot fails, retry once. If still failing, proceed to Step 11 without the plot.
 
 ---
 
-## Step 10: Generate Final Report (<output_dir>/standalone_analysis.md)
+## Step 11: Generate Final Report (<output_dir>/standalone_analysis.md)
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 10.2 will use to read and modify it.
+2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.2 will use to read and modify it.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
@@ -529,7 +526,7 @@ The report at `<output_dir>/standalone_analysis.md` must use these exact `##` he
 6. `## Appendix`
 
 
-### 10.1 Validate Report Structure (Retry up to 2x)
+### 11.1 Validate Report Structure (Retry up to 2x)
 
 After writing `standalone_analysis.md`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
 
@@ -555,11 +552,11 @@ print('PASS: All required sections present')
 2. Check if the report contains similar but incorrectly named headers (e.g., `## Compute Kernel Analysis` instead of `## Compute Kernel Optimizations`, or `## System-Level Analysis` instead of `## System-Level Optimizations`) and rename them to match the exact required names using string replacement. Do NOT rewrite the report from scratch.
 3. If sections are entirely absent, add them with the correct `##` headers, keeping existing content
 4. Run validation again
-5. Maximum 2 retry attempts. If still failing after retry, proceed to Step 10.2 with a warning
+5. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning
 
 ---
 
-### 10.2 Generate and Embed Performance Improvement Plot
+### 11.2 Generate and Embed Performance Improvement Plot
 
 Render `perf_improvement.png`, and embed the base64-encoded plot into the report.
 
