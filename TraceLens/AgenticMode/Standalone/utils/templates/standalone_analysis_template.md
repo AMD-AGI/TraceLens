@@ -42,6 +42,10 @@ See LICENSE for license information.
 11. Model and appendix: Use `model_info["model"]` from `metadata/model_info.json` for the
     report title (fall back to "Workload" if "Cannot be inferred from trace"). Fill Appendix
     **Model Architecture** with the raw `model`, `architecture`, `scale`, `precision` values.
+12. Library parenthetical: Compute Kernel card titles and Detailed Analysis headings must include
+    the library name(s) in parentheses when present in the sub-agent findings. Omit when no
+    library is identified. System-Level and Kernel Fusion titles do NOT include a library
+    parenthetical.
 -->
 
 # <Model> - <Platform> Standalone Analysis
@@ -99,7 +103,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
 
-### 🔴 P1: <Brief Title>
+### 🔴 P1: <Brief Title> (<Library>)
 
 **Insight**: [1 sentence - what's wrong]
 
@@ -111,7 +115,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ---
 
-### 🟡 P2: <Brief Title>
+### 🟡 P2: <Brief Title> (<Library>)
 
 **Insight**: [1 sentence]
 
@@ -123,7 +127,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ---
 
-### 🟢 P3: <Brief Title>
+### 🟢 P3: <Brief Title> (<Library>)
 
 **Insight**: [1 sentence]
 
@@ -215,7 +219,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
 <a id="detailed-analysis-compute-p1"></a>
-#### 🔴 P1: <Brief Title>
+#### 🔴 P1: <Brief Title> (<Library>)
 **Identification:**
 **Data:**
 
