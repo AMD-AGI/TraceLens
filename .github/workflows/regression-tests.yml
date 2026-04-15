@@ -8,13 +8,9 @@ name: Regression Tests
 
 on:
   push:
-    branches:
-      - main
-      - staging-public-main-with-history
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
-      - staging-public-main-with-history
+    branches: [ main ]
 
 jobs:
   regression-tests:
