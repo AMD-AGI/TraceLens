@@ -8,9 +8,13 @@ name: Regression Tests
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - staging-public-main-with-history
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - staging-public-main-with-history
 
 jobs:
   regression-tests:
@@ -53,6 +57,11 @@ jobs:
         run: |
           . .venv/bin/activate
           pytest tests/test_compare_perf_reports.py
+
+      - name: Run pytest on inference perf report tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_inference_perf_report.py
 
       - name: Run collective analysis tests
         run: |
