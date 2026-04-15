@@ -120,9 +120,9 @@ Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true`
 - This time is NOT overlapped with compute -- GPU is waiting
 
 **Synchronization barriers:**
-- Explicit `cudaDeviceSynchronize` / `hipDeviceSynchronize` or stream-level syncs stall the GPU pipeline
+- Explicit device-level synchronization or stream-level syncs stall the GPU pipeline
 - Common causes: Debug synchronization left in production code, unnecessary sync between independent operations
-- Solution: Remove unnecessary device/stream syncs; use CUDA events for fine-grained ordering instead of full device sync
+- Solution: Remove unnecessary device/stream syncs; use stream events for fine-grained ordering instead of full device sync
 
 **Redundant collective operations:**
 - Multiple allreduce/allgather on the same or overlapping data within a single iteration
