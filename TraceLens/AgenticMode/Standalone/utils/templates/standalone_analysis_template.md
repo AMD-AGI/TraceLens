@@ -22,7 +22,7 @@ See LICENSE for license information.
    P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue
    exists (number sequentially from P1, including CPU/Idle first if invoked).
 6. Each section is independently composable -- can be shared standalone.
-7. Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps).
+7. All three tiers (Compute, Kernel Fusion, System) use separate sequential P1/P2/P3 numbering (no gaps).
 8. Priority icons are assigned by PRIORITY NUMBER, not severity:
    - Compute Kernel: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
    - Kernel Fusion: icon by confidence (🔴 high → 🟡 medium → 🟢 low), not priority number
@@ -158,7 +158,7 @@ Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- CONDITIONAL: If NO actionable system-level issues found (idle <= 15% and all multi-kernel assessments flagged: false), use Template A. -->
-<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if idle > 15%. -->
+<!-- Otherwise, number priorities sequentially: CPU/Idle first (if idle > 15%), then multi-kernel issues by severity. -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. -->
 <!-- System-level recommendations have NO **Impact** field -- impact is not quantifiable for system-level issues. -->
@@ -205,7 +205,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Detailed Analysis
 
-<!-- Paste reasoning blocks from sub-agent findings, renaming headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
+<!-- Paste reasoning blocks from sub-agent findings, augment headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
 <!-- Detailed Analysis labels per rule 9 — do not use these labels in optimization cards above -->
 <!-- Impact estimate bullets are rendered by each sub-agent from metadata/*.json → impact_estimates (same source as card Impact). -->
 
@@ -235,8 +235,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
 <!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available." -->
 
-<a id="detailed-analysis-fusion-1"></a>
-#### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+<a id="detailed-analysis-fusion-P1"></a>
+#### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
 **Identification:**
 
@@ -248,10 +248,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Impact estimate:**
 
-<a id="detailed-analysis-fusion-2"></a>
-#### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+<a id="detailed-analysis-fusion-P2"></a>
+#### 🔴/🟡/🟢 P2: <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-N`.*
+*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-PN`.*
 
 ### System-Level Insights
 

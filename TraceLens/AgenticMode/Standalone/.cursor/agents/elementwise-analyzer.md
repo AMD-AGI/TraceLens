@@ -102,11 +102,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 - Simple elementwise ops (add, mul, copy) should achieve >70% of peak HBM BW
 - Complex elementwise ops may have lower efficiency
 
-### Step 5: Generate Markdown Tables
-
-Build operations table from `metrics['operations']`.
-
-### Step 6: Determine Optimization Recommendations
+### Step 5: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
 
@@ -119,47 +115,17 @@ For each validated bottleneck, provide recommendations in both categories:
 - Compare to baseline bandwidth to identify anomalies
 - Check for memory access pattern issues
 
-### Step 7: Write Category Findings
+### Step 6: Write Category Findings
 
-Write `<output_dir>/category_findings/elementwise_findings.md` using the command prefix.
+**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/elementwise_findings.md` using the output format defined there, with `<category>` = `elementwise`.
 
-The findings file **must** include **Impact Summary**, then **Recommendations**, then **Detailed Analysis**.
+### Step 6.5: Write Impact Estimates to Metadata
 
-Impact Summary template:
-
-```markdown
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
-
-## Recommendations
-
-### P1: <Brief Title>
-**Insight**: [1 sentence — what's wrong]
-**Action**: [1-2 sentences — what to do]
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
-```
-
-Each `## Recommendations` P-item must map 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank. **Insight** summarizes the bottleneck, **Action** merges algorithmic and kernel recommendations, **Impact** uses the `## Impact Summary` savings range.
-
-**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
-
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/elementwise_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
-
-### Step 7.5: Write Impact Estimates to Metadata
-
-Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'elementwise', 'compute')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'elementwise', 'compute')"
 ```
-
-**Impact estimation guidelines:**
-- `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
-- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear fusion opportunity; `medium` = depends on kernel tuning quality; `low` = rough estimate
-- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 

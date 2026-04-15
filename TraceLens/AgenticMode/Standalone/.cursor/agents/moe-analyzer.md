@@ -88,22 +88,7 @@ Apply roofline-based thresholds to identify bottlenecks from `metrics['operation
 - Time: > 100ms OR > 5% of category time
 - Efficiency: < 70% of peak (roofline)
 
-### Step 4: Generate Markdown Tables
-
-Build the operations breakdown table from `metrics['operations']`:
-
-```markdown
-| Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type |
-|-----------|-------|-----------|---------------|------------|------------|------|
-```
-
-**Column mappings:**
-- **Count**: Use `operations[i].count` (total invocations, not unique signatures)
-- **Efficiency**: Use `operations[i].efficiency.efficiency_percent`. Format as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
-- **FLOPS/Byte**: Use `operations[i].efficiency.flops_per_byte`
-- **Type**: Use `operations[i].efficiency.bound_type` formatted with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
-
-### Step 5: Determine Optimization Recommendations
+### Step 4: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
 
@@ -118,73 +103,19 @@ For each validated bottleneck, provide recommendations in both categories:
 - For compute-bound ops not reaching peak MAF: kernel has room for better utilization — flag for tile size or wave occupancy tuning
 - Note the specific gap: achieved vs peak for the relevant metric (TFLOPS or TB/s)
 
-### Step 6: Write Category Findings
+### Step 5: Write Category Findings
 
-Write `<output_dir>/category_findings/moe_fused_findings.md` using the command prefix.
+**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/moe_fused_findings.md` using the output format defined there, with `<category>` = `moe_fused`.
 
-```markdown
-# MoE Analysis Summary
+Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
 
-## Overview
-MoE operations account for X% of compute time. Average efficiency: Y%.
+### Step 5.5: Write Impact Estimates to Metadata
 
-## Operations Breakdown
-[Generated table]
-
-## Key Bottlenecks
-
-### 1. <Operation Name>
-- **Time:** X ms (Y% of compute)
-- **Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
-- **Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
-- *Use the template matching `bound_type` and delete the other.*
-- **Issue:** [Brief description including bound type]
-- **Algorithmic:** [Model/framework-level recommendation]
-- **Kernel:** [Kernel optimization recommendation]
-
-## Additional Notes
-- Quantized MoE detected: [yes/no, with data types]
-- Fused vs unfused: [summary of operation types]
-- **Byte estimation accuracy:** The bytes metric uses a uniform expert routing assumption to estimate weight memory traffi. This makes TB/s and FLOPS/Byte as average-case approximations. FLOPS are exact.
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
-
-## Recommendations
-
-### P1: <Brief Title>
-**Insight**: [1 sentence — from Issue in Key Bottlenecks]
-**Action**: [1-2 sentences — merged Algorithmic + Kernel from Key Bottlenecks]
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
-```
-
-Each `## Recommendations` P-item must map 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank. Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
-
-**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
-
-**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
-- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
-- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
-Do not look up peaks independently from the metadata dict.
-
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/moe_fused_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
-
-### Step 6.5: Write Impact Estimates to Metadata
-
-Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'moe_fused', 'compute')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'moe_fused', 'compute')"
 ```
-
-**Impact estimation guidelines:**
-- `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
-- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak; `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
-- If no actionable bottlenecks found, the table may have zero rows.
-- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 
