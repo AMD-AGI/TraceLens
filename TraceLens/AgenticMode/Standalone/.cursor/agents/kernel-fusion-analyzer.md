@@ -141,7 +141,7 @@ Number findings P1, P2, P3... sequentially by savings (highest first). The icon 
 
 Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`. Two HIGH findings in a row are `### 🔴 P1:` and `### 🔴 P2:` (both red).
 
-**Title format:** `### <icon> <priority>: <Pattern Name>`
+**Title format:** `### <icon> P<N>: <Pattern Name>`
 
 ```markdown
 # Kernel Fusion Analysis Summary (Experimental)
