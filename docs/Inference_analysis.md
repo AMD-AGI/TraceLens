@@ -127,53 +127,23 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 #### Collection Parameters
 
-- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. Most inference serving benchmarks use `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio R. We recommend tracing `(((R+1)/2) * 5 * OSL) ± (16 * OSL / CONC)` execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details.
+- **Eager or Graph Execution Steady-State Window:** Large tracefiles are expected. Most inference serving benchmarks use `NUM_PROMPTS = 10 × CONC` with OSL sampling ratio R. We recommend tracing `(((R+1)/2) * 5 * OSL) ± (16 * OSL / CONC)` execution steps (which represents peak concurrency with prefill-decode mix). See [steady-state region identification](#steady-state-region-and-trace-splitting) for more details. User might need to increase the timeout limit in certain inference frameworks to allow storing the trace in the middle of the execution (e.g., VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200 for vLLM).
 - **Graph Capture Mode:** The recommended patchfile will trace the graph capture phase and store corresponding tracefiles.
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. For example, vLLM supports `profiler-config.torch_profiler_record_shapes` and `profiler-config.torch_profiler_with_stack`.
 
-vLLM example:
+#### Trace collection options
+##### SGLang
+1. While doing the profiling of the execution step, pass the parameter `shape_discovery=True` in the profile request to enable shape discovery and registration for operations which are not covered in default SGLang profile.
 
-```
---profiler-config '{
-    "profiler": "torch",
-    "torch_profiler_dir": "./vllm_profile",
-    "capture_torch_profiler_dir": "./vllm_profile/capture_traces",
-    "detailed_trace_annotation": "True",
-    "torch_profiler_record_shapes": "True",
-    "torch_profiler_with_memory": "True",
-    "torch_profiler_with_stack": "True",
-    "torch_profiler_with_flops": "False",
-    "torch_profiler_use_gzip": "True",
-    "delay_iterations" : 4500,
-    "max_iterations" : 256
-    }'
-```
+2. While doing the profiling of the execution step, pass the parameter `roofline_annotations=True` in the profile request to annotate trace with more detailed information useful for roofline annotations.
 
-SGLang example:
+3. To profile the graph capture phase, while server startup provide the `--enable-profile-cuda-graph` server argument. This will save a trace file per batch size but it misses shape information for some operations, to ensure more diverse coverage, provide the `--enable-shape-discovery-for-cuda-graph-profile` server argument.
 
-1. Setting environment variables:
+##### ATOM
+1. To annotate the execution steps trace with roofline annotations, set the environment variable `ATOM_ENABLE_ROOFLINE_ANNOTATION=1`.
 
-```
-export SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR"
-export SGLANG_PROFILE_WITH_STACK=True
-export SGLANG_PROFILE_RECORD_SHAPE=True
-```
+2. To profile the capture phase and store one trace file per batch size, add the server argument `--enable-capture-profiling` during startup.
 
-1. Enable graph capture profiling (done at server startup): To profile the graph capture phase, while server startup provide the `--enable-profile-cuda-graph` server argument. This will save a trace file per batch size but it misses shape information for some operations, to ensure more diverse coverage, provide the `--enable-shape-discovery-for-cuda-graph-profile` server argument.
-
-```
-python3 -m sglang.launch_server \
---model-path=$MODEL --host=0.0.0.0 --port=$PORT --trust-remote-code \
-:
---enable-profile-cuda-graph \
---enable-shape-discovery-for-cuda-graph-profile \
-:
-```
-
-1. Modify HTTPs request payload to enable shape profiling and detailed annotations. 
-```
-payload.update({"shape_discovery":True,"roofline_annotations":True})
-```
 ### Step 3: Trace Preparation (Optional)
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
@@ -673,4 +643,8 @@ Balancing complete trace capture versus analysis complexity.
 
 **Last Updated:** April 2026
 **Maintainers:** AMD-AGI Performance and Optimization Team
+<<<<<<< HEAD
 **Repository:** [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens)
+=======
+**Repository:** [github.com/AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)
+>>>>>>> origin/main

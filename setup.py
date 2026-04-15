@@ -29,7 +29,6 @@ setup(
     ],
     extras_require={
         # To install slodels, use a custom index:
-        # pip install "slodels[openai,anthropic,google-genai]" --extra-index-url https://atlartifactory.amd.com:8443/artifactory/api/pypi/SW-SLAI-PROD-VIRTUAL/simple
         # pip install "slodels[openai,anthropic,google-genai]"
         "comparative": [
             "slodels[openai,anthropic,google-genai]",

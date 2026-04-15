@@ -3544,14 +3544,14 @@ class aten_reduce(Reduce):
                 if keepdim_idx is not None and idx == keepdim_idx:
                     continue
                 val = scalar_args[idx]
-                if val is None:
+                if val is None or isinstance(val, str):
                     continue
                 try:
                     if isinstance(val, (list, tuple)):
                         dim_list = [int(d) for d in val]
                         dim = dim_list
                         break
-                    elif isinstance(val, int):
+                    elif isinstance(val, int) and not isinstance(val, bool):
                         dim = [int(val)]
                         break
                     print(f"failed to parse dimension specification for reduce: {name}")

@@ -575,6 +575,8 @@ def generate_perf_report_pytorch(
             "vllm::unified_attention_with_output",
             "aiter::mha_varlen_fwd",
             "pseudo_mla_decode_fwd",
+            "vllm::gdn_attention_core",
+            "aiter::fmha_fav3_varlen_fwd",
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
         ]
     )
@@ -745,15 +747,7 @@ def generate_perf_report_pytorch(
                         df_ops_fwd["name"] != "flash_attn::_flash_attn_varlen_backward"
                     ]
 
-                op_events = [
-                    event
-                    for event in op_events
-                    if (
-                        event["name"] != "vllm::unified_attention_with_output"
-                        and event["name"] != "aiter::mha_varlen_fwd"
-                    )
-                ]
-                df_ops_bwd_raw = None
+                op_events = []
                 if len(op_events) > 0:
                     df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
                         op_events,
