@@ -217,8 +217,15 @@ def categorize_torch_op(row):
             that holds the underlying GPU kernel name.
 
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'GroupQuant', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+        str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused',
+             'SSM_fwd', 'SSM_bwd', 'MoE_comm_fwd', 'MoE_comm_bwd',
+             'RoPE_fwd', 'RoPE_bwd', 'CrossEntropy_fwd', 'CrossEntropy_bwd',
+             'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
+             'record_param_comms', or 'other'.
+
+        Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
+        are categorization-only (timing without GFLOPS or TB/s).
     """
 
     debug = False
