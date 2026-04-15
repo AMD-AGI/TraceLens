@@ -54,6 +54,11 @@ jobs:
           . .venv/bin/activate
           pytest tests/test_compare_perf_reports.py
 
+      - name: Run pytest on inference perf report tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_inference_perf_report.py
+
       - name: Run collective analysis tests
         run: |
           . .venv/bin/activate
