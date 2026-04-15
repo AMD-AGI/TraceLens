@@ -106,7 +106,12 @@ Examine `memcpy_assessment` for D2H and H2D issues. `memcpy_assessment.flagged` 
 - Common causes: Unpinned memory, on-the-fly tensor creation, data loading
 - Solution: Pin host memory; pre-allocate device tensors; use async transfers
 
-### Step 4: Analyze NCCL Blocking
+**D2D (Device-to-Device) Issues:**
+- Redundant D2D copies indicate unnecessary on-device data movement between buffers or GPUs
+- Common causes: Explicit `.to(device)` on already-resident tensors, contiguous() calls, format conversions
+- Solution: Eliminate redundant copies; use in-place operations or aliased tensors where possible
+
+### Step 4: Analyze NCCL Blocking and Synchronization
 
 Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true` when exposed communication exceeds 5% of total GPU time.
 
@@ -114,14 +119,31 @@ Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true`
 - High `exposed_comm_time_ms` means communication is on the critical path
 - This time is NOT overlapped with compute -- GPU is waiting
 
+**Synchronization barriers:**
+- Explicit `cudaDeviceSynchronize` / `hipDeviceSynchronize` or stream-level syncs stall the GPU pipeline
+- Common causes: Debug synchronization left in production code, unnecessary sync between independent operations
+- Solution: Remove unnecessary device/stream syncs; use CUDA events for fine-grained ordering instead of full device sync
+
+**Redundant collective operations:**
+- Multiple allreduce/allgather on the same or overlapping data within a single iteration
+- Common causes: Framework layers issuing separate collectives that could be fused, duplicate gradient syncs
+- Solution: Deduplicate or fuse collectives; reduce collective frequency per iteration
+
 ### Step 5: Analyze Compute/Communication Overlap
 
 Examine `overlap_assessment`. `overlap_assessment.flagged` is `true` when overlap ratio is below 70%.
 
-**Overlap improvement strategies:**
+**Overlap improvement strategies (choose based on analysis mode):**
+
+For **training** workloads:
 1. Enable gradient communication overlap (async allreduce during backward)
 2. Pipeline micro-batches to overlap compute of batch N+1 with comm of batch N
 3. Use gradient bucketing to better align communication with available compute
+
+For **inference** workloads (vLLM / SGLang):
+1. Overlap tensor-parallel collective communication with decode compute using separate streams
+2. Pipeline prefill and decode phases so collectives from one phase overlap compute of the next
+3. Reduce collective payload size via quantized or compressed allreduce, tuning communication environment variables
 
 ### Step 6: Write System Findings
 
@@ -222,15 +244,3 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is below threshold, multi-kernel issues start at P1
 6. **Do NOT duplicate category analysis** - This analysis is about cross-cutting patterns, not individual op efficiency
-
----
-
-## Common Recommendations Summary
-
-| Issue | Primary Solution | Secondary Solution |
-|-------|-----------------|-------------------|
-| High D2H memcpy | Keep data on device | Batch host reads |
-| High H2D memcpy | Pin host memory, pre-allocate | Async transfers |
-| NCCL blocking compute | Overlap compute + comm | Pipeline parallelism |
-| Poor overlap ratio | Async allreduce | Gradient bucketing |
-| Large comm on critical path | Reduce collective size | Compression/quantization |
