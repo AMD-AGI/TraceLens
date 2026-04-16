@@ -274,44 +274,6 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ---
 
-## Kernel Fusion Variant
-
-Kernel fusion blocks use **three** labels: **Identification**, **Data**, **Impact estimate**.
-
-```markdown
-<!-- reasoning-candidate tier=system rank=<N> -->
-#### <candidate_title>
-**Identification:** …
-
-**Data:** …
-
-**Impact estimate:** …
-```
-
-| Label | Purpose |
-|-------|---------|
-| `**Identification:**` | How the fusion candidate was surfaced. Plain language body ending with `(source: \`fusion_candidates.json\` → <keys>)`. |
-| `**Data:**` | Kernels table with columns: `Kernel \| Type \| Duration (us) \| Perf model`. |
-| `**Impact estimate:**` | Rendered from `kernel_fusion_metrics.json → impact_estimates[]`. Uses four-bullet format (see below); non-quantifiable entries use the standard single-line form. |
-
-### Fusion impact rendering
-
-Quantifiable:
-
-```markdown
-- Low end (75% roofline): <savings_ms_low> ms savings (<e2e_pct_low>% E2E)
-- High end (100% roofline): <savings_ms_high> ms savings (<e2e_pct_high>% E2E)
-- Coverage: <modeled_kernel_count> of <kernel_count> kernels modelled
-- Fusion pattern: <bound_type>-bound, <fusion_type>
-- Confidence: High/Medium/Low — <brief reason from sub-agent pattern classification>
-```
-
-When partial coverage, append to Coverage: `(<unmodeled_count> kernel(s) use measured trace time)`.
-
-Non-quantifiable: `Impact estimate is not quantifiable from trace data.`
-
----
-
 ## Self-check
 
 Before returning, verify:
@@ -324,7 +286,7 @@ Before returning, verify:
    `Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence`.
 3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**`,
    `**Action**`, and `**Impact**`.
-4. **Data table columns** match the tier defaults. Standalone compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`; fusion: `Kernel | Type | Duration (us) | Perf model`. Comparative compute: `Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1)`. System (both modes): `Metric | Value | Flagged`.
+4. **Data table columns** match the tier defaults. Standalone compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`. Comparative compute: `Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1)`. System (both modes): `Metric | Value | Flagged`.
 5. **Card–Detailed Analysis consistency:** Every claim, number, and operation in the P-item card (Insight / Action / Impact) must be consistent with the corresponding Detailed Analysis block.
 6. **Identification** before `(source:`: no JSON-path-shaped backticks except op names used as prose. Outside `(source: …)` and in **Data** / **Reasoning** / **Resolution**: no bare internal/tooling field names.
 7. **Impact:** use the exact Low / High / Range line prefixes from § Impact Estimates rendering, or include `not quantifiable`.
