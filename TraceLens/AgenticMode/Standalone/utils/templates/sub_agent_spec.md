@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 Canonical reference for the output that sub-agents write into their findings
 files. The orchestrator extracts these sections when composing the final
-`standalone_analysis.md` (standalone) or `comparative_analysis.md` (comparative) report.
+report.
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
 > schema. Replace `<category>` with the actual category name
