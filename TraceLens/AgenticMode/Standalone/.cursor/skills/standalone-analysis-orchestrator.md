@@ -403,35 +403,6 @@ Include this block in every compute kernel subagent prompt (dedicated and batche
 
 #### Dedicated Compute Kernel Subagent Prompt
 
-Include these constraints in EVERY compute kernel subagent invocation prompt:
-
-#### 1. Flag Efficiency Anomalies
-
-When `<comparison_scope>` == `standalone`:
-
-- Any efficiency > 100% **MUST** be noted as `[ANOMALY] - verify measurement`
-- Do **NOT** use > 100% values to claim "excellent performance"
-- Report the anomaly but base recommendations on other operations
-- Efficiency anomalies indicate:
-  - Wrong peak spec for the platform
-  - Measurement timing issues
-  - Workload characteristics outside normal bounds
-
-#### 2. Output Consistency
-
-- Status must be `SUCCESS` or `ERROR`
-- Time values in milliseconds (ms) unless otherwise noted
-- **`standalone`:** efficiency percentages are typically 0–100% roofline; flag >100% as anomaly per above
-- **`comparative`:** state efficiency semantics per `*_metrics.json` and agent docs
-- Always include operation count for context
-
-#### 3. Fusion-Tagged Operations
-
-- Operations with `fusion_flagged: true` in the metrics JSON are already covered by a high-confidence kernel fusion candidate — do **NOT** flag them as bottlenecks or write kernel_tuning recommendations
-- The analysis scripts already exclude them from `impact_estimates`
-
----
-
 **Compute Kernel Subagent Prompt Template:**
 
 For each mapped category, launch a Task (subagent_type: generalPurpose):
