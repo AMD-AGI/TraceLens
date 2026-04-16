@@ -678,5 +678,3 @@ def classify_kernel_library(op_name: str, kernel_details: str = "") -> Optional[
         if marker in kd:
             return lib
     return None
-
-
