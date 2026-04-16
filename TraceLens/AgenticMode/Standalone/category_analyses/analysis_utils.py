@@ -20,15 +20,21 @@ import ast
 import json
 import os
 import re
+import sys
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+TARGET_HIGH = 100.0
+TARGET_LOW = 75.0
+TARGET_MID = 87.5
+
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),
     ("rocm_aiter", "AITER"),
+    ("fbgemm", "FBGEMM"),
     ("miopen", "MIOpen"),
     ("triton", "Triton"),
 ]
@@ -288,7 +294,7 @@ def calculate_efficiency(
     row: pd.Series,
     peak_hbm_bw: float,
     peak_maf_or_maf_dict,
-    analysis_mode: str = "standalone",
+    comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
     Extract efficiency metrics for an operation from pre-computed CSV columns.
@@ -298,7 +304,7 @@ def calculate_efficiency(
         peak_hbm_bw: Peak HBM bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
             for resolving the precision-aware peak
-        analysis_mode:
+        comparison_scope:
             ``standalone`` uses roofline efficiency
             ``comparative`` uses comparative efficiency
 
@@ -347,7 +353,7 @@ def calculate_efficiency(
         balance_point = peak_maf / peak_hbm_bw
         result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
 
-    if analysis_mode == "comparative":
+    if comparison_scope == "comparative":
         _comparative_efficiency_percent_from_row(result, row)
     else:
         _apply_standalone_efficiency_percent(result, row)
@@ -371,7 +377,7 @@ def _load_fusion_map(output_dir: str) -> Dict[str, str]:
 
 def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
     """Match kernel_details_summary against fusion kernel map with prefix fallback."""
-    for kn in re.findall(r"'name': '([^']+)'", kd_str):
+    for kn in re.findall(r"'name':\s*'([^']+)'", kd_str):
         if kn in fusion_map:
             return fusion_map[kn]
         for fk, bn in fusion_map.items():
@@ -384,7 +390,7 @@ def build_operation_metrics(
     ops_df: pd.DataFrame,
     metadata: dict,
     category_config: dict,
-    analysis_mode: str = "standalone",
+    comparison_scope: str = "standalone",
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
@@ -399,7 +405,7 @@ def build_operation_metrics(
         category_config: Category-specific configuration with:
             - extra_fields: Additional fields to extract (optional)
             - operation_classifier: Function to classify operations (optional)
-        analysis_mode: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
+        comparison_scope: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
 
     Returns:
         List of operation metric dicts
@@ -430,7 +436,7 @@ def build_operation_metrics(
         )
 
         efficiency = calculate_efficiency(
-            row, peak_hbm_bw, maf, analysis_mode=analysis_mode
+            row, peak_hbm_bw, maf, comparison_scope=comparison_scope
         )
 
         op_metric = {
@@ -497,18 +503,18 @@ def compute_impact_estimates(
     category: str,
     min_savings_ms: float = 0.1,
     baseline_ms: float = 0,
+    analysis_mode: str = "standalone",
 ) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    Assumes tuning can reach 75%–100% of the efficiency target. For standalone
-    metrics that is roofline performance; for comparative metrics,
-    ``calculate_efficiency(..., analysis_mode='comparative')`` sets
-    ``efficiency_percent`` to ``100 * t2 / t1`` and the same band math applies.
-    Produces a range:
-      - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
-      - savings_ms_low  = op_time_ms * (1 - efficiency_pct / 75)    [75% target]
-      - savings_ms      = op_time_ms * (1 - efficiency_pct / 87.5)  [87.5% midpoint]
+    Computes the gap to 100% roofline (standalone) or trace2 runtime (comparative)
+    and estimates how much of that gap tuning can close (75%–100%). Produces a range:
+      - savings_ms_high = gap                   [close 100% of the gap]
+      - savings_ms_low  = 0.75 * gap            [close 75% of the gap]
+      - savings_ms      = 0.875 * gap           [midpoint]
+
+    where gap = op_time_ms * (1 - efficiency_pct / 100).
 
     The midpoint (87.5%) is the primary estimate used for plots and aggregation.
     Low/high values are negative-clamped to zero (already above target).
@@ -522,14 +528,12 @@ def compute_impact_estimates(
         category: Category name for labelling
         min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
         baseline_ms: Total end-to-end GPU time for E2E % calculation (0 to skip)
+        analysis_mode: ``standalone`` for roofline bands, ``comparative`` for
+            gap-fraction bands
 
     Returns:
         List of impact estimate dicts sorted by savings descending
     """
-    TARGET_HIGH = 100.0
-    TARGET_LOW = 75.0
-    TARGET_MID = 87.5
-
     estimates = []
     for op in operations:
         if op.get("fusion_flagged"):
@@ -543,8 +547,8 @@ def compute_impact_estimates(
             continue
 
         savings_high = max(0, time_ms * (1 - eff_pct / TARGET_HIGH))
-        savings_low = max(0, time_ms * (1 - eff_pct / TARGET_LOW))
-        savings_mid = max(0, time_ms * (1 - eff_pct / TARGET_MID))
+        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
+        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
 
         if savings_high < min_savings_ms:
             continue
@@ -566,102 +570,6 @@ def compute_impact_estimates(
             estimate["e2e_pct_high"] = round(savings_high / baseline_ms * 100, 2)
         estimates.append(estimate)
     return sorted(estimates, key=lambda x: x["savings_ms"], reverse=True)
-
-
-def generate_plot_data(output_dir: str, max_recommendations: int = 6) -> str:
-    """
-    Aggregate impact_estimates from all *_metrics.json files into a single
-    plot_data.json consumed by the performance improvement plot script.
-
-    Only ``kernel_tuning`` estimates (roofline or comparative trace2-gap;
-    see ``analysis_mode`` on each metrics file) with high/medium confidence
-    are included in plot recommendations. All estimates are in ``all_estimates``.
-
-    Args:
-        output_dir: Base output directory containing category_data/
-        max_recommendations: Max number of recommendations for the plot
-
-    Returns:
-        Path to written plot_data.json
-    """
-    out_path = f"{output_dir}/plot_data.json"
-    category_data_dir = f"{output_dir}/category_data"
-    manifest_path = f"{category_data_dir}/category_manifest.json"
-
-    try:
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
-
-        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
-
-        all_estimates: List[dict] = []
-        for fname in sorted(os.listdir(category_data_dir)):
-            if not fname.endswith("_metrics.json"):
-                continue
-            fpath = os.path.join(category_data_dir, fname)
-            with open(fpath, "r") as f:
-                metrics = json.load(f)
-            if metrics.get("status") in ("ERROR", "NO_DATA"):
-                continue
-            all_estimates.extend(metrics.get("impact_estimates", []))
-
-        category_savings = defaultdict(
-            lambda: {
-                "savings_ms": 0,
-                "savings_ms_low": 0,
-                "savings_ms_high": 0,
-                "count": 0,
-                "ops": [],
-            }
-        )
-        for e in all_estimates:
-            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
-                "high",
-                "medium",
-            ):
-                cat = e["category"]
-                category_savings[cat]["savings_ms"] += e["savings_ms"]
-                category_savings[cat]["savings_ms_low"] += e.get(
-                    "savings_ms_low", e["savings_ms"]
-                )
-                category_savings[cat]["savings_ms_high"] += e.get(
-                    "savings_ms_high", e["savings_ms"]
-                )
-                category_savings[cat]["count"] += 1
-                category_savings[cat]["ops"].append(e.get("operation", ""))
-
-        plot_recs = sorted(
-            [
-                {
-                    "category": cat,
-                    "savings_ms": round(v["savings_ms"], 3),
-                    "savings_ms_low": round(v["savings_ms_low"], 3),
-                    "savings_ms_high": round(v["savings_ms_high"], 3),
-                    "operation_count": v["count"],
-                    "type": "kernel_tuning",
-                }
-                for cat, v in category_savings.items()
-            ],
-            key=lambda x: x["savings_ms"],
-            reverse=True,
-        )[:max_recommendations]
-
-        plot_data = {
-            "baseline_ms": baseline_ms,
-            "recommendations": plot_recs,
-            "all_estimates": all_estimates,
-        }
-    except Exception:
-        plot_data = {
-            "baseline_ms": 0,
-            "recommendations": [],
-            "all_estimates": [],
-        }
-
-    with open(out_path, "w") as f:
-        json.dump(plot_data, f, indent=2)
-
-    return out_path
 
 
 def parse_first_shape(dims_str):
@@ -698,6 +606,7 @@ def shape_aware_lookup(table, kname, input_dims=None):
 REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
+    "Kernel Fusion Opportunities (Experimental)",
     "System-Level Optimizations",
     "Detailed Analysis",
     "Appendix",
@@ -706,17 +615,20 @@ REQUIRED_REPORT_HEADERS = [
 
 def validate_report(
     output_dir: str,
+    report_filename: str = "standalone_analysis.md",
 ) -> Tuple[bool, List[str]]:
     """
-    Validate that standalone_analysis.md contains all required ## section headers.
+    Validate that the report file contains all required ## section headers.
 
     Args:
-        output_dir: Base output directory containing standalone_analysis.md
+        output_dir: Base output directory containing the report
+        report_filename: Report filename (default: standalone_analysis.md;
+            use comparative_analysis.md for comparative mode)
 
     Returns:
         Tuple of (passed: bool, missing: list of error/missing-section strings)
     """
-    report_path = os.path.join(output_dir, "standalone_analysis.md")
+    report_path = os.path.join(output_dir, report_filename)
     if not os.path.exists(report_path):
         return False, ["<file not found>"]
 
@@ -757,6 +669,102 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
+def get_peak_specs(metadata: dict) -> dict:
+    """Extract peak MAF and HBM bandwidth from metadata dict.
+
+    Handles both the dict-style max_achievable_tflops and the legacy
+    scalar peak_bf16_maf_tflops formats.
+    """
+    return {
+        "peak_maf_tflops": (
+            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
+            if isinstance(metadata.get("max_achievable_tflops"), dict)
+            else metadata.get("peak_bf16_maf_tflops")
+        ),
+        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+    }
+
+
+def run_category_analysis(
+    category: str,
+    output_dir: str,
+    config: dict,
+    extract_fn,
+    pre_process_fn=None,
+    no_data_check_fn=None,
+    compute_impact=True,
+    comparison_scope: str = "standalone",
+):
+    """Generic runner for category analysis scripts.
+
+    Args:
+        category: Category name (e.g., 'gemm', 'norm')
+        output_dir: Base output directory path
+        config: Category-specific config dict (extra_fields, operation_classifier)
+        extract_fn: Callable(ops_df, metadata) -> dict of category-specific metrics
+        pre_process_fn: Optional callable(ops_df, metadata) -> (ops_df, extra_dict)
+            for pre-filtering or augmenting the DataFrame before analysis
+        no_data_check_fn: Optional callable(output_dir, category, comparison_scope) -> dict or None.
+            If it returns a dict, that dict is written as metrics and the runner
+            exits early (used for categories that may not be present, e.g. MoE).
+        compute_impact: Whether to compute kernel-tuning impact estimates
+        comparison_scope: ``standalone`` (roofline efficiency) or ``comparative``
+            (TraceDiff-style ``100 * t2 / t1`` in ``operations[].efficiency``).
+    """
+    if no_data_check_fn:
+        no_data_metrics = no_data_check_fn(output_dir, category, comparison_scope)
+        if no_data_metrics is not None:
+            output_path = write_metrics_json(no_data_metrics, output_dir, category)
+            print(f"No data. Metrics written to: {output_path}")
+            return
+
+    try:
+        ops_df, metadata = load_category_data(output_dir, category)
+    except FileNotFoundError as e:
+        error_metrics = {
+            "category": category,
+            "status": "ERROR",
+            "error": str(e),
+            "comparison_scope": comparison_scope,
+        }
+        write_metrics_json(error_metrics, output_dir, category)
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    extra = {}
+    if pre_process_fn:
+        ops_df, extra = pre_process_fn(ops_df, metadata)
+
+    time_metrics = calculate_time_metrics(ops_df, metadata)
+    operations = build_operation_metrics(
+        ops_df, metadata, config, comparison_scope=comparison_scope
+    )
+    category_specific = extract_fn(ops_df, metadata)
+
+    if compute_impact:
+        baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+        impact_estimates = compute_impact_estimates(
+            operations, category, baseline_ms=baseline_ms,
+            analysis_mode=comparison_scope,
+        )
+    else:
+        impact_estimates = []
+
+    metrics = {
+        "category": category,
+        "status": "OK",
+        "comparison_scope": comparison_scope,
+        **time_metrics,
+        "operations": operations,
+        "category_specific": category_specific,
+        "impact_estimates": impact_estimates,
+        **extra,
+    }
+
+    output_path = write_metrics_json(metrics, output_dir, category)
+    print(f"Metrics written to: {output_path}")
+
+
 # Category-specific helper functions
 def classify_kernel_library(op_name: str, kernel_details: str = "") -> Optional[str]:
     """Identify the GPU library backing an operation from its name or kernel strings."""
@@ -769,222 +777,3 @@ def classify_kernel_library(op_name: str, kernel_details: str = "") -> Optional[
         if marker in kd:
             return lib
     return None
-
-
-def detect_quantized_gemm(op_name: str) -> bool:
-    """Check if GEMM operation is quantized."""
-    quantized_markers = ["w8a8", "int8", "fp8", "w4a16", "w4a4", "fp4", "mxfp4"]
-    return any(marker in op_name.lower() for marker in quantized_markers)
-
-
-def detect_flash_attention(op_name: str) -> bool:
-    """Check if SDPA operation uses Flash Attention."""
-    flash_markers = ["flash", "fmha", "flash_attention", "flashattn"]
-    return any(marker in op_name.lower() for marker in flash_markers)
-
-
-def detect_softmax(op_name: str) -> bool:
-    """Check if operation is a softmax."""
-    return "softmax" in op_name.lower()
-
-
-def detect_transpose(op_name: str) -> bool:
-    """Check if operation is a transpose (layout overhead indicator)."""
-    return "transpose" in op_name.lower()
-
-
-def classify_other_operation(op_name: str) -> str:
-    """Classify 'other' category operations."""
-    op_lower = op_name.lower()
-
-    # Communication operations (vendor-agnostic naming)
-    if any(
-        x in op_lower
-        for x in [
-            "all_reduce",
-            "collective",
-            "ncclkernel",
-            "rccl",
-            "broadcast",
-            "allgather",
-        ]
-    ):
-        return "communication"
-
-    # Graph operations
-    if any(x in op_lower for x in ["graph", "hipgraph", "cudagraph"]):
-        return "graph"
-
-    return "miscellaneous"
-
-
-def detect_paged_attention(op_name: str, kernel_details: str = None) -> bool:
-    """
-    Check if SDPA operation uses Paged Attention (vLLM style).
-
-    Args:
-        op_name: Operation name
-        kernel_details: Optional kernel_details_summary string from CSV
-
-    Returns:
-        True if paged attention is detected
-    """
-    # Check operation name for vLLM paged attention markers
-    paged_markers = ["unified_attention", "paged_attention", "vllm"]
-    if any(marker in op_name.lower() for marker in paged_markers):
-        return True
-
-    # Check kernel details for paged attention kernels
-    if kernel_details:
-        if "kernel_paged_attention" in str(kernel_details).lower():
-            return True
-        if "paged_attention_2d" in str(kernel_details).lower():
-            return True
-
-    return False
-
-
-def parse_kernel_breakdown(kernel_details_str: str) -> dict:
-    """
-    Parse kernel_details_summary to extract sub-kernel timing breakdown.
-
-    Args:
-        kernel_details_str: String representation of kernel details list
-
-    Returns:
-        Dict with kernel breakdown: {kernel_name: {mean_us, percent, total_us}}
-    """
-    result = {
-        "kernels": [],
-        "total_kernel_time_us": 0,
-        "has_paged_attention": False,
-        "has_fwd_kernel": False,
-        "has_reshape_cache": False,
-    }
-
-    if not kernel_details_str or pd.isna(kernel_details_str):
-        return result
-
-    try:
-        kernel_str = str(kernel_details_str)
-        kernel_str = kernel_str.replace("np.float64(", "").replace(")", "")
-
-        # Pattern to match kernel entries
-        kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
-        matches = re.findall(kernel_pattern, kernel_str, re.DOTALL)
-
-        total_time = 0
-        kernels = []
-
-        for name, mean_us in matches:
-            mean_us_float = float(mean_us)
-            total_time += mean_us_float
-
-            # Classify kernel type
-            kernel_type = "other"
-            if "reshape_and_cache" in name.lower():
-                kernel_type = "reshape_cache"
-                result["has_reshape_cache"] = True
-            elif "paged_attention" in name.lower():
-                kernel_type = "paged_attention"
-                result["has_paged_attention"] = True
-            elif "_fwd_kernel" in name.lower() or "fwd_kernel" in name.lower():
-                kernel_type = "fwd_kernel"
-                result["has_fwd_kernel"] = True
-
-            kernels.append(
-                {"name": name, "mean_us": mean_us_float, "kernel_type": kernel_type}
-            )
-
-        # Calculate percentages
-        if total_time > 0:
-            for k in kernels:
-                k["percent"] = round((k["mean_us"] / total_time) * 100, 2)
-
-        result["kernels"] = kernels
-        result["total_kernel_time_us"] = round(total_time, 2)
-
-    except Exception:
-        pass
-
-    return result
-
-
-def parse_perf_params(perf_params_str: str) -> dict:
-    """
-    Parse perf_params to extract attention configuration and workload profile.
-
-    Args:
-        perf_params_str: String representation of perf_params dict
-
-    Returns:
-        Dict with parsed parameters
-    """
-    result = {
-        "batch_size": None,
-        "n_q": None,
-        "h_q": None,
-        "n_kv": None,
-        "h_kv": None,
-        "d_h_qk": None,
-        "d_h_v": None,
-        "dropout": None,
-        "causal": None,
-        "flash_impl": None,
-        "sum_ctx_tokens": None,
-        "sum_gen_tokens": None,
-        "ctx_ratio": None,
-        "workload_type": "unknown",
-    }
-
-    if not perf_params_str or pd.isna(perf_params_str):
-        return result
-
-    try:
-        params = ast.literal_eval(str(perf_params_str))
-
-        # Extract basic parameters
-        result["batch_size"] = params.get("B")
-        result["n_q"] = params.get("N_Q")
-        result["h_q"] = params.get("H_Q")
-        result["n_kv"] = params.get("N_KV")
-        result["h_kv"] = params.get("H_KV")
-        result["d_h_qk"] = params.get("d_h_qk")
-        result["d_h_v"] = params.get("d_h_v")
-        result["dropout"] = params.get("dropout")
-        result["causal"] = params.get("causal")
-        result["flash_impl"] = params.get("flash_impl")
-
-        # Extract context/generation tokens for workload profiling
-        ctx_tokens = params.get("sum_ctx_tokens", 0)
-        gen_tokens = params.get("sum_gen_tokens", 0)
-        result["sum_ctx_tokens"] = ctx_tokens
-        result["sum_gen_tokens"] = gen_tokens
-
-        # Calculate context ratio and determine workload type
-        total_tokens = ctx_tokens + gen_tokens
-        if total_tokens > 0:
-            ctx_ratio = ctx_tokens / total_tokens
-            result["ctx_ratio"] = round(ctx_ratio, 3)
-
-            if ctx_ratio > 0.8:
-                result["workload_type"] = "prefill_heavy"
-            elif ctx_ratio < 0.2:
-                result["workload_type"] = "decode_heavy"
-            else:
-                result["workload_type"] = "mixed"
-
-        # Detect GQA (Grouped Query Attention)
-        if result["h_q"] and result["h_kv"]:
-            if result["h_kv"] < result["h_q"]:
-                result["attention_pattern"] = "GQA"
-                result["gqa_ratio"] = result["h_q"] // result["h_kv"]
-            elif result["h_kv"] == result["h_q"]:
-                result["attention_pattern"] = "MHA"
-            else:
-                result["attention_pattern"] = "unknown"
-
-    except Exception:
-        pass
-
-    return result

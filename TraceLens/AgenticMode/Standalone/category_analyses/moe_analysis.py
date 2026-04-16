@@ -11,37 +11,38 @@ Computes metrics for MoE fused operations and outputs JSON for subagent processi
 """
 
 import argparse
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    compute_impact_estimates,
-    write_metrics_json,
+    get_peak_specs,
+    run_category_analysis,
 )
 
 
-def get_moe_config():
-    """Return MoE-specific configuration."""
-    return {
-        "extra_fields": [],
-    }
+def _check_moe_data(output_dir, category, comparison_scope):
+    """Return NO_DATA metrics if MoE CSV is absent (expected for non-MoE traces)."""
+    moe_csv = f"{output_dir}/category_data/{category}_ops.csv"
+    if not os.path.exists(moe_csv):
+        return {
+            "category": category,
+            "status": "NO_DATA",
+            "comparison_scope": comparison_scope,
+            "message": "No MoE operations detected in this trace",
+            "total_time_ms": 0,
+            "percent_of_compute": 0,
+            "operation_count": 0,
+            "operations": [],
+            "category_specific": {},
+        }
+    return None
 
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract MoE-specific aggregate metrics."""
-    return {
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
-    }
+    return get_peak_specs(metadata)
 
 
 def main():
@@ -51,67 +52,18 @@ def main():
         "--comparison_scope",
         choices=("standalone", "comparative"),
         default="standalone",
-        help=(
-            "standalone: roofline efficiency in operations[].efficiency; "
-            "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
-        ),
+        help="standalone vs comparative (TraceDiff columns on Trace 1 CSVs).",
     )
     args = parser.parse_args()
 
-    # Check if MoE data exists
-    moe_csv = f"{args.output_dir}/category_data/moe_fused_ops.csv"
-    if not os.path.exists(moe_csv):
-        # No MoE operations - write minimal metrics
-        metrics = {
-            "category": "moe_fused",
-            "status": "NO_DATA",
-            "analysis_mode": args.comparison_scope,
-            "message": "No MoE operations detected in this trace",
-            "total_time_ms": 0,
-            "percent_of_compute": 0,
-            "operation_count": 0,
-            "operations": [],
-            "category_specific": {},
-        }
-        output_path = write_metrics_json(metrics, args.output_dir, "moe_fused")
-        print(f"No MoE data. Metrics written to: {output_path}")
-        return
-
-    try:
-        ops_df, metadata = load_category_data(args.output_dir, "moe_fused")
-    except FileNotFoundError as e:
-        error_metrics = {"category": "moe_fused", "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, "moe_fused")
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    config = get_moe_config()
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-
-    time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=args.comparison_scope
+    run_category_analysis(
+        category="moe_fused",
+        output_dir=args.output_dir,
+        config={"extra_fields": []},
+        extract_fn=extract_category_specific,
+        no_data_check_fn=_check_moe_data,
+        comparison_scope=args.comparison_scope,
     )
-    category_specific = extract_category_specific(ops_df, metadata)
-
-    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    impact_estimates = compute_impact_estimates(
-        operations, "moe_fused", baseline_ms=baseline_ms
-    )
-
-    metrics = {
-        "category": "moe_fused",
-        "status": "OK",
-        "analysis_mode": args.comparison_scope,
-        **time_metrics,
-        "operations": operations,
-        "category_specific": category_specific,
-        "impact_estimates": impact_estimates,
-    }
-
-    output_path = write_metrics_json(metrics, args.output_dir, "moe_fused")
-    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":

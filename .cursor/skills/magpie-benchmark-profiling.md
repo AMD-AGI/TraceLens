@@ -157,6 +157,65 @@ No manual env var configuration is needed.
 
 Before running the benchmark, ask the user whether they want to profile a targeted steady-state window or the entire benchmark run. This applies to **both vLLM and SGLang** frameworks (the mechanism differs but the formulas are the same).
 
+#### Common profiler flags (apply for both Option A and Option B)
+
+The flags below must be applied **regardless** of whether the user chooses targeted-window or full-benchmark profiling. They enable graph-capture tracing, detailed annotations, and shape discovery that are required for downstream TraceLens analysis.
+
+##### Common vLLM flags
+
+Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any existing value):
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces --profiler-config.detailed_trace_annotation True"
+```
+
+Use the literal path `/workspace/torch_trace/capture_traces` rather than `${TRACE_DIR}/capture_traces`. Bash does not recursively expand variables — `$EXTRA_VLLM_ARGS` is word-split but its contents are not re-evaluated for variable references, so `${TRACE_DIR}` would be passed as a literal string to vLLM. For `--run-mode local`, replace `/workspace/torch_trace` with the actual host-side trace directory.
+
+- `--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces` — enables graph-capture tracing. vLLM writes separate traces for CUDA graph capture phases into this directory, which are needed for downstream TraceLens analysis of graph-replayed operations.
+- `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_inference_trace_annotation` for accurate trace splitting.
+
+##### Common SGLang flags
+
+Apply **three** edits regardless of profiling mode:
+
+**1. Add profiling env vars to the user's YAML config.**
+
+```yaml
+benchmark:
+  envs:
+    SGLANG_PROFILE_WITH_STACK: "True"
+    SGLANG_PROFILE_RECORD_SHAPE: "True"
+```
+
+These enable call-stack capture and tensor shape recording in the profiler trace, which are required for TraceLens roofline analysis and kernel attribution.
+
+**2. Add graph-capture profiling flags as `EXTRA_SGLANG_ARGS` in the user's YAML config.**
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"
+```
+
+If the YAML already has an `EXTRA_SGLANG_ARGS` field with existing flags, **append** these flags to the existing value rather than replacing it.
+
+- `--enable-profile-cuda-graph` — makes CUDA graph-replayed operations individually traced rather than appearing as a single opaque graph-launch kernel. Without this flag, the profiler cannot see inside replayed graphs and roofline analysis is incomplete.
+- `--enable-shape-discovery-for-cuda-graph-profile` — records tensor shapes for operations inside CUDA graphs, enabling accurate roofline modelling of graph-replayed kernels.
+
+**3. Patch `benchmark_serving.py` to enable shape discovery and roofline annotations in the profile request body.**
+
+The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add `shape_discovery` and `roofline_annotations` flags:
+
+```bash
+ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"shape_discovery\": True, \"roofline_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
+  <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
+```
+
+- `shape_discovery: True` — enables tensor shape recording for CUDA graph operations during profiling.
+- `roofline_annotations: True` — adds FLOPs and memory bandwidth annotations needed for roofline analysis.
+
 #### Profiling mode
 
 Ask:
@@ -170,7 +229,7 @@ Compute recommended `delay_iterations` and `max_iterations` from the YAML config
 **Formulas:**
 
 ```
-max_iters = min(OSL, OSL * 16 / CONC)
+max_iters = min(1024, max(256,OSL * 16 / CONC))
 
 delay_iters = ( OSL * (RANDOM_RANGE_RATIO + 1 ) * 3 ) - (max_iters/2)
 
@@ -190,34 +249,25 @@ Once the user confirms (or provides overrides), apply the framework-specific edi
 
 ###### vLLM targeted window
 
-Apply **three** temporary edits on the remote node:
+Apply **two** temporary edits:
 
-**1. Add profiler iteration args to the benchmark script.**
+**1. Add profiler iteration args as `EXTRA_VLLM_ARGS` in the user's YAML config.**
 
-The script lives at `<magpie_repo>/InferenceMAX/benchmarks/<benchmark_script>` (the script name comes from the YAML `benchmark_script` field, defaulting to `vllm_mi300x.sh`). Find the `PROFILER_ARGS` block (the `if [[ "${PROFILE:-}" == "1" ]]` section) and append these lines:
+Instead of patching the benchmark shell script, add the profiler arguments to the `EXTRA_VLLM_ARGS` environment variable in the YAML config's `envs` section. The benchmark script already passes `$EXTRA_VLLM_ARGS` to the `vllm serve` command, so no script edits are needed.
 
-```bash
-ssh <node> "sed -i '/profiler-config.torch_profiler_use_gzip/a\\
-  PROFILER_ARGS+=(--profiler-config.delay_iterations <DELAY>)\\
-  PROFILER_ARGS+=(--profiler-config.max_iterations <MAX>)\\
-  PROFILER_ARGS+=(--profiler-config.ignore_frontend True)' \
-  <magpie_repo>/InferenceMAX/benchmarks/<benchmark_script>"
+Edit the user's YAML config file to add (or append to) the `EXTRA_VLLM_ARGS` field under `benchmark.envs`:
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_VLLM_ARGS: "--profiler-config.delay_iterations <DELAY> --profiler-config.max_iterations <MAX> --profiler-config.ignore_frontend True"
 ```
+
+If the YAML already has an `EXTRA_VLLM_ARGS` field with existing flags, **append** the profiler flags to the existing value rather than replacing it.
 
 `ignore_frontend` must be `True` when using delay/max iterations, otherwise the AsyncLLM front-end profiler captures the entire range and adds significant overhead.
 
-**2. Ensure `PROFILER_ARGS` is passed to `vllm serve`.**
-
-The benchmark script may not include `"${PROFILER_ARGS[@]}"` in the `vllm serve` command. Check whether the `vllm serve` line already references `PROFILER_ARGS`. If it does not, inject it before the output redirection (`> $SERVER_LOG`):
-
-```bash
-ssh <node> "sed -i 's|\$EXTRA_VLLM_ARGS > \$SERVER_LOG|\$EXTRA_VLLM_ARGS \"\${PROFILER_ARGS[@]}\" > \$SERVER_LOG|' \
-  <magpie_repo>/InferenceMAX/benchmarks/<benchmark_script>"
-```
-
-Without this, the `PROFILER_ARGS` array is built but never actually passed to the vLLM server.
-
-**3. MANDATORY: Increase `num_prompts` in `benchmark_lib.sh` so the benchmark runs long enough for the profiling window.**
+**2. MANDATORY: Increase `num_prompts` in `benchmark_lib.sh` so the benchmark runs long enough for the profiling window.**
 
 **This patch is always required when using delay + max iterations.** The `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally overrides** `num_prompts` when `PROFILE=1` — this happens *after* parsing the `--num-prompts` argument, so it stomps whatever value the calling script (e.g. `vllm_mi300x.sh`) passes. Do NOT skip this patch even if the calling script already sets a larger `--num-prompts`. Without this fix, the benchmark finishes before the delay window is reached, and no steady-state trace is captured.
 
@@ -232,15 +282,15 @@ Replace `10` with a different multiplier if the user requests it.
 
 ###### SGLang targeted window
 
-SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. Apply **three** temporary edits on the remote node:
+SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. The common SGLang flags (env vars, `EXTRA_SGLANG_ARGS`, `shape_discovery`, `roofline_annotations`) were already applied in the shared section above. Apply **two** additional edits for targeted windowing:
 
 **1. Patch `benchmark_serving.py` to set `start_step` and `num_steps`.**
 
-The file is at `<magpie_repo>/InferenceMAX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Replace it with the computed delay and iteration values:
+The common section already patched `benchmark_serving.py` to add `shape_discovery` and `roofline_annotations`. Now apply a second sed to set the targeted window parameters:
 
 ```bash
 ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"start_step\": <DELAY>, \"num_steps\": <MAX>, \"merge_profiles\": False, \"profile_by_stage\": False/' \
-  <magpie_repo>/InferenceMAX/utils/bench_serving/benchmark_serving.py"
+  <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
 ```
 
 Where `<DELAY>` is the computed `delay_iters` and `<MAX>` is the computed `max_iters`. This maps to SGLang's `/start_profile` API:
@@ -255,62 +305,59 @@ This is the same patch as for vLLM — `benchmark_lib.sh` is shared between both
 
 ```bash
 ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
-  <magpie_repo>/InferenceMAX/benchmarks/benchmark_lib.sh"
+  <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
 ```
 
 Replace `10` with a different multiplier if the user requests it. Without this fix, the benchmark finishes before the `start_step` window is reached, and no steady-state trace is captured.
-
-**3. Add `--enable-profile-cuda-graph` to the SGLang server launch command in the benchmark script.**
-
-The script name comes from the YAML `benchmark_script` field (e.g. `dsr1_fp8_mi300x.sh`). It may live directly under `<magpie_repo>/InferenceMAX/benchmarks/` or inside a subdirectory such as `benchmarks/single_node/`. Locate the actual file first:
-
-```bash
-ssh <node> "find <magpie_repo>/InferenceMAX/benchmarks -name '<benchmark_script>' -type f"
-```
-
-When profiling is enabled, the server must be started with `--enable-profile-cuda-graph` so that CUDA graph-replayed operations are individually traced rather than appearing as a single opaque graph-launch kernel. Without this flag, the profiler cannot see inside replayed graphs and roofline analysis is incomplete.
-
-Find the `python -m sglang.launch_server` invocation in the benchmark script and append the flag:
-
-```bash
-ssh <node> "sed -i '/python.*-m sglang.launch_server/s/$/ --enable-profile-cuda-graph/' \
-  <actual_path_to_benchmark_script>"
-```
-
-If the server launch command spans multiple lines (backslash-continued), append the flag to the **last** continuation line instead.
 
 ---
 
 ##### Option B: Profile the entire benchmark
 
-Do **not** edit any scripts. The defaults are appropriate:
-- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish.
-- **SGLang:** `num_steps` stays at `1` in `benchmark_serving.py` — captures a single step. To capture the full run without a targeted window, the user can also manually increase `num_steps` without setting `start_step`.
+Do **not** add `start_step`/`delay_iterations` args or increase `num_prompts`. The common flags from the shared section above **still apply** and must be present:
+- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler_dir`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
+- **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPE`, `EXTRA_SGLANG_ARGS` with graph-capture flags, and the `shape_discovery`/`roofline_annotations` patch to `benchmark_serving.py`) must all be applied.
 - `num_prompts` stays at `CONC` — keeps the trace to a manageable size since every iteration is profiled.
 
 Warn the user that full-benchmark traces will be very large (potentially several GB per rank for large models).
 
 #### Cleanup
 
-All edits in Step 2b are temporary. **Before** applying any patches, back up the modified files:
+All edits in Step 2b are temporary.
+
+**For vLLM:** The YAML config was modified (to add/update `EXTRA_VLLM_ARGS`). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up `benchmark_lib.sh` before patching:
+
+```bash
+ssh <node> "cd <magpie_repo>/InferenceMAX && \
+  cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak"
+```
+
+After the benchmark completes, restore `benchmark_lib.sh` and remove the `EXTRA_VLLM_ARGS` profiler flags from the YAML config (or revert to the original YAML):
+
+```bash
+ssh <node> "cd <magpie_repo>/InferenceMAX && \
+  mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh"
+```
+
+Then edit the user's YAML config to remove the profiler flags from `EXTRA_VLLM_ARGS` (or restore the original value if it had pre-existing flags).
+
+**For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`) and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
 
 ```bash
 ssh <node> "cd <magpie_repo>/InferenceMAX && \
   cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak && \
-  cp utils/bench_serving/benchmark_serving.py utils/bench_serving/benchmark_serving.py.bak && \
-  cp benchmarks/<benchmark_script> benchmarks/<benchmark_script>.bak"
+  cp utils/bench_serving/benchmark_serving.py utils/bench_serving/benchmark_serving.py.bak"
 ```
 
-Only back up files that will be edited (e.g. skip `benchmark_serving.py` for vLLM).
-
-**After** the benchmark completes (Step 5, after trace quality is verified), restore the originals:
+After the benchmark completes, restore the remote files:
 
 ```bash
 ssh <node> "cd <magpie_repo>/InferenceMAX && \
   mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh && \
-  mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py && \
-  mv benchmarks/<benchmark_script>.bak benchmarks/<benchmark_script>"
+  mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py"
 ```
+
+Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
 
 Alternatively, if InferenceMAX is a git checkout, use `git checkout -- <file>` to discard changes. Or delete the entire `InferenceMAX` directory — Magpie re-clones it on the next run.
 

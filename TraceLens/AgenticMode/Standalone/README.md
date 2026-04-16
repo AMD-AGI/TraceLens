@@ -175,7 +175,7 @@ analysis_output/
 The analysis is split into three independent tiers that can be composed separately:
 
 - **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
-- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings via a roofline projection model with 85% memory/compute pipeline overlap. Uses `orchestrator_prepare.py` (Step 4b) for candidate extraction and `kernel_fusion_analysis.py` for deterministic metrics, then invokes `kernel-fusion-analyzer` to generate findings.
+- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings via a roofline projection model with 85% memory/compute pipeline overlap. Uses `utils/orchestrator_prepare.py` (Step 4b) for candidate extraction and `kernel_fusion_analysis.py` for deterministic metrics, then invokes `kernel-fusion-analyzer` to generate findings.
 - **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
 
 Each tier writes to a separate findings directory and produces an independently composable report section.
@@ -256,7 +256,7 @@ The orchestrator supports two analysis modes, selected during Step 0:
 
 | Mode | Script | Use Case |
 |------|--------|----------|
-| **Default (training and eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training traces, eager inference traces |
+| **Default (training and non-vLLM/SGLang eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang eager inference traces |
 | **Inference (vLLM/SGLang)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang traces in eager mode or graph replay + capture mode |
 
 For inference mode, the orchestrator also asks for the execution mode:

@@ -12,35 +12,173 @@ Supports both Flash Attention and Paged Attention (vLLM) analysis.
 """
 
 import argparse
+import ast
+import re
 import sys
 import os
+
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    compute_impact_estimates,
-    write_metrics_json,
-    detect_flash_attention,
-    detect_paged_attention,
-    parse_kernel_breakdown,
-    parse_perf_params,
+    get_peak_specs,
+    run_category_analysis,
 )
 
+# ---------------------------------------------------------------------------
+# SDPA-specific detectors (moved from analysis_utils)
+# ---------------------------------------------------------------------------
 
-def get_sdpa_config():
-    """Return SDPA-specific configuration."""
-    return {
-        "extra_fields": [
-            "Input Dims",
-            "has_perf_model",
-            "perf_params",
-            "kernel_details_summary",
-        ],
-        "operation_classifier": classify_sdpa_operation,
+
+def detect_flash_attention(op_name: str) -> bool:
+    """Check if SDPA operation uses Flash Attention."""
+    flash_markers = ["flash", "fmha", "flash_attention", "flashattn"]
+    return any(marker in op_name.lower() for marker in flash_markers)
+
+
+def detect_paged_attention(op_name: str, kernel_details: str = None) -> bool:
+    """Check if SDPA operation uses Paged Attention (vLLM style)."""
+    paged_markers = ["unified_attention", "paged_attention", "vllm"]
+    if any(marker in op_name.lower() for marker in paged_markers):
+        return True
+
+    if kernel_details:
+        kd_lower = str(kernel_details).lower()
+        if "kernel_paged_attention" in kd_lower:
+            return True
+        if "paged_attention_2d" in kd_lower:
+            return True
+
+    return False
+
+
+def parse_kernel_breakdown(kernel_details_str: str) -> dict:
+    """Parse kernel_details_summary to extract sub-kernel timing breakdown."""
+    result = {
+        "kernels": [],
+        "total_kernel_time_us": 0,
+        "has_paged_attention": False,
+        "has_fwd_kernel": False,
+        "has_reshape_cache": False,
     }
+
+    if not kernel_details_str or pd.isna(kernel_details_str):
+        return result
+
+    try:
+        kernel_str = str(kernel_details_str)
+        kernel_str = kernel_str.replace("np.float64(", "").replace(")", "")
+
+        kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
+        matches = re.findall(kernel_pattern, kernel_str, re.DOTALL)
+
+        total_time = 0
+        kernels = []
+
+        for name, mean_us in matches:
+            mean_us_float = float(mean_us)
+            total_time += mean_us_float
+
+            kernel_type = "other"
+            if "reshape_and_cache" in name.lower():
+                kernel_type = "reshape_cache"
+                result["has_reshape_cache"] = True
+            elif "paged_attention" in name.lower():
+                kernel_type = "paged_attention"
+                result["has_paged_attention"] = True
+            elif "_fwd_kernel" in name.lower() or "fwd_kernel" in name.lower():
+                kernel_type = "fwd_kernel"
+                result["has_fwd_kernel"] = True
+
+            kernels.append(
+                {"name": name, "mean_us": mean_us_float, "kernel_type": kernel_type}
+            )
+
+        if total_time > 0:
+            for k in kernels:
+                k["percent"] = round((k["mean_us"] / total_time) * 100, 2)
+
+        result["kernels"] = kernels
+        result["total_kernel_time_us"] = round(total_time, 2)
+
+    except Exception:
+        pass
+
+    return result
+
+
+def parse_perf_params(perf_params_str: str) -> dict:
+    """Parse perf_params to extract attention configuration and workload profile."""
+    result = {
+        "batch_size": None,
+        "n_q": None,
+        "h_q": None,
+        "n_kv": None,
+        "h_kv": None,
+        "d_h_qk": None,
+        "d_h_v": None,
+        "dropout": None,
+        "causal": None,
+        "flash_impl": None,
+        "sum_ctx_tokens": None,
+        "sum_gen_tokens": None,
+        "ctx_ratio": None,
+        "workload_type": "unknown",
+    }
+
+    if not perf_params_str or pd.isna(perf_params_str):
+        return result
+
+    try:
+        params = ast.literal_eval(str(perf_params_str))
+
+        result["batch_size"] = params.get("B")
+        result["n_q"] = params.get("N_Q")
+        result["h_q"] = params.get("H_Q")
+        result["n_kv"] = params.get("N_KV")
+        result["h_kv"] = params.get("H_KV")
+        result["d_h_qk"] = params.get("d_h_qk")
+        result["d_h_v"] = params.get("d_h_v")
+        result["dropout"] = params.get("dropout")
+        result["causal"] = params.get("causal")
+        result["flash_impl"] = params.get("flash_impl")
+
+        ctx_tokens = params.get("sum_ctx_tokens", 0)
+        gen_tokens = params.get("sum_gen_tokens", 0)
+        result["sum_ctx_tokens"] = ctx_tokens
+        result["sum_gen_tokens"] = gen_tokens
+
+        total_tokens = ctx_tokens + gen_tokens
+        if total_tokens > 0:
+            ctx_ratio = ctx_tokens / total_tokens
+            result["ctx_ratio"] = round(ctx_ratio, 3)
+
+            if ctx_ratio > 0.8:
+                result["workload_type"] = "prefill_heavy"
+            elif ctx_ratio < 0.2:
+                result["workload_type"] = "decode_heavy"
+            else:
+                result["workload_type"] = "mixed"
+
+        if result["h_q"] and result["h_kv"]:
+            if result["h_kv"] < result["h_q"]:
+                result["attention_pattern"] = "GQA"
+                result["gqa_ratio"] = result["h_q"] // result["h_kv"]
+            elif result["h_kv"] == result["h_q"]:
+                result["attention_pattern"] = "MHA"
+            else:
+                result["attention_pattern"] = "unknown"
+
+    except Exception:
+        pass
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# SDPA classification and extraction
+# ---------------------------------------------------------------------------
 
 
 def classify_sdpa_operation(op_name: str, row) -> dict:
@@ -49,18 +187,15 @@ def classify_sdpa_operation(op_name: str, row) -> dict:
         row.get("has_perf_model", False) if "has_perf_model" in row.index else False
     )
 
-    # Get kernel details for paged attention detection
     kernel_details = (
         row.get("kernel_details_summary", "")
         if "kernel_details_summary" in row.index
         else ""
     )
 
-    # Detect attention type
     is_flash = detect_flash_attention(op_name)
     is_paged = detect_paged_attention(op_name, kernel_details)
 
-    # Determine attention type
     if is_paged:
         attention_type = "paged"
     elif is_flash:
@@ -68,12 +203,10 @@ def classify_sdpa_operation(op_name: str, row) -> dict:
     else:
         attention_type = "standard"
 
-    # Parse kernel breakdown for paged attention
     kernel_breakdown = None
     if is_paged and kernel_details:
         kernel_breakdown = parse_kernel_breakdown(kernel_details)
 
-    # Parse perf_params for workload profiling
     perf_params_str = row.get("perf_params", "") if "perf_params" in row.index else ""
     workload_profile = None
     if perf_params_str:
@@ -86,7 +219,6 @@ def classify_sdpa_operation(op_name: str, row) -> dict:
         "attention_type": attention_type,
     }
 
-    # Add kernel breakdown if available
     if kernel_breakdown and kernel_breakdown.get("kernels"):
         result["kernel_breakdown"] = {
             "has_paged_attention_kernel": kernel_breakdown.get(
@@ -97,7 +229,6 @@ def classify_sdpa_operation(op_name: str, row) -> dict:
             "kernels": kernel_breakdown.get("kernels", []),
         }
 
-    # Add workload profile if available
     if workload_profile:
         result["workload_profile"] = {
             "n_q": workload_profile.get("n_q"),
@@ -120,13 +251,11 @@ def extract_category_specific(ops_df, metadata) -> dict:
     flash_attention_count = 0
     paged_attention_count = 0
 
-    # Aggregate kernel breakdown stats
     total_reshape_cache_percent = 0
     total_fwd_kernel_percent = 0
     total_paged_attention_percent = 0
     kernel_breakdown_count = 0
 
-    # Aggregate workload profile stats
     total_ctx_tokens = 0
     total_gen_tokens = 0
 
@@ -144,7 +273,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
         if detect_paged_attention(op_name, kernel_details):
             paged_attention_count += 1
 
-            # Parse kernel breakdown for aggregation
             breakdown = parse_kernel_breakdown(kernel_details)
             if breakdown.get("kernels"):
                 kernel_breakdown_count += 1
@@ -156,7 +284,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
                     elif k["kernel_type"] == "paged_attention":
                         total_paged_attention_percent += k.get("percent", 0)
 
-        # Parse perf_params for workload aggregation
         perf_params_str = (
             row.get("perf_params", "") if "perf_params" in row.index else ""
         )
@@ -165,7 +292,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
             total_ctx_tokens += profile.get("sum_ctx_tokens") or 0
             total_gen_tokens += profile.get("sum_gen_tokens") or 0
 
-    # Count operations with perf models
     has_perf_model_count = 0
     if "has_perf_model" in ops_df.columns:
         has_perf_model_count = int(ops_df["has_perf_model"].sum())
@@ -176,15 +302,9 @@ def extract_category_specific(ops_df, metadata) -> dict:
         "has_perf_model_count": has_perf_model_count,
         "flash_attention_detected": flash_attention_count > 0,
         "paged_attention_detected": paged_attention_count > 0,
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        **get_peak_specs(metadata),
     }
 
-    # Add kernel breakdown aggregates if available
     if kernel_breakdown_count > 0:
         result["kernel_breakdown_avg"] = {
             "avg_reshape_cache_percent": round(
@@ -198,7 +318,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
             ),
         }
 
-    # Add workload profile aggregates if available
     total_tokens = total_ctx_tokens + total_gen_tokens
     if total_tokens > 0:
         ctx_ratio = total_ctx_tokens / total_tokens
@@ -239,43 +358,22 @@ def main():
         ),
     )
     args = parser.parse_args()
-    category = args.category
 
-    try:
-        ops_df, metadata = load_category_data(args.output_dir, category)
-    except FileNotFoundError as e:
-        error_metrics = {"category": category, "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, category)
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    config = get_sdpa_config()
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-
-    time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=args.comparison_scope
+    run_category_analysis(
+        category=args.category,
+        output_dir=args.output_dir,
+        config={
+            "extra_fields": [
+                "Input Dims",
+                "has_perf_model",
+                "perf_params",
+                "kernel_details_summary",
+            ],
+            "operation_classifier": classify_sdpa_operation,
+        },
+        extract_fn=extract_category_specific,
+        comparison_scope=args.comparison_scope,
     )
-    category_specific = extract_category_specific(ops_df, metadata)
-
-    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    impact_estimates = compute_impact_estimates(
-        operations, category, baseline_ms=baseline_ms
-    )
-
-    metrics = {
-        "category": category,
-        "status": "OK",
-        "analysis_mode": args.comparison_scope,
-        **time_metrics,
-        "operations": operations,
-        "category_specific": category_specific,
-        "impact_estimates": impact_estimates,
-    }
-
-    output_path = write_metrics_json(metrics, args.output_dir, category)
-    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":
