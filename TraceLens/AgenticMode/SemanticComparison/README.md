@@ -93,7 +93,7 @@ The analysis pipeline has two phases: **Semantic Breakdown** (per-trace, paralle
 
 ### Orchestrator
 
-The **Semantic Comparison Orchestrator** skill coordinates the entire workflow. It queries user inputs, launches parallel breakdown subagents for both traces, harmonizes semantic vocabularies, runs the deterministic comparison pipeline, and generates the final gap analysis report.
+The skill (`.cursor/skills/SKILL.md`) coordinates the entire workflow. It queries user inputs, launches parallel breakdown subagents for both traces, harmonizes semantic vocabularies, runs the deterministic comparison pipeline, and generates the final gap analysis report.
 
 ### Workflow Steps
 
@@ -189,26 +189,16 @@ To add a new `semantic_block` label:
 2. Add the shape derivation formula in `derive_block_shapes()` in the same file
 3. Update the vocabulary list in `semantic-breakdown-agent.md`
 
-### Single-Trace Breakdown
-
-The breakdown pipeline can be run independently on a single trace using the **Trace Semantic Breakdown** skill:
-
-```
-Run semantic breakdown on <path_to_trace.json>
-```
-
-This produces `semantic_labels.json`, `derived_shapes.json`, and a semantic report without requiring a second trace for comparison.
-
 ---
 
 ## Example
 
-**Comparing GPT-OSS-20B decode performance on MI355 vs B200:**
+**Comparing decode performance across two GPU platforms:**
 
 ```
-Run semantic comparison on traces/bs22_b200_graph.json and traces/bs22_mi355_graph.json
+Run semantic comparison on traces/trace_a.json and traces/trace_b.json
 
-Model config: https://huggingface.co/openai/gpt-oss-20b/raw/main/config.json
+Model config: <path_to_config.json>  (e.g. from HuggingFace: https://huggingface.co/<org>/<model>/raw/main/config.json)
 Tokens: 22 (decode, batch_size=22)
 Labels: B200 / MI355
 ```
