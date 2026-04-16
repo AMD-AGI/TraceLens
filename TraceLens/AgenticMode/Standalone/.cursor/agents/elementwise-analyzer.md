@@ -155,7 +155,7 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estima
 1. **Baseline comparison** - Compare complex ops to simple ops (add, mul, copy)
 2. **Calculate efficiency** -
   **Standalone:** Compare achieved TB/s vs peak HBM BW (memory-bound elementwise). Elementwise ops should hit peak HBM BW
-  **Comparative:** Compare achieved runtime in trace1 vs acheived runtime in trace2. use roofline fields only as supplementary context if needed
+  **Comparative:** Compare achieved runtime in trace1 vs achieved runtime in trace2. use roofline fields only as supplementary context if needed
 3. **Memory-bound** - Elementwise ops should hit peak HBM BW
 4. **Fusion opportunities** - If chains of elementwise ops suggest fusion candidates, note the observation but defer fusion analysis to the kernel fusion module
 5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
