@@ -286,10 +286,6 @@ Before returning, verify:
    `Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence`.
 3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**`,
    `**Action**`, and `**Impact**`.
-4. **Data table columns** match the tier defaults. Standalone compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`. Comparative compute: `Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1)`. System (both modes): `Metric | Value | Flagged`.
-5. **Card–Detailed Analysis consistency:** Every claim, number, and operation in the P-item card (Insight / Action / Impact) must be consistent with the corresponding Detailed Analysis block.
-6. **Identification** before `(source:`: no JSON-path-shaped backticks except op names used as prose. Outside `(source: …)` and in **Data** / **Reasoning** / **Resolution**: no bare internal/tooling field names.
-7. **Impact:** use the exact Low / High / Range line prefixes from § Impact Estimates rendering, or include `not quantifiable`.
 
 **System tier:**
 
