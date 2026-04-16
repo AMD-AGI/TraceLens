@@ -382,12 +382,20 @@ Include this block in every compute kernel subagent prompt (dedicated and batche
 
 <Shared Compute Kernel Preamble>:
 ```
+comparison_scope: {comparison_scope}
+
 **CRITICAL - READ FIRST:**
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
+- **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement"
+- When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
+
+**Platform Specs:**
+- Peak HBM BW: {peak_hbm_bw} TB/s
+- Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
+- Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
 
 **CRITICAL CONSTRAINTS:**
-1. Any efficiency > 100% → `[ANOMALY] - verify measurement`
+1. **Standalone only:** Any efficiency > 100% → `[ANOMALY] - verify measurement`
 2. Status must be SUCCESS or ERROR; times in ms; efficiencies as percentages
 3. Operations with `fusion_flagged: true` in the metrics JSON are already covered by
    a high-confidence kernel fusion candidate — do NOT flag them as bottlenecks or write
@@ -409,17 +417,8 @@ For each mapped category, launch a Task (subagent_type: generalPurpose):
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
-comparison_scope: {comparison_scope}
 
-**CRITICAL - READ FIRST:**
-- Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement"
-- When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
-
-**Platform Specs:**
-- Peak HBM BW: {peak_hbm_bw} TB/s
-- Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
-- Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
+<Shared Compute Kernel Preamble>
 
 Read and follow the FULL instructions in:
   TraceLens/AgenticMode/Standalone/.cursor/agents/{agent_file}
