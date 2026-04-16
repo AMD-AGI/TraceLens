@@ -121,7 +121,7 @@ blank line between them. The validator checks for these as substring matches.
 |-------|---------|
 | `**Identification:**` | How these operations were deemed an optimization opportunity. Body text must use **plain language only** — no JSON keys, dotted paths, or internal variable names. **Must** end with a `(source: <artifact> → <keys>)` parenthetical as the final text. Artifact names and keys must be wrapped in backticks (e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). All JSON keys and internal variable names belong **exclusively** inside this parenthetical. When the metrics JSON includes a non-null `library` field for an operation (e.g. `"Tensile"`, `"CK"`, `"AITER"`, `"Triton"`, `"rocBLAS"`), **always** state which library the operations use (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
 | `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
-| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*. **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower" (e.g. "Trace 2 is 60% faster on this shape"), plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
+| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*. **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower", plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the three-bullet format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` |
 
@@ -244,11 +244,19 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ### Rendering in `## Detailed Analysis`
 
-**Quantifiable:**
+**Standalone — Quantifiable:**
 
 ```markdown
 - Low end (75% roofline target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
 - High end (100% roofline target): <high_e2e_ms> ms savings (<high_e2e_percent>% E2E)
+- Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
+```
+
+**Comparative — Quantifiable (gap to target trace):**
+
+```markdown
+- Low end (75% gap target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
+- High end (100% gap target): <high_e2e_ms> ms savings (<high_e2e_percent>% E2E)
 - Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
 ```
 
@@ -266,6 +274,44 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ---
 
+## Kernel Fusion Variant
+
+Kernel fusion blocks use **three** labels: **Identification**, **Data**, **Impact estimate**.
+
+```markdown
+<!-- reasoning-candidate tier=system rank=<N> -->
+#### <candidate_title>
+**Identification:** …
+
+**Data:** …
+
+**Impact estimate:** …
+```
+
+| Label | Purpose |
+|-------|---------|
+| `**Identification:**` | How the fusion candidate was surfaced. Plain language body ending with `(source: \`fusion_candidates.json\` → <keys>)`. |
+| `**Data:**` | Kernels table with columns: `Kernel \| Type \| Duration (us) \| Perf model`. |
+| `**Impact estimate:**` | Rendered from `kernel_fusion_metrics.json → impact_estimates[]`. Uses four-bullet format (see below); non-quantifiable entries use the standard single-line form. |
+
+### Fusion impact rendering
+
+Quantifiable:
+
+```markdown
+- Low end (75% roofline): <savings_ms_low> ms savings (<e2e_pct_low>% E2E)
+- High end (100% roofline): <savings_ms_high> ms savings (<e2e_pct_high>% E2E)
+- Coverage: <modeled_kernel_count> of <kernel_count> kernels modelled
+- Fusion pattern: <bound_type>-bound, <fusion_type>
+- Confidence: High/Medium/Low — <brief reason from sub-agent pattern classification>
+```
+
+When partial coverage, append to Coverage: `(<unmodeled_count> kernel(s) use measured trace time)`.
+
+Non-quantifiable: `Impact estimate is not quantifiable from trace data.`
+
+---
+
 ## Self-check
 
 Before returning, verify:
@@ -279,6 +325,9 @@ Before returning, verify:
 3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**`,
    `**Action**`, and `**Impact**`.
 4. **Data table columns** match the tier defaults. Standalone compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`; fusion: `Kernel | Type | Duration (us) | Perf model`. Comparative compute: `Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1)`. System (both modes): `Metric | Value | Flagged`.
+5. **Card–Detailed Analysis consistency:** Every claim, number, and operation in the P-item card (Insight / Action / Impact) must be consistent with the corresponding Detailed Analysis block.
+6. **Identification** before `(source:`: no JSON-path-shaped backticks except op names used as prose. Outside `(source: …)` and in **Data** / **Reasoning** / **Resolution**: no bare internal/tooling field names.
+7. **Impact:** use the exact Low / High / Range line prefixes from § Impact Estimates rendering, or include `not quantifiable`.
 
 **System tier:**
 
