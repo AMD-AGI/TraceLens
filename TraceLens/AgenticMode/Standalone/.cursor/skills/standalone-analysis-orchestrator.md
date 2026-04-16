@@ -411,8 +411,6 @@ comparison_scope: {comparison_scope}
 
 #### Dedicated Compute Kernel Subagent Prompt
 
-**Compute Kernel Subagent Prompt Template:**
-
 For each mapped category, launch a Task (subagent_type: generalPurpose):
 
 ```
