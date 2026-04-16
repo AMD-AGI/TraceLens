@@ -7,7 +7,7 @@
 """Tests for TraceLens AgenticMode Standalone Analysis.
 
 - Unit tests for category_analyses/analysis_utils (efficiency, impact estimates, plot data, helpers).
-- Integration test for orchestrator_prepare.py with minimal perf_report_csvs fixtures
+- Integration test for utils/orchestrator_prepare.py with minimal perf_report_csvs fixtures
   (Steps 2-3 only; Step 4 requires a real trace and is skipped when fixtures are used).
 """
 

@@ -259,7 +259,7 @@ columns. The gpu_arch JSON should contain `mem_bw_gbps` and
 
 Output: `.xlsx` workbook and/or per-sheet CSV files. When `--output_csvs_dir`
 points to `perf_report_csvs/`, the CSVs can be consumed directly by
-`orchestrator_prepare.py` for standalone analysis.
+`utils/orchestrator_prepare.py` for standalone analysis.
 
 ### Step 7: Augment trace with annotations [S]
 
