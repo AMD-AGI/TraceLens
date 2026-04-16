@@ -584,12 +584,14 @@ If the plot fails, retry once. If still failing, proceed to Step 11 without the 
 
 ---
 
-## Step 11: Generate Final Report (<output_dir>/standalone_analysis.md)
+## Step 11: Generate Final Report
+
+**Output filename:** `standalone_analysis.md` when `<comparison_scope>` = `standalone`; `comparative_analysis.md` when `<comparison_scope>` = `comparative`. Referred to as `<report_filename>` below.
 
 **CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly. Subagents lack the full template context and produce reports that violate formatting guidelines. The orchestrator has already read all findings files and the template — it must perform the substitution itself using `<prefix>` commands (e.g., `tee`, `sed`, or Python one-liners).
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.2 will use to read and modify it.
+2. **Copy** it to `<output_dir>/<report_filename>` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.2 will use to read and modify it.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
@@ -599,7 +601,7 @@ If the plot fails, retry once. If still failing, proceed to Step 11 without the 
    - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
-The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
+The report at `<output_dir>/<report_filename>` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
 2. `## Compute Kernel Optimizations`
 3. `## Kernel Fusion Opportunities (Experimental)`
@@ -610,7 +612,7 @@ The report at `<output_dir>/standalone_analysis.md` must use these exact `##` he
 
 ### 11.1 Validate Report Structure (Retry up to 2x)
 
-After writing `standalone_analysis.md`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
+After writing `<report_filename>`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
 
 **Validation procedure:**
 
@@ -618,14 +620,14 @@ After writing `standalone_analysis.md`, validate that the report contains all re
 <prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
-passed, missing = validate_report(sys.argv[1])
+passed, missing = validate_report(sys.argv[1], sys.argv[2])
 if not passed:
     print('FAIL:')
     for m in missing:
         print('  - ' + m)
     sys.exit(1)
 print('PASS: All required sections present')
-\" '<output_dir>'
+\" '<output_dir>' '<report_filename>'
 ```
 
 **If validation fails (exit code 1):**

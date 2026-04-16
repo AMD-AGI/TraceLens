@@ -503,20 +503,26 @@ def compute_impact_estimates(
     category: str,
     min_savings_ms: float = 0.1,
     baseline_ms: float = 0,
+    analysis_mode: str = "standalone",
 ) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    Assumes tuning can reach 75%–100% of the efficiency target. For standalone
-    metrics that is roofline performance; for comparative metrics,
-    ``calculate_efficiency(..., comparison_scope='comparative')`` sets
-    ``efficiency_percent`` to ``100 * t2 / t1`` and the same band math applies.
-    Produces a range:
+    **Standalone mode** (roofline band):
+      Assumes tuning can reach 75%–100% of roofline peak. Produces a range:
       - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
       - savings_ms_low  = op_time_ms * (1 - efficiency_pct / 75)    [75% target]
       - savings_ms      = op_time_ms * (1 - efficiency_pct / 87.5)  [87.5% midpoint]
 
-    The midpoint (87.5%) is the primary estimate used for plots and aggregation.
+    **Comparative mode** (gap-fraction):
+      ``efficiency_percent`` is ``100 * t2 / t1``, so the full gap is
+      ``savings_ms_high = t1 - t2``.  The low/mid estimates are fractions of
+      that gap:
+      - savings_ms_high = gap                   [close 100% of the gap]
+      - savings_ms_low  = 0.75 * gap            [close 75% of the gap]
+      - savings_ms      = 0.875 * gap           [midpoint]
+
+    The midpoint is the primary estimate used for plots and aggregation.
     Low/high values are negative-clamped to zero (already above target).
     Anomalous efficiencies (>100%) are excluded.
 
@@ -528,10 +534,17 @@ def compute_impact_estimates(
         category: Category name for labelling
         min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
         baseline_ms: Total end-to-end GPU time for E2E % calculation (0 to skip)
+        analysis_mode: ``standalone`` for roofline bands, ``comparative`` for
+            gap-fraction bands
 
     Returns:
         List of impact estimate dicts sorted by savings descending
     """
+    GAP_FRAC_LOW = 0.75
+    GAP_FRAC_MID = 0.875
+
+    is_comparative = analysis_mode == "comparative"
+
     estimates = []
     for op in operations:
         if op.get("fusion_flagged"):
@@ -545,8 +558,12 @@ def compute_impact_estimates(
             continue
 
         savings_high = max(0, time_ms * (1 - eff_pct / TARGET_HIGH))
-        savings_low = max(0, time_ms * (1 - eff_pct / TARGET_LOW))
-        savings_mid = max(0, time_ms * (1 - eff_pct / TARGET_MID))
+        if is_comparative:
+            savings_low = max(0, GAP_FRAC_LOW * savings_high)
+            savings_mid = max(0, GAP_FRAC_MID * savings_high)
+        else:
+            savings_low = max(0, time_ms * (1 - eff_pct / TARGET_LOW))
+            savings_mid = max(0, time_ms * (1 - eff_pct / TARGET_MID))
 
         if savings_high < min_savings_ms:
             continue
@@ -613,17 +630,20 @@ REQUIRED_REPORT_HEADERS = [
 
 def validate_report(
     output_dir: str,
+    report_filename: str = "standalone_analysis.md",
 ) -> Tuple[bool, List[str]]:
     """
-    Validate that standalone_analysis.md contains all required ## section headers.
+    Validate that the report file contains all required ## section headers.
 
     Args:
-        output_dir: Base output directory containing standalone_analysis.md
+        output_dir: Base output directory containing the report
+        report_filename: Report filename (default: standalone_analysis.md;
+            use comparative_analysis.md for comparative mode)
 
     Returns:
         Tuple of (passed: bool, missing: list of error/missing-section strings)
     """
-    report_path = os.path.join(output_dir, "standalone_analysis.md")
+    report_path = os.path.join(output_dir, report_filename)
     if not os.path.exists(report_path):
         return False, ["<file not found>"]
 
@@ -739,7 +759,8 @@ def run_category_analysis(
     if compute_impact:
         baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
         impact_estimates = compute_impact_estimates(
-            operations, category, baseline_ms=baseline_ms
+            operations, category, baseline_ms=baseline_ms,
+            analysis_mode=comparison_scope,
         )
     else:
         impact_estimates = []

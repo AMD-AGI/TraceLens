@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 Canonical reference for the `## Detailed Analysis` candidate blocks that sub-agents
 write into their findings files. The orchestrator pastes these blocks into the final
-`## Detailed Analysis` section of `standalone_analysis.md`, renaming headings with
+`## Detailed Analysis` section of the final report (`standalone_analysis.md` or `comparative_analysis.md`), renaming headings with
 P-numbers, priority icons, and HTML anchors.
 
 **Link here from every `*-analyzer.md`** instead of duplicating the schema.

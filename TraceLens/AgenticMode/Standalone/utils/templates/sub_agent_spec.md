@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 Canonical reference for the output that sub-agents write into their findings
 files. The orchestrator extracts these sections when composing the final
-`standalone_analysis.md` report.
+`standalone_analysis.md` (standalone) or `comparative_analysis.md` (comparative) report.
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
 > schema. Replace `<category>` with the actual category name
@@ -121,7 +121,7 @@ blank line between them. The validator checks for these as substring matches.
 |-------|---------|
 | `**Identification:**` | How these operations were deemed an optimization opportunity. Body text must use **plain language only** — no JSON keys, dotted paths, or internal variable names. **Must** end with a `(source: <artifact> → <keys>)` parenthetical as the final text. Artifact names and keys must be wrapped in backticks (e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). All JSON keys and internal variable names belong **exclusively** inside this parenthetical. When the metrics JSON includes a non-null `library` field for an operation (e.g. `"Tensile"`, `"CK"`, `"AITER"`, `"Triton"`, `"rocBLAS"`), **always** state which library the operations use (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
 | `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
-| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
+| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*. **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower" (e.g. "Trace 2 is 60% faster on this shape"), plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the three-bullet format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` |
 
@@ -278,6 +278,7 @@ Before returning, verify:
    `Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence`.
 3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**`,
    `**Action**`, and `**Impact**`.
+4. **Data table columns** match the tier defaults. Standalone compute: `Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound`; fusion: `Kernel | Type | Duration (us) | Perf model`. Comparative compute: `Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1)`. System (both modes): `Metric | Value | Flagged`.
 
 **System tier:**
 

@@ -18,7 +18,9 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
   - **Trace 1** =  trace (primary). **Trace 2** = trace (target/comparison).
   - Impact semantics: standalone uses roofline gap (75–100% of peak); comparative uses
     trace 2 kernel time as the optimization target (gap = trace1 time − trace2 time).
-  - Efficiency semantics: standalone = % of roofline; comparative = 100 × (trace2 kernel time) / (trace1 kernel time).
+  - Comparative speed semantics: express as "X% faster" or "X% slower" relative to Trace 1.
+    Formula: `speed_diff_pct = abs(1 - t2/t1) × 100`. If t2 < t1 → "X% faster"; if t2 > t1 → "X% slower".
+    Standalone efficiency semantics: % of roofline (unchanged).
 
 === GENERAL RULES ===
 1. Warnings section: Only include if there were errors or high-variance operations; omit entirely if all succeeded and no variance flags.
@@ -132,7 +134,7 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 ### Top Operations
 
 <!-- === STANDALONE Top Operations === -->
-Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. For **Ops** column use `operation_count` from `category_data/<category>_metrics.json` (total invocations). The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %). The last column shows both the time range and E2E % range when kernel_tuning estimates exist (e.g. "~770–9801 ms (1.4–17.3%)"); use "—" when no estimates.
+Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. For **Ops** column use `operation_count` from `category_data/<category>_metrics.json` (total invocations). The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %). For the last column, populate EVERY category independently: read `impact_estimates` from `category_data/<category>_metrics.json`, compute `sum(savings_ms_low)` and `sum(savings_ms_high)` across all estimates, and show "~LOW–HIGH ms (LOW_E2E–HIGH_E2E%)" (e.g. "~770–9801 ms (1.4–17.3%)") when `sum(savings_ms_high) > 0`; use "—" ONLY when `impact_estimates` is empty or all savings are zero. This column is independent of whether the category receives a P-item card.
 
 
 | Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
@@ -140,11 +142,11 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 | 1 | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
 
 <!-- === COMPARATIVE Top Operations === -->
-<!-- Use **% of computation time** based on Trace 1. "Difference" = Trace 2 category time − Trace 1 category time; negative means Trace 2 is faster. Use "—" when trace 2 has no matching category data. -->
+<!-- Use **% of computation time** based on Trace 1. "Difference" = Trace 2 category time − Trace 1 category time; negative means Trace 2 is faster. Use "—" when trace 2 has no matching category data. For the Potential improvement column, populate EVERY category independently: read `impact_estimates` from `category_data/<category>_metrics.json`, compute `sum(savings_ms_low)` and `sum(savings_ms_high)` across all estimates, and show "~LOW–HIGH ms (LOW_E2E–HIGH_E2E%)" when `sum(savings_ms_high) > 0`; use "—" ONLY when `impact_estimates` is empty or all savings are zero. This column is independent of whether the category receives a P-item card; a category where Trace 2 is faster can still have improvement estimates. -->
 
-| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
-|------|----------|-------------------|-------------------|-------------------|-----|-----------------|
-| 1 | ... | ... | ... | ... | ... | +/-X.X or — |
+| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) | Potential improvement (time, E2E %) |
+|------|----------|-------------------|-------------------|-------------------|-----|-----------------|-------------------------------------|
+| 1 | ... | ... | ... | ... | ... | +/-X.X or — | ~X–Y ms (X–Y%) or — |
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
