@@ -22,27 +22,30 @@ See LICENSE for license information.
    P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue
    exists (number sequentially from P1, including CPU/Idle first if invoked).
 6. Each section is independently composable -- can be shared standalone.
-7. Compute and System tiers use separate sequential P1/P2/P3 numbering (no gaps).
+7. All three tiers (Compute, Kernel Fusion, System) use separate sequential P1/P2/P3 numbering (no gaps).
 8. Priority icons are assigned by PRIORITY NUMBER, not severity:
    - Compute Kernel: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
-   - Kernel Fusion: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (by confidence: high → medium → low)
+   - Kernel Fusion: icon by confidence (🔴 high → 🟡 medium → 🟢 low), not priority number
    - System-Level: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
-9. Detailed Analysis: A single `## Detailed Analysis` section contains
-   `### Compute Kernel Insights` then `### Kernel Fusion Insights` then
-   `### System-Level Insights`, each with
-   `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching the optimization card titles and order.
-   Compute and System blocks use five labels: **Identification:**, **Data:**,
-   **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:**.
-   Kernel Fusion blocks use three labels: **Identification:**, **Data:**, **Impact estimate:**.
-   Compute Data uses trace-grounded kernel tables (FLOPS/Byte, Efficiency, Bound);
-   System Data uses system evidence only (no kernel breakdown tables). Impact estimate
-   is rendered from `metadata/*.json → impact_estimates`. P-item cards link to Detailed
-   Analysis anchors (e.g. `#detailed-analysis-compute-p1`).
-10. Model and appendix: Read `metadata/model_info.json`. For the report title and any **&lt;Model&gt;** placeholder used for display: use `model_info["model"]` when it is not "Cannot be inferred from trace"; otherwise use **"Workload"**. Fill the Appendix **Model Architecture** section with the raw `model`, `architecture`, `scale`, and `precision` values from that file (they may be "Cannot be inferred from trace").
-11. No redundancy: Information appears in ONE place only.
-12. Recommendations: Max ~10 lines PER recommendation. Use category-specific Action text
-    (SDPA: tile/block, backend; GEMM: fusion, tile, library; elementwise: fuse with adjacent;
-    do not suggest kernel fusion for SDPA).
+9. Field labels — each section uses EXACTLY these labels:
+
+   OPTIMIZATION CARDS (§Compute Kernel Optimizations, §Kernel Fusion, §System-Level):
+   - Compute Kernel P-items: **Insight** / **Action** / **Impact**
+   - Kernel Fusion P-items:  **Insight** / **Action** / **Impact** / **Confidence**
+   - System-Level P-items:   **Insight** / **Action**
+
+   DETAILED ANALYSIS (§Detailed Analysis only):
+   - Compute / System blocks: **Identification:** / **Data:** / **Reasoning for Slowdown:** / **Resolution:** / **Impact estimate:**
+   - Kernel Fusion blocks:    **Identification:** / **Data:** / **Impact estimate:**
+
+10. Detailed Analysis: three subsections (`### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights`) with `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching card titles and order.
+11. Model and appendix: Use `model_info["model"]` from `metadata/model_info.json` for the
+    report title (fall back to "Workload" if "Cannot be inferred from trace"). Fill Appendix
+    **Model Architecture** with the raw `model`, `architecture`, `scale`, `precision` values.
+12. Library parenthetical: Compute Kernel card titles and Detailed Analysis headings must include
+    the library name(s) in parentheses when present in the sub-agent findings. Omit when no
+    library is identified. System-Level and Kernel Fusion titles do NOT include a library
+    parenthetical.
 -->
 
 # <Model> - <Platform> Standalone Analysis
@@ -50,6 +53,8 @@ See LICENSE for license information.
 ## Executive Summary
 [1 paragraph overview + key metrics table]
 
+<!-- MANDATORY: This table must contain exactly these 5 rows:
+     Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category -->
 | Metric | Value |
 |--------|-------|
 | Total Time | X ms |
@@ -98,7 +103,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
 
-### 🔴 P1: <Brief Title>
+### 🔴 P1: <Brief Title> (<Library>)
 
 **Insight**: [1 sentence - what's wrong]
 
@@ -110,7 +115,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ---
 
-### 🟡 P2: <Brief Title>
+### 🟡 P2: <Brief Title> (<Library>)
 
 **Insight**: [1 sentence]
 
@@ -122,7 +127,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 ---
 
-### 🟢 P3: <Brief Title>
+### 🟢 P3: <Brief Title> (<Library>)
 
 **Insight**: [1 sentence]
 
@@ -157,7 +162,7 @@ Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- CONDITIONAL: If NO actionable system-level issues found (idle <= 15% and all multi-kernel assessments flagged: false), use Template A. -->
-<!-- Otherwise, number priorities sequentially starting from P1. Include CPU/Idle only if idle > 15%. -->
+<!-- Otherwise, number priorities sequentially: CPU/Idle first (if idle > 15%), then multi-kernel issues by severity. -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. -->
 <!-- System-level recommendations have NO **Impact** field -- impact is not quantifiable for system-level issues. -->
@@ -204,8 +209,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ## Detailed Analysis
 
-<!-- Paste reasoning blocks from sub-agent findings, renaming headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
-<!-- Each P-block (Compute Kernel and System-Level) uses five required labels: **Identification:**, **Data:**, **Reasoning for Slowdown:**, **Resolution:**, **Impact estimate:** -->
+<!-- Paste reasoning blocks from sub-agent findings, augment headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
+<!-- Detailed Analysis labels per rule 9 — do not use these labels in optimization cards above -->
 <!-- Impact estimate bullets are rendered by each sub-agent from metadata/*.json → impact_estimates (same source as card Impact). -->
 
 ### Compute Kernel Insights
@@ -214,7 +219,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
 <a id="detailed-analysis-compute-p1"></a>
-#### 🔴 P1: <Brief Title>
+#### 🔴 P1: <Brief Title> (<Library>)
 **Identification:**
 **Data:**
 
@@ -234,8 +239,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
 <!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available." -->
 
-<a id="detailed-analysis-fusion-1"></a>
-#### 1. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+<a id="detailed-analysis-fusion-P1"></a>
+#### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
 **Identification:**
 
@@ -247,10 +252,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Impact estimate:**
 
-<a id="detailed-analysis-fusion-2"></a>
-#### 2. <Candidate Name> (<time_ms> ms, <instance_count> instances)
+<a id="detailed-analysis-fusion-P2"></a>
+#### 🔴/🟡/🟢 P2: <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
-*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-N`.*
+*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-PN`.*
 
 ### System-Level Insights
 
