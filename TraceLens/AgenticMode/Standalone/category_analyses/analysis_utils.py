@@ -294,7 +294,7 @@ def calculate_efficiency(
     row: pd.Series,
     peak_hbm_bw: float,
     peak_maf_or_maf_dict,
-    analysis_mode: str = "standalone",
+    comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
     Extract efficiency metrics for an operation from pre-computed CSV columns.
@@ -304,7 +304,7 @@ def calculate_efficiency(
         peak_hbm_bw: Peak HBM bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
             for resolving the precision-aware peak
-        analysis_mode:
+        comparison_scope:
             ``standalone`` uses roofline efficiency
             ``comparative`` uses comparative efficiency
 
@@ -353,7 +353,7 @@ def calculate_efficiency(
         balance_point = peak_maf / peak_hbm_bw
         result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
 
-    if analysis_mode == "comparative":
+    if comparison_scope == "comparative":
         _comparative_efficiency_percent_from_row(result, row)
     else:
         _apply_standalone_efficiency_percent(result, row)
@@ -390,7 +390,7 @@ def build_operation_metrics(
     ops_df: pd.DataFrame,
     metadata: dict,
     category_config: dict,
-    analysis_mode: str = "standalone",
+    comparison_scope: str = "standalone",
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
@@ -405,7 +405,7 @@ def build_operation_metrics(
         category_config: Category-specific configuration with:
             - extra_fields: Additional fields to extract (optional)
             - operation_classifier: Function to classify operations (optional)
-        analysis_mode: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
+        comparison_scope: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
 
     Returns:
         List of operation metric dicts
@@ -436,7 +436,7 @@ def build_operation_metrics(
         )
 
         efficiency = calculate_efficiency(
-            row, peak_hbm_bw, maf, analysis_mode=analysis_mode
+            row, peak_hbm_bw, maf, comparison_scope=comparison_scope
         )
 
         op_metric = {
@@ -509,7 +509,7 @@ def compute_impact_estimates(
 
     Assumes tuning can reach 75%–100% of the efficiency target. For standalone
     metrics that is roofline performance; for comparative metrics,
-    ``calculate_efficiency(..., analysis_mode='comparative')`` sets
+    ``calculate_efficiency(..., comparison_scope='comparative')`` sets
     ``efficiency_percent`` to ``100 * t2 / t1`` and the same band math applies.
     Produces a range:
       - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
@@ -688,7 +688,7 @@ def run_category_analysis(
     pre_process_fn=None,
     no_data_check_fn=None,
     compute_impact=True,
-    analysis_mode: str = "standalone",
+    comparison_scope: str = "standalone",
 ):
     """Generic runner for category analysis scripts.
 
@@ -699,15 +699,15 @@ def run_category_analysis(
         extract_fn: Callable(ops_df, metadata) -> dict of category-specific metrics
         pre_process_fn: Optional callable(ops_df, metadata) -> (ops_df, extra_dict)
             for pre-filtering or augmenting the DataFrame before analysis
-        no_data_check_fn: Optional callable(output_dir, category, analysis_mode) -> dict or None.
+        no_data_check_fn: Optional callable(output_dir, category, comparison_scope) -> dict or None.
             If it returns a dict, that dict is written as metrics and the runner
             exits early (used for categories that may not be present, e.g. MoE).
         compute_impact: Whether to compute kernel-tuning impact estimates
-        analysis_mode: ``standalone`` (roofline efficiency) or ``comparative``
+        comparison_scope: ``standalone`` (roofline efficiency) or ``comparative``
             (TraceDiff-style ``100 * t2 / t1`` in ``operations[].efficiency``).
     """
     if no_data_check_fn:
-        no_data_metrics = no_data_check_fn(output_dir, category, analysis_mode)
+        no_data_metrics = no_data_check_fn(output_dir, category, comparison_scope)
         if no_data_metrics is not None:
             output_path = write_metrics_json(no_data_metrics, output_dir, category)
             print(f"No data. Metrics written to: {output_path}")
@@ -720,7 +720,7 @@ def run_category_analysis(
             "category": category,
             "status": "ERROR",
             "error": str(e),
-            "analysis_mode": analysis_mode,
+            "comparison_scope": comparison_scope,
         }
         write_metrics_json(error_metrics, output_dir, category)
         print(f"Error: {e}", file=sys.stderr)
@@ -732,7 +732,7 @@ def run_category_analysis(
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
     operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=analysis_mode
+        ops_df, metadata, config, comparison_scope=comparison_scope
     )
     category_specific = extract_fn(ops_df, metadata)
 
@@ -747,7 +747,7 @@ def run_category_analysis(
     metrics = {
         "category": category,
         "status": "OK",
-        "analysis_mode": analysis_mode,
+        "comparison_scope": comparison_scope,
         **time_metrics,
         "operations": operations,
         "category_specific": category_specific,

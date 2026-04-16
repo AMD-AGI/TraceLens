@@ -264,7 +264,7 @@ def test_comparative_impact_from_operations_trace2_faster():
     metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     config: dict = {}
     operations = build_operation_metrics(
-        df, metadata, config, analysis_mode="comparative"
+        df, metadata, config, comparison_scope="comparative"
     )
     mm_op = next(o for o in operations if o["name"] == "aten::mm")
     assert mm_op["efficiency"]["efficiency_percent"] == 50.0
@@ -543,7 +543,7 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     if m.get("status") == "OK":
         assert "operations" in m
         assert "impact_estimates" in m
-        assert m.get("analysis_mode") == "standalone"
+        assert m.get("comparison_scope") == "standalone"
 
 
 def test_gemm_analysis_script_comparative_mode(tmp_path):
@@ -599,7 +599,7 @@ def test_gemm_analysis_script_comparative_mode(tmp_path):
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     with open(out / "category_data" / "gemm_metrics.json") as f:
         m = json.load(f)
-    assert m["analysis_mode"] == "comparative"
+    assert m["comparison_scope"] == "comparative"
     assert len(m["impact_estimates"]) == 1
     assert m["impact_estimates"][0]["type"] == "kernel_tuning"
     assert m["operations"][0]["efficiency"]["efficiency_percent"] == 50.0
@@ -608,8 +608,8 @@ def test_gemm_analysis_script_comparative_mode(tmp_path):
     assert m["impact_estimates"][0]["savings_ms_high"] == 5.0
 
 
-def test_moe_analysis_no_data_includes_analysis_mode(tmp_path):
-    """moe_analysis.py with no moe_fused_ops.csv writes analysis_mode from --comparison_scope."""
+def test_moe_analysis_no_data_includes_comparison_scope(tmp_path):
+    """moe_analysis.py with no moe_fused_ops.csv writes comparison_scope from --comparison_scope."""
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
     script = os.path.join(STANDALONE, "category_analyses", "moe_analysis.py")
@@ -641,7 +641,7 @@ def test_moe_analysis_no_data_includes_analysis_mode(tmp_path):
     with open(metrics_path) as f:
         m = json.load(f)
     assert m.get("status") == "NO_DATA"
-    assert m.get("analysis_mode") == "comparative"
+    assert m.get("comparison_scope") == "comparative"
 
 
 def test_norm_analysis_script_comparative_scope(tmp_path):
@@ -697,5 +697,5 @@ def test_norm_analysis_script_comparative_scope(tmp_path):
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     with open(out / "category_data" / "norm_metrics.json") as f:
         m = json.load(f)
-    assert m["analysis_mode"] == "comparative"
+    assert m["comparison_scope"] == "comparative"
     assert m["operations"][0]["efficiency"]["efficiency_percent"] == 50.0

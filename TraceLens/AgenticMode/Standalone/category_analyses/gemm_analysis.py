@@ -78,7 +78,7 @@ def main():
             "operation_classifier": classify_gemm_operation,
         },
         extract_fn=extract_category_specific,
-        analysis_mode=args.comparison_scope,
+        comparison_scope=args.comparison_scope,
     )
 
 

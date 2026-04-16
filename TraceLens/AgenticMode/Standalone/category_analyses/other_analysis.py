@@ -134,7 +134,7 @@ def main():
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
     operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=args.comparison_scope
+        ops_df, metadata, config, comparison_scope=args.comparison_scope
     )
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
 
@@ -146,7 +146,7 @@ def main():
     metrics = {
         "category": category,
         "status": "OK",
-        "analysis_mode": args.comparison_scope,
+        "comparison_scope": args.comparison_scope,
         **time_metrics,
         "operations": operations,
         "category_specific": category_specific,

@@ -72,7 +72,7 @@ def main():
         },
         extract_fn=extract_category_specific,
         compute_impact=False,
-        analysis_mode=args.comparison_scope,
+        comparison_scope=args.comparison_scope,
     )
 
 

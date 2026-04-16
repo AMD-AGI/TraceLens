@@ -113,7 +113,7 @@ When `comparison_scope` is `standalone`:
 - **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
 - **Type**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
 
-**Comparative** — when `metrics['analysis_mode']` is `comparative`:
+**Comparative** — when `metrics['comparison_scope']` is `comparative`:
 
 ```markdown
 | Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |

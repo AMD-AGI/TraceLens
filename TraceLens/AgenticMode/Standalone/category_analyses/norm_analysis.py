@@ -45,7 +45,7 @@ def main():
         output_dir=args.output_dir,
         config={"extra_fields": []},
         extract_fn=extract_category_specific,
-        analysis_mode=args.comparison_scope,
+        comparison_scope=args.comparison_scope,
     )
 
 
