@@ -252,7 +252,7 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 - Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
 ```
 
-**Comparative — Quantifiable (gap to target trace):**
+**Comparative — Quantifiable:**
 
 ```markdown
 - Low end (75% gap target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
