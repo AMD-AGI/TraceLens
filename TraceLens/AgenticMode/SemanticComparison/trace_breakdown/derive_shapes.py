@@ -37,20 +37,30 @@ from category_mappings import (
 )
 
 
-def load_or_prompt_run_config(output_dir, cli_num_tokens, cli_context_length):
-    """Load cached run_config.json or create from CLI args."""
+def load_or_prompt_run_config(
+    output_dir, cli_num_tokens, cli_context_length, metadata=None
+):
+    """Load cached run_config.json or create from CLI args / metadata."""
     cfg_path = os.path.join(output_dir, "run_config.json")
     cached = {}
     if os.path.exists(cfg_path):
         with open(cfg_path) as f:
             cached = json.load(f)
 
-    num_tokens = cli_num_tokens or cached.get("num_tokens")
-    context_length = cli_context_length or cached.get("context_length")
+    num_tokens = (
+        cli_num_tokens
+        or (metadata.get("num_tokens") if metadata else None)
+        or cached.get("num_tokens")
+    )
+    context_length = (
+        cli_context_length
+        or (metadata.get("context_length") if metadata else None)
+        or cached.get("context_length")
+    )
 
     if num_tokens is None:
         print(
-            "ERROR: --num_tokens is required on first run (no cached run_config.json found)",
+            "ERROR: --num_tokens is required on first run (no cached run_config.json or --metadata found)",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -61,6 +71,8 @@ def load_or_prompt_run_config(output_dir, cli_num_tokens, cli_context_length):
     run_cfg = {
         "num_tokens": num_tokens,
         "context_length": context_length,
+        "context_sum": metadata.get("context_sum") if metadata else None,
+        "generation_sum": metadata.get("generation_sum") if metadata else None,
     }
     with open(cfg_path, "w") as f:
         json.dump(run_cfg, f, indent=2)
@@ -71,7 +83,14 @@ def load_or_prompt_run_config(output_dir, cli_num_tokens, cli_context_length):
     return run_cfg
 
 
-def derive_all_shapes(labeled_kernels, model_cfg, num_tokens, context_length):
+def derive_all_shapes(
+    labeled_kernels,
+    model_cfg,
+    num_tokens,
+    context_length,
+    context_sum=None,
+    generation_sum=None,
+):
     """Compute shapes for each unique semantic_block in the labeled kernels."""
     seen_blocks = OrderedDict()
     for k in labeled_kernels:
@@ -93,6 +112,8 @@ def derive_all_shapes(labeled_kernels, model_cfg, num_tokens, context_length):
             num_tokens,
             context_length=context_length,
             layer_idx=layer_idx,
+            context_sum=context_sum,
+            generation_sum=generation_sum,
         )
 
         n_layers = len(info["layers"]) if info["layers"] else 1
@@ -147,13 +168,24 @@ def main():
         help="KV context length for SDPA (defaults to num_tokens)",
     )
     parser.add_argument(
+        "--metadata",
+        type=str,
+        default=None,
+        help="Path to merged metadata JSON (from annotation_metadata.gather_metadata)",
+    )
+    parser.add_argument(
         "-o", "--output", default="derived_shapes.json", help="Output JSON path"
     )
     args = parser.parse_args()
 
+    metadata = None
+    if args.metadata and os.path.exists(args.metadata):
+        with open(args.metadata) as f:
+            metadata = json.load(f)
+
     output_dir = os.path.dirname(os.path.abspath(args.output)) or "."
     run_cfg = load_or_prompt_run_config(
-        output_dir, args.num_tokens, args.context_length
+        output_dir, args.num_tokens, args.context_length, metadata=metadata
     )
 
     with open(args.labels_json) as f:
@@ -169,6 +201,8 @@ def main():
         model_cfg,
         run_cfg["num_tokens"],
         run_cfg["context_length"],
+        context_sum=run_cfg.get("context_sum"),
+        generation_sum=run_cfg.get("generation_sum"),
     )
 
     no_formula = [r for r in results if r["total_flops"] is None]

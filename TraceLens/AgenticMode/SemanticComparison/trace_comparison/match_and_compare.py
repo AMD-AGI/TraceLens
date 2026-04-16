@@ -21,6 +21,13 @@ Usage:
         --name-a MI355 --name-b B200 \
         [--shapes-a derived_a.json --shapes-b derived_b.json] \
         [-o comparison.csv]
+
+    For multi-region (per steady-state), use --regions-dir-a and --regions-dir-b:
+    python match_and_compare.py --regions-dir-a output/MI355 --regions-dir-b output/B200 \
+        --name-a MI355 --name-b B200 -o comparison.csv
+
+    This matches regions by subdir name (e.g. prefill_only_3072) and compares
+    only corresponding regions (apples-to-apples).
 """
 
 import argparse
@@ -31,7 +38,12 @@ import sys
 from collections import OrderedDict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trace_breakdown"))
-from category_mappings import get_group, get_perf_category
+from category_mappings import (
+    get_group,
+    get_perf_category,
+    refine_perf_category,
+    group_from_perf_category,
+)
 
 
 def load_labels(path):
@@ -47,12 +59,22 @@ def load_shapes(path):
 
 
 def aggregate(labeled_kernels):
-    """Aggregate labeled kernels by semantic_block."""
+    """Aggregate labeled kernels by semantic_block.
+
+    Carries forward perf_category and nn_module from kernel data when
+    available (set by align_and_label.py / apply_category_corrections.py).
+    """
     blocks = OrderedDict()
     for k in labeled_kernels:
         block = k["semantic_block"]
         if block not in blocks:
-            blocks[block] = {"names": set(), "durs": [], "count": 0}
+            blocks[block] = {
+                "names": set(),
+                "durs": [],
+                "count": 0,
+                "perf_category": k.get("perf_category"),
+                "nn_module": k.get("nn_module"),
+            }
         b = blocks[block]
         b["names"].add(k["name"])
         b["durs"].append(k["dur"])
@@ -60,12 +82,35 @@ def aggregate(labeled_kernels):
     return blocks
 
 
+def load_metadata(path):
+    """Load metadata.json and return gpu_timeline dict if present."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            meta = json.load(f)
+        return meta.get("gpu_timeline")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def build_comparison(
-    agg_a, agg_b, total_a, total_b, name_a, name_b, shapes_a=None, shapes_b=None
+    agg_a,
+    agg_b,
+    total_a,
+    total_b,
+    name_a,
+    name_b,
+    shapes_a=None,
+    shapes_b=None,
+    region=None,
+    gpu_timeline_a=None,
+    gpu_timeline_b=None,
 ):
     """Build comparison rows for all semantic blocks present in either trace."""
     all_blocks = list(OrderedDict.fromkeys(list(agg_a.keys()) + list(agg_b.keys())))
     has_shapes = shapes_a is not None or shapes_b is not None
+    has_gpu_timeline = gpu_timeline_a is not None and gpu_timeline_b is not None
 
     rows = []
     for i, block in enumerate(all_blocks):
@@ -82,16 +127,29 @@ def build_comparison(
         gap = a_total - b_total
 
         row = OrderedDict()
+        if region is not None:
+            row["region"] = region
         row["semantic_block"] = block
-        row["semantic_group"] = get_group(block)
-        row["perf_category"] = get_perf_category(block)
+        kernel_names_a_str = " | ".join(sorted(a["names"]))
+        kernel_names_b_str = " | ".join(sorted(b["names"]))
+        base_cat = (
+            a.get("perf_category") or b.get("perf_category") or get_perf_category(block)
+        )
+        row["perf_category"] = refine_perf_category(
+            base_cat, kernel_names_a_str, kernel_names_b_str
+        )
+        grp = get_group(block)
+        if grp == "Others" and row["perf_category"] != "Others":
+            grp = group_from_perf_category(row["perf_category"])
+        row["semantic_group"] = grp
+        row["nn_module"] = a.get("nn_module") or b.get("nn_module") or ""
         row["algorithm_order"] = i + 1
-        row[f"{name_a}_kernel_names"] = " | ".join(sorted(a["names"]))
+        row[f"{name_a}_kernel_names"] = kernel_names_a_str
         row[f"{name_a}_kernel_count"] = a["count"]
         row[f"{name_a}_total_us"] = round(a_total, 2)
         row[f"{name_a}_avg_us"] = round(a_avg, 2)
         row[f"{name_a}_pct"] = round(a_pct, 1)
-        row[f"{name_b}_kernel_names"] = " | ".join(sorted(b["names"]))
+        row[f"{name_b}_kernel_names"] = kernel_names_b_str
         row[f"{name_b}_kernel_count"] = b["count"]
         row[f"{name_b}_total_us"] = round(b_total, 2)
         row[f"{name_b}_avg_us"] = round(b_avg, 2)
@@ -130,6 +188,16 @@ def build_comparison(
             row[f"{name_b}_TB_s"] = (
                 round(total_bytes / b_time_s / 1e12, 4) if b_time_s > 0 else 0
             )
+
+        if has_gpu_timeline:
+            row[f"{name_a}_busy_ms"] = round(
+                gpu_timeline_a.get("busy_time_us", 0) / 1000, 2
+            )
+            row[f"{name_a}_idle_pct"] = gpu_timeline_a.get("idle_pct")
+            row[f"{name_b}_busy_ms"] = round(
+                gpu_timeline_b.get("busy_time_us", 0) / 1000, 2
+            )
+            row[f"{name_b}_idle_pct"] = gpu_timeline_b.get("idle_pct")
 
         rows.append(row)
     return rows
@@ -185,62 +253,147 @@ def run_assertions(rows, labeled_a, labeled_b, total_a, total_b, name_a, name_b)
 
 def main():
     parser = argparse.ArgumentParser(description="Compare two semantic breakdowns")
-    parser.add_argument("trace_a", help="Path to trace A semantic_labels.json")
-    parser.add_argument("trace_b", help="Path to trace B semantic_labels.json")
+    parser.add_argument(
+        "trace_a", nargs="?", help="Path to trace A semantic_labels.json"
+    )
+    parser.add_argument(
+        "trace_b", nargs="?", help="Path to trace B semantic_labels.json"
+    )
+    parser.add_argument(
+        "--regions-dir-a",
+        help="Dir with per-region subdirs (e.g. prefill_only_3072/semantic_labels.json)",
+    )
+    parser.add_argument(
+        "--regions-dir-b", help="Dir with per-region subdirs for trace B"
+    )
     parser.add_argument("--name-a", default="trace_a", help="Short name for trace A")
     parser.add_argument("--name-b", default="trace_b", help="Short name for trace B")
     parser.add_argument("--shapes-a", help="Path to trace A derived_shapes.json")
     parser.add_argument("--shapes-b", help="Path to trace B derived_shapes.json")
     parser.add_argument(
+        "--region",
+        help="Region descriptor (e.g. prefill_only_3072) for multi-section reports",
+    )
+    parser.add_argument(
         "-o", "--output", default="comparison.csv", help="Output CSV path"
     )
     args = parser.parse_args()
 
-    data_a = load_labels(args.trace_a)
-    data_b = load_labels(args.trace_b)
+    all_rows = []
+    fieldnames = None
 
-    labeled_a = data_a["labeled_kernels"]
-    labeled_b = data_b["labeled_kernels"]
-    total_a = data_a.get("total_kernel_time_us", sum(k["dur"] for k in labeled_a))
-    total_b = data_b.get("total_kernel_time_us", sum(k["dur"] for k in labeled_b))
+    if args.regions_dir_a and args.regions_dir_b:
+        regions_a = {
+            d
+            for d in os.listdir(args.regions_dir_a)
+            if os.path.isdir(os.path.join(args.regions_dir_a, d))
+        }
+        regions_b = {
+            d
+            for d in os.listdir(args.regions_dir_b)
+            if os.path.isdir(os.path.join(args.regions_dir_b, d))
+        }
+        common_regions = sorted(regions_a & regions_b)
+        for region in common_regions:
+            labels_a = os.path.join(args.regions_dir_a, region, "semantic_labels.json")
+            labels_b = os.path.join(args.regions_dir_b, region, "semantic_labels.json")
+            shapes_a_path = os.path.join(
+                args.regions_dir_a, region, "derived_shapes.json"
+            )
+            shapes_b_path = os.path.join(
+                args.regions_dir_b, region, "derived_shapes.json"
+            )
+            metadata_a_path = os.path.join(args.regions_dir_a, region, "metadata.json")
+            metadata_b_path = os.path.join(args.regions_dir_b, region, "metadata.json")
+            if not os.path.exists(labels_a) or not os.path.exists(labels_b):
+                continue
+            data_a = load_labels(labels_a)
+            data_b = load_labels(labels_b)
+            labeled_a = data_a["labeled_kernels"]
+            labeled_b = data_b["labeled_kernels"]
+            total_a = data_a.get(
+                "total_kernel_time_us", sum(k["dur"] for k in labeled_a)
+            )
+            total_b = data_b.get(
+                "total_kernel_time_us", sum(k["dur"] for k in labeled_b)
+            )
+            shapes_a = (
+                load_shapes(shapes_a_path) if os.path.exists(shapes_a_path) else None
+            )
+            shapes_b = (
+                load_shapes(shapes_b_path) if os.path.exists(shapes_b_path) else None
+            )
+            gpu_timeline_a = load_metadata(metadata_a_path)
+            gpu_timeline_b = load_metadata(metadata_b_path)
+            agg_a = aggregate(labeled_a)
+            agg_b = aggregate(labeled_b)
+            rows = build_comparison(
+                agg_a,
+                agg_b,
+                total_a,
+                total_b,
+                args.name_a,
+                args.name_b,
+                shapes_a,
+                shapes_b,
+                region=region,
+                gpu_timeline_a=gpu_timeline_a,
+                gpu_timeline_b=gpu_timeline_b,
+            )
+            all_rows.extend(rows)
+            if fieldnames is None and rows:
+                fieldnames = list(rows[0].keys())
+        if not all_rows:
+            print("No matching regions found", file=sys.stderr)
+            sys.exit(1)
+    else:
+        if not args.trace_a or not args.trace_b:
+            parser.error(
+                "Provide trace_a and trace_b, or --regions-dir-a and --regions-dir-b"
+            )
+        data_a = load_labels(args.trace_a)
+        data_b = load_labels(args.trace_b)
+        labeled_a = data_a["labeled_kernels"]
+        labeled_b = data_b["labeled_kernels"]
+        total_a = data_a.get("total_kernel_time_us", sum(k["dur"] for k in labeled_a))
+        total_b = data_b.get("total_kernel_time_us", sum(k["dur"] for k in labeled_b))
+        shapes_a = load_shapes(args.shapes_a) if args.shapes_a else None
+        shapes_b = load_shapes(args.shapes_b) if args.shapes_b else None
+        agg_a = aggregate(labeled_a)
+        agg_b = aggregate(labeled_b)
+        all_rows = build_comparison(
+            agg_a,
+            agg_b,
+            total_a,
+            total_b,
+            args.name_a,
+            args.name_b,
+            shapes_a,
+            shapes_b,
+            region=args.region,
+        )
+        fieldnames = list(all_rows[0].keys()) if all_rows else []
+        if all_rows:
+            errors = run_assertions(
+                all_rows,
+                labeled_a,
+                labeled_b,
+                total_a,
+                total_b,
+                args.name_a,
+                args.name_b,
+            )
+            for e in errors:
+                print(e, file=sys.stderr)
+            if any("FAIL" in e for e in errors):
+                sys.exit(1)
 
-    shapes_a = load_shapes(args.shapes_a) if args.shapes_a else None
-    shapes_b = load_shapes(args.shapes_b) if args.shapes_b else None
-
-    agg_a = aggregate(labeled_a)
-    agg_b = aggregate(labeled_b)
-
-    rows = build_comparison(
-        agg_a,
-        agg_b,
-        total_a,
-        total_b,
-        args.name_a,
-        args.name_b,
-        shapes_a,
-        shapes_b,
-    )
-
-    errors = run_assertions(
-        rows, labeled_a, labeled_b, total_a, total_b, args.name_a, args.name_b
-    )
-    for e in errors:
-        print(e, file=sys.stderr)
-    if any("FAIL" in e for e in errors):
-        sys.exit(1)
-
-    fieldnames = list(rows[0].keys())
-    with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(
-        f"Wrote {args.output} ({len(rows)} blocks, "
-        f"{args.name_a}={len(labeled_a)} kernels/{total_a:.0f}us, "
-        f"{args.name_b}={len(labeled_b)} kernels/{total_b:.0f}us)",
-        file=sys.stderr,
-    )
+    if fieldnames and all_rows:
+        with open(args.output, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_rows)
+        print(f"Wrote {args.output} ({len(all_rows)} rows)", file=sys.stderr)
 
 
 if __name__ == "__main__":

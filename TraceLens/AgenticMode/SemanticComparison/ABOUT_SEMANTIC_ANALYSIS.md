@@ -102,7 +102,13 @@ The semantic block label determines:
 
 ## The Semantic Block Vocabulary
 
-The vocabulary is a fixed set of labels defined in `category_mappings.py`. Each label maps to exactly one performance category. The vocabulary covers the standard transformer architecture and its MoE variant:
+The vocabulary is an extensible set of labels. A reference catalog is defined in `functional_label_catalog.py`, and the core mappings live in `category_mappings.py`. Each label maps to exactly one performance category (`perf_category`), which is stored explicitly per kernel.
+
+The labeling happens in two stages:
+1. **Algorithmic alignment** (`align_and_label.py`) assigns generic positional labels (e.g., `GEMM_0`, `Elementwise_1`) based on pattern matching and cross-trace dynamic programming alignment.
+2. **LLM refinement** (Step 2.5) replaces generic labels with functional names (e.g., `GEMM_0` → `QKV Projection`) and sets `perf_category` and `nn_module` explicitly on each kernel. The LLM can use labels from the reference catalog or invent new ones for novel architectures.
+
+The reference vocabulary covers the standard transformer architecture and its MoE variant:
 
 **Preamble** -- operations before the first layer:
 `Embedding`, `Input Norm`
@@ -119,4 +125,4 @@ The vocabulary is a fixed set of labels defined in `category_mappings.py`. Each 
 **Epilogue** -- operations after the last layer:
 `Final Norm`, `LM Head`
 
-Every kernel in a trace must be assigned one of these labels. There is no "Other" or "Unknown" category -- the goal is complete, analyzable coverage. If a kernel cannot be confidently mapped to a specific block, it is assigned to the nearest matching label in the Elementwise category, ensuring it still participates in roofline analysis rather than being excluded.
+Every kernel in a trace must be assigned a label. Kernels that cannot be confidently classified into a known type (GEMM, SDPA, Normalization, Elementwise, MemCpy) are assigned to the **Others** category. A post-labeling validation step also ensures type-category consistency: if a kernel's classified type does not match the expected type of its assigned semantic block, it is relabeled. The LLM is also instructed to use honest labels like "Others" or "Unknown Elementwise" rather than misclassify uncertain kernels.
