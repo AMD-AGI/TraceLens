@@ -206,7 +206,8 @@ Sub-agents write an **`impact_estimates` array** into
 - **Compute tier only:** use `kernel_tuning` estimates from the pre-computed
   metrics JSON (`savings_ms_low`–`savings_ms_high`, `e2e_pct_low`–`e2e_pct_high`).
   Do NOT manually estimate algorithmic, fusion, or system savings.
-- **Confidence:** `high` = clear, measurable gap to expected peak (roofline for standalone; trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate.
+- **Confidence:** `high` = clear, measurable gap to peak; `medium` = likely
+  opportunity but outcome depends on implementation; `low` = rough estimate.
 
 ### JSON schema
 
