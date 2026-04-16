@@ -227,7 +227,7 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
 
 ```bash
 <prefix> python3 \
-  TraceLens/AgenticMode/Standalone/orchestrator_prepare.py \
+  TraceLens/AgenticMode/Standalone/utils/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir>

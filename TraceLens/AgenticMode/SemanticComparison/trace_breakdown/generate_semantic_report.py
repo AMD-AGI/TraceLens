@@ -9,7 +9,7 @@
 Generate a multi-sheet performance report from semantic labels + derived shapes.
 
 Produces a report with column names compatible with the Standalone analysis
-pipeline (orchestrator_prepare.py) so that graph-mode traces can be analyzed
+pipeline (utils/orchestrator_prepare.py) so that graph-mode traces can be analyzed
 using the same sub-agents as eager-mode traces.
 
 Input:
@@ -242,7 +242,7 @@ def build_unified_perf_summary(labels_data, shapes_data, gpu_arch):
     """Sheet 3: unified_perf_summary -- standalone-compatible format.
 
     One row per unique (semantic_block, perf_params) combination. Uses column
-    names compatible with orchestrator_prepare.py (``name``, ``op category``,
+    names compatible with utils/orchestrator_prepare.py (``name``, ``op category``,
     ``Kernel Time (µs)_sum``, etc.) while keeping semantic metadata as extra
     columns for context.
     """

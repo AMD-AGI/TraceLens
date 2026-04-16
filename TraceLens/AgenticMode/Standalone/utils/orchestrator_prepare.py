@@ -8,8 +8,6 @@
 """
 TraceLens AgenticMode - Orchestrator Preparation Script
 Steps 2-5: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
-
-TO DO: Prune out unnecessary segments
 """
 
 import argparse
@@ -21,12 +19,16 @@ import sys
 import traceback
 from collections import defaultdict
 from typing import Any
-
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
 from utils.arch_utils import list_platforms, load_arch
+from TraceLens.TreePerf import TreePerfAnalyzer
+from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+from TraceLens.AgenticMode.SemanticComparison.trace_breakdown.classify_kernels import (
+    classify_kernel,
+)
 
 CATEGORY_SKILL_MAP = {
     "cpu_idle": "cpu-idle-analysis",
@@ -41,6 +43,27 @@ CATEGORY_SKILL_MAP = {
     "convolution": "convolution-analysis",
     "other": "generic-op-analysis",
 }
+
+FUSION_EXCLUDED_KERNELS = ["nccl", "rccl", "memcpy", "memset"]
+FUSION_ALREADY_FUSED = [
+    "attn_fwd",
+    "attn_bwd",
+    "fmha",
+    "unified_attention",
+    "paged_attention",
+    "flash_attn",
+    "flash_fwd",
+    "silu_and_mul",
+    "SiluAndMul",
+]
+_NORM_KERNEL_PATTERNS = [
+    "batchnorm",
+    "layernorm",
+    "groupnorm",
+    "instancenorm",
+    "rmsnorm",
+]
+_MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
 def get_enhanced_category(row):
@@ -197,6 +220,7 @@ def _perf_csv_dirs_for_scope(comparison_scope: str, output_dir: str):
             os.path.join(output_dir, "perf_report_trace1_csvs"),
             os.path.join(output_dir, "perf_report_trace2_csvs"),
         )
+
 
 
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):

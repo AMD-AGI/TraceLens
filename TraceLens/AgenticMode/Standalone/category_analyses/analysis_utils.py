@@ -508,21 +508,15 @@ def compute_impact_estimates(
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    **Standalone mode** (roofline band):
-      Assumes tuning can reach 75%–100% of roofline peak. Produces a range:
-      - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
-      - savings_ms_low  = op_time_ms * (1 - efficiency_pct / 75)    [75% target]
-      - savings_ms      = op_time_ms * (1 - efficiency_pct / 87.5)  [87.5% midpoint]
-
-    **Comparative mode** (gap-fraction):
-      ``efficiency_percent`` is ``100 * t2 / t1``, so the full gap is
-      ``savings_ms_high = t1 - t2``.  The low/mid estimates are fractions of
-      that gap:
+    Computes the gap to 100% roofline (standalone) or trace2 runtime (comparative)
+    and estimates how much of that gap tuning can close (75%–100%). Produces a range:
       - savings_ms_high = gap                   [close 100% of the gap]
       - savings_ms_low  = 0.75 * gap            [close 75% of the gap]
       - savings_ms      = 0.875 * gap           [midpoint]
 
-    The midpoint is the primary estimate used for plots and aggregation.
+    where gap = op_time_ms * (1 - efficiency_pct / 100).
+
+    The midpoint (87.5%) is the primary estimate used for plots and aggregation.
     Low/high values are negative-clamped to zero (already above target).
     Anomalous efficiencies (>100%) are excluded.
 
@@ -540,11 +534,6 @@ def compute_impact_estimates(
     Returns:
         List of impact estimate dicts sorted by savings descending
     """
-    GAP_FRAC_LOW = 0.75
-    GAP_FRAC_MID = 0.875
-
-    is_comparative = analysis_mode == "comparative"
-
     estimates = []
     for op in operations:
         if op.get("fusion_flagged"):
@@ -558,12 +547,8 @@ def compute_impact_estimates(
             continue
 
         savings_high = max(0, time_ms * (1 - eff_pct / TARGET_HIGH))
-        if is_comparative:
-            savings_low = max(0, GAP_FRAC_LOW * savings_high)
-            savings_mid = max(0, GAP_FRAC_MID * savings_high)
-        else:
-            savings_low = max(0, time_ms * (1 - eff_pct / TARGET_LOW))
-            savings_mid = max(0, time_ms * (1 - eff_pct / TARGET_MID))
+        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
+        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
 
         if savings_high < min_savings_ms:
             continue
@@ -792,5 +777,3 @@ def classify_kernel_library(op_name: str, kernel_details: str = "") -> Optional[
         if marker in kd:
             return lib
     return None
-
-

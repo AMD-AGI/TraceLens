@@ -10,7 +10,7 @@ TraceLens AgenticMode - Multi-Kernel Issue Analysis
 Analyzes cross-cutting multi-kernel patterns: memcpy (D2H/H2D), NCCL blocking,
 and compute/communication overlap deficiency.
 
-Reads pre-computed multi_kernel_data.json from orchestrator_prepare.py.
+Reads pre-computed multi_kernel_data.json from utils/orchestrator_prepare.py.
 Outputs multi_kernel_metrics.json with severity assessments.
 """
 

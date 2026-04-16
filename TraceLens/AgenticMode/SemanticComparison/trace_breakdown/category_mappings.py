@@ -126,7 +126,7 @@ DEFAULT_TIMELINE_CATEGORY = "Other"
 # ---------------------------------------------------------------------------
 # Standalone-compatible op categories
 # Maps perf_category to the `op category` values that
-# orchestrator_prepare.py's get_enhanced_category() expects.
+# utils/orchestrator_prepare.py's get_enhanced_category() expects.
 # ---------------------------------------------------------------------------
 
 PERF_CATEGORY_TO_OP_CATEGORY = {
