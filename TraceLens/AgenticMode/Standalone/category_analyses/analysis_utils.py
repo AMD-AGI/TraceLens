@@ -426,13 +426,15 @@ def compute_impact_estimates(
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    Assumes tuning can reach 75%–100% of roofline performance. Produces a range:
-      - savings_ms_high = op_time_ms * (1 - efficiency_pct / 100)   [100% target]
-      - savings_ms_low  = op_time_ms * (1 - efficiency_pct / 75)    [75% target]
-      - savings_ms      = op_time_ms * (1 - efficiency_pct / 87.5)  [87.5% midpoint]
+    Computes the gap to 100% roofline and estimates how much of that gap
+    tuning can close (75%–100%). Produces a range:
+      - savings_ms_high = gap                   [close 100% of the gap]
+      - savings_ms_low  = 0.75 * gap            [close 75% of the gap]
+      - savings_ms      = 0.875 * gap           [midpoint]
+
+    where gap = op_time_ms * (1 - efficiency_pct / 100).
 
     The midpoint (87.5%) is the primary estimate used for plots and aggregation.
-    Low/high values are negative-clamped to zero (already above target).
     Anomalous efficiencies (>100%) are excluded.
 
     When baseline_ms > 0, each estimate also includes e2e_pct_low / e2e_pct_high
@@ -460,8 +462,8 @@ def compute_impact_estimates(
             continue
 
         savings_high = max(0, time_ms * (1 - eff_pct / TARGET_HIGH))
-        savings_low = max(0, time_ms * (1 - eff_pct / TARGET_LOW))
-        savings_mid = max(0, time_ms * (1 - eff_pct / TARGET_MID))
+        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
+        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
 
         if savings_high < min_savings_ms:
             continue

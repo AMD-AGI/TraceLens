@@ -361,41 +361,32 @@ def compute_fusion_impact_estimates(
         subgroups = _split_into_subgroups(enriched)
         has_matrix_ops = any(_is_matrix_op(e) for e in enriched)
 
-        savings_by_target = {}
-        bound_type = "memory"
-        for target_pct, label in [
-            (TARGET_HIGH, "high"),
-            (TARGET_MID, "mid"),
-            (TARGET_LOW, "low"),
-        ]:
-            total_savings_us = 0.0
-            for sg_type, sg_kernels in subgroups:
-                if sg_type == "gemm_epilogue":
-                    non_gemm_time = sum(
-                        e["dur_us"] for e in sg_kernels if not _is_matrix_op(e)
-                    )
-                    total_savings_us += non_gemm_time
-                elif sg_type == "elementwise":
-                    sg_savings = _roofline_savings_us(
-                        sg_kernels,
-                        peak_bw_bytes_s,
-                        vector_maf,
-                        matrix_maf,
-                        target_pct,
-                    )
-                    total_savings_us += sg_savings
-            savings_by_target[label] = total_savings_us
+        total_savings_us = 0.0
+        for sg_type, sg_kernels in subgroups:
+            if sg_type == "gemm_epilogue":
+                non_gemm_time = sum(
+                    e["dur_us"] for e in sg_kernels if not _is_matrix_op(e)
+                )
+                total_savings_us += non_gemm_time
+            elif sg_type == "elementwise":
+                sg_savings = _roofline_savings_us(
+                    sg_kernels,
+                    peak_bw_bytes_s,
+                    vector_maf,
+                    matrix_maf,
+                    TARGET_HIGH,
+                )
+                total_savings_us += sg_savings
 
-        if savings_by_target["high"] > 0:
-            sg_types = [t for t, _ in subgroups]
-            if "elementwise" in sg_types:
-                bound_type = "memory"
-            elif "gemm_epilogue" in sg_types:
-                bound_type = "compute"
+        sg_types = [t for t, _ in subgroups]
+        if "gemm_epilogue" in sg_types:
+            bound_type = "compute"
+        else:
+            bound_type = "memory"
 
-        savings_mid = savings_by_target["mid"] * instance_count / 1000
-        savings_high = savings_by_target["high"] * instance_count / 1000
-        savings_low = savings_by_target["low"] * instance_count / 1000
+        savings_high = total_savings_us * instance_count / 1000
+        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
+        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
 
         if savings_high < min_savings_ms:
             continue
