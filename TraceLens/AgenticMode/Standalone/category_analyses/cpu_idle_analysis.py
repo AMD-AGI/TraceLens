@@ -23,7 +23,7 @@ from typing import Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import write_metrics_json
+from analysis_utils import perf_report_csv_dir, write_metrics_json
 
 
 def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
