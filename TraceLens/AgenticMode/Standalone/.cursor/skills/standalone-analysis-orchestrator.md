@@ -559,7 +559,7 @@ If the plot fails, retry once. If still failing, proceed to Step 11 without the 
 
 **Output filename:** `standalone_analysis.md` when `<comparison_scope>` = `standalone`; `comparative_analysis.md` when `<comparison_scope>` = `comparative`. Referred to as `<report_filename>` below.
 
-**CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly. Subagents lack the full template context and produce reports that violate formatting guidelines. The orchestrator has already read all findings files and the template — it must perform the substitution itself using `<prefix>` commands (e.g., `tee`, `sed`, or Python one-liners).
+**CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
 2. **Copy** it to `<output_dir>/<report_filename>` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.2 will use to read and modify it.
