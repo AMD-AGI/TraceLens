@@ -26,7 +26,6 @@ from analysis_utils import (
     run_category_analysis,
 )
 
-
 # ---------------------------------------------------------------------------
 # SDPA-specific detectors (moved from analysis_utils)
 # ---------------------------------------------------------------------------

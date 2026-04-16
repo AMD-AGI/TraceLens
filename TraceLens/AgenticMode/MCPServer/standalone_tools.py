@@ -85,7 +85,9 @@ def _prepare_agentic(
 ) -> dict:
     import subprocess
 
-    script_path = os.path.join(_get_standalone_dir(), "orchestrator_prepare.py")
+    script_path = os.path.join(
+        _get_standalone_dir(), "utils", "orchestrator_prepare.py"
+    )
     effective_trace_path = trace_path or "none"
 
     cmd = [
