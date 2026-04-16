@@ -24,7 +24,9 @@ def load_manifest(output_dir: str) -> dict:
         return json.load(f)
 
 
-def extract_condensed_op_info(output_dir: str) -> bool:
+def extract_condensed_op_info(
+    output_dir: str, comparison_scope: str = "standalone"
+) -> bool:
     """Extract name, Input type, Input Dims to metadata/condensed_op_info.csv.
 
     Reads unified_perf_summary.csv from the appropriate perf report CSV

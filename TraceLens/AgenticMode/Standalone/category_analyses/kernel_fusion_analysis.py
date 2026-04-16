@@ -33,6 +33,7 @@ from analysis_utils import (
     TARGET_LOW,
     TARGET_MID,
     parse_first_shape,
+    perf_report_csv_dir,
     shape_aware_lookup,
     write_metrics_json,
 )

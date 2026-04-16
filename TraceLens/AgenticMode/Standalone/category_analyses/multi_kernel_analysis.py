@@ -24,7 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import write_metrics_json
+from analysis_utils import perf_report_csv_dir, write_metrics_json
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
