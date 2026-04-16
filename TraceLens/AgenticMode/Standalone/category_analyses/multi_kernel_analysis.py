@@ -16,14 +16,8 @@ Outputs multi_kernel_metrics.json with severity assessments.
 
 import json
 import os
-import sys
 import argparse
-
 import pandas as pd
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import write_metrics_json
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
@@ -225,7 +219,9 @@ def main():
             "overlap_assessment": {"flagged": False},
             "patterns_detected": [],
         }
-        write_metrics_json(error_metrics, output_dir, "multi_kernel")
+        metrics_file = f"{output_dir}/category_data/multi_kernel_metrics.json"
+        with open(metrics_file, "w") as f:
+            json.dump(error_metrics, f, indent=2)
         return
 
     with open(data_file, "r") as f:
@@ -337,7 +333,10 @@ def main():
         "impact_estimates": [],
     }
 
-    write_metrics_json(metrics, output_dir, "multi_kernel")
+    # Write metrics output
+    metrics_file = f"{output_dir}/category_data/multi_kernel_metrics.json"
+    with open(metrics_file, "w") as f:
+        json.dump(metrics, f, indent=2)
 
     print(f"\n  ✓ Wrote multi_kernel_metrics.json")
     print(f"  ✓ {len(patterns_detected)} patterns detected")

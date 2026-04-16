@@ -23,25 +23,17 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_STANDALONE_DIR = os.path.dirname(_THIS_DIR)
-sys.path.insert(0, _THIS_DIR)
-sys.path.insert(0, _STANDALONE_DIR)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import (
-    TARGET_HIGH,
-    TARGET_LOW,
-    TARGET_MID,
-    parse_first_shape,
-    shape_aware_lookup,
-    write_metrics_json,
-)
-from utils.arch_utils import load_arch
+from analysis_utils import parse_first_shape, shape_aware_lookup, write_metrics_json
 
 MAX_FUSION_KERNEL_COUNT = (
     15  # Skip candidates with more kernels than this (too complex to fuse reliably)
 )
 
+TARGET_HIGH = 100.0  # Best-case savings target (100% of original time)
+TARGET_LOW = 75.0  # Mid-range savings target (75% of original time)
+TARGET_MID = 87.5  # Balanced savings target (87.5% of original time)
 MIN_E2E_PCT = 2.0  # Drop estimates whose best-case E2E impact is below this threshold
 OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
@@ -361,32 +353,41 @@ def compute_fusion_impact_estimates(
         subgroups = _split_into_subgroups(enriched)
         has_matrix_ops = any(_is_matrix_op(e) for e in enriched)
 
-        total_savings_us = 0.0
-        for sg_type, sg_kernels in subgroups:
-            if sg_type == "gemm_epilogue":
-                non_gemm_time = sum(
-                    e["dur_us"] for e in sg_kernels if not _is_matrix_op(e)
-                )
-                total_savings_us += non_gemm_time
-            elif sg_type == "elementwise":
-                sg_savings = _roofline_savings_us(
-                    sg_kernels,
-                    peak_bw_bytes_s,
-                    vector_maf,
-                    matrix_maf,
-                    TARGET_HIGH,
-                )
-                total_savings_us += sg_savings
+        savings_by_target = {}
+        bound_type = "memory"
+        for target_pct, label in [
+            (TARGET_HIGH, "high"),
+            (TARGET_MID, "mid"),
+            (TARGET_LOW, "low"),
+        ]:
+            total_savings_us = 0.0
+            for sg_type, sg_kernels in subgroups:
+                if sg_type == "gemm_epilogue":
+                    non_gemm_time = sum(
+                        e["dur_us"] for e in sg_kernels if not _is_matrix_op(e)
+                    )
+                    total_savings_us += non_gemm_time
+                elif sg_type == "elementwise":
+                    sg_savings = _roofline_savings_us(
+                        sg_kernels,
+                        peak_bw_bytes_s,
+                        vector_maf,
+                        matrix_maf,
+                        target_pct,
+                    )
+                    total_savings_us += sg_savings
+            savings_by_target[label] = total_savings_us
 
-        sg_types = [t for t, _ in subgroups]
-        if "gemm_epilogue" in sg_types:
-            bound_type = "compute"
-        else:
-            bound_type = "memory"
+        if savings_by_target["high"] > 0:
+            sg_types = [t for t, _ in subgroups]
+            if "elementwise" in sg_types:
+                bound_type = "memory"
+            elif "gemm_epilogue" in sg_types:
+                bound_type = "compute"
 
-        savings_high = total_savings_us * instance_count / 1000
-        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
-        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
+        savings_mid = savings_by_target["mid"] * instance_count / 1000
+        savings_high = savings_by_target["high"] * instance_count / 1000
+        savings_low = savings_by_target["low"] * instance_count / 1000
 
         if savings_high < min_savings_ms:
             continue
@@ -471,16 +472,23 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
                         "max_achievable_tflops": meta["max_achievable_tflops"],
                     }
 
-    try:
-        arch = load_arch(platform)
+    arch_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "utils",
+        "arch",
+        f"{platform}.json",
+    )
+    if os.path.exists(arch_path):
+        with open(arch_path, "r") as f:
+            arch = json.load(f)
         return {
             "peak_hbm_bw_tbs": arch["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": arch["max_achievable_tflops"],
         }
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"No arch config found for platform {platform} in metadata or arch JSON"
-        )
+
+    raise FileNotFoundError(
+        f"No arch config found for platform {platform} in metadata or arch JSON"
+    )
 
 
 def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:
@@ -559,12 +567,6 @@ def main():
     try:
         arch = load_arch_config(args.output_dir, platform)
     except FileNotFoundError as e:
-        error_metrics = {
-            "category": "kernel_fusion",
-            "status": "ERROR",
-            "error": str(e),
-        }
-        write_metrics_json(error_metrics, args.output_dir, "kernel_fusion")
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

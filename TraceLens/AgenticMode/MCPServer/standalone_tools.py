@@ -186,11 +186,12 @@ def _run_all_category_analyses(output_dir: str) -> dict:
         results = {cat: fut.result() for cat, fut in futures.items()}
 
     try:
-        from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
-            generate_priority_data,
-        )
+        analyses_dir = os.path.join(_get_standalone_dir(), "category_analyses")
+        if analyses_dir not in sys.path:
+            sys.path.insert(0, analyses_dir)
+        from analysis_utils import generate_plot_data
 
-        generate_priority_data(output_dir)
+        generate_plot_data(output_dir)
     except Exception as e:
         results["_plot_data_error"] = str(e)
 
