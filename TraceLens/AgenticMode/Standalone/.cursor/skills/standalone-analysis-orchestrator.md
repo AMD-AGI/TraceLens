@@ -48,16 +48,10 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
-<<<<<<< HEAD
-9. Aggregate Results: System-Level + Compute Kernel Recommendations
-10. Generate Final Report (composable System + Compute sections)
-10.1–10.2. Embed performance plot (`{{PERF_PLOT}}`) — see Steps 10 / 10.2 in body
-10.3. **Comparative only:** Cumulative TraceDiff plot (`{{COMPARATIVE_CUMULATIVE_PLOT}}`) — see Step 10.3
-=======
 9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
 10. Generate Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
 11. Generate Final Report (composable System + Compute sections)
->>>>>>> staging
+11.3. **Comparative only:** Cumulative TraceDiff plot (`{{COMPARATIVE_CUMULATIVE_PLOT}}`) — see Step 11.3
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -163,9 +157,8 @@ If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not 
 
 Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
 
-<<<<<<< HEAD
-**Output paths:** 
-**`standalone`** — one run: `--output_xlsx_path <output_dir>/perf_report.xlsx`, `--output_csvs_dir <output_dir>/perf_report_csvs`. 
+**Output paths:**
+**`standalone`** — one run: `--output_xlsx_path <output_dir>/perf_report.xlsx`, `--output_csvs_dir <output_dir>/perf_report_csvs`.
 **`comparative`** — two runs: trace1 → `<output_dir>/perf_report_trace1.xlsx`, `<output_dir>/perf_report_trace1_csvs`; trace2 → `--profile_json_path <trace2_path>`, `<output_dir>/perf_report_trace2.xlsx`, `<output_dir>/perf_report_trace2_csvs`.
 
 **Extension flags (comparative, trace1 only):** When `<comparison_scope>` = `comparative`, append **only** to the trace1 command:
@@ -179,10 +172,7 @@ Do **not** pass `--extension_*` on the trace2 command.
 
 ---
 
-**Default (training and eager inference)** (`<analysis_mode>` = `default`):
-=======
-**Default (training and non-vLLM/SGLang eager inference)** (analysis_mode = `default`):
->>>>>>> staging
+**Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
@@ -413,12 +403,11 @@ Include this block in every compute kernel subagent prompt (dedicated and batche
 
 #### Dedicated Compute Kernel Subagent Prompt
 
-<<<<<<< HEAD
 Include these constraints in EVERY compute kernel subagent invocation prompt:
 
 #### 1. Flag Efficiency Anomalies
 
-When `<comparison_scope>`== `standalone`:
+When `<comparison_scope>` == `standalone`:
 
 - Any efficiency > 100% **MUST** be noted as `[ANOMALY] - verify measurement`
 - Do **NOT** use > 100% values to claim "excellent performance"
@@ -445,15 +434,11 @@ When `<comparison_scope>`== `standalone`:
 
 **Compute Kernel Subagent Prompt Template:**
 
-When invoking a compute kernel subagent, use this template:
-=======
 For each mapped category, launch a Task (subagent_type: generalPurpose):
->>>>>>> staging
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
 
-<<<<<<< HEAD
 **CRITICAL - READ FIRST:**
 - Pass `<comparison_scope>` variable
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
@@ -464,12 +449,9 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 - Peak HBM BW: {peak_hbm_bw} TB/s
 - Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
 - Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
-=======
-<Shared Compute Kernel Preamble>
 
 Read and follow the FULL instructions in:
   TraceLens/AgenticMode/Standalone/.cursor/agents/{agent_file}
->>>>>>> staging
 
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
   category_data/{category}_tree_data.json (if available)

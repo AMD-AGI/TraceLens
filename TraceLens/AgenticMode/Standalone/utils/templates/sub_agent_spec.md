@@ -136,7 +136,10 @@ blank line between them. The validator checks for these as substring matches.
 ## Operations Table Schema (compute tier)
 
 Standard column schema for operations breakdown tables and the `**Data:**` table
-inside `## Detailed Analysis` blocks.
+inside `## Detailed Analysis` blocks. Use the **standalone** or **comparative**
+schema based on `metrics['comparison_scope']`.
+
+### Standalone (`comparison_scope` = `standalone`)
 
 ```markdown
 | Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound |
@@ -152,6 +155,21 @@ inside `## Detailed Analysis` blocks.
   - `compute-bound`: `X.XX% of Y TFLOPS` (Y = `resolved_peak_maf`)
   - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_hbm_bw`)
 - **Bound**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
+
+### Comparative (`comparison_scope` = `comparative`)
+
+```markdown
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+```
+
+**Column mappings** (T1 source: `metrics['operations']`; T2 source: `category_data/<category>_ops.csv`):
+- **Trace 1 Time (ms)**: `operations[i].time_ms`
+- **Trace 2 Time (ms)**: `Kernel Time (µs)_trace2_sum / 1000` from the aligned CSV row
+- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operation_count_trace2` from the CSV row. Format `T1 / T2` (use `—` for missing T2).
+- **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row
+- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
+- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
 
 Agents may extend the table with additional columns (e.g., `Sub-Category` for
 the generic-op analyzer). Do NOT use `classification.gemm_type` or similar
@@ -188,8 +206,7 @@ Sub-agents write an **`impact_estimates` array** into
 - **Compute tier only:** use `kernel_tuning` estimates from the pre-computed
   metrics JSON (`savings_ms_low`–`savings_ms_high`, `e2e_pct_low`–`e2e_pct_high`).
   Do NOT manually estimate algorithmic, fusion, or system savings.
-- **Confidence:** `high` = clear, measurable gap to peak; `medium` = likely
-  opportunity but outcome depends on implementation; `low` = rough estimate.
+- **Confidence:** `high` = clear, measurable gap to expected peak (roofline for standalone; trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate.
 
 ### JSON schema
 

@@ -105,45 +105,7 @@ These groupings are guidelines. If you encounter an operation that doesn't fit n
 **Special considerations:**
 - Reduce ops are generally memory-bound
 
-<<<<<<< HEAD
-### Step 5: Generate Markdown Tables
-
-Build operations breakdown tables from `metrics['operations']`
-
-When `comparison_scope` is `standalone`:
-
-```markdown
-| Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type |
-|-----------|-------|-----------|---------------|------------|------------|------|
-```
-
-**Standalone column mappings:**
-- **Count**: `operations[i].count` (total invocations, not unique signatures)
-- **Time (ms)**: `operations[i].time_ms` (Trace 1 kernel time)
-- **% of Category**: `operations[i].percent_of_category`
-- **Efficiency**: `operations[i].efficiency.efficiency_percent` formatted as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`) — approximate for reduce kernels (see [Performance Model Limitation](#performance-model-limitation))
-- **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
-- **Type**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
-
-**Comparative** — when `metrics['comparison_scope']` is `comparative`:
-
-```markdown
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
-|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
-```
-
-**Comparative column mappings:**
-- **Trace 1 Time (ms)**: `operations[i].time_ms`
-- **Trace 2 Time (ms)**: `Kernel Time (µs)_trace2_sum / 1000` from the aligned row in `category_data/reduce_ops.csv`.
-- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operation_count_trace2` from the same CSV row. Format `T1 / T2` (use `—` for missing T2).
-- **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row.
-- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
-- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
-
-### Step 6: Determine Optimization Recommendations
-=======
 ### Step 5: Determine Optimization Recommendations
->>>>>>> staging
 
 For each validated bottleneck, provide recommendations in both categories:
 
@@ -168,15 +130,6 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estima
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'reduce', 'compute')"
 ```
 
-<<<<<<< HEAD
-**Impact estimation guidelines:**
-- `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
-- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
-- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
-
-=======
->>>>>>> staging
 ---
 
 ## Common Patterns for Reduce Analysis
