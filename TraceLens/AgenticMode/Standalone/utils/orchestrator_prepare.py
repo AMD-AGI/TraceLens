@@ -642,7 +642,7 @@ def main():
                         k = tree.get_UID2event(uid)
                         if categorizer(k) == "kernel":
                             kname = k.get("name", "")
-                            ktype, _ = classify_kernel(kname)
+                            ktype, *_ = classify_kernel(kname)
                             kernels.append(
                                 {
                                     "name": kname,
@@ -705,7 +705,7 @@ def main():
                     if categorizer(k) != "kernel":
                         continue
                     kname = k.get("name", "")
-                    ktype, _ = classify_kernel(kname)
+                    ktype, *_ = classify_kernel(kname)
                     parent_groups[parent_uid].append(
                         {
                             "op": ev.get("name", ""),
