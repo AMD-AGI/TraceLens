@@ -137,8 +137,7 @@ blank line between them. The validator checks for these as substring matches.
 ## Operations Table Schema (compute tier)
 
 Standard column schema for operations breakdown tables and the `**Data:**` table
-inside `## Detailed Analysis` blocks. Use the **standalone** or **comparative**
-schema based on `comparison_scope`.
+inside `## Detailed Analysis` blocks.
 
 ### Standalone (`comparison_scope` = `standalone`)
 
