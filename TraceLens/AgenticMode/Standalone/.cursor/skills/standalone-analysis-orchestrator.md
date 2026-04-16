@@ -438,9 +438,9 @@ For each mapped category, launch a Task (subagent_type: generalPurpose):
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
+comparison_scope: {comparison_scope}
 
 **CRITICAL - READ FIRST:**
-- Pass `<comparison_scope>` variable
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
 - **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement"
 - When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
