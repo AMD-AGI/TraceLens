@@ -11,7 +11,8 @@ files. The orchestrator extracts these sections when composing the final
 report.
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
-> schema. Replace `<category>` with the actual category name
+> schema. Replace `<category>` with the actual category name.
+> This spec receives `comparison_scope`: `standalone` (default) or `comparative`.
 ---
 
 ## Orchestrator-consumed sections
@@ -137,7 +138,7 @@ blank line between them. The validator checks for these as substring matches.
 
 Standard column schema for operations breakdown tables and the `**Data:**` table
 inside `## Detailed Analysis` blocks. Use the **standalone** or **comparative**
-schema based on `metrics['comparison_scope']`.
+schema based on `comparison_scope`.
 
 ### Standalone (`comparison_scope` = `standalone`)
 
