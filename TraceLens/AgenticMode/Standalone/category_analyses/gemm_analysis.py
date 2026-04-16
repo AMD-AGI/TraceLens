@@ -14,32 +14,26 @@ import argparse
 import sys
 import os
 
-# Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    compute_impact_estimates,
-    write_metrics_json,
-    detect_quantized_gemm,
+    get_peak_specs,
+    run_category_analysis,
 )
 
 
-def get_gemm_config():
-    """Return GEMM-specific configuration."""
-    return {
-        "extra_fields": ["Input Dims", "has_perf_model"],
-        "operation_classifier": classify_gemm_operation,
-    }
+def detect_quantized_gemm(op_name: str) -> bool:
+    """Check if GEMM operation is quantized."""
+    quantized_markers = ["w8a8", "int8", "fp8", "w4a16", "w4a4", "fp4", "mxfp4"]
+    return any(marker in op_name.lower() for marker in quantized_markers)
 
 
 def classify_gemm_operation(op_name: str, row) -> dict:
     """Classify GEMM operation type."""
+    is_quantized = detect_quantized_gemm(op_name)
     return {
-        "is_quantized": detect_quantized_gemm(op_name),
-        "gemm_type": "quantized" if detect_quantized_gemm(op_name) else "regular",
+        "is_quantized": is_quantized,
+        "gemm_type": "quantized" if is_quantized else "regular",
     }
 
 
@@ -49,7 +43,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
         1 for name in ops_df["name"] if detect_quantized_gemm(str(name))
     )
 
-    # Count operations missing perf models
     missing_perf_model = 0
     if "TFLOPS/s_mean" in ops_df.columns:
         import pandas as pd
@@ -59,12 +52,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
     return {
         "quantized_count": int(quantized_count),
         "missing_perf_model_count": int(missing_perf_model),
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        **get_peak_specs(metadata),
     }
 
 
@@ -82,43 +70,16 @@ def main():
     )
     args = parser.parse_args()
 
-    try:
-        ops_df, metadata = load_category_data(args.output_dir, "gemm")
-    except FileNotFoundError as e:
-        # Write error metrics file
-        error_metrics = {"category": "gemm", "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, "gemm")
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    config = get_gemm_config()
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-
-    # Build metrics
-    time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=args.comparison_scope
+    run_category_analysis(
+        category="gemm",
+        output_dir=args.output_dir,
+        config={
+            "extra_fields": ["Input Dims", "has_perf_model"],
+            "operation_classifier": classify_gemm_operation,
+        },
+        extract_fn=extract_category_specific,
+        analysis_mode=args.comparison_scope,
     )
-    category_specific = extract_category_specific(ops_df, metadata)
-
-    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    impact_estimates = compute_impact_estimates(
-        operations, "gemm", baseline_ms=baseline_ms
-    )
-
-    metrics = {
-        "category": "gemm",
-        "status": "OK",
-        "analysis_mode": args.comparison_scope,
-        **time_metrics,
-        "operations": operations,
-        "category_specific": category_specific,
-        "impact_estimates": impact_estimates,
-    }
-
-    output_path = write_metrics_json(metrics, args.output_dir, "gemm")
-    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":

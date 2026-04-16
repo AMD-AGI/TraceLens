@@ -22,7 +22,8 @@ import pandas as pd
 from typing import Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analysis_utils import perf_report_csv_dir
+
+from analysis_utils import write_metrics_json
 
 
 def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
@@ -49,17 +50,6 @@ def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
         return None
 
     return pd.read_csv(csv_path)
-
-
-def load_manifest(output_dir: str) -> Dict:
-    """Load category manifest for metadata."""
-    manifest_path = f"{output_dir}/category_data/category_manifest.json"
-
-    if os.path.exists(manifest_path):
-        with open(manifest_path, "r") as f:
-            return json.load(f)
-
-    return {}
 
 
 def analyze_kernel_patterns(ops_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
@@ -157,11 +147,7 @@ def main():
             "impact_estimates": [],
         }
 
-        # Write metrics JSON
-        os.makedirs(f"{output_dir}/category_data", exist_ok=True)
-        metrics_path = f"{output_dir}/category_data/cpu_idle_metrics.json"
-        with open(metrics_path, "w") as f:
-            json.dump(metrics, f, indent=2)
+        metrics_path = write_metrics_json(metrics, output_dir, "cpu_idle")
 
         print(f"\n✓ Metrics saved: {metrics_path}")
         print("=" * 80)
@@ -169,12 +155,8 @@ def main():
     except Exception as e:
         print(f"\n✗ Error: {str(e)}")
 
-        # Write error metrics
         error_metrics = {"status": "ERROR", "error": str(e)}
-
-        os.makedirs(f"{output_dir}/category_data", exist_ok=True)
-        with open(f"{output_dir}/category_data/cpu_idle_metrics.json", "w") as f:
-            json.dump(error_metrics, f, indent=2)
+        write_metrics_json(error_metrics, output_dir, "cpu_idle")
 
         raise
 

@@ -134,107 +134,17 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 7: Write Category Findings
 
-Write `<output_dir>/category_findings/other_findings.md` using the command prefix.
+**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/other_findings.md` using the output format defined there, with `<category>` = `other`. Extend the operations table with a `Sub-Category` column mapped from `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`).
 
-```markdown
-# Uncategorized Operations Analysis
-
-## Overview
-X uncategorized operations account for Y% of compute time.
-Sub-categories: W graph, V miscellaneous.
-
-## Operations Breakdown
-
-Build operations breakdown tables from `metrics['operations']`
-
-When `comparison_scope` is `standalone`:
-
-| Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type | Sub-Category |
-|-----------|-------|-----------|---------------|------------|------------|------|--------------|
-
-**Standalone column mappings:**
-- **Count**: `operations[i].count` (total invocations, not unique signatures)
-- **Time (ms)**: `operations[i].time_ms` (Trace 1 kernel time)
-- **% of Category**: `operations[i].percent_of_category`
-- **Efficiency**: `operations[i].efficiency.efficiency_percent` formatted as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
-- **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
-- **Type**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
-- **Sub-Category**: `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`)
-
-**Comparative** — when `metrics['analysis_mode']` is `comparative`:
-
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) | Sub-Category |
-|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|--------------|
-
-**Comparative column mappings:**
-- **Trace 1 Time (ms)**: `operations[i].time_ms`
-- **Trace 2 Time (ms)**: `Kernel Time (µs)_trace2_sum / 1000` from the aligned row in `category_data/other_ops.csv`.
-- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operation_count_trace2` from the same CSV row. Format `T1 / T2` (use `—` for missing T2).
-- **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row.
-- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
-- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
-- **Sub-Category**: `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`)
-
-## Key Findings
-
-### 1. <Operation Name>
-- **Time:** X ms (Y% of compute/memory)
-- **If `comparison_scope` is `standalone`:**
-  - When `bound_type` is **compute**: **Efficiency:** Z% of peak MAF (as applicable).
-  - When `bound_type` is **memory**: **Efficiency:** Z% of peak HBM BW (as applicable).
-  - Include only the line that matches `bound_type`; do not print both MAF and HBM lines.
-- **If `comparison_scope` is `comparative`:**
-  - **Relative kernel time:** `efficiency_percent` = 100×t2/t1 (trace2 kernel time divided by trace1, expressed as a percentage).
-- **Called from:** [parent chain context]
-- **What it does:** [LLM inference from name + kernel details + tree context]
-- **Possible miscategorization:** [Yes/No -- if it looks like a GEMM, reduce, etc.]
-- **Algorithmic:** [Recommendation]
-- **Kernel:** [Recommendation]
-
-## Communication Kernels (Skipped)
-[If communication_ops_skipped.count > 0, include this section:]
-X communication kernel(s) detected but not analyzed here.
-For detailed collective communication analysis, use **TraceLens's NCCL Analyzer**.
-See: `TraceLens/NcclAnalyser/` and the NCCL Analyzer documentation.
-Operations skipped: [list op names from communication_ops_skipped.op_names]
-
-## GPU Graph Operations
-[If graph operations detected, analyze capture/replay overhead]
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
-
-## Notes
-- Communication kernels (NCCL/RCCL) are excluded from this analysis — use TraceLens's NCCL Analyzer
-- Communication overlap and memcpy patterns are covered in the Multi-Kernel system findings
-- Synchronization overhead is covered in the CPU/Idle system findings
-```
-
-**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
-
-**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
-- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
-- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
-Do not look up peaks independently from the metadata dict.
-
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/other_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% roofline target), `savings_ms_high` (100% roofline target), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
+Synthesize **Insight** from the Key Findings analysis, **Action** from merged **Algorithmic** + **Kernel** from Key Findings.
 
 ### Step 7.5: Write Impact Estimates to Metadata
 
-Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'other', 'compute')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'other', 'compute')"
 ```
-
-**Impact estimation guidelines:**
-- `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
-- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
-- If no actionable bottlenecks found, the table may have zero rows.
-- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 

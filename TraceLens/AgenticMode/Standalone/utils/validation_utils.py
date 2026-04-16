@@ -13,9 +13,10 @@ Validates subagent outputs before report aggregation:
 - Priority consistency check (top categories by GPU time)
 """
 
-import json
 import os
 import re
+
+from .report_utils import load_manifest, _scan_findings_dir
 
 
 def validate_subagent_outputs(output_dir):
@@ -23,9 +24,7 @@ def validate_subagent_outputs(output_dir):
 
     Returns a dict with check results and prints a summary.
     """
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+    manifest = load_manifest(output_dir)
 
     results = {
         "time_check": _check_time_sanity(manifest),
@@ -80,25 +79,16 @@ def _check_time_sanity(manifest):
 
 def _check_efficiency_anomalies(output_dir):
     """Scan compute kernel findings for efficiency values > 100%."""
-    findings_dir = os.path.join(output_dir, "category_findings")
-    anomalies = []
-
-    if not os.path.isdir(findings_dir):
+    compute_findings = _scan_findings_dir(output_dir, "category_findings")
+    if not compute_findings:
         return {"status": "WARN", "messages": ["category_findings/ not found"]}
 
-    for f in os.listdir(findings_dir):
-        if f.endswith("_findings.md"):
-            with open(os.path.join(findings_dir, f)) as fh:
-                content = fh.read()
-                matches = re.findall(r"(\d{3,}\.?\d*)\s*%", content)
-                for m in matches:
-                    if float(m) > 100:
-                        anomalies.append(
-                            {
-                                "category": f.replace("_findings.md", ""),
-                                "value": f"{m}%",
-                            }
-                        )
+    anomalies = []
+    for category, content in compute_findings.items():
+        matches = re.findall(r"(\d{3,}\.?\d*)\s*%", content)
+        for m in matches:
+            if float(m) > 100:
+                anomalies.append({"category": category, "value": f"{m}%"})
 
     if anomalies:
         messages = [f"{a['category']}: {a['value']}" for a in anomalies]
@@ -115,31 +105,17 @@ def _check_coverage(output_dir, manifest):
     categories = manifest.get("categories", [])
     messages = []
 
-    system_dir = os.path.join(output_dir, "system_findings")
-    expected_system = [c["name"] for c in categories if c.get("tier") == "system"]
-    found_system = []
-    if os.path.isdir(system_dir):
-        found_system = [
-            f.replace("_findings.md", "")
-            for f in os.listdir(system_dir)
-            if f.endswith("_findings.md")
-        ]
-    missing_system = set(expected_system) - set(found_system)
+    found_system = set(_scan_findings_dir(output_dir, "system_findings").keys())
+    expected_system = {c["name"] for c in categories if c.get("tier") == "system"}
+    missing_system = expected_system - found_system
     if missing_system:
         messages.append(f"Missing system findings: {', '.join(missing_system)}")
 
-    compute_dir = os.path.join(output_dir, "category_findings")
-    expected_compute = [
+    found_compute = set(_scan_findings_dir(output_dir, "category_findings").keys())
+    expected_compute = {
         c["name"] for c in categories if c.get("tier") == "compute_kernel"
-    ]
-    found_compute = []
-    if os.path.isdir(compute_dir):
-        found_compute = [
-            f.replace("_findings.md", "")
-            for f in os.listdir(compute_dir)
-            if f.endswith("_findings.md")
-        ]
-    missing_compute = set(expected_compute) - set(found_compute)
+    }
+    missing_compute = expected_compute - found_compute
     if missing_compute:
         messages.append(f"Missing compute findings: {', '.join(missing_compute)}")
 

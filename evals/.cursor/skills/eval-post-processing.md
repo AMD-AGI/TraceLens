@@ -55,14 +55,29 @@ Read these files:
 2. `<report_dir>/aggregates/pass_rate_summary.csv`
 3. `<report_dir>/aggregates/stream_diagnostics.csv`
 4. `evals/eval_utils/report_section_rules.yaml` — classification guide (JSON format despite `.yaml` extension)
-5. `<test_traces_csv>` — for trace metadata (id, platform, trace_path)
+5. `<test_traces_csv>` — for trace metadata (id, sub_category, platform, trace_path)
+
+### Splitting Unit Test vs E2E Test Cases
+
+Use the `sub_category` column from `<test_traces_csv>` to classify each trace:
+
+- **Unit test cases**: `sub_category` is NOT `full_model` (e.g., gemm, conv, attention, elementwise, moe)
+- **E2E test cases**: `sub_category` is `full_model`
+
+All subsequent metrics, tables, and failure analysis must be computed and reported **separately** for unit tests and e2e tests.
 
 From `aggregated_results.csv`, compute:
 
-- **Global metrics**: count PASS, FAIL, MISSING rows; compute pass rate
-- **Per-suite metrics**: same counts grouped by suite
-- **Top failure issues**: group FAIL rows by `issue_summary`, count, sort descending
-- **Per-trace failure counts**: group FAIL rows by `trace_id`, count, sort descending
+- **Overall metrics**: count PASS, FAIL, MISSING rows; compute pass rate
+- **Unit test metrics**: same counts for unit test trace_ids only
+- **E2E test metrics**: same counts for e2e test trace_ids only
+- **Top failure issues**: group FAIL rows by `issue_summary`, count, sort descending — compute overall AND per-split
+- **Per-trace failure counts**: group FAIL rows by `trace_id`, count, sort descending — compute per-split
+
+From `stream_diagnostics.csv`, compute per-split:
+
+- **Success rate**: successful runs / total runs
+- **Average duration**: mean of `duration_ms` for successful runs
 
 ### Classification
 
@@ -83,18 +98,12 @@ Write two markdown files. Follow the exact structure below.
 
 Generated at: `<ISO 8601 timestamp>`
 
-| Metric | Value |
-|---|---|
-| Overall PASS | <count> |
-| Overall FAIL | <count> |
-| Overall MISSING | <count> |
-| Overall pass rate | <percentage>% |
-
-## Suite Summary
-
-| Suite | PASS | FAIL | MISSING | Pass rate |
-|---|---|---|---|---|
-| <suite> | <pass> | <fail> | <missing> | <rate>% |
+| Metric | Overall | Unit Tests | E2E Tests |
+|---|---|---|---|
+| PASS | <overall_pass> | <unit_pass> | <e2e_pass> |
+| FAIL | <overall_fail> | <unit_fail> | <e2e_fail> |
+| MISSING | <overall_missing> | <unit_missing> | <e2e_missing> |
+| Pass rate | <overall_rate>% | <unit_rate>% | <e2e_rate>% |
 
 ## Failure Sections
 
@@ -103,20 +112,55 @@ Generated at: `<ISO 8601 timestamp>`
 | <base_section> | <count> |
 ...
 
-## Sections
-
-| Section | Failures |
-|---|---|
-| <standalone_section> | <count> |
-...sorted descending by count
-
-## Top Failure Issues
+## Top Failure Issues (Overall)
 
 | Issue | Count |
 |---|---|
 | <issue_summary> | <count> |
 ...top 10, sorted descending
+
+---
+
+## Unit Test Cases (<N> cases, <unit_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending (worst first)
+
+### Top Failures (Unit Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...top 10 for unit test cases only
+
+---
+
+## E2E Test Cases (<N> cases, <e2e_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending (worst first)
+
+### Top Failures (E2E Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...top 10 for e2e test cases only
 ```
+
+Column definitions for the Per-Case Results table:
+- **Category**: the `sub_category` from the test traces CSV (e.g., gemm, conv, attention, moe, full_model)
+- **Pass Rate**: format as `<pass>/<total> (<pct>%)` matching `pass_rate_summary.csv`
+- **Runs**: `<successful_runs>/<total_runs>` from `stream_diagnostics.csv`
+- **Avg Duration**: mean of `duration_ms` (in seconds) for successful runs from `stream_diagnostics.csv`
 
 ### `<report_dir>/fix_ticket_report.md`
 
@@ -125,49 +169,93 @@ Generated at: `<ISO 8601 timestamp>`
 
 Generated at: `<ISO 8601 timestamp>`
 
-| Metric | Value |
-|---|---|
-| Overall PASS | <count> |
-| Overall FAIL | <count> |
-| Overall MISSING | <count> |
-| Overall pass rate | <percentage>% |
+| Metric | Overall | Unit Tests | E2E Tests |
+|---|---|---|---|
+| PASS | <overall_pass> | <unit_pass> | <e2e_pass> |
+| FAIL | <overall_fail> | <unit_fail> | <e2e_fail> |
+| MISSING | <overall_missing> | <unit_missing> | <e2e_missing> |
+| Pass rate | <overall_rate>% | <unit_rate>% | <e2e_rate>% |
 
-## Suite: <suite_name>
+---
 
-### Sections
+## Unit Test Cases (<N> cases, <unit_rate>% pass rate)
 
-| Section | Failures |
-|---|---|
-| <standalone_section> | <count> |
-...sorted descending
+### Per-Case Results
 
-### Top Failure Issues
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending
+
+### Top Failures (Unit Tests)
 
 | Issue | Count |
 |---|---|
 | <issue_summary> | <count> |
-...all issues, sorted descending
+...all issues for unit test cases, sorted descending
 
-### Failure Modes (Concise)
+### Failure Modes (Unit Tests)
 
 | Issue | Count | Likely cause | Suggested fix |
 |---|---|---|---|
 | <issue_summary> | <count> | <cause> | <fix> |
-...top 8 issues with cause/fix analysis
+...top 8 unit test issues with cause/fix analysis
 
-### Top Reproducers
+### Top Reproducers (Unit Tests)
 
 | Trace/Case | Failures | Platform | Reproducer command |
 |---|---|---|---|
-| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="evals/<suite>_test_traces.csv" bash evals/eval_scripts/run_repeatability_parallel.sh` |
-...top 5 traces by failure count
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+...top 5 unit test traces by failure count
+
+---
+
+## E2E Test Cases (<N> cases, <e2e_rate>% pass rate)
+
+### Per-Case Results
+
+| Case | Category | Platform | PASS | FAIL | MISSING | Pass Rate | Runs | Avg Duration |
+|---|---|---|---|---|---|---|---|---|
+| <trace_id> | <sub_category> | <platform> | <pass> | <fail> | <missing> | <pass_rate> | <success>/<total> | <avg_dur>s |
+...sorted by FAIL descending
+
+### Top Failures (E2E Tests)
+
+| Issue | Count |
+|---|---|
+| <issue_summary> | <count> |
+...all issues for e2e test cases, sorted descending
+
+### Failure Modes (E2E Tests)
+
+| Issue | Count | Likely cause | Suggested fix |
+|---|---|---|---|
+| <issue_summary> | <count> | <cause> | <fix> |
+...top 8 e2e test issues with cause/fix analysis
+
+### Top Reproducers (E2E Tests)
+
+| Trace/Case | Failures | Platform | Reproducer command |
+|---|---|---|---|
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+...top 5 e2e test traces by failure count
 ```
 
 For the reproducer commands:
 - Use the `container` value from inputs
-- Use the **relative** path of `test_traces_csv` (e.g. `evals/e2e_test_traces.csv`) — never embed absolute or user-specific paths
+- Use the **relative** path of `test_traces_csv` (e.g. `evals/combined_traces.csv`) — never embed absolute or user-specific paths
 - Omit `NUM_REPEATS` and `MAX_PARALLEL` so the script defaults (5 repeats, 5 parallel) are used, matching a standard eval run
 - The `platform` comes from the test traces CSV
+
+### Handling single-split runs
+
+If the test traces CSV contains **only unit tests** or **only e2e tests** (no `full_model` entries, or all `full_model` entries), still use the two-section format but note the empty section:
+
+```markdown
+## E2E Test Cases (0 cases)
+
+No e2e test cases in this run.
+```
 
 ## Step 7 — Build Reproducer Packages
 

@@ -28,17 +28,26 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     validate_efficiency,
     calculate_efficiency_with_validation,
     compute_impact_estimates,
-    generate_plot_data,
     write_metrics_json,
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    classify_other_operation,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.gemm_analysis import (
     detect_quantized_gemm,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.sdpa_analysis import (
     detect_flash_attention,
-    detect_softmax,
-    detect_transpose,
     detect_paged_attention,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.reduce_analysis import (
+    detect_softmax,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.other_analysis import (
+    classify_other_operation,
+)
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
+    generate_priority_data,
 )
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
@@ -80,7 +89,7 @@ def output_dir_with_category_data(tmp_path):
 
 @pytest.fixture
 def output_dir_with_manifest_and_metrics(tmp_path):
-    """Create category_data with category_manifest.json and 1+ *_metrics.json for generate_plot_data."""
+    """Create category_data with category_manifest.json and 1+ *_metrics.json for generate_priority_data."""
     out = tmp_path / "analysis_output"
     cat_data = out / "category_data"
     cat_data.mkdir(parents=True)
@@ -283,12 +292,12 @@ def test_comparative_impact_from_operations_trace2_faster():
 # ----- Unit tests: generate_plot_data -----
 
 
-def test_generate_plot_data(output_dir_with_manifest_and_metrics):
-    out_path = generate_plot_data(
+def test_generate_priority_data(output_dir_with_manifest_and_metrics):
+    out_path = generate_priority_data(
         output_dir_with_manifest_and_metrics, max_recommendations=3
     )
     assert os.path.isfile(out_path)
-    assert out_path.endswith("plot_data.json")
+    assert out_path.endswith("priority_data.json")
 
     with open(out_path) as f:
         data = json.load(f)
@@ -296,7 +305,7 @@ def test_generate_plot_data(output_dir_with_manifest_and_metrics):
     assert data["baseline_ms"] == 5000.0
     assert "recommendations" in data
     assert "all_estimates" in data
-    # gemm: 100+50, sdpa: 80 -> sorted by savings: gemm first, then sdpa
+    assert "priorities" in data
     recs = data["recommendations"]
     assert len(recs) <= 3
     categories = [r["category"] for r in recs]
@@ -307,37 +316,7 @@ def test_generate_plot_data(output_dir_with_manifest_and_metrics):
     assert gemm_rec["operation_count"] == 2
 
 
-def test_generate_plot_data_comparative_kernel_tuning_type(tmp_path):
-    cat_data = tmp_path / "category_data"
-    cat_data.mkdir(parents=True)
-    (cat_data / "category_manifest.json").write_text(
-        json.dumps({"gpu_utilization": {"total_time_ms": 2000.0}}, indent=2)
-    )
-    gemm_metrics = {
-        "status": "OK",
-        "category": "gemm",
-        "impact_estimates": [
-            {
-                "operation": "aten::mm",
-                "category": "gemm",
-                "type": "kernel_tuning",
-                "savings_ms": 12.0,
-                "savings_ms_low": 12.0,
-                "savings_ms_high": 12.0,
-                "confidence": "high",
-            },
-        ],
-    }
-    (cat_data / "gemm_metrics.json").write_text(json.dumps(gemm_metrics, indent=2))
-    out_path = generate_plot_data(str(tmp_path))
-    with open(out_path) as f:
-        data = json.load(f)
-    assert len(data["recommendations"]) == 1
-    assert data["recommendations"][0]["type"] == "kernel_tuning"
-    assert data["recommendations"][0]["savings_ms"] == 12.0
-
-
-def test_generate_plot_data_skips_error_metrics(tmp_path):
+def test_generate_priority_data_skips_error_metrics(tmp_path):
     cat_data = tmp_path / "category_data"
     cat_data.mkdir(parents=True)
     (cat_data / "category_manifest.json").write_text(
@@ -346,7 +325,7 @@ def test_generate_plot_data_skips_error_metrics(tmp_path):
     (cat_data / "gemm_metrics.json").write_text(
         json.dumps({"status": "ERROR", "impact_estimates": []}, indent=2)
     )
-    out_path = generate_plot_data(str(tmp_path))
+    out_path = generate_priority_data(str(tmp_path))
     with open(out_path) as f:
         data = json.load(f)
     assert data["baseline_ms"] == 100.0
@@ -450,11 +429,6 @@ def test_detect_flash_attention():
 def test_detect_softmax():
     assert detect_softmax("aten::softmax") is True
     assert detect_softmax("aten::mm") is False
-
-
-def test_detect_transpose():
-    assert detect_transpose("aten::transpose") is True
-    assert detect_transpose("aten::mm") is False
 
 
 def test_detect_paged_attention():

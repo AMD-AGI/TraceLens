@@ -101,41 +101,7 @@ Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
 - **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
 
-### Step 4: Generate Markdown Tables
-
-Build operations breakdown tables from `metrics['operations']`
-
-When `comparison_scope` is `standalone`:
-
-```markdown
-| Operation | Count | Time (ms) | % of Category | Efficiency | FLOPS/Byte | Type |
-|-----------|-------|-----------|---------------|------------|------------|------|
-```
-
-**Standalone column mappings:**
-- **Count**: `operations[i].count` (total invocations, not unique signatures)
-- **Time (ms)**: `operations[i].time_ms` (Trace 1 kernel time)
-- **% of Category**: `operations[i].percent_of_category`
-- **Efficiency**: `operations[i].efficiency.efficiency_percent` formatted as `X.XX% of Y TFLOPS` when `bound_type` is `compute` (Y = `resolved_peak_maf`), or `X.XX% of Y TB/s` when `bound_type` is `memory` (Y = `resolved_peak_hbm_bw`)
-- **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
-- **Type**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`). Do NOT use `classification.gemm_type` here — that field distinguishes quantized vs regular, not the compute/memory bound type.
-
-**Comparative** — when `metrics['analysis_mode']` is `comparative`:
-
-```markdown
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
-|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
-```
-
-**Comparative column mappings:**
-- **Trace 1 Time (ms)**: `operations[i].time_ms`
-- **Trace 2 Time (ms)**: `Kernel Time (µs)_trace2_sum / 1000` from the aligned row in `category_data/gemm_ops.csv`.
-- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operation_count_trace2` from the same CSV row. Format `T1 / T2` (use `—` for missing T2).
-- **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row.
-- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
-- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
-
-### Step 5: Determine Optimization Recommendations
+### Step 4: Determine Optimization Recommendations
 
 For each validated bottleneck, provide recommendations in both categories:
 
@@ -150,63 +116,19 @@ For each validated bottleneck, provide recommendations in both categories:
 - **Memory-bound:** Optimize memory access patterns, check for bandwidth bottlenecks
 - Flag suboptimal GEMM kernel selections
 
-### Step 6: Write Category Findings
+### Step 5: Write Category Findings
 
-Create `<output_dir>/category_findings/gemm_findings.md`. 
+**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/gemm_findings.md` using the output format defined there, with `<category>` = `gemm`. Do NOT use `classification.gemm_type` for the Type column — that field distinguishes quantized vs regular, not the compute/memory bound type.
 
-```markdown
-# GEMM Analysis Summary
+Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
 
-## Overview
-GEMMs account for X% of compute time. Average efficiency: Y%.
+### Step 5.5: Write Impact Estimates to Metadata
 
-## Operations Breakdown
-[Generated table]
-
-## Key Bottlenecks
-
-### 1. <Operation Name>
-- **Time:** X ms (Y% of compute)
-- **Standalone — Efficiency (compute-bound):** Z% of peak MAF (A TFLOPS/s achieved vs B TFLOPS/s peak <compute_spec>)
-- **Standalone — Efficiency (memory-bound):** Z% of peak HBM BW (A TB/s achieved vs B TB/s peak)
-- **Comparative — Relative kernel time:** `efficiency_percent` = 100×t2/t1 for this op (state in plain language vs trace2; optional: cite achieved TFLOPS/TB/s vs peak from the same row as context)
-- *Standalone: use the template matching `bound_type` and delete the other peak line. Comparative: omit roofline-only efficiency lines if you only discuss trace2 ratio.*
-- **Issue:** [Brief description]
-- **Algorithmic:** [Model/framework-level recommendation]
-- **Kernel:** [Kernel optimization recommendation]
-
-## Additional Notes
-- Missing perf models: [count from metrics]
-- Quantized GEMMs detected: [count from metrics]
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
-```
-
-**Detailed Analysis block:** Follow [`utils/templates/reasoning_block_template.md`](../utils/templates/reasoning_block_template.md) for the full block schema.
-
-**Peak reference (bound-type-aware):** When citing peak performance for a bottleneck, select the correct peak based on `operations[i].efficiency.bound_type`:
-- **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS). Report achieved TFLOPS/s vs peak TFLOPS.
-- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s). Report achieved TB/s vs peak TB/s.
-Do not look up peaks independently from the metadata dict.
-
-**Note:** `kernel_tuning` impact estimates are pre-computed in `category_data/gemm_metrics.json` under the `impact_estimates` key. Each estimate includes `savings_ms_low` (75% target band), `savings_ms_high` (100% target band), `savings_ms` (87.5% midpoint), `e2e_pct_low`, and `e2e_pct_high` (savings as % of E2E time). Use `savings_ms_low–savings_ms_high` for the Estimated Savings column and format the Estimated Improvement column as `savings_ms_low–savings_ms_high ms (e2e_pct_low–e2e_pct_high%)`.
-
-### Step 6.5: Write Impact Estimates to Metadata
-
-Run the script below, then render impact bullets in your `## Detailed Analysis` block per `reasoning_block_template.md`.
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.category_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'gemm', 'compute')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'gemm', 'compute')"
 ```
-
-**Impact estimation guidelines:**
-- `kernel_tuning`: Use the range from `impact_estimates` in the metrics JSON (`savings_ms_low`–`savings_ms_high` for savings; `e2e_pct_low`–`e2e_pct_high` for E2E %)
-- Do NOT manually estimate algorithmic, fusion, or system savings. Only `kernel_tuning` rows from pre-computed data are valid.
-- **Confidence**: `high` = clear, measurable gap to expected peak (roofline for standalone and trace2 runtime for comparative); `medium` = likely opportunity but outcome depends on implementation; `low` = rough estimate
-- **Self-check:** Before finishing, verify the Impact Summary table has ONLY `kernel_tuning` type rows. If `impact_estimates` is empty, leave the table with zero data rows (header and separator only). Do NOT add placeholder rows or rows with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 

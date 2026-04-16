@@ -10,17 +10,16 @@ Public API:
 
 - ``generate_perf_plot`` — 2-panel chart: cumulative stacked E2E bars by
   kernel category + throughput cone with 75-100% roofline band.
-- ``embed_plot_in_report`` — inject ``perf_improvement`` PNG into markdown.
-- ``generate_and_embed_plot`` — end-to-end pipeline (plot_data → plot → embed).
+- ``generate_priority_data`` — aggregate impact estimates into priority_data.json.
+- ``generate_and_embed_plot`` — end-to-end pipeline (priority_data → plot → embed).
 """
 
 import base64
 import json
 import os
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
-    generate_plot_data,
-)
 import re
+from collections import defaultdict
+from typing import List
 
 import numpy as np
 import matplotlib
@@ -28,9 +27,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest
+
 __all__ = [
     "generate_perf_plot",
-    "embed_plot_in_report",
+    "generate_priority_data",
     "generate_and_embed_plot",
 ]
 
@@ -80,12 +81,7 @@ def _compute_cumulative_projections(baseline_ms, recommendations):
         lat_best = max(0.01, baseline_ms - cum_hi)
         lat_worst = max(0.01, baseline_ms - cum_lo)
         cnt = rec.get("operation_count", 1)
-        cat_display = (
-            rec["category"][0].upper() + rec["category"][1:]
-            if rec["category"]
-            else rec["category"]
-        )
-        steps.append(f"{cat_display}\n({cnt} ops)")
+        steps.append(f"{_short_name(rec['category'], max_len=20)}\n({cnt} ops)")
         e2e_ms.append(lat_mid)
         savings.append(sm)
         rel.append(round(baseline_ms / lat_mid * 100, 1))
@@ -155,6 +151,153 @@ def _build_color_map(recommendations):
     return cmap
 
 
+def _render_stacked_bars(
+    ax,
+    proj,
+    recommendations,
+    baseline_by_cat,
+    segment_order,
+    cat_color_map,
+    show_error_bars,
+):
+    """Render the left-panel stacked E2E bars with labels and error bars."""
+    n_bars = len(proj["steps"])
+    x = np.arange(n_bars, dtype=float)
+    width = 0.62
+    rest_label = "Non-computing"
+    rest_color = "#aab7c4"
+
+    def _segment_heights(num_recs: int) -> dict[str, float]:
+        savings_by_cat: dict[str, float] = {}
+        for j in range(num_recs):
+            r = recommendations[j]
+            c = r["category"]
+            sv = float(r.get("savings_ms", 0))
+            if c in baseline_by_cat and c != _REST_KEY:
+                savings_by_cat[c] = savings_by_cat.get(c, 0.0) + sv
+            elif _REST_KEY in baseline_by_cat:
+                savings_by_cat[_REST_KEY] = savings_by_cat.get(_REST_KEY, 0.0) + sv
+        return {
+            name: max(
+                0.0, baseline_by_cat.get(name, 0.0) - savings_by_cat.get(name, 0.0)
+            )
+            for name in segment_order
+        }
+
+    bottom = np.zeros(n_bars, dtype=float)
+    rest_bottom = np.zeros(n_bars, dtype=float)
+    rest_height = np.zeros(n_bars, dtype=float)
+    for seg_name in segment_order:
+        h = np.array(
+            [_segment_heights(k)[seg_name] for k in range(n_bars)], dtype=float
+        )
+        if np.all(h <= 0):
+            continue
+        color = (
+            rest_color
+            if seg_name == _REST_KEY
+            else cat_color_map.get(seg_name, "#bdc3c7")
+        )
+        lbl = rest_label if seg_name == _REST_KEY else _short_name(seg_name)
+        ax.bar(
+            x,
+            h,
+            width,
+            bottom=bottom,
+            label=lbl,
+            color=color,
+            edgecolor="white",
+            linewidth=0.9,
+            alpha=0.95,
+        )
+        if seg_name == _REST_KEY:
+            rest_bottom = bottom.copy()
+            rest_height = h.copy()
+        bottom += h
+
+    for k in range(n_bars):
+        total_h = float(bottom[k])
+        accent = "#333333"
+        if k > 0:
+            cat = recommendations[k - 1].get("category", "")
+            accent = cat_color_map.get(cat, "#333333")
+        label_y = total_h + (proj["err_hi"][k] + 1.2 if show_error_bars else 1.2)
+        ax.text(
+            x[k],
+            label_y,
+            f"{proj['e2e_ms'][k]:.1f} ms",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color=accent,
+        )
+        if k > 0 and proj["savings"][k] > 0:
+            rest_mid = float(rest_bottom[k]) + float(rest_height[k]) / 2
+            ax.text(
+                x[k],
+                rest_mid,
+                f"-{proj['savings'][k]:.1f} ms",
+                ha="center",
+                va="center",
+                fontsize=8,
+                color=accent,
+                fontweight="bold",
+                zorder=5,
+            )
+        if show_error_bars:
+            ax.errorbar(
+                [x[k]],
+                [total_h],
+                yerr=[[proj["err_lo"][k]], [proj["err_hi"][k]]],
+                fmt="none",
+                ecolor=accent,
+                elinewidth=1.1,
+                capsize=3,
+                zorder=6,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(proj["steps"], fontsize=8)
+    ax.set_ylabel("E2E time stacked by category (ms)", fontsize=11)
+    ax.set_title(
+        "Projected E2E Latency (stacked by kernel category)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
+    ymax = (
+        float(np.max(bottom + proj["err_hi"]) + 8)
+        if show_error_bars
+        else float(np.max(bottom) + 8)
+    )
+    ax.set_ylim(0, ymax * 1.12)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    handles, labels = ax.get_legend_handles_labels()
+    rec_order = [_short_name(r["category"]) for r in recommendations]
+    ordered_handles = []
+    ordered_labels = []
+    for rn in rec_order:
+        if rn in labels:
+            idx = labels.index(rn)
+            ordered_handles.append(handles[idx])
+            ordered_labels.append(labels[idx])
+    for h, l in zip(handles, labels):
+        if l not in ordered_labels:
+            ordered_handles.append(h)
+            ordered_labels.append(l)
+    ax.legend(
+        ordered_handles,
+        ordered_labels,
+        loc="upper left",
+        bbox_to_anchor=(1.0, 1.0),
+        fontsize=7.5,
+        frameon=False,
+        title="Operations",
+    )
+
+
 def _render_throughput_cone(ax, proj):
     """Render the cumulative throughput cone on the given axes."""
     x_vals = np.arange(len(proj["steps"]))
@@ -208,6 +351,163 @@ def _render_throughput_cone(ax, proj):
     ax.tick_params(axis="x", labelsize=9)
 
 
+def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str:
+    """Aggregate impact_estimates into priority_data.json -- the single
+    deterministic source of truth for both report P-item ordering and the
+    performance improvement plot.
+
+    Produces three top-level arrays:
+      - ``priorities``: ranked category list for report P-items (quantified
+        categories sorted by savings_ms, then unmodeled categories with
+        >5% of compute time sorted by gpu_kernel_time_ms)
+      - ``recommendations``: same quantified categories, used by the plot
+      - ``all_estimates``: flat list of every per-operation estimate
+
+    Args:
+        output_dir: Base output directory containing category_data/
+        max_recommendations: Max categories in the plot recommendations
+
+    Returns:
+        Path to written priority_data.json
+    """
+    out_path = os.path.join(output_dir, "priority_data.json")
+    category_data_dir = os.path.join(output_dir, "category_data")
+
+    try:
+        manifest = load_manifest(output_dir)
+
+        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+        computation_pct = manifest.get("gpu_utilization", {}).get(
+            "computation_time_percent", 0
+        )
+        computation_time_ms = baseline_ms * computation_pct / 100
+        threshold_ms = computation_time_ms * 0.05
+
+        all_estimates: List[dict] = []
+        for fname in sorted(os.listdir(category_data_dir)):
+            if not fname.endswith("_metrics.json"):
+                continue
+            fpath = os.path.join(category_data_dir, fname)
+            with open(fpath, "r") as f:
+                metrics = json.load(f)
+            if metrics.get("status") in ("ERROR", "NO_DATA"):
+                continue
+            all_estimates.extend(metrics.get("impact_estimates", []))
+
+        category_savings: dict = defaultdict(
+            lambda: {
+                "savings_ms": 0,
+                "savings_ms_low": 0,
+                "savings_ms_high": 0,
+                "count": 0,
+                "ops": [],
+            }
+        )
+        for e in all_estimates:
+            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
+                "high",
+                "medium",
+            ):
+                cat = e["category"]
+                category_savings[cat]["savings_ms"] += e["savings_ms"]
+                category_savings[cat]["savings_ms_low"] += e.get(
+                    "savings_ms_low", e["savings_ms"]
+                )
+                category_savings[cat]["savings_ms_high"] += e.get(
+                    "savings_ms_high", e["savings_ms"]
+                )
+                category_savings[cat]["count"] += 1
+                category_savings[cat]["ops"].append(e.get("operation", ""))
+
+        plot_recs = sorted(
+            [
+                {
+                    "category": cat,
+                    "savings_ms": round(v["savings_ms"], 3),
+                    "savings_ms_low": round(v["savings_ms_low"], 3),
+                    "savings_ms_high": round(v["savings_ms_high"], 3),
+                    "operation_count": v["count"],
+                    "type": "kernel_tuning",
+                }
+                for cat, v in category_savings.items()
+            ],
+            key=lambda x: x["savings_ms"],
+            reverse=True,
+        )[:max_recommendations]
+
+        cat_display = {}
+        for cat_entry in manifest.get("categories", []):
+            cat_display[cat_entry["name"]] = cat_entry.get(
+                "display_name", cat_entry["name"]
+            )
+
+        priorities: List[dict] = []
+        for rank, rec in enumerate(plot_recs, 1):
+            priorities.append(
+                {
+                    "rank": rank,
+                    "category": rec["category"],
+                    "display_name": cat_display.get(rec["category"], rec["category"]),
+                    "savings_ms": rec["savings_ms"],
+                    "savings_ms_low": rec["savings_ms_low"],
+                    "savings_ms_high": rec["savings_ms_high"],
+                    "source": "impact_estimates",
+                }
+            )
+
+        quantified_cats = set(category_savings.keys())
+        unmodeled = []
+        for cat_entry in manifest.get("categories", []):
+            cat_name = cat_entry.get("name")
+            if cat_entry.get("tier") != "compute_kernel":
+                continue
+            if cat_name in quantified_cats:
+                continue
+            gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
+            if gpu_time >= threshold_ms:
+                unmodeled.append(
+                    {
+                        "category": cat_name,
+                        "display_name": cat_entry.get("display_name", cat_name),
+                        "gpu_kernel_time_ms": round(gpu_time, 3),
+                    }
+                )
+        unmodeled.sort(key=lambda x: x["gpu_kernel_time_ms"], reverse=True)
+
+        next_rank = len(priorities) + 1
+        for entry in unmodeled:
+            priorities.append(
+                {
+                    "rank": next_rank,
+                    "category": entry["category"],
+                    "display_name": entry["display_name"],
+                    "savings_ms": None,
+                    "gpu_kernel_time_ms": entry["gpu_kernel_time_ms"],
+                    "source": "manifest_fallback",
+                }
+            )
+            next_rank += 1
+
+        priority_data = {
+            "baseline_ms": baseline_ms,
+            "priorities": priorities,
+            "recommendations": plot_recs,
+            "all_estimates": all_estimates,
+        }
+    except Exception:
+        priority_data = {
+            "baseline_ms": 0,
+            "priorities": [],
+            "recommendations": [],
+            "all_estimates": [],
+        }
+
+    with open(out_path, "w") as f:
+        json.dump(priority_data, f, indent=2)
+
+    return out_path
+
+
 def generate_perf_plot(
     output_dir: str,
     title: str,
@@ -222,11 +522,11 @@ def generate_perf_plot(
     optimized category's slice by its ``savings_ms``.  Right panel shows
     cumulative relative throughput with a 75-100% roofline band.
 
-    Generates ``plot_data.json`` automatically if missing.
+    Generates ``priority_data.json`` automatically if missing.
 
     Args:
         output_dir: Directory containing ``category_data/category_manifest.json``
-            and (optionally) ``plot_data.json``.
+            and (optionally) ``priority_data.json``.
         title: Figure suptitle.
         output_filename: PNG name under ``output_dir``.
         write_base64: Write ``perf_improvement_base64.txt`` for report embedding.
@@ -235,16 +535,16 @@ def generate_perf_plot(
     Returns:
         True if the figure was written, False if inputs were missing or invalid.
     """
-    plot_data_path = os.path.join(output_dir, "plot_data.json")
+    plot_data_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(plot_data_path):
         try:
-            generate_plot_data(output_dir)
+            generate_priority_data(output_dir)
         except Exception as e:
-            print(f"plot_data generation failed: {e}")
+            print(f"priority_data generation failed: {e}")
             return False
 
     if not os.path.exists(plot_data_path):
-        print(f"plot_data.json not found at {plot_data_path} - skipping plot")
+        print(f"priority_data.json not found at {plot_data_path} - skipping plot")
         return False
 
     with open(plot_data_path, "r") as f:
@@ -256,13 +556,11 @@ def generate_perf_plot(
         print("No kernel tuning recommendations or invalid baseline - skipping plot")
         return False
 
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    if not os.path.exists(manifest_path):
-        print(f"category_manifest.json not found - skipping plot")
+    try:
+        manifest = load_manifest(output_dir)
+    except FileNotFoundError:
+        print("category_manifest.json not found - skipping plot")
         return False
-
-    with open(manifest_path, "r") as f:
-        manifest = json.load(f)
 
     proj = _compute_cumulative_projections(baseline_ms, recommendations)
     baseline_by_cat, segment_order, plotted_cats = _build_stacked_segments(
@@ -272,28 +570,6 @@ def generate_perf_plot(
     )
     cat_color_map = _build_color_map(recommendations)
 
-    n_bars = len(proj["steps"])
-    x = np.arange(n_bars, dtype=float)
-    width = 0.62
-    rest_label = "Non-computing"
-
-    def _segment_heights(num_recs: int) -> dict[str, float]:
-        savings_by_cat: dict[str, float] = {}
-        for j in range(num_recs):
-            r = recommendations[j]
-            c = r["category"]
-            sv = float(r.get("savings_ms", 0))
-            if c in baseline_by_cat and c != _REST_KEY:
-                savings_by_cat[c] = savings_by_cat.get(c, 0.0) + sv
-            elif _REST_KEY in baseline_by_cat:
-                savings_by_cat[_REST_KEY] = savings_by_cat.get(_REST_KEY, 0.0) + sv
-        return {
-            name: max(
-                0.0, baseline_by_cat.get(name, 0.0) - savings_by_cat.get(name, 0.0)
-            )
-            for name in segment_order
-        }
-
     fig, (ax_stack, ax_cone) = plt.subplots(
         1,
         2,
@@ -301,119 +577,14 @@ def generate_perf_plot(
         gridspec_kw={"width_ratios": [1.45, 1.0]},
     )
 
-    # -- Left panel: stacked bars --
-    bottom = np.zeros(n_bars, dtype=float)
-    rest_color = "#aab7c4"
-    rest_bottom = np.zeros(n_bars, dtype=float)
-    rest_height = np.zeros(n_bars, dtype=float)
-    for seg_name in segment_order:
-        h = np.array(
-            [_segment_heights(k)[seg_name] for k in range(n_bars)], dtype=float
-        )
-        if np.all(h <= 0):
-            continue
-        color = (
-            rest_color
-            if seg_name == _REST_KEY
-            else cat_color_map.get(seg_name, "#bdc3c7")
-        )
-        lbl = rest_label if seg_name == _REST_KEY else _short_name(seg_name)
-        ax_stack.bar(
-            x,
-            h,
-            width,
-            bottom=bottom,
-            label=lbl,
-            color=color,
-            edgecolor="white",
-            linewidth=0.9,
-            alpha=0.95,
-        )
-        if seg_name == _REST_KEY:
-            rest_bottom = bottom.copy()
-            rest_height = h.copy()
-        bottom += h
-
-    for k in range(n_bars):
-        total_h = float(bottom[k])
-        accent = "#333333"
-        if k > 0:
-            cat = recommendations[k - 1].get("category", "")
-            accent = cat_color_map.get(cat, "#333333")
-        label_y = total_h + (proj["err_hi"][k] + 1.2 if show_error_bars else 1.2)
-        ax_stack.text(
-            x[k],
-            label_y,
-            f"{proj['e2e_ms'][k]:.1f} ms",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            fontweight="bold",
-            color=accent,
-        )
-        if k > 0 and proj["savings"][k] > 0:
-            rest_mid = float(rest_bottom[k]) + float(rest_height[k]) / 2
-            ax_stack.text(
-                x[k],
-                rest_mid,
-                f"-{proj['savings'][k]:.1f} ms",
-                ha="center",
-                va="center",
-                fontsize=8,
-                color=accent,
-                fontweight="bold",
-                zorder=5,
-            )
-        if show_error_bars:
-            ax_stack.errorbar(
-                [x[k]],
-                [total_h],
-                yerr=[[proj["err_lo"][k]], [proj["err_hi"][k]]],
-                fmt="none",
-                ecolor=accent,
-                elinewidth=1.1,
-                capsize=3,
-                zorder=6,
-            )
-
-    ax_stack.set_xticks(x)
-    ax_stack.set_xticklabels(proj["steps"], fontsize=8)
-    ax_stack.set_ylabel("E2E time stacked by category (ms)", fontsize=11)
-    ax_stack.set_title(
-        "Projected E2E Latency (stacked by kernel category)",
-        fontsize=11,
-        fontweight="bold",
-        pad=10,
-    )
-    ymax = (
-        float(np.max(bottom + proj["err_hi"]) + 8)
-        if show_error_bars
-        else float(np.max(bottom) + 8)
-    )
-    ax_stack.set_ylim(0, ymax * 1.12)
-    ax_stack.spines["top"].set_visible(False)
-    ax_stack.spines["right"].set_visible(False)
-    handles, labels = ax_stack.get_legend_handles_labels()
-    rec_order = [_short_name(r["category"]) for r in recommendations]
-    ordered_handles = []
-    ordered_labels = []
-    for rn in rec_order:
-        if rn in labels:
-            idx = labels.index(rn)
-            ordered_handles.append(handles[idx])
-            ordered_labels.append(labels[idx])
-    for h, l in zip(handles, labels):
-        if l not in ordered_labels:
-            ordered_handles.append(h)
-            ordered_labels.append(l)
-    ax_stack.legend(
-        ordered_handles,
-        ordered_labels,
-        loc="upper left",
-        bbox_to_anchor=(1.0, 1.0),
-        fontsize=7.5,
-        frameon=False,
-        title="Operations",
+    _render_stacked_bars(
+        ax_stack,
+        proj,
+        recommendations,
+        baseline_by_cat,
+        segment_order,
+        cat_color_map,
+        show_error_bars,
     )
 
     fig.text(
@@ -426,7 +597,6 @@ def generate_perf_plot(
         style="italic",
     )
 
-    # -- Right panel: throughput cone --
     _render_throughput_cone(ax_cone, proj)
 
     fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
@@ -448,7 +618,7 @@ def generate_perf_plot(
     return True
 
 
-def embed_plot_in_report(
+def _embed_plot_in_report(
     output_dir: str,
     report_filename: str = "standalone_analysis.md",
     placeholder: str = "{{PERF_PLOT}}",
@@ -517,6 +687,6 @@ def generate_and_embed_plot(output_dir: str, title: str) -> dict:
     results["plot"] = generate_perf_plot(output_dir, title)
     if results["plot"]:
         results["plot_data"] = True
-        results["embed"] = embed_plot_in_report(output_dir)
+        results["embed"] = _embed_plot_in_report(output_dir)
 
     return results

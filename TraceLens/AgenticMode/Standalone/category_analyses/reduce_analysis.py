@@ -16,21 +16,12 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import (
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    compute_impact_estimates,
-    write_metrics_json,
-    detect_softmax,
-)
+from analysis_utils import run_category_analysis
 
 
-def get_reduce_config():
-    """Return reduce-specific configuration."""
-    return {
-        "extra_fields": [],
-    }
+def detect_softmax(op_name: str) -> bool:
+    """Check if operation is a softmax."""
+    return "softmax" in op_name.lower()
 
 
 def extract_category_specific(ops_df, metadata) -> dict:
@@ -58,41 +49,13 @@ def main():
     )
     args = parser.parse_args()
 
-    try:
-        ops_df, metadata = load_category_data(args.output_dir, "reduce")
-    except FileNotFoundError as e:
-        error_metrics = {"category": "reduce", "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, "reduce")
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    config = get_reduce_config()
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-
-    time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(
-        ops_df, metadata, config, analysis_mode=args.comparison_scope
+    run_category_analysis(
+        category="reduce",
+        output_dir=args.output_dir,
+        config={"extra_fields": []},
+        extract_fn=extract_category_specific,
+        analysis_mode=args.comparison_scope,
     )
-    category_specific = extract_category_specific(ops_df, metadata)
-
-    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    impact_estimates = compute_impact_estimates(
-        operations, "reduce", baseline_ms=baseline_ms
-    )
-
-    metrics = {
-        "category": "reduce",
-        "status": "OK",
-        "analysis_mode": args.comparison_scope,
-        **time_metrics,
-        "operations": operations,
-        "category_specific": category_specific,
-        "impact_estimates": impact_estimates,
-    }
-
-    output_path = write_metrics_json(metrics, args.output_dir, "reduce")
-    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":

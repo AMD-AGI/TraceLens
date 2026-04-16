@@ -256,7 +256,7 @@ The orchestrator supports two analysis modes, selected during Step 0:
 
 | Mode | Script | Use Case |
 |------|--------|----------|
-| **Default (training and eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training traces, eager inference traces |
+| **Default (training and non-vLLM/SGLang eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang eager inference traces |
 | **Inference (vLLM/SGLang)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang traces in eager mode or graph replay + capture mode |
 
 For inference mode, the orchestrator also asks for the execution mode:
