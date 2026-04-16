@@ -18,41 +18,28 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
-    get_peak_specs,
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
     compute_impact_estimates,
     write_metrics_json,
+    classify_other_operation,
 )
 
 
-def classify_other_operation(op_name: str) -> str:
-    """Classify 'other' category operations."""
-    op_lower = op_name.lower()
-
-    if any(
-        x in op_lower
-        for x in [
-            "all_reduce",
-            "collective",
-            "ncclkernel",
-            "rccl",
-            "broadcast",
-            "allgather",
-        ]
-    ):
-        return "communication"
-
-    if any(x in op_lower for x in ["graph", "hipgraph", "cudagraph"]):
-        return "graph"
-
-    return "miscellaneous"
+def get_other_config():
+    """Return other-specific configuration."""
+    return {
+        "extra_fields": [],
+        "operation_classifier": classify_other_op,
+    }
 
 
-def _classify_other_op(op_name: str, row) -> dict:
-    """Operation classifier callback for build_operation_metrics."""
-    return {"sub_category": classify_other_operation(op_name)}
+def classify_other_op(op_name: str, row) -> dict:
+    """Classify other operation type."""
+    category = classify_other_operation(op_name)
+
+    return {"sub_category": category}
 
 
 def extract_category_specific(ops_df, metadata, skipped_comm_ops=None) -> dict:
@@ -71,7 +58,12 @@ def extract_category_specific(ops_df, metadata, skipped_comm_ops=None) -> dict:
         "communication_count": 0,
         "graph_count": graph_count,
         "miscellaneous_count": misc_count,
-        **get_peak_specs(metadata),
+        "peak_maf_tflops": (
+            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
+            if isinstance(metadata.get("max_achievable_tflops"), dict)
+            else metadata.get("peak_bf16_maf_tflops")
+        ),
+        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
     }
 
     if skipped_comm_ops and skipped_comm_ops["count"] > 0:
@@ -117,10 +109,9 @@ def main():
         )
     ops_df = ops_df[~comm_mask]
 
-    config = {
-        "extra_fields": [],
-        "operation_classifier": _classify_other_op,
-    }
+    config = get_other_config()
+    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
+    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
     operations = build_operation_metrics(ops_df, metadata, config)

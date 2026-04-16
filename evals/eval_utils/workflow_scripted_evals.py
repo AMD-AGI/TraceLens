@@ -154,7 +154,7 @@ def _check_findings_placement(output_dir: str) -> tuple[str, str]:
 
 def _check_plot(output_dir: str) -> tuple[str, str]:
     plot_path = os.path.join(output_dir, "perf_improvement.png")
-    plot_data_path = os.path.join(output_dir, "priority_data.json")
+    plot_data_path = os.path.join(output_dir, "plot_data.json")
 
     if os.path.isfile(plot_path):
         return "PASS", ""
