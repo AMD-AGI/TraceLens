@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 import gzip
 import os
 import json
@@ -14,6 +15,7 @@ import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..util import DataLoader
+from ..util import TraceEventUtils
 
 
 def list_to_tuple(obj):
@@ -22,13 +24,87 @@ def list_to_tuple(obj):
     return obj
 
 
-def _nccl_filter_event_fn(event):
-    """Filters NCCL kernel events."""
-    is_nccl_kernel = (
-        event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
+def _parse_split_sizes(value):
+    """Parse an In/Out split size value into a list of ints.
+
+    Traces store split sizes in varying formats depending on the PyTorch
+    version: as a JSON array (Python list/tuple after loading) or as a
+    string representation ``'[393216, 393216, ...]'``.  This helper
+    normalises both forms into a plain list of ints, returning ``None``
+    when the value is missing or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [int(x) for x in value]
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("["):
+            try:
+                parsed = ast.literal_eval(value)
+                if isinstance(parsed, (list, tuple)):
+                    return [int(x) for x in parsed]
+            except (ValueError, SyntaxError):
+                pass
+    return None
+
+
+import re
+
+DEFAULT_CUSTOM_COLLECTIVE_PATTERNS = [
+    (r"cross_device_reduce", "allreduce"),
+]
+
+_DEFAULT_FILTER_PATTERNS = TraceEventUtils.get_communication_regexes() + [
+    re.compile(p, re.IGNORECASE) for p, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+]
+
+_DEFAULT_INFERENCE_RULES = [
+    (re.compile(p, re.IGNORECASE), collective)
+    for p, collective in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+]
+
+
+def _build_filter_and_inference_rules(custom_patterns):
+    """Build compiled regex lists from user-provided (pattern, collective) tuples."""
+    filter_patterns = TraceEventUtils.get_communication_regexes()
+    inference_rules = []
+    for pattern, collective in custom_patterns:
+        compiled = re.compile(pattern, re.IGNORECASE)
+        filter_patterns.append(compiled)
+        inference_rules.append((compiled, collective))
+    return filter_patterns, inference_rules
+
+
+def _infer_collective_name(kernel_name, inference_rules):
+    """Infer a normalised collective name from the GPU kernel name.
+
+    Returns the collective name string if a known pattern matches,
+    otherwise ``None`` (meaning the caller should keep whatever the
+    trace already provides).
+    """
+    for pattern, collective in inference_rules:
+        if pattern.search(kernel_name):
+            return collective
+    return None
+
+
+def _collective_filter(event, filter_patterns):
+    """Filters collective kernel events (NCCL and custom collectives)."""
+    if event.get("cat") != "kernel":
+        return False
+    name = event.get("name", "")
+    is_collective = any(p.search(name) for p in filter_patterns)
+    args = event.get("args", {})
+    is_linked = (
+        args.get("correlation") is not None or args.get("External id") is not None
     )
-    is_linked = event.get("args", {}).get("External id") is not None
-    return is_nccl_kernel and is_linked
+    return is_collective and is_linked
+
+
+def _nccl_filter_event_fn(event):
+    """Default filter using built-in patterns (for multiprocessing path)."""
+    return _collective_filter(event, _DEFAULT_FILTER_PATTERNS)
 
 
 def _load_single_rank_process(rank, filepath):
@@ -52,7 +128,19 @@ class NcclAnalyser:
         world_size,
         use_multiprocessing=False,
         max_workers=None,
+        custom_collective_patterns=None,
     ):
+        """
+        Parameters
+        ----------
+        custom_collective_patterns : list of (str, str) tuples, optional
+            Each tuple is ``(regex_pattern, collective_name)``.  The regex
+            is matched against GPU kernel names to identify custom
+            collective kernels (e.g. vLLM's ``cross_device_reduce``).
+            When a kernel matches and has no ``Collective name`` in its
+            trace metadata, *collective_name* is used as the inferred type.
+            Defaults to ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS``.
+        """
         self.logger = logging.getLogger(__name__)
         self.list_profile_filepaths = list_profile_filepaths
         self.world_size = world_size
@@ -61,6 +149,16 @@ class NcclAnalyser:
         self.max_workers = (
             max_workers if max_workers is not None else (os.cpu_count() or 8)
         )
+
+        patterns = (
+            custom_collective_patterns
+            if custom_collective_patterns is not None
+            else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+        )
+        (
+            self._filter_patterns,
+            self._inference_rules,
+        ) = _build_filter_and_inference_rules(patterns)
 
         # Byte sizes per dtype
         self.dtype2bytes = {
@@ -111,15 +209,12 @@ class NcclAnalyser:
 
         # Internal storage
         self.rank2trace_data = {}  # Stores per-rank data
+        self._simplified_mode = False
         self.load_trace_data()
 
     def _nccl_filter_event_fn(self, event):
-        """Filters NCCL kernel events."""
-        is_nccl_kernel = (
-            event.get("cat") == "kernel" and "nccl" in event.get("name", "").lower()
-        )
-        is_linked = event.get("args", {}).get("External id") is not None
-        return is_nccl_kernel and is_linked
+        """Filters collective kernel events using instance patterns."""
+        return _collective_filter(event, self._filter_patterns)
 
     def load_trace_data(self):
         """Loads NCCL JSON trace data and extracts relevant events."""
@@ -179,6 +274,12 @@ class NcclAnalyser:
                     if isinstance(field_value, list):
                         field_value = list_to_tuple(field_value)
                     row[field] = field_value
+                if row["Collective name"] is None:
+                    inferred = _infer_collective_name(
+                        evt.get("name", ""), self._inference_rules
+                    )
+                    if inferred is not None:
+                        row["Collective name"] = inferred
                 bytes_per_elem = (
                     self.dtype2bytes[row["dtype"]]
                     if row["dtype"] in self.dtype2bytes
@@ -204,21 +305,49 @@ class NcclAnalyser:
 
         df_long = df_long.reset_index(drop=True)
 
-        # Assign an index within each process group and rank
-        df_long["Process Group Name"] = df_long["Process Group Name"].fillna(
-            "Unknown_Group"
+        # Detect simplified inference mode: all NCCL kernels on a single
+        # stream per rank and no Process Group metadata.  When both
+        # conditions hold we match collectives across ranks purely by
+        # their temporal order on the stream (idx_instream).
+        pg_all_missing = (
+            df_long["Process Group Name"].isna().all()
+            or (
+                df_long["Process Group Name"].fillna("Unknown_Group") == "Unknown_Group"
+            ).all()
         )
-        df_long["index_in_group"] = (
-            df_long.groupby(["Process Group Name", "rank"])["ts"]
-            .rank(method="first")
-            .astype(int)
-            - 1
+        single_stream_per_rank = all(
+            df_long.loc[df_long["rank"] == r, "stream"].nunique() <= 1
+            for r in df_long["rank"].unique()
         )
+        self._simplified_mode = pg_all_missing and single_stream_per_rank
 
-        # Create a composite collective ID (process group + index)
-        df_long["collective_id"] = (
-            df_long["Process Group Name"] + "_" + df_long["index_in_group"].astype(str)
-        )
+        if self._simplified_mode:
+            self.logger.info(
+                "Detected simplified inference mode: all NCCL kernels on a "
+                "single stream with no Process Group metadata. Matching "
+                "collectives by stream-order index."
+            )
+            df_long["Process Group Name"] = "all"
+            df_long["index_in_group"] = (
+                df_long.groupby(["rank"])["ts"].rank(method="first").astype(int) - 1
+            )
+            df_long["collective_id"] = df_long["index_in_group"].astype(str)
+        else:
+            # Regular path: match by (Process Group Name, temporal order)
+            df_long["Process Group Name"] = df_long["Process Group Name"].fillna(
+                "Unknown_Group"
+            )
+            df_long["index_in_group"] = (
+                df_long.groupby(["Process Group Name", "rank"])["ts"]
+                .rank(method="first")
+                .astype(int)
+                - 1
+            )
+            df_long["collective_id"] = (
+                df_long["Process Group Name"]
+                + "_"
+                + df_long["index_in_group"].astype(str)
+            )
 
         desired_col_order = [
             "collective_id",
@@ -360,26 +489,33 @@ class NcclAnalyser:
             rank_events = df[df["collective_id"] == cid]
             rank_events = rank_events.set_index("rank")
 
-            # Skip if the collective type is not in the implicit sync category
             collective_name = rank_events.iloc[0]["Collective name"]
-            if (
-                self.collective_name2type.get(collective_name)
-                not in self.implicit_sync_cat
-            ):
-                continue
+            c_type = self.collective_name2type.get(collective_name)
 
-            # **Metadata Consistency Check**
+            if self._simplified_mode:
+                # In simplified mode, include all collectives when the name
+                # is missing or unrecognised; otherwise still filter.
+                if collective_name is not None and c_type is not None:
+                    if c_type not in self.implicit_sync_cat:
+                        continue
+            else:
+                if c_type not in self.implicit_sync_cat:
+                    continue
+
+            # **Metadata Consistency Check** (skip in simplified mode —
+            # fields may be uniformly absent)
             ref_metadata = {
                 field: rank_events.iloc[0][field] for field in metadata_fields
             }
-            for field in metadata_fields:
-                unique_values = rank_events[field].unique()
-                if len(unique_values) > 1:
-                    msg_mismatch = f"Metadata mismatch in '{field}' for collective {cid}: {unique_values}"
-                    if strict_metadata_check:
-                        self.logger.error(msg_mismatch)
-                        raise ValueError(msg_mismatch)
-                    self.logger.warning(msg_mismatch)
+            if not self._simplified_mode:
+                for field in metadata_fields:
+                    unique_values = rank_events[field].unique()
+                    if len(unique_values) > 1:
+                        msg_mismatch = f"Metadata mismatch in '{field}' for collective {cid}: {unique_values}"
+                        if strict_metadata_check:
+                            self.logger.error(msg_mismatch)
+                            raise ValueError(msg_mismatch)
+                        self.logger.warning(msg_mismatch)
 
             row = {"collective_id": cid, **ref_metadata}
 
@@ -417,18 +553,36 @@ class NcclAnalyser:
             )
             row["skew in end time"] = latest_end - earliest_end
 
-            # Compute algorithmic and bus bandwidth
-            c_type = self.collective_name2type.get(row["Collective name"])
-            row["Full msg size (MB)"] = (
-                row["Out msg size (MB)"]
-                if c_type == "allgather"
-                else row["In msg size (MB)"]
+            # Compute algorithmic and bus bandwidth (when metadata allows)
+            has_msg_size = (
+                row.get("In msg size (MB)") is not None
+                and row.get("Out msg size (MB)") is not None
             )
-            row["algo bw (GB/s)"] = (row["Full msg size (MB)"] / 1024) / (
-                row["comm_latency"] / 1e6
-            )
-            scaling_factor = self.collective2scaling_factor[c_type](row["Group size"])
-            row["bus bw (GB/s)"] = row["algo bw (GB/s)"] * scaling_factor
+            has_group_size = row.get("Group size") is not None
+
+            if has_msg_size and c_type is not None:
+                row["Full msg size (MB)"] = (
+                    row["Out msg size (MB)"]
+                    if c_type == "allgather"
+                    else row["In msg size (MB)"]
+                )
+                if row["comm_latency"] > 0:
+                    row["algo bw (GB/s)"] = (row["Full msg size (MB)"] / 1024) / (
+                        row["comm_latency"] / 1e6
+                    )
+                else:
+                    row["algo bw (GB/s)"] = float("nan")
+                if has_group_size and c_type in self.collective2scaling_factor:
+                    scaling_factor = self.collective2scaling_factor[c_type](
+                        row["Group size"]
+                    )
+                    row["bus bw (GB/s)"] = row["algo bw (GB/s)"] * scaling_factor
+                else:
+                    row["bus bw (GB/s)"] = float("nan")
+            else:
+                row["Full msg size (MB)"] = float("nan")
+                row["algo bw (GB/s)"] = float("nan")
+                row["bus bw (GB/s)"] = float("nan")
 
             rows.append(row)
 
@@ -493,26 +647,41 @@ class NcclAnalyser:
                 strict_metadata_check=strict_metadata_check
             )
 
-        # Aggregation logic
-
         df = self.df_implicit_sync_cat
+        if df.empty:
+            self.logger.warning(
+                "Implicit sync collective dataframe is empty. "
+                "Returning empty summary."
+            )
+            return df
+
+        # Core metrics always available (straggler analysis)
         agg_logic = {
-            "comm_latency": agg_metrics
-            + ["size", lambda x: x.sum() / 1000],  # Size and sum (convert to ms)
+            "comm_latency": agg_metrics + ["size", lambda x: x.sum() / 1000],
             "skew in start time": agg_metrics,
             "skew in end time": agg_metrics,
-            "algo bw (GB/s)": agg_metrics,
-            "bus bw (GB/s)": agg_metrics,
         }
+        # Bandwidth metrics only when data is present
+        if not df["algo bw (GB/s)"].isna().all():
+            agg_logic["algo bw (GB/s)"] = agg_metrics
+        if not df["bus bw (GB/s)"].isna().all():
+            agg_logic["bus bw (GB/s)"] = agg_metrics
+
         metric_fields = list(agg_logic.keys()).copy()
         for col in metadata_fields:
-            agg_logic[col] = "first"
+            if col in df.columns:
+                agg_logic[col] = "first"
 
+        # In simplified mode, Collective name / dtype / In msg nelems may be
+        # uniformly None.  Use a fillna so groupby doesn't drop them.
         groupby_cols = ["Collective name", "dtype", "In msg nelems"]
-        agg_result = df.groupby(groupby_cols).agg(agg_logic)
+        df_grouped = df.copy()
+        for col in groupby_cols:
+            if col in df_grouped.columns:
+                df_grouped[col] = df_grouped[col].fillna("Unknown")
+        agg_result = df_grouped.groupby(groupby_cols).agg(agg_logic)
 
         # Post-processing: rename columns and sort
-
         agg_result.columns = [
             f"{col[0]}_{col[1]}" if col[1] != "" else col[0]
             for col in agg_result.columns
@@ -522,30 +691,35 @@ class NcclAnalyser:
             "comm_latency_size": "count",
         }
         for col in metadata_fields:
-            column_renames[col + "_first"] = col
+            rename_key = col + "_first"
+            if rename_key in agg_result.columns:
+                column_renames[rename_key] = col
 
         agg_result.rename(columns=column_renames, inplace=True)
         summary_df = agg_result.reset_index()
         summary_df = summary_df.sort_values(
             by="Total comm latency (ms)", ascending=False
         )
-        columns_order = groupby_cols + metadata_fields
+        columns_order = groupby_cols + [
+            c for c in metadata_fields if c in summary_df.columns
+        ]
         for group in metric_fields:
             for agg in agg_metrics:
-                columns_order.append(f"{group}_{agg}")
+                col_name = f"{group}_{agg}"
+                if col_name in summary_df.columns:
+                    columns_order.append(col_name)
         columns_order.extend(["count", "Total comm latency (ms)"])
-        summary_df = summary_df[columns_order]
+        summary_df = summary_df[[c for c in columns_order if c in summary_df.columns]]
         return summary_df
 
     def build_df_nccl_all2allv(self, detailed=False, strict_metadata_check=True):
-        # this is diff from implicit sync cat
-        # first, each rank can send and receive different amount of data
-        # as a result they do not respect the implicit sync cat
-        # we cannot calculate comm latency as min dur
-        # thus we cannot calculate algo bw and bus bw
-        # as we discuss and understand the metrics, we can add them
-        # for now we expose raw data and leave the calculations to the user
-        # we will add some basic metrics for now
+        """Build a per-collective-instance DataFrame for all_to_allv.
+
+        Unlike implicit-sync collectives, each rank sends/receives a different
+        amount of data, so ``comm_latency`` / ``algo bw`` / ``bus bw`` do not
+        apply.  Instead we report ``throughput``, ``wall_time``, per-rank
+        duration spread, and ``size_imbalance``.
+        """
 
         if not hasattr(self, "df_per_rank_coll"):
             self.build_df_long()
@@ -636,6 +810,44 @@ class NcclAnalyser:
             row["total data communicated (MB)"] = total_in_size
             row["total nelems communicated"] = total_in_nelems
 
+            # Per-instance bandwidth and imbalance metrics
+            wall_time = latest_end - earliest_start
+            row["wall_time (us)"] = wall_time
+            row["max_rank_dur (us)"] = max(
+                row[f"rank_{r}_dur"] for r in rank_events.index
+            )
+            row["min_rank_dur (us)"] = min(
+                row[f"rank_{r}_dur"] for r in rank_events.index
+            )
+            row["avg_rank_dur (us)"] = sum(
+                row[f"rank_{r}_dur"] for r in rank_events.index
+            ) / len(rank_events.index)
+
+            if wall_time > 0:
+                row["throughput (GB/s)"] = (total_in_size / 1024) / (wall_time / 1e6)
+            else:
+                row["throughput (GB/s)"] = float("nan")
+
+            rank_throughputs = []
+            for r in rank_events.index:
+                r_size = row[f"rank_{r}_In msg size (MB)"]
+                r_dur = row[f"rank_{r}_dur"]
+                if r_size > 0 and r_dur > 0:
+                    rank_throughputs.append((r_size / 1024) / (r_dur / 1e6))
+            if rank_throughputs:
+                row["max_rank_throughput (GB/s)"] = max(rank_throughputs)
+                row["min_rank_throughput (GB/s)"] = min(rank_throughputs)
+            else:
+                row["max_rank_throughput (GB/s)"] = float("nan")
+                row["min_rank_throughput (GB/s)"] = float("nan")
+
+            rank_sizes = [row[f"rank_{r}_In msg size (MB)"] for r in rank_events.index]
+            mean_size = sum(rank_sizes) / len(rank_sizes) if rank_sizes else 0
+            if mean_size > 0:
+                row["size_imbalance"] = max(rank_sizes) / mean_size
+            else:
+                row["size_imbalance"] = float("nan")
+
             rows.append(row)
 
         if len(rows) == 0:
@@ -654,6 +866,14 @@ class NcclAnalyser:
             "stream",
             "total data communicated (MB)",
             "total nelems communicated",
+            "wall_time (us)",
+            "max_rank_dur (us)",
+            "min_rank_dur (us)",
+            "avg_rank_dur (us)",
+            "throughput (GB/s)",
+            "max_rank_throughput (GB/s)",
+            "min_rank_throughput (GB/s)",
+            "size_imbalance",
             "skew in start time",
             "skew in end time",
         ]
@@ -662,3 +882,179 @@ class NcclAnalyser:
         df = df.sort_values(by="total data communicated (MB)", ascending=False)
         self.df_all2allv_detailed = df
         return self.df_all2allv_detailed if detailed else df.drop(columns=per_rank_cols)
+
+    def build_df_summary_nccl_all2allv(
+        self,
+        agg_metrics=["mean", "std", "min", "max"],
+        strict_metadata_check=True,
+    ):
+        """Summary of all_to_allv collectives grouped by (Process Group Name, dtype).
+
+        Unlike implicit-sync collectives, all2allv has variable per-rank message
+        sizes.  We report aggregate throughput and size imbalance rather than
+        algo bw / bus bw.
+        """
+        if not hasattr(self, "df_all2allv_detailed"):
+            result = self.build_df_nccl_all2allv(
+                detailed=True, strict_metadata_check=strict_metadata_check
+            )
+            if result is None:
+                return None
+
+        df = self.df_all2allv_detailed
+        general_cols = [c for c in df.columns if not c.startswith("rank_")]
+        df = df[general_cols]
+
+        if df.empty:
+            return None
+
+        groupby_cols = ["Process Group Name", "dtype"]
+        agg_logic = {
+            "total data communicated (MB)": agg_metrics,
+            "wall_time (us)": agg_metrics + ["sum"],
+            "throughput (GB/s)": agg_metrics,
+            "size_imbalance": ["mean", "max"],
+            "max_rank_dur (us)": ["mean", "max"],
+            "skew in start time": ["mean", "max"],
+            "skew in end time": ["mean", "max"],
+            "collective_id": "count",
+        }
+        metadata_fields = ["Process Group Ranks", "Collective name", "Group size"]
+        for col in metadata_fields:
+            agg_logic[col] = "first"
+
+        agg_result = df.groupby(groupby_cols).agg(agg_logic)
+        agg_result.columns = [
+            f"{col[0]}_{col[1]}" if col[1] != "" else col[0]
+            for col in agg_result.columns
+        ]
+
+        renames = {
+            "collective_id_count": "count",
+            "wall_time (us)_sum": "Total wall_time (us)",
+        }
+        for col in metadata_fields:
+            renames[f"{col}_first"] = col
+        agg_result.rename(columns=renames, inplace=True)
+
+        agg_result["Total wall_time (ms)"] = agg_result["Total wall_time (us)"] / 1000
+
+        summary_df = agg_result.reset_index()
+        summary_df = summary_df.sort_values(by="Total wall_time (ms)", ascending=False)
+
+        return summary_df
+
+    def build_df_all2allv_heatmap(self, strict_metadata_check=True):
+        """Build a (src_rank, dst_rank) -> total bytes sent matrix across all
+        all2allv invocations.  Useful for identifying hot rank pairs in MoE.
+
+        ``In split size[j]`` on rank *i* is treated as the number of elements
+        rank *i* sends to rank *j* (NCCL sendcounts convention).  Bytes are
+        computed immediately per-event using the event's dtype so that mixed
+        dtypes across invocations are handled correctly.
+
+        When *strict_metadata_check* is True (default), events with
+        unparseable split sizes, unrecognised dtypes, or split-size lengths
+        that don't match the event's ``Group size`` are logged and skipped.
+
+        .. note::
+
+           The output can have up to N*N rows (one per observed src/dst
+           pair).  Rows are only present for pairs that appear in the trace
+           with parseable split sizes and known dtypes.  For very large
+           world sizes this can exceed Excel's row limit (1,048,576) or use
+           significant memory.  A warning is emitted when world_size > 256,
+           and the method returns ``None`` when world_size > 1024.
+        """
+        if self.world_size > 1024:
+            self.logger.warning(
+                "Skipping all2allv heatmap: world_size=%d would produce %d "
+                "rows (exceeds Excel row limit). Consider post-processing "
+                "the per-rank long table directly.",
+                self.world_size,
+                self.world_size**2,
+            )
+            return None
+
+        if self.world_size > 256:
+            self.logger.warning(
+                "all2allv heatmap will produce %d rows for world_size=%d. "
+                "This may be slow to write and unwieldy in Excel.",
+                self.world_size**2,
+                self.world_size,
+            )
+
+        if not hasattr(self, "df_per_rank_coll"):
+            self.build_df_long()
+
+        df = self.df_per_rank_coll
+        if df.empty:
+            return None
+
+        pair_data = {}  # (src, dst) -> {"total_bytes": int, "count": int}
+
+        all2allv_df = df[df["Collective name"] == "all_to_allv"]
+        if all2allv_df.empty:
+            return None
+
+        for _, row in all2allv_df.iterrows():
+            split_sizes = _parse_split_sizes(row["In split size"])
+            if split_sizes is None:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: unable to parse "
+                        "In split size=%r",
+                        row.get("rank", "unknown"),
+                        row["In split size"],
+                    )
+                continue
+
+            group_size = row.get("Group size")
+            if group_size is not None and len(split_sizes) != group_size:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: "
+                        "len(In split size)=%d != Group size=%d",
+                        row.get("rank", "unknown"),
+                        len(split_sizes),
+                        group_size,
+                    )
+                continue
+
+            dtype = row["dtype"]
+            bytes_per_elem = self.dtype2bytes.get(dtype)
+            if bytes_per_elem is None:
+                if strict_metadata_check:
+                    self.logger.warning(
+                        "Skipping all2allv event on rank %s: unrecognised " "dtype %r",
+                        row.get("rank", "unknown"),
+                        dtype,
+                    )
+                continue
+
+            src_rank = row["rank"]
+            for dst_rank, nelems in enumerate(split_sizes):
+                key = (src_rank, dst_rank)
+                if key not in pair_data:
+                    pair_data[key] = {"total_bytes": 0, "count": 0}
+                pair_data[key]["total_bytes"] += int(nelems) * bytes_per_elem
+                pair_data[key]["count"] += 1
+
+        if not pair_data:
+            return None
+
+        rows = []
+        for (src, dst), vals in sorted(pair_data.items()):
+            total_mb = vals["total_bytes"] / (1024**2)
+            count = vals["count"]
+            rows.append(
+                {
+                    "src_rank": src,
+                    "dst_rank": dst,
+                    "total_sent_MB": total_mb,
+                    "avg_sent_MB": total_mb / count if count > 0 else 0.0,
+                    "count": count,
+                }
+            )
+
+        return pd.DataFrame(rows)
