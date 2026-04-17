@@ -7,7 +7,7 @@
 """Tests for TraceLens AgenticMode Standalone Analysis.
 
 - Unit tests for category_analyses/analysis_utils (efficiency, impact estimates, plot data, helpers).
-- Integration test for orchestrator_prepare.py with minimal perf_report_csvs fixtures
+- Integration test for utils/orchestrator_prepare.py with minimal perf_report_csvs fixtures
   (Steps 2-3 only; Step 4 requires a real trace and is skipped when fixtures are used).
 """
 
@@ -28,17 +28,26 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     validate_efficiency,
     calculate_efficiency_with_validation,
     compute_impact_estimates,
-    generate_plot_data,
     write_metrics_json,
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
-    classify_other_operation,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.gemm_analysis import (
     detect_quantized_gemm,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.sdpa_analysis import (
     detect_flash_attention,
-    detect_softmax,
-    detect_transpose,
     detect_paged_attention,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.reduce_analysis import (
+    detect_softmax,
+)
+from TraceLens.AgenticMode.Standalone.category_analyses.other_analysis import (
+    classify_other_operation,
+)
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
+    generate_priority_data,
 )
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
@@ -80,7 +89,7 @@ def output_dir_with_category_data(tmp_path):
 
 @pytest.fixture
 def output_dir_with_manifest_and_metrics(tmp_path):
-    """Create category_data with category_manifest.json and 1+ *_metrics.json for generate_plot_data."""
+    """Create category_data with category_manifest.json and 1+ *_metrics.json for generate_priority_data."""
     out = tmp_path / "analysis_output"
     cat_data = out / "category_data"
     cat_data.mkdir(parents=True)
@@ -202,12 +211,13 @@ def test_compute_impact_estimates_basic():
     ]
     estimates = compute_impact_estimates(operations, "gemm")
     assert len(estimates) == 2
-    # 10 * (1 - 0.5) = 5, 5 * (1 - 0.8) = 1
-    assert estimates[0]["savings_ms"] == 4.286
+    # gap = time * (1 - eff/100), savings_ms = 0.875 * gap
+    # op_a: 0.875 * 10 * 0.5 = 4.375, op_b: 0.875 * 5 * 0.2 = 0.875
+    assert estimates[0]["savings_ms"] == 4.375
     assert estimates[0]["operation"] == "op_a"
     assert estimates[0]["category"] == "gemm"
     assert estimates[0]["type"] == "kernel_tuning"
-    assert estimates[1]["savings_ms"] == 0.429
+    assert estimates[1]["savings_ms"] == 0.875
 
 
 def test_compute_impact_estimates_excludes_anomaly():
@@ -236,20 +246,20 @@ def test_compute_impact_estimates_min_savings():
     ]
     estimates = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1)
     assert len(estimates) == 1
-    assert estimates[0]["savings_ms"] == 0.429
+    assert estimates[0]["savings_ms"] == 0.438
     estimates_strict = compute_impact_estimates(operations, "gemm", min_savings_ms=1.0)
     assert len(estimates_strict) == 0
 
 
-# ----- Unit tests: generate_plot_data -----
+# ----- Unit tests: generate_priority_data -----
 
 
-def test_generate_plot_data(output_dir_with_manifest_and_metrics):
-    out_path = generate_plot_data(
+def test_generate_priority_data(output_dir_with_manifest_and_metrics):
+    out_path = generate_priority_data(
         output_dir_with_manifest_and_metrics, max_recommendations=3
     )
     assert os.path.isfile(out_path)
-    assert out_path.endswith("plot_data.json")
+    assert out_path.endswith("priority_data.json")
 
     with open(out_path) as f:
         data = json.load(f)
@@ -257,7 +267,7 @@ def test_generate_plot_data(output_dir_with_manifest_and_metrics):
     assert data["baseline_ms"] == 5000.0
     assert "recommendations" in data
     assert "all_estimates" in data
-    # gemm: 100+50, sdpa: 80 -> sorted by savings: gemm first, then sdpa
+    assert "priorities" in data
     recs = data["recommendations"]
     assert len(recs) <= 3
     categories = [r["category"] for r in recs]
@@ -268,7 +278,7 @@ def test_generate_plot_data(output_dir_with_manifest_and_metrics):
     assert gemm_rec["operation_count"] == 2
 
 
-def test_generate_plot_data_skips_error_metrics(tmp_path):
+def test_generate_priority_data_skips_error_metrics(tmp_path):
     cat_data = tmp_path / "category_data"
     cat_data.mkdir(parents=True)
     (cat_data / "category_manifest.json").write_text(
@@ -277,7 +287,7 @@ def test_generate_plot_data_skips_error_metrics(tmp_path):
     (cat_data / "gemm_metrics.json").write_text(
         json.dumps({"status": "ERROR", "impact_estimates": []}, indent=2)
     )
-    out_path = generate_plot_data(str(tmp_path))
+    out_path = generate_priority_data(str(tmp_path))
     with open(out_path) as f:
         data = json.load(f)
     assert data["baseline_ms"] == 100.0
@@ -381,11 +391,6 @@ def test_detect_flash_attention():
 def test_detect_softmax():
     assert detect_softmax("aten::softmax") is True
     assert detect_softmax("aten::mm") is False
-
-
-def test_detect_transpose():
-    assert detect_transpose("aten::transpose") is True
-    assert detect_transpose("aten::mm") is False
 
 
 def test_detect_paged_attention():
