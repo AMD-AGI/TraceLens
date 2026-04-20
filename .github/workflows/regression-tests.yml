@@ -86,4 +86,5 @@ jobs:
 
       - name: Run pytest on the standalone analysis tests
         run: |
+          . .venv/bin/activate
           pytest tests/test_standalone_analysis.py
