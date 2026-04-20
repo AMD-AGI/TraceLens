@@ -536,7 +536,7 @@ After writing `standalone_analysis.md`, validate that the report contains all re
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_report
 passed, missing = validate_report(sys.argv[1])
 if not passed:
     print('FAIL:')
