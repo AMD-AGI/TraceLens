@@ -119,13 +119,33 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/convolution_findings.md` using the output format defined there, with `<category>` = `convolution`.
 
-### Step 6.5: Write Impact Estimates to Metadata
+### Step 6.1: Write Impact Estimates to Metadata
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'convolution', 'compute')"
 ```
+
+### Step 6.2: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/category_findings/convolution_findings.md' 'compute'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
 
 ---
 

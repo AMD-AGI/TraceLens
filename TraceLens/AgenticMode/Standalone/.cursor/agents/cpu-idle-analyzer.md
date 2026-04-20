@@ -117,6 +117,10 @@ Write `<output_dir>/system_findings/cpu_idle_findings.md` using the command pref
 | Short Kernels (<10µs) | N (X%) |
 | Avg Kernel Time | X.X µs |
 
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
+
 ## Recommendations
 
 [If idle > 15%, provide actionable recommendations based on the kernel analysis data.
@@ -130,7 +134,7 @@ idle time is within acceptable range and no action is needed.]
 
 **Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
 
-### Step 3.5: Write Impact Estimates to Metadata
+### Step 3.1: Write Impact Estimates to Metadata
 
 Run the script below, then render impact bullets in your `## Detailed Analysis` block per `sub_agent_spec.md`.
 
@@ -138,13 +142,33 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'cpu_idle', 'system')"
 ```
 
+### Step 3.2: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/system_findings/cpu_idle_findings.md' 'system'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
+
 ---
 
 ## Key Principles
 
 1. **Report factual data** - Idle percentage and kernel statistics from the metrics JSON
 2. **Provide actionable solutions** - Specific steps, not vague suggestions
-3. **No impact estimates** - System-level impact cannot be reliably estimated from trace data
+3. **Impact Summary is header-only** - System-level Impact Summary must include the table header row but zero data rows
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 5. **Consider trade-offs** - Some solutions have costs (memory, complexity)
 
