@@ -46,7 +46,10 @@ def normalize_value(val):
     if isinstance(val, (np.integer, np.floating)):
         return val.item()
     elif isinstance(val, list):
-        return [normalize_value(v) for v in val]
+        normalized = [normalize_value(v) for v in val]
+        if normalized and all(isinstance(v, dict) for v in normalized):
+            normalized.sort(key=lambda d: str(sorted(d.items())))
+        return normalized
     elif isinstance(val, dict):
         return {k: normalize_value(v) for k, v in val.items()}
     elif isinstance(val, str):

@@ -154,9 +154,11 @@ class JaxNcclAnalyser:
                 replica_string, replica_groups, data_bytes = None, None, None
 
                 if collective_name:
-                    replica_string, replica_groups, data_bytes = (
-                        self._lookup_collective_info(node, collective_name)
-                    )
+                    (
+                        replica_string,
+                        replica_groups,
+                        data_bytes,
+                    ) = self._lookup_collective_info(node, collective_name)
 
                 row["replica_string"] = replica_string
                 row["replica_groups"] = replica_groups
@@ -250,9 +252,13 @@ class JaxNcclAnalyser:
         print("=" * 80)
 
         for collective_name in unique_collectives:
-            bandwidths, bus_bandwidths, avg_bandwidth, avg_bus_bandwidth, slice_info = (
-                self._calculate_collective_bandwidth_from_df(df, collective_name)
-            )
+            (
+                bandwidths,
+                bus_bandwidths,
+                avg_bandwidth,
+                avg_bus_bandwidth,
+                slice_info,
+            ) = self._calculate_collective_bandwidth_from_df(df, collective_name)
 
             if slice_info:
                 results[collective_name] = {
@@ -406,8 +412,8 @@ class JaxNcclAnalyser:
         Returns:
             bool: True if event is a collective communication event, False otherwise
         """
-        is_coll_comm_event = (
-            event.get("gpu_kernel_op_cat", "") == "Communication rccl/nccl"
+        is_coll_comm_event = TraceEventUtils.is_communication_string(
+            event.get("name", "")
         )
         return is_coll_comm_event
 
@@ -715,10 +721,12 @@ class JaxNcclAnalyser:
             print(f"\n  Slice: {collective_id}")
 
             # Calculate bandwidth for each replica group in this slice
-            group_bandwidths, group_bus_bandwidths, group_details = (
-                self._calculate_bandwidth_per_replica_group(
-                    df, collective_name, collective_id
-                )
+            (
+                group_bandwidths,
+                group_bus_bandwidths,
+                group_details,
+            ) = self._calculate_bandwidth_per_replica_group(
+                df, collective_name, collective_id
             )
 
             if group_bandwidths:
