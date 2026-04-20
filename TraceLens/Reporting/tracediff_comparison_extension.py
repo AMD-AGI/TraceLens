@@ -20,6 +20,9 @@ same key as trace2 kernel time) to ``unified_perf_summary`` (beside
 ``Kernel Time (µs)_sum`` / ``operation_count``). Op-category workbook tabs
 (``GEMM``, ``CONV_bwd``, etc.) and launcher sheets are unchanged—enough for
 workflows that consume unified summary only (e.g. AgenticMode standalone).
+A ``diff_stats`` sheet (TraceDiff per-kernel diff rows) is included whenever
+``diff_stats_df`` is non-empty; pass ``debug`` as an extra extension arg for
+``debug_lca_ids`` on ``unified_perf_summary`` only.
 When ``unified_perf_summary`` is non-empty, diff rows use ``cpu_op_uid`` and
 enriched unified rows use ``ex_UID`` to align tuple keys via the same tree walk
 as the trace2 time lookup. If no unified row matches a diff UID, that diff row
@@ -768,11 +771,11 @@ def postprocess_perf_report_dataframes_extension(
             dict_name2df, diff_stats_df, baseline, debug=debug
         )
         out.update(enriched)
-        if debug:
-            out["diff_stats"] = diff_stats_df
+        out["diff_stats"] = diff_stats_df
         print(
             "[TraceDiff] Added speedup, delta, Kernel Time (µs)_trace2_sum, "
-            "and operation_count_trace2 to unified_perf_summary only."
+            "and operation_count_trace2 to unified_perf_summary; "
+            "added diff_stats sheet."
         )
 
     return out
