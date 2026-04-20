@@ -198,6 +198,10 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
    - Evidence: [metrics]
    - Recommendation: [specific action]
 
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
+
 ## Recommendations
 
 ### System P<N>: [Highest Priority Multi-Kernel Issue]
@@ -239,7 +243,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 ## Key Principles
 
 1. **System-level focus** - These are pipeline/framework issues, NOT individual kernel issues
-2. **No impact estimates** - System-level impact cannot be reliably estimated from trace data
+2. **Impact Summary is header-only** - System-level Impact Summary must include the table header row but zero data rows
 3. **Provide actionable solutions** - Specific steps, not vague suggestions
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is below threshold, multi-kernel issues start at P1

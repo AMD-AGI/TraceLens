@@ -52,6 +52,40 @@ _KERNEL_NAME_LIBRARY_RULES = [
     ("void at::native::", "PyTorch Native"),
 ]
 
+REQUIRED_REPORT_HEADERS = [
+    "Executive Summary",
+    "Compute Kernel Optimizations",
+    "Kernel Fusion Opportunities (Experimental)",
+    "System-Level Optimizations",
+    "Detailed Analysis",
+    "Appendix",
+]
+
+REQUIRED_FINDINGS_HEADERS = [
+    "## Impact Summary",
+    "## Recommendations",
+    "## Detailed Analysis",
+]
+
+REQUIRED_METRICS_ROWS = [
+    "Total Time",
+    "Compute %",
+    "Idle %",
+    "Exposed Communication %",
+    "Top Bottleneck Category",
+]
+
+_PLACEHOLDER_RE = re.compile(r"<[A-Z][a-z_ ]+>")
+_KNOWN_PLACEHOLDERS = {
+    "<Brief Title>",
+    "<Library>",
+    "<platform>",
+    "<model>",
+    "<architecture>",
+    "<scale>",
+    "<precision>",
+}
+
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
@@ -519,21 +553,16 @@ def shape_aware_lookup(table, kname, input_dims=None):
     return shapes.get(shape_key) or next(iter(shapes.values()), {})
 
 
-REQUIRED_REPORT_HEADERS = [
-    "Executive Summary",
-    "Compute Kernel Optimizations",
-    "Kernel Fusion Opportunities (Experimental)",
-    "System-Level Optimizations",
-    "Detailed Analysis",
-    "Appendix",
-]
-
-
 def validate_report(
     output_dir: str,
 ) -> Tuple[bool, List[str]]:
-    """
-    Validate that standalone_analysis.md contains all required ## section headers.
+    """Validate standalone_analysis.md and findings files for structural issues.
+
+    Checks:
+    - Required ## section headers in standalone_analysis.md
+    - Required ## headers in each *_findings.md
+    - Metrics table under Executive Summary (5 rows, no placeholders)
+    - Unfilled template placeholders
 
     Args:
         output_dir: Base output directory containing standalone_analysis.md
@@ -558,6 +587,41 @@ def validate_report(
         for h in REQUIRED_REPORT_HEADERS
         if f"## {h}" not in content
     )
+
+    for subdir in ("category_findings", "system_findings"):
+        findings_dir = os.path.join(output_dir, subdir)
+        if not os.path.isdir(findings_dir):
+            continue
+        for fname in os.listdir(findings_dir):
+            if not fname.endswith("_findings.md"):
+                continue
+            with open(os.path.join(findings_dir, fname)) as ff:
+                fcontent = ff.read()
+            for h in REQUIRED_FINDINGS_HEADERS:
+                if h not in fcontent:
+                    missing.append(f"Missing '{h}' in {subdir}/{fname}")
+
+    exec_start = content.find("## Executive Summary")
+    if exec_start >= 0:
+        next_section = content.find("\n## ", exec_start + 1)
+        exec_block = (
+            content[exec_start:next_section] if next_section > 0 else content[exec_start:]
+        )
+        if "|" not in exec_block:
+            missing.append("No metrics table found under ## Executive Summary")
+        else:
+            for row_name in REQUIRED_METRICS_ROWS:
+                if row_name not in exec_block:
+                    missing.append(f"Missing metrics row: {row_name}")
+            for placeholder in ("X ms", "Y%", "Z%", "W%"):
+                if f"| {placeholder}" in exec_block or f"| {placeholder} " in exec_block:
+                    missing.append(
+                        f"Placeholder value '{placeholder}' in Executive Summary table"
+                    )
+
+    found = [p for p in _PLACEHOLDER_RE.findall(content) if p in _KNOWN_PLACEHOLDERS]
+    if found:
+        missing.append(f"Unfilled placeholders: {', '.join(sorted(set(found)))}")
 
     return len(missing) == 0, missing
 

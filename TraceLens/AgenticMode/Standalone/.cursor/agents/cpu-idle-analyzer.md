@@ -117,6 +117,10 @@ Write `<output_dir>/system_findings/cpu_idle_findings.md` using the command pref
 | Short Kernels (<10µs) | N (X%) |
 | Avg Kernel Time | X.X µs |
 
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
+
 ## Recommendations
 
 [If idle > 15%, provide actionable recommendations based on the kernel analysis data.
@@ -144,7 +148,7 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 
 1. **Report factual data** - Idle percentage and kernel statistics from the metrics JSON
 2. **Provide actionable solutions** - Specific steps, not vague suggestions
-3. **No impact estimates** - System-level impact cannot be reliably estimated from trace data
+3. **Impact Summary is header-only** - System-level Impact Summary must include the table header row but zero data rows
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 5. **Consider trade-offs** - Some solutions have costs (memory, complexity)
 

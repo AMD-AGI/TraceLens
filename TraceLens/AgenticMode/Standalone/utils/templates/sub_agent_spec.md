@@ -29,15 +29,22 @@ parsed by the orchestrator.
 
 **System tier** (`system_findings/`):
 
-1. `## Recommendations`
-2. `## Detailed Analysis`
+1. `## Impact Summary`
+2. `## Recommendations`
+3. `## Detailed Analysis`
 
-System-tier agents omit `## Impact Summary` — system-level impact is not
-quantifiable from trace data.
+System-tier Impact Summary must include the table header but no data rows —
+system-level impact is not quantifiable from trace data.
+
+```markdown
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
+```
 
 ---
 
-## Impact Summary (compute tier only)
+## Impact Summary
 
 ```markdown
 ## Impact Summary
@@ -80,7 +87,7 @@ entirely.
 **Action**: [1-2 sentences — what to do]
 ```
 
-System-tier recommendations have no **Impact** field.
+System-tier recommendations have no **Impact** field. Always use exactly `**Insight**`, `**Action**`, `**Impact**` as field labels.
 
 ---
 
@@ -264,7 +271,7 @@ Before returning, verify:
 
 **System tier:**
 
-1. `## Recommendations` and `## Detailed Analysis` are present, in that order,
-   at the end of the findings file.
-2. Each `### P<N>:` block under `## Recommendations` contains `**Insight**` and
-   `**Action**`.
+1. `## Impact Summary`, `## Recommendations`, and `## Detailed Analysis` are all
+   present, in that order, at the end of the findings file.
+2. The Impact Summary has the table header row but **zero data rows**.
+3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**` and `**Action**`.

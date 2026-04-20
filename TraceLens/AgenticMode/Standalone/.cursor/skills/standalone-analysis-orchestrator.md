@@ -513,6 +513,8 @@ If the plot fails, retry once. If still failing, proceed to Step 11 without the 
    - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
    - `priority_data.json` — use `priorities` array for compute kernel P-item ordering (P1 = rank 1, P2 = rank 2, P3+ = rest). Categories with `source: "manifest_fallback"` use Impact: "Not quantifiable from trace data".
+   - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
+   - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
    - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
