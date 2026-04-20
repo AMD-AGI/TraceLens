@@ -422,7 +422,6 @@ def compute_impact_estimates(
     operations: List[dict],
     category: str,
     min_savings_ms: float = 0.1,
-    min_e2e_pct: float = 2.0,
     baseline_ms: float = 0,
 ) -> List[dict]:
     """
@@ -440,15 +439,12 @@ def compute_impact_estimates(
     Anomalous efficiencies (>100%) are excluded.
 
     When baseline_ms > 0, each estimate also includes e2e_pct_low / e2e_pct_high
-    (savings as a percentage of end-to-end time), and the min_e2e_pct gate
-    drops estimates whose best-case E2E impact is below the threshold.
+    (savings as a percentage of end-to-end time).
 
     Args:
         operations: List of operation metric dicts (from build_operation_metrics)
         category: Category name for labelling
         min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
-        min_e2e_pct: Minimum best-case E2E % savings to include (default 2.0).
-            Only applied when baseline_ms > 0.
         baseline_ms: Total end-to-end GPU time for E2E % calculation (0 to skip)
 
     Returns:
@@ -471,8 +467,6 @@ def compute_impact_estimates(
         savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
 
         if savings_high < min_savings_ms:
-            continue
-        if baseline_ms > 0 and (savings_high / baseline_ms * 100) < min_e2e_pct:
             continue
         confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
         estimate = {
@@ -523,6 +517,49 @@ def shape_aware_lookup(table, kname, input_dims=None):
                 break
     shape_key = parse_first_shape(input_dims) if input_dims else None
     return shapes.get(shape_key) or next(iter(shapes.values()), {})
+
+
+REQUIRED_REPORT_HEADERS = [
+    "Executive Summary",
+    "Compute Kernel Optimizations",
+    "Kernel Fusion Opportunities (Experimental)",
+    "System-Level Optimizations",
+    "Detailed Analysis",
+    "Appendix",
+]
+
+
+def validate_report(
+    output_dir: str,
+) -> Tuple[bool, List[str]]:
+    """
+    Validate that standalone_analysis.md contains all required ## section headers.
+
+    Args:
+        output_dir: Base output directory containing standalone_analysis.md
+
+    Returns:
+        Tuple of (passed: bool, missing: list of error/missing-section strings)
+    """
+    report_path = os.path.join(output_dir, "standalone_analysis.md")
+    if not os.path.exists(report_path):
+        return False, ["<file not found>"]
+
+    with open(report_path, "r") as f:
+        content = f.read()
+
+    if len(content.strip()) < 100:
+        return False, ["<report is empty or too short>"]
+
+    missing: List[str] = []
+
+    missing.extend(
+        f"Missing section: {h}"
+        for h in REQUIRED_REPORT_HEADERS
+        if f"## {h}" not in content
+    )
+
+    return len(missing) == 0, missing
 
 
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:

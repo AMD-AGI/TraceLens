@@ -22,7 +22,6 @@ CSV_COLUMNS = ["index", "category", "issue_summary", "result", "details"]
 NUMERIC_TOLERANCE = 0.01
 ABS_TOLERANCE = 0.05
 OPTIONAL_COLUMN_PREFIXES = ("Pct Roofline", "Roofline Time")
-OPTIONAL_COLUMNS = {"num_kernels"}
 
 _NUMPY_TYPE_RE = re.compile(r"np\.\w+\(([^)]+)\)")
 
@@ -59,7 +58,6 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
             c
             for c in missing_cols
             if not any(c.startswith(p) for p in OPTIONAL_COLUMN_PREFIXES)
-            and c not in OPTIONAL_COLUMNS
         }
         if missing_cols:
             mismatches.append(f"{fname}: missing required columns: {missing_cols}")

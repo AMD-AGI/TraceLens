@@ -55,7 +55,7 @@ generate_single_ref() {
         (
             cd "$STANDALONE_DIR"
             agent --print --force --trust --output-format stream-json \
-                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                "Run standalone analysis on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_DIR/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then

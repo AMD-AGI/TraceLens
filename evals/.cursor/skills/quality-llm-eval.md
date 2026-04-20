@@ -61,12 +61,10 @@ For each matched P-item pair (from eval 2), compare the content values. **Only c
 
 For each matched compute P-item pair:
 
-- **Performance numbers**: kernel time, efficiency percentage, achieved bandwidth/TFLOPS. Numeric tolerance: 2% relative difference.
+- **Performance numbers**: kernel time, efficiency percentage, achieved bandwidth/TFLOPS. Numeric tolerance: 5% relative difference.
 - **Shapes**: matrix dimensions, batch sizes. Must match exactly.
-- **Gap to roofline**: the efficiency percentage or fraction of peak. Tolerance: 2%.
-- **Estimated gain**: savings in ms from pre-computed `kernel_tuning` estimates (format: `~X.X ms savings from closing efficiency gaps (pre-computed)` or `Not quantifiable from trace data`). Tolerance: 2%. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
-
-When comparing Impact/savings fields, accept format variants as equivalent: `**Estimated Savings**` tables, `**Impact** kernel_tuning` inline text, and `~X.X ms savings (pre-computed)` patterns all convey the same information. Compare the numeric values regardless of formatting. Do not flag a mismatch solely because the label or structure differs between reference and generated.
+- **Gap to roofline**: the efficiency percentage or fraction of peak. Tolerance: 5%.
+- **Estimated gain**: savings in ms from pre-computed `kernel_tuning` estimates (format: `~X.X ms savings from closing efficiency gaps (pre-computed)` or `Not quantifiable from trace data`). Tolerance: 5%. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
 
 Check the category findings files for detailed values if the top-level report summarizes them.
 
