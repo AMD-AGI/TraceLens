@@ -55,7 +55,7 @@ Use vendor-agnostic terminology in all narrative text (Insight, Action, Impact):
 
 ## Analysis Workflow
 
-### Step 1: Generate Metrics, Read Candidates and Impact Estimates
+### Step 1: Generate Metrics and Build the Candidate List
 
 Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.json`:
 
@@ -64,10 +64,21 @@ Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.j
   --output-dir <output_dir>
 ```
 
-Then read `<output_dir>/category_data/fusion_candidates.json`. Each entry contains:
+Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_estimates` array is the **authoritative candidate list** for findings — `kernel_fusion_analysis.py` has already gated it on `MIN_E2E_PCT` and perf-model coverage, so every entry is a quantifiable, above-threshold opportunity. Each estimate has:
+
+- `operation`: Module base name (matches `base_name` in `fusion_candidates.json`)
+- `savings_ms`, `savings_ms_low`, `savings_ms_high`: Savings range (75-100% of roofline)
+- `bound_type`: "compute" or "memory"
+- `fusion_type`: "matrix_compute" or "memory_bound"
+- `confidence`: "high" or "medium"
+- `time_ms`: Total candidate time across all instances
+- `warning`: Present when some kernels lack perf models
+
+If `impact_estimates` is empty, skip Steps 2-3 entirely and write the "No fusion opportunities detected" template (see Step 4 fallback).
+
+For each entry in `impact_estimates`, look up the matching candidate in `<output_dir>/category_data/fusion_candidates.json` by `base_name == operation` to pull the descriptive fields used in Steps 2-4:
 
 - `module_name`: Module or function name from the trace
-- `base_name`: Module type without instance index
 - `parent_chain`: Ancestor modules in the call stack
 - `instance_count`: How many times this module type repeats
 - `kernel_count`: GPU kernels launched per instance
@@ -76,17 +87,7 @@ Then read `<output_dir>/category_data/fusion_candidates.json`. Each entry contai
 - `has_fused_kernel`: Whether subtree contains a fused kernel
 - `total_kernel_time_us`: Total GPU time across all instances
 
-Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. This contains pre-computed `impact_estimates` with roofline-based savings for each candidate. Each estimate has:
-
-- `operation`: Matches `base_name` in fusion_candidates
-- `savings_ms`, `savings_ms_low`, `savings_ms_high`: Savings range (75-100% of roofline)
-- `bound_type`: "compute" or "memory"
-- `fusion_type`: "matrix_compute" or "memory_bound"
-- `confidence`: "high" or "medium"
-- `time_ms`: Total candidate time across all instances
-- `warning`: Present when some kernels lack perf models
-
-Use these estimates to populate the **Impact** field in each finding. Match by `operation` name (= `base_name`). If no matching estimate exists, use "Not quantifiable -- insufficient perf model data".
+Do NOT iterate `fusion_candidates.json` directly. Candidates absent from `impact_estimates` were dropped by the deterministic gate and must not be turned into findings.
 
 ### Step 2: Classify Each Candidate
 
@@ -187,7 +188,6 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 - Confidence: High/Medium/Low — <brief reason>
 
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
-<!-- When not quantifiable: **Impact estimate:** Impact estimate is not quantifiable from trace data. -->
 
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
@@ -205,15 +205,36 @@ No kernel fusion opportunities detected.
 |---------------|------|----------------------|-------------------------------|------------|
 ```
 
+### Step 4.1: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/system_findings/kernel_fusion_findings.md' 'system'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
+
 ---
 
 ## Key Principles
 
-1. **Include pre-computed savings** from `kernel_fusion_metrics.json` when available -- do NOT re-derive savings yourself, use the values from the metrics JSON
-2. **Let the data speak** -- classify based on module names AND kernel composition, not just one signal
-3. **Reject confidently** -- not every multi-kernel module is a fusion opportunity; independent operations under a container module are not fusable
-4. **Explain reasoning** -- especially for novel patterns, state why you believe the kernels are fusable
-5. Use the **module name** to determine the user-facing operation name. If the module is `aten::conv2d` or `Conv2d`, call it "Convolution" in the finding title, not "GEMM" -- even though convolutions are implemented as GEMMs internally.
+1. **`kernel_fusion_metrics.json.impact_estimates` is the candidate list.** Every finding maps 1:1 to an entry there. Do not derive findings from candidates absent from that list -- they were dropped by the deterministic threshold gate.
+2. **Include pre-computed savings** from `kernel_fusion_metrics.json` -- do NOT re-derive savings yourself, use the values from the metrics JSON.
+3. **Let the data speak** -- classify based on module names AND kernel composition, not just one signal.
+4. **Reject confidently** -- not every multi-kernel module is a fusion opportunity; independent operations under a container module are not fusable. Use Step 2's Decision 1 to drop candidates from `impact_estimates` that turn out to be containers, all-GEMM groups, or already-fused subtrees.
+5. **Explain reasoning** -- especially for novel patterns, state why you believe the kernels are fusable.
+6. Use the **module name** to determine the user-facing operation name. If the module is `aten::conv2d` or `Conv2d`, call it "Convolution" in the finding title, not "GEMM" -- even though convolutions are implemented as GEMMs internally.
 
 ---
 

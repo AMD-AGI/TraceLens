@@ -19,7 +19,11 @@ from .report_utils import (
     load_manifest_categories,
     write_impact_estimates,
 )
-from .validation_utils import validate_subagent_outputs
+from .validation_utils import (
+    validate_findings_file,
+    validate_report,
+    validate_subagent_outputs,
+)
 
 __all__ = [
     "extract_condensed_op_info",
@@ -31,6 +35,8 @@ __all__ = [
     "load_findings",
     "load_manifest",
     "load_manifest_categories",
+    "validate_findings_file",
+    "validate_report",
     "validate_subagent_outputs",
     "write_impact_estimates",
 ]

@@ -23,33 +23,13 @@ parsed by the orchestrator.
 
 **Compute tier** (`category_findings/`):
 
-1. `## Impact Summary`
-2. `## Recommendations`
-3. `## Detailed Analysis`
+1. `## Recommendations`
+2. `## Detailed Analysis`
 
 **System tier** (`system_findings/`):
 
 1. `## Recommendations`
 2. `## Detailed Analysis`
-
-System-tier agents omit `## Impact Summary` — system-level impact is not
-quantifiable from trace data.
-
----
-
-## Impact Summary (compute tier only)
-
-```markdown
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
-```
-
-- If `impact_estimates` is empty or no actionable bottlenecks found, keep the
-  header and separator only (zero data rows).
-- Only `kernel_tuning` rows from pre-computed data are valid. Do NOT add rows
-  with Type `algorithmic`, `system`, `—`, or any other value.
 
 ---
 
@@ -64,7 +44,7 @@ reasoning candidate at the same rank.
 ### P1: <Brief Title> (<Library>)
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from impact_estimates in metrics JSON, OR "Not quantifiable from trace data"]
 ```
 
 **Library parenthetical:** Collect the unique non-null `library` values from
@@ -80,7 +60,7 @@ entirely.
 **Action**: [1-2 sentences — what to do]
 ```
 
-System-tier recommendations have no **Impact** field.
+System-tier recommendations have no **Impact** field. Always use exactly `**Insight**`, `**Action**`, `**Impact**` as field labels.
 
 ---
 
@@ -249,22 +229,31 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ---
 
-## Self-check
+## Validate findings (required before returning)
 
-Before returning, verify:
+After writing the findings file and impact estimates, run the programmatic
+validator. This replaces the previous manual self-check.
 
-**Compute tier:**
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/<subdir>/<category>_findings.md' '<tier>'
+```
 
-1. `## Impact Summary`, `## Recommendations`, and `## Detailed Analysis` are all
-   present, in that order, at the end of the findings file.
-2. The Impact Summary header row matches:
-   `Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence`.
-3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**`,
-   `**Action**`, and `**Impact**`.
+Where `<tier>` is `compute` or `system` and `<subdir>` is `category_findings`
+or `system_findings` respectively.
 
-**System tier:**
+**If validation fails (exit code 1):**
 
-1. `## Recommendations` and `## Detailed Analysis` are present, in that order,
-   at the end of the findings file.
-2. Each `### P<N>:` block under `## Recommendations` contains `**Insight**` and
-   `**Action**`.
+1. Read the FAIL output to identify structural issues
+2. Fix the findings file — add missing sections, correct P-item labels, etc.
+3. Re-run validation
+4. Maximum 2 retry attempts. If still failing, return with a warning
