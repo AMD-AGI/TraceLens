@@ -205,6 +205,26 @@ No kernel fusion opportunities detected.
 |---------------|------|----------------------|-------------------------------|------------|
 ```
 
+### Step 4.1: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/system_findings/kernel_fusion_findings.md' 'system'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
+
 ---
 
 ## Key Principles

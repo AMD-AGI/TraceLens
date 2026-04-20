@@ -230,13 +230,33 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 
 **Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
 
-### Step 7: Write Impact Estimates to Metadata
+### Step 7.1: Write Impact Estimates to Metadata
 
 Run the script below, then render impact bullets in your `## Detailed Analysis` block per `sub_agent_spec.md`.
 
 ```bash
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'multi_kernel', 'system')"
 ```
+
+### Step 7.2: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/system_findings/multi_kernel_findings.md' 'system'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
 
 ---
 
