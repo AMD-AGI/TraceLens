@@ -32,9 +32,7 @@ _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
 _P_ITEM_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
-_CANDIDATE_RE = re.compile(
-    r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->"
-)
+_CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
 
 # Level 2: cross-cutting batch checks
 _TIME_DISCREPANCY_THRESHOLD = 15  # percent
@@ -71,6 +69,7 @@ _KNOWN_REPORT_PLACEHOLDERS = {
 # Level 1: per-file findings validation (called within each sub-agent)
 # ---------------------------------------------------------------------------
 
+
 def validate_findings_file(filepath, tier):
     """Validate a single findings file against the sub-agent spec contract.
 
@@ -104,9 +103,7 @@ def validate_findings_file(filepath, tier):
 
     if all(p >= 0 for p in header_positions):
         if header_positions[0] > header_positions[1]:
-            errors.append(
-                "## Recommendations must appear before ## Detailed Analysis"
-            )
+            errors.append("## Recommendations must appear before ## Detailed Analysis")
 
     rec_start = content.find("## Recommendations")
     da_start = content.find("## Detailed Analysis")
@@ -165,6 +162,7 @@ def validate_findings_file(filepath, tier):
 # ---------------------------------------------------------------------------
 # Level 2: cross-cutting batch checks (called at Step 8)
 # ---------------------------------------------------------------------------
+
 
 def validate_subagent_outputs(output_dir):
     """Run cross-cutting validation checks on all subagent outputs.
@@ -269,6 +267,7 @@ def _check_priority_consistency(manifest):
 # Level 3: final report validation (called at Step 11.1)
 # ---------------------------------------------------------------------------
 
+
 def validate_report(output_dir):
     """Validate standalone_analysis.md for structural issues.
 
@@ -308,7 +307,9 @@ def validate_report(output_dir):
     if exec_start >= 0:
         next_section = content.find("\n## ", exec_start + 1)
         exec_block = (
-            content[exec_start:next_section] if next_section > 0 else content[exec_start:]
+            content[exec_start:next_section]
+            if next_section > 0
+            else content[exec_start:]
         )
         if "|" not in exec_block:
             missing.append("No metrics table found under ## Executive Summary")
@@ -317,13 +318,17 @@ def validate_report(output_dir):
                 if row_name not in exec_block:
                     missing.append(f"Missing metrics row: {row_name}")
             for placeholder in ("X ms", "Y%", "Z%", "W%"):
-                if f"| {placeholder}" in exec_block or f"| {placeholder} " in exec_block:
+                if (
+                    f"| {placeholder}" in exec_block
+                    or f"| {placeholder} " in exec_block
+                ):
                     missing.append(
                         f"Placeholder value '{placeholder}' in Executive Summary table"
                     )
 
     found = [
-        p for p in _REPORT_PLACEHOLDER_RE.findall(content)
+        p
+        for p in _REPORT_PLACEHOLDER_RE.findall(content)
         if p in _KNOWN_REPORT_PLACEHOLDERS
     ]
     if found:

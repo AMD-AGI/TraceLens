@@ -53,7 +53,6 @@ _KERNEL_NAME_LIBRARY_RULES = [
 ]
 
 
-
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
     Load CSV operations data and metadata JSON for a category.
