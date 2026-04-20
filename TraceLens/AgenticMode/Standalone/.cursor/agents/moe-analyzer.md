@@ -109,33 +109,13 @@ For each validated bottleneck, provide recommendations in both categories:
 
 Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
 
-### Step 5.1: Write Impact Estimates to Metadata
+### Step 5.5: Write Impact Estimates to Metadata
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'moe_fused', 'compute')"
 ```
-
-### Step 5.2: Validate Findings
-
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
-
-```bash
-<prefix> python3 -c "
-import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
-if not passed:
-    print('FAIL:')
-    for e in errors:
-        print('  - ' + e)
-    sys.exit(1)
-print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/moe_fused_findings.md' 'compute'
-```
-
-If validation fails, fix the findings file and re-run. Max 2 retries.
 
 ---
 
