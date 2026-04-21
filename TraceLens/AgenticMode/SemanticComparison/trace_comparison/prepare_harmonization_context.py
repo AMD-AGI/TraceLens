@@ -20,6 +20,7 @@ Usage:
         --name-a MI355 --name-b B200 \
         -o harmonization_context.json
 """
+
 import argparse
 import json
 import os
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from functional_label_catalog import FUNCTIONAL_LABEL_CATALOG
 
 
-def _collect_block_details(labels_data, name):
+def _collect_block_details(labels_data):
     """Build per-block summary from semantic_labels.json."""
     block_map = OrderedDict()
     for k in labels_data["labeled_kernels"]:
@@ -63,8 +64,8 @@ def _collect_block_details(labels_data, name):
 
 def build_harmonization_context(alignment_data, labels_a, labels_b, name_a, name_b):
     """Build the full harmonization context for LLM review."""
-    details_a = _collect_block_details(labels_a, name_a)
-    details_b = _collect_block_details(labels_b, name_b)
+    details_a = _collect_block_details(labels_a)
+    details_b = _collect_block_details(labels_b)
 
     enriched_rows = []
     for row in alignment_data["alignment_table"]:
@@ -116,12 +117,33 @@ def build_harmonization_context(alignment_data, labels_a, labels_b, name_a, name
     }
     context["alignment_summary"] = alignment_data.get("summary", {})
 
-    needs_harmonization = sum(
-        1 for r in enriched_rows if r["label_match"] not in ("same",)
-    )
-    context["harmonization_needed"] = needs_harmonization
-    context["alignment_table"] = enriched_rows
-    context["label_catalog"] = FUNCTIONAL_LABEL_CATALOG
+    already_matched = sum(1 for r in enriched_rows if r["label_match"] == "same")
+    rows_needing_work = [r for r in enriched_rows if r["label_match"] != "same"]
+    context["already_matched"] = already_matched
+    context["harmonization_needed"] = len(rows_needing_work)
+    context["alignment_table"] = rows_needing_work
+
+    present_modules = set()
+    for d in (details_a, details_b):
+        for entry in d.values():
+            nn = entry.get("nn_module", "")
+            if nn:
+                present_modules.add(nn)
+    filtered_catalog = {
+        "nn_modules": [
+            m
+            for m in FUNCTIONAL_LABEL_CATALOG.get("nn_modules", [])
+            if m in present_modules
+        ],
+        "cpu_ops": {
+            k: v
+            for k, v in FUNCTIONAL_LABEL_CATALOG.get("cpu_ops", {}).items()
+            if k in present_modules
+        },
+    }
+    if not filtered_catalog["nn_modules"]:
+        filtered_catalog = FUNCTIONAL_LABEL_CATALOG
+    context["label_catalog"] = filtered_catalog
 
     return context
 

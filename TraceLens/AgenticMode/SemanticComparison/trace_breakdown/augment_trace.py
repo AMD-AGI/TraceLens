@@ -326,7 +326,7 @@ def augment(trace_path, labels_path, output_path):
             file=sys.stderr,
         )
 
-    gpu_pid, gpu_tid = find_gpu_pid_tid(events)
+    gpu_pid, _gpu_tid = find_gpu_pid_tid(events)
     if gpu_pid is None:
         print("ERROR: No GPU kernel events found in trace", file=sys.stderr)
         sys.exit(1)
