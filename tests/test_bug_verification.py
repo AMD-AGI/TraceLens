@@ -104,6 +104,28 @@ class TestBug1BooleanDictKey:
         )
 
 
+class TestBug3PropertyStaticmethod:
+    """
+    BUG #3 — gpu_event_analyser.py:75
+    @property + @staticmethod stacked returns a descriptor object, not an iterable.
+
+    Fix: replace @property+@staticmethod with @classmethod+@property
+    """
+
+    def test_all_event_keys_is_iterable(self):
+        """
+        FAILS while the bug exists.
+        PASSES once the fix is applied.
+        """
+        from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+
+        result = GPUEventAnalyser.all_event_keys
+        assert hasattr(result, "__iter__"), (
+            f"Expected iterable, got {type(result).__name__}. "
+            "Fix: replace @property+@staticmethod with @classmethod+@property"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Template for adding future bug tests
 # ---------------------------------------------------------------------------

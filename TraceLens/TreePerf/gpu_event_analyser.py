@@ -72,12 +72,10 @@ class GPUEventAnalyser:
     gpu_event_keys = [all_gpu_key, computation_key, communication_key, memcpy_key]
     cpu_event_keys = [all_cpu_key]
 
+    @classmethod
     @property
-    @staticmethod
-    def all_event_keys():
-        return itertools.chain(
-            GPUEventAnalyser.gpu_event_keys, GPUEventAnalyser.cpu_event_keys
-        )
+    def all_event_keys(cls):
+        return itertools.chain(cls.gpu_event_keys, cls.cpu_event_keys)
 
     def get_gpu_event_lists(self):
         """
