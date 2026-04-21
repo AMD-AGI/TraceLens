@@ -52,7 +52,7 @@ def main():
     run_category_analysis(
         category="moe_fused",
         output_dir=args.output_dir,
-        config={"extra_fields": []},
+        config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,
         no_data_check_fn=_check_moe_data,
     )

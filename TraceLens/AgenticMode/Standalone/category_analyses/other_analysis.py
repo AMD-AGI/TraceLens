@@ -118,7 +118,7 @@ def main():
     ops_df = ops_df[~comm_mask]
 
     config = {
-        "extra_fields": [],
+        "extra_fields": ["Input Dims", "Input type"],
         "operation_classifier": _classify_other_op,
     }
 

@@ -251,9 +251,13 @@ def test_compute_impact_estimates_min_savings():
     assert len(estimates_strict) == 0
 
 
-def test_compute_impact_estimates_filters_by_e2e_pct():
+def test_compute_impact_estimates_no_e2e_pct_gate():
     # 0.5 ms op at 10% efficiency -> savings_high = 0.5 * 0.9 = 0.45 ms.
-    # On a 300 ms baseline that is 0.15% E2E, well below the default 2% gate.
+    # On a 300 ms baseline that is 0.15% E2E. The min_e2e_pct gate that
+    # previously filtered this case has been removed (revert of ee83501)
+    # because on comm-bound traces it filtered legitimate per-op estimates.
+    # Long-tail noise filtering now happens at the consumer side, not in
+    # compute_impact_estimates itself.
     operations = [
         {
             "name": "tiny_op",
@@ -266,17 +270,13 @@ def test_compute_impact_estimates_filters_by_e2e_pct():
         },
     ]
     estimates = compute_impact_estimates(operations, "elementwise", baseline_ms=300.0)
-    assert estimates == []
+    assert len(estimates) == 1
+    assert estimates[0]["e2e_pct_high"] == 0.15
+    assert estimates[0]["savings_ms_high"] == 0.45
 
-    estimates_loose = compute_impact_estimates(
-        operations, "elementwise", baseline_ms=300.0, min_e2e_pct=0.0
-    )
-    assert len(estimates_loose) == 1
-    assert estimates_loose[0]["e2e_pct_high"] == 0.15
-
-    # Without baseline_ms the gate is skipped, matching the existing behaviour.
     estimates_no_baseline = compute_impact_estimates(operations, "elementwise")
     assert len(estimates_no_baseline) == 1
+    assert "e2e_pct_high" not in estimates_no_baseline[0]
 
 
 # ----- Unit tests: generate_priority_data -----
