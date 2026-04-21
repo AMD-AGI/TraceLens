@@ -252,12 +252,9 @@ def test_compute_impact_estimates_min_savings():
 
 
 def test_compute_impact_estimates_no_e2e_pct_gate():
-    # 0.5 ms op at 10% efficiency -> savings_high = 0.5 * 0.9 = 0.45 ms.
-    # On a 300 ms baseline that is 0.15% E2E. The min_e2e_pct gate that
-    # previously filtered this case has been removed (revert of ee83501)
-    # because on comm-bound traces it filtered legitimate per-op estimates.
-    # Long-tail noise filtering now happens at the consumer side, not in
-    # compute_impact_estimates itself.
+    # Sub-1% E2E ops are retained: 0.5 ms at 10% eff -> 0.45 ms savings = 0.15%
+    # of a 300 ms baseline. compute_impact_estimates does not filter by E2E
+    # share; long-tail noise filtering is the consumer's responsibility.
     operations = [
         {
             "name": "tiny_op",
