@@ -126,6 +126,30 @@ class TestBug3PropertyStaticmethod:
         )
 
 
+class TestBug6BytesBwdWrongKwargs:
+    """
+    BUG #6 — perf_model.py:133
+    bytes_bwd() passes bytes_per_element= but bytes_func expects
+    bpe_mat1, bpe_mat2, bpe_bias, bpe_output — raises TypeError on every call.
+    """
+
+    def test_bytes_bwd_does_not_raise_typeerror(self):
+        """
+        FAILS while the bug exists (TypeError).
+        PASSES once the fix is applied.
+        """
+        from TraceLens.PerfModel.perf_model import GEMM
+
+        class _MinimalGEMM(GEMM):
+            @staticmethod
+            def get_param_details(event):
+                return {"M": 4, "N": 4, "K": 4, "bias": False, "B": 1}
+
+        gemm = _MinimalGEMM({})
+        result = gemm.bytes_bwd(bytes_per_element=2)
+        assert result is not None
+
+
 # ---------------------------------------------------------------------------
 # Template for adding future bug tests
 # ---------------------------------------------------------------------------
