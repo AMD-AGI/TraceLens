@@ -555,9 +555,7 @@ class TraceEventUtils:
     # TODO separate util class for Jax
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(
-            TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata
-        ):
+        if event.get(TraceEventUtils.TraceKeys.Phase) == TraceEventUtils.TracePhases.Metadata:
             return "metadata"
         elif (
             TraceEventUtils.TraceKeys.PID in event
