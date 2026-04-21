@@ -549,11 +549,15 @@ print('PASS: All required sections present')
 
 **If validation fails (exit code 1):**
 
-1. Read the FAIL output to identify missing sections
-2. Check if the report contains similar but incorrectly named headers (e.g., `## Compute Kernel Analysis` instead of `## Compute Kernel Optimizations`, or `## System-Level Analysis` instead of `## System-Level Optimizations`) and rename them to match the exact required names using string replacement. Do NOT rewrite the report from scratch.
-3. If sections are entirely absent, add them with the correct `##` headers, keeping existing content
-4. Run validation again
-5. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning
+1. Read the FAIL output to identify the issue. Fix in-place, do NOT rewrite the report from scratch.
+a. Check if the report contains similar but incorrectly named headers and rename them to match the exact required names. 
+b. If sections are entirely absent, add them with the correct `##` headers, keeping existing content.
+c. For "Missing metrics row" errors: add the row to the Executive Summary table using values from `category_data/category_manifest.json` (`gpu_utilization` keys) and `priority_data.json` (top bottleneck).
+d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary metrics table: replace each with the actual value from `category_manifest.json` -> `gpu_utilization`.
+e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
+f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
+2. Run validation again.
+3. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning.
 
 ---
 

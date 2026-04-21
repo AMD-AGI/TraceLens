@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from TraceLens.PerfModel.utils import torch_dtype_map
+
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
 TARGET_MID = 87.5
@@ -335,8 +337,9 @@ def build_operation_metrics(
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
     fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
+    e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
-    # Calculate total time for percentage calculations
+    # Calculate category total for % of category (kept for analyzer screening)
     total_time_ms = 0
     if "Kernel Time (µs)_sum" in ops_df.columns:
         total_time_ms = ops_df["Kernel Time (µs)_sum"].sum() / 1000
@@ -354,7 +357,10 @@ def build_operation_metrics(
         count = int(row.get("count", row.get("operation_count", 1)))
         time_ms = row.get("Kernel Time (µs)_sum", 0) / 1000
         percent_of_category = (
-            (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
+            round(time_ms / total_time_ms * 100, 2) if total_time_ms > 0 else 0
+        )
+        percent_of_total = (
+            round(time_ms / e2e_ms_total * 100, 2) if e2e_ms_total > 0 else None
         )
 
         efficiency = calculate_efficiency(row, peak_hbm_bw, maf)
@@ -363,7 +369,8 @@ def build_operation_metrics(
             "name": op_name,
             "count": count,
             "time_ms": round(time_ms, 3),
-            "percent_of_category": round(percent_of_category, 2),
+            "percent_of_category": percent_of_category,
+            "percent_of_total": percent_of_total,
             "efficiency": efficiency,
         }
 
@@ -377,8 +384,16 @@ def build_operation_metrics(
             if field in row and not pd.isna(row[field]):
                 op_metric[field] = row[field]
 
+        # Pre-rendered Args column (shape + dtype, with empty/Scalar slots dropped)
+        args_str = format_args(
+            row.get("Input Dims") if "Input Dims" in row else None,
+            row.get("Input type") if "Input type" in row else None,
+        )
+        if args_str:
+            op_metric["args"] = args_str
+
         # Kernel time variance detection (require 10+ samples, >= 5% of E2E)
-        e2e_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+        e2e_ms = e2e_ms_total
         e2e_frac = time_ms / e2e_ms if e2e_ms > 0 else 1.0
         if count > 10 and e2e_frac >= 0.05:
             std_val = row.get("Kernel Time (µs)_std")
@@ -422,7 +437,6 @@ def compute_impact_estimates(
     operations: List[dict],
     category: str,
     min_savings_ms: float = 0.1,
-    min_e2e_pct: float = 2.0,
     baseline_ms: float = 0,
 ) -> List[dict]:
     """
@@ -440,15 +454,12 @@ def compute_impact_estimates(
     Anomalous efficiencies (>100%) are excluded.
 
     When baseline_ms > 0, each estimate also includes e2e_pct_low / e2e_pct_high
-    (savings as a percentage of end-to-end time), and the min_e2e_pct gate
-    drops estimates whose best-case E2E impact is below the threshold.
+    (savings as a percentage of end-to-end time).
 
     Args:
         operations: List of operation metric dicts (from build_operation_metrics)
         category: Category name for labelling
         min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
-        min_e2e_pct: Minimum best-case E2E % savings to include (default 2.0).
-            Only applied when baseline_ms > 0.
         baseline_ms: Total end-to-end GPU time for E2E % calculation (0 to skip)
 
     Returns:
@@ -471,8 +482,6 @@ def compute_impact_estimates(
         savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
 
         if savings_high < min_savings_ms:
-            continue
-        if baseline_ms > 0 and (savings_high / baseline_ms * 100) < min_e2e_pct:
             continue
         confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
         estimate = {
@@ -507,6 +516,36 @@ def parse_first_shape(dims_str):
         )
     except Exception:
         return None
+
+
+def format_args(input_dims_str, input_type_str) -> Optional[str]:
+    """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
+
+    Drops empty/Scalar placeholder slots, normalizes dtypes via torch_dtype_map
+    (unmapped tokens fall through). Args are joined with <br> so each entry
+    renders on its own line inside a markdown table cell, keeping the column
+    narrow even for many-input ops. Returns None on missing or unparseable input.
+    """
+    if pd.isna(input_dims_str) or pd.isna(input_type_str):
+        return None
+    try:
+        pairs = list(zip(
+            ast.literal_eval(str(input_dims_str)),
+            ast.literal_eval(str(input_type_str)),
+        ))
+    except Exception:
+        return None
+
+    parts = []
+    for dim, dtype in pairs:
+        shape = tuple(dim) if isinstance(dim, (list, tuple)) else ()
+        kind = (torch_dtype_map(str(dtype)) or str(dtype)) if dtype else ""
+        if not shape and kind in ("", "Scalar"):
+            continue
+        # Trailing comma keeps tuple syntax for 1-element shapes ((128,) not (128))
+        body = ",".join(map(str, shape)) + ("," if len(shape) == 1 else "")
+        parts.append(f"({body}) {kind}".rstrip())
+    return "<br>".join(parts) or None
 
 
 def shape_aware_lookup(table, kname, input_dims=None):

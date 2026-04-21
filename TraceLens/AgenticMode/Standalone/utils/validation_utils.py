@@ -18,6 +18,8 @@ Level 3 — validate_report (Step 11.1, after report assembly)
     Final standalone_analysis.md structure: headers, metrics table, placeholders.
 """
 
+import json
+import json
 import os
 import re
 
@@ -33,6 +35,10 @@ _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
 _P_ITEM_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
+
+# Markdown table header containing an "Args" column. Match line that starts
+# with `|` and has `Args` as one of the column names.
+_TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args\s*\|.*\|\s*$", re.MULTILINE)
 
 # Level 2: cross-cutting batch checks
 _TIME_DISCREPANCY_THRESHOLD = 15  # percent
@@ -148,6 +154,10 @@ def validate_findings_file(filepath, tier):
             f"reasoning-candidate count ({len(candidates)})"
         )
 
+    # Compute tier only: Args column cells must match operations[].args verbatim
+    if tier == "compute":
+        errors.extend(_validate_args_column(content, filepath))
+
     passed = len(errors) == 0
     if passed:
         print("PASS: Findings file is valid")
@@ -157,6 +167,65 @@ def validate_findings_file(filepath, tier):
             print(f"  - {e}")
 
     return passed, errors
+
+
+def _scan_args_cells(content):
+    """Yield (line_no, cell) for every non-empty Args cell in markdown tables."""
+    lines = content.splitlines()
+    for header_idx, header_line in enumerate(lines):
+        if not _TABLE_HEADER_RE.match(header_line):
+            continue
+        cols = [c.strip() for c in header_line.strip("|").split("|")]
+        try:
+            args_col = cols.index("Args")
+        except ValueError:
+            continue
+        # Skip the separator row (|---|...|).
+        for row_idx in range(header_idx + 2, len(lines)):
+            row = lines[row_idx]
+            if not row.strip().startswith("|"):
+                break
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            if args_col < len(cells) and cells[args_col]:
+                yield row_idx + 1, cells[args_col]
+
+
+def _load_valid_args(*metrics_paths):
+    """Build set of operations[].args strings from one or more metrics JSONs."""
+    valid = set()
+    for p in metrics_paths:
+        try:
+            with open(p) as f:
+                d = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        valid.update(
+            op["args"]
+            for op in d.get("operations", [])
+            if isinstance(op.get("args"), str)
+        )
+    return valid
+
+
+def _validate_args_column(content, findings_path):
+    """Level-1 check: every Args cell in a compute findings file must match
+    operations[].args verbatim in the matching `<cat>_metrics.json`.
+
+    Catches reformat (e.g. `<br>` -> `,` or `x`), summarization, or content
+    drift. Skips silently if the metrics JSON is absent or has no `args` field.
+    """
+    output_dir = os.path.dirname(os.path.dirname(findings_path))
+    cat = os.path.basename(findings_path).replace("_findings.md", "")
+    metrics_path = os.path.join(output_dir, "category_data", f"{cat}_metrics.json")
+    valid_args = _load_valid_args(metrics_path)
+    if not valid_args:
+        return []
+    return [
+        f"Args cell on line {ln} does not match operations[].args in "
+        f"{cat}_metrics.json (paste verbatim, keep <br>): {cell}"
+        for ln, cell in _scan_args_cells(content)
+        if cell not in valid_args
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -334,4 +403,33 @@ def validate_report(output_dir):
     if found:
         missing.append(f"Unfilled placeholders: {', '.join(sorted(set(found)))}")
 
+    missing.extend(_validate_report_args_column(content, output_dir))
+
     return len(missing) == 0, missing
+
+
+def _validate_report_args_column(content, output_dir):
+    """Level-3 check: every Args cell in standalone_analysis.md must match some
+    operations[].args verbatim across all category metrics JSONs.
+
+    Catches LLM reformatting introduced by the Step 11 orchestrator when it
+    pastes per-category Detailed Analysis tables into the final report.
+    """
+    cat_data_dir = os.path.join(output_dir, "category_data")
+    if not os.path.isdir(cat_data_dir):
+        return []
+    metrics_paths = [
+        os.path.join(cat_data_dir, f)
+        for f in os.listdir(cat_data_dir)
+        if f.endswith("_metrics.json")
+    ]
+    valid_args = _load_valid_args(*metrics_paths)
+    if not valid_args:
+        return []
+    return [
+        f"standalone_analysis.md line {ln}: Args cell does not match any "
+        f"operations[].args in category_data/*_metrics.json (paste verbatim, "
+        f"keep <br>): {cell}"
+        for ln, cell in _scan_args_cells(content)
+        if cell not in valid_args
+    ]
