@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: Workflow LLM Eval
-description: Run LLM-based workflow evals on a standalone analysis output and produce a results CSV.
+description: Run LLM-based workflow eval (eval 12 only) on a standalone analysis output and produce a results CSV.
 triggers:
   - workflow LLM eval
   - run workflow LLM eval
@@ -17,7 +17,11 @@ tools:
 
 # Workflow LLM Eval
 
-Evaluate the standalone analysis report for correct formatting, content structure, and template adherence.
+Evaluate the standalone analysis report's Appendix for correct hardware reference values.
+
+**Note:** Evals 9, 10, 11, 13, and 14 have been converted to deterministic Python
+checks in `workflow_scripted_evals.py`. This skill now only handles eval 12 (Hardware
+Reference in Appendix), which requires semantic reasoning about hardware values.
 
 ## Inputs
 
@@ -27,73 +31,29 @@ When triggered, the prompt will specify:
 
 ## Files to Read
 
-Read ALL of these before evaluating:
+Read these before evaluating:
 
 - `<output_dir>/standalone_analysis.md`
-- `<output_dir>/perf_report_csvs/gpu_timeline.csv`
-- `<output_dir>/category_data/category_manifest.json`
-- `<output_dir>/metadata/model_info.json`
-- All `<output_dir>/category_findings/*_findings.md`
-- All `<output_dir>/system_findings/*_findings.md`
 
-## Evals
+## Scoring Rubric
 
-Evaluate ALL 6 checks below. Write ALL 6 rows to the results CSV. If a file listed above does not exist, skip it gracefully (do not FAIL solely because an optional system findings file is absent).
+Eval 12 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval framework).
 
-### workflow_eval_9: Report Template Rendering
+### Dimensions
 
-**Category:** Workflow
-**Issue Summary:** Report Template Rendering
+| Dimension | Weight | Description |
+|-----------|--------|-------------|
+| **correctness** | 50% | Are the hardware values present and plausible? 10=all correct, 7=minor issue, 0=wrong/missing |
+| **completeness** | 50% | Are all three items (platform, HBM BW, MAF) present? 10=all three, 7=two of three, 4=one, 0=none |
 
-Read `standalone_analysis.md` and check for the presence of ALL these section headers (exact or close match):
+### Pass/Fail
 
-- `## Executive Summary`
-- `## Compute Kernel Optimizations`
-- `## System-Level Optimizations`
-- `## Detailed Analysis`
-- `## Appendix`
+`overall_score = correctness * 0.50 + completeness * 0.50`
+- **FAIL** if correctness = 0
+- **FAIL** if overall_score < 7.0
+- **PASS** otherwise
 
-Also verify the Executive Summary contains a markdown table (lines with `|`).
-
-**PASS** if all headers found. **FAIL** with list of missing headers.
-
-### workflow_eval_10: Executive Summary has metrics table
-
-**Category:** Workflow
-**Issue Summary:** Executive Summary has metrics table
-
-In `standalone_analysis.md`, find the Executive Summary section. Verify the metrics table contains rows for:
-
-- Total Compute Time (or Total Time)
-- Computation (percentage)
-- Idle Time (percentage)
-- Exposed Communication (percentage)
-- Top Bottleneck Category
-
-Cross-check numeric values against `gpu_timeline.csv`:
-- Computation % should match `computation_time_percent` within 1%
-- Idle % should match `idle_time_percent` within 1%
-
-**PASS** if all rows present and values align. **FAIL** with specifics.
-
-### workflow_eval_11: Issue Template rendering
-
-**Category:** Workflow
-**Issue Summary:** Issue Template rendering
-
-In `standalone_analysis.md`, find every priority item (lines matching `### ... P1:`, `### ... P2:`, `### ... P3:`, etc.). For each P-item, determine which section it belongs to and verify it has the correct fields:
-
-**Compute Kernel P-items** (under `## Compute Kernel Optimizations`):
-- **Insight** (or **Issue**): 1-2 sentences describing the problem
-- **Action**: 1-2 sentences describing what to do
-- **Impact**: expected improvement (e.g., "~X.X ms savings..." or "Not quantifiable from trace data")
-
-**System-Level P-items** (under `## System-Level Optimizations`):
-- **Insight** (or **Issue**): 1-2 sentences describing the problem
-- **Action**: 1-2 sentences describing what to do
-- (No **Impact** field — system-level issues are not quantified)
-
-**PASS** if every P-item has the correct fields for its section. Either **Insight** or **Issue** is acceptable as the first field — both are valid. **FAIL** listing which P-items are missing required fields or have unexpected fields.
+## Eval
 
 ### workflow_eval_12: Hardware Reference in Appendix
 
@@ -106,42 +66,23 @@ In `standalone_analysis.md`, find the `## Appendix` section. Verify it contains:
 - Peak HBM BW value
 - At least one Peak MAF value
 
-**PASS** if all present. **FAIL** with what's missing.
+**Scoring guide (multi-dimensional):**
+- **correctness**: Are the hardware values plausible and correctly stated? (10=correct, 7=present but imprecise, 0=wrong/invented)
+- **completeness**: How many of the three items are present? (10=all three, 7=two of three, 4=one, 0=none)
 
-### workflow_eval_13: Sub-agent findings structure and Impact Summary types
+**PASS** if overall_score >= 7.0 and correctness >= 4. **FAIL** with what's missing.
 
-**Category:** Workflow
-**Issue Summary:** Sub-agent findings structure and Impact Summary types
-
-Read `category_manifest.json` to get categories by tier. For each **compute_kernel** category, read `category_findings/<cat>_findings.md`. For each **system** category, read `system_findings/<cat>_findings.md`.
-
-**Compute kernel findings** must each contain:
-
-- An operations table (markdown table with columns like Operation, Count, Time)
-- At least one key bottleneck section with Time, Efficiency, and recommendation text
-- An `## Impact Summary` section with a markdown table where every data row has Type = `kernel_tuning`. Rows with Type = `algorithmic` or `system` are **not allowed**. The table may have zero data rows (header only) if no actionable bottlenecks were found.
-
-**System findings** (e.g. `cpu_idle_findings.md`, `multi_kernel_findings.md`) must each contain:
-
-- An `## Impact Summary` section with the table header row but **zero data rows**. System-level analyses do not produce impact estimates.
-
-**PASS** if all findings have the required structure and valid Impact Summary types. **FAIL** listing which categories have missing structure or invalid Impact Summary rows (e.g. `algorithmic` or `system` type entries in compute findings, or data rows in system findings).
-
-### workflow_eval_14: Model identification in report
-
-**Category:** Workflow
-**Issue Summary:** Model identification in report
-
-Read `metadata/model_info.json` and `standalone_analysis.md`.
-
-The `## Appendix` section must contain a **Model Architecture** subsection with all four fields from `model_info.json`: model, architecture, scale, precision.
-
-**PASS** if the Appendix contains all four fields. **FAIL** with specifics on which fields are missing.
+In the `details` column, include: `correctness=N/10 completeness=N/10 overall=N.N | <explanation>`
 
 ## Output
 
-Write a CSV to the specified `results_path` with exactly these 5 columns and 6 data rows:
+Write a CSV to the specified `results_path` with exactly these columns and **1** data row:
 
-`index,category,issue_summary,result,details`
+`index,category,issue_summary,result,details,root_cause,recommended_fix`
 
-Use `workflow_eval_9` through `workflow_eval_14` as the `index` values. Do not add any other columns.
+Use `workflow_eval_12` as the `index` value.
+
+Include scoring breakdown in the `details` column:
+`correctness=N/10 completeness=N/10 overall=N.N | <explanation>`
+
+Set `root_cause` to `template` and `recommended_fix` to a specific fix suggestion if the result is FAIL. Leave both empty if PASS.
