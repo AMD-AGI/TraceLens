@@ -329,7 +329,10 @@ def main():
 
     # Analysis options
     parser.add_argument(
-        "--detailed_analysis", action="store_true", default=True, help="Include detailed information (enabled by default)"
+        "--detailed_analysis",
+        action="store_true",
+        default=True,
+        help="Include detailed information (enabled by default)",
     )
     parser.add_argument(
         "--agg_metrics",

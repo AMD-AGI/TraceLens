@@ -738,15 +738,15 @@ class NcclAnalyser:
             return pd.DataFrame()
 
         wait_cols = [
-            c for c in df_isync.columns
+            c
+            for c in df_isync.columns
             if c.startswith("rank_") and c.endswith("_wait_time")
         ]
         if not wait_cols:
             return pd.DataFrame()
 
         ranks = sorted(
-            int(c.replace("rank_", "").replace("_wait_time", ""))
-            for c in wait_cols
+            int(c.replace("rank_", "").replace("_wait_time", "")) for c in wait_cols
         )
         num_collectives = len(df_isync)
 
@@ -759,15 +759,17 @@ class NcclAnalyser:
             mean_wait = df_isync[wc].mean()
             times_last = (straggler_rank_per_row == wc).sum()
             times_first = (df_isync["earliest arrival rank"] == r).sum()
-            rows.append({
-                "rank": r,
-                "total_wait_time_us": round(total_wait, 1),
-                "mean_wait_time_us": round(mean_wait, 1),
-                "times_arrived_last": int(times_last),
-                "times_arrived_first": int(times_first),
-                "pct_arrived_last": round(100.0 * times_last / num_collectives, 1),
-                "num_collectives": num_collectives,
-            })
+            rows.append(
+                {
+                    "rank": r,
+                    "total_wait_time_us": round(total_wait, 1),
+                    "mean_wait_time_us": round(mean_wait, 1),
+                    "times_arrived_last": int(times_last),
+                    "times_arrived_first": int(times_first),
+                    "pct_arrived_last": round(100.0 * times_last / num_collectives, 1),
+                    "num_collectives": num_collectives,
+                }
+            )
 
         df_straggler = pd.DataFrame(rows)
 
@@ -779,9 +781,9 @@ class NcclAnalyser:
                 .rename(columns={"dur": "total_nccl_dur_us"})
             )
             df_straggler = df_straggler.merge(dur_by_rank, on="rank", how="left")
-            df_straggler["total_nccl_dur_us"] = df_straggler[
-                "total_nccl_dur_us"
-            ].round(1)
+            df_straggler["total_nccl_dur_us"] = df_straggler["total_nccl_dur_us"].round(
+                1
+            )
 
         df_straggler = df_straggler.sort_values(
             "total_wait_time_us", ascending=True
