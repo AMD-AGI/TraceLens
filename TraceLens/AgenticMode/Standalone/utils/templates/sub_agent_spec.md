@@ -104,7 +104,7 @@ inside `## Detailed Analysis` blocks.
 
 **Column mappings** (source: `metrics['operations']`):
 - **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
-- **Args**: `operations[i].args`. Pre-rendered shape + dtype, **already joined with `<br>`** so each entry renders on its own line in the cell — paste verbatim into the table, do not reformat or re-join. Empty/Scalar slots are pre-dropped and dtypes are normalized via `torch_dtype_map` (all FP8/FP4 sub-variants collapse to `fp8`/`fp4`). Omit the column if every row is missing this field.
+- **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. Omit the column if every row is missing this field.
 - **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
 - **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `null` ⇒ omit the column. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
 - **Count**: `operations[i].count` — total invocations, not unique signatures.
