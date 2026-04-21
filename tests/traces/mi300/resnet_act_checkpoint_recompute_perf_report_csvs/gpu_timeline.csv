@@ -1,0 +1,17 @@
+type,time ms,percent,is_recompute
+computation_time,15.11189404296875,26.738384562518462,False
+exposed_comm_time,38.3431845703125,67.84290648660685,False
+exposed_memcpy_time,1.5836318359375,2.802015214925736,False
+busy_time,55.03871044921875,97.38330626405104,False
+idle_time,1.478892578125,2.6166937359489535,False
+total_time,56.51760302734375,100.0,False
+total_comm_time,47.20031005859375,83.5143522200646,False
+total_memcpy_time,1.63343310546875,2.8901316014383687,False
+computation_time,4.12223779296875,9.867892037163763,True
+exposed_comm_time,0.0,0.0,True
+exposed_memcpy_time,0.0,0.0,True
+busy_time,4.12223779296875,9.867892037163763,True
+idle_time,37.65201123046875,90.13210796283624,True
+total_time,41.7742490234375,100.0,True
+total_comm_time,0.0,0.0,True
+total_memcpy_time,0.0,0.0,True

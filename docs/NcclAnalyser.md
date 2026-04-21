@@ -24,7 +24,7 @@ In distributed deep learning, analyzing the performance of collective communicat
 
 - **Synchronization (Wait-Time) Metrics**: Tracks **skew in start times** (how late certain ranks arrive) and **skew in end times**, providing insights for diagnosing load imbalance or synchronization overheads.
 
-- **Alltoallv Support**: Provides raw data for alltoallv events, which do not enforce an implicit sync pattern.
+- **Alltoallv Support**: Provides raw data for alltoallv events, which do not enforce an implicit sync pattern. Includes per-instance metrics (wall time, throughput, size imbalance) and a summary aggregation grouped by process group and dtype. An optional heatmap mode (`build_df_all2allv_heatmap`) produces per rank-pair send volumes, useful for diagnosing MoE/expert-parallel routing imbalance.
 
 - **Summary & Detailed Dataframes**: Supports both high-level summaries for quick insights and detailed dataframes for advanced analysis, including per-rank metadata and performance metrics. We suggest **power users** to build their custom pipelines and analyses on top of detailed dfs. 
 

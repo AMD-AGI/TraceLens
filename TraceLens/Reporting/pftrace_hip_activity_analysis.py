@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from ..util import TraceEventUtils
 import numpy as np
 import pandas as pd
 
@@ -128,7 +129,6 @@ def discover_gpus(
 # --------------------------------------------------------------------------- #
 
 _c_gemm = re.compile(r"(cublasLt|Cijk|gemm|nvjet)", re.IGNORECASE)
-_c_rccl = re.compile(r"(rccl|nccl)", re.IGNORECASE)
 _c_mem = re.compile(r"(copy|memcpy|memset)", re.IGNORECASE)
 _c_ck_fwd = re.compile(r"(FmhaFwd|flash_fprop)", re.IGNORECASE)
 _c_ck_bwd = re.compile(r"(FmhaBwd|kernel_func|flash_bprop)", re.IGNORECASE)
@@ -139,7 +139,7 @@ _c_fillBuffer = re.compile(r"(fillbuffer)", re.IGNORECASE)
 
 
 def classify(name: str) -> str:
-    if _c_rccl.search(name):
+    if TraceEventUtils.is_communication_string(name):
         return "rccl"
     if _c_gemm.search(name):
         return "gemm"

@@ -8,7 +8,7 @@
 End-to-end test for --detect_recompute feature.
 
 Uses a ResNet activation-checkpoint trace to verify that:
-1. Generated report with --detect_recompute matches a checked-in reference xlsx
+1. Generated report with --detect_recompute matches checked-in reference CSVs
 2. is_recompute column appears in the expected sheets
 3. Feature has zero impact when disabled (default)
 """
@@ -22,13 +22,38 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
 
-from conftest import compare_cols, format_diff_details
+from conftest import (
+    compare_cols,
+    format_diff_details,
+    list_perf_report_csv_sheets,
+    perf_report_csv_dirname,
+    read_perf_report_csv,
+)
 
 TRACE_DIR = os.path.join(os.path.dirname(__file__), "traces", "mi300")
 TRACE_PATH = os.path.join(TRACE_DIR, "resnet_act_checkpoint.json.gz")
-REF_XLSX = os.path.join(TRACE_DIR, "resnet_act_checkpoint_recompute_perf_report.xlsx")
+REF_CSV_DIR = os.path.join(
+    TRACE_DIR, perf_report_csv_dirname("resnet_act_checkpoint_recompute")
+)
 
-SHEETS_WITH_RECOMPUTE = ["ops_summary", "ops_unique_args", "unified_perf_summary"]
+SHEETS_WITH_RECOMPUTE = [
+    "gpu_timeline",
+    "ops_summary_by_category",
+    "ops_summary",
+    "ops_unique_args",
+    "unified_perf_summary",
+]
+
+PERF_METRICS_SHEETS = [
+    "GEMM",
+    "SDPA_fwd",
+    "SDPA_bwd",
+    "CONV_fwd",
+    "CONV_bwd",
+    "UnaryElementwise",
+    "BinaryElementwise",
+    "Normalization",
+]
 
 COLS_IGNORE = [
     "kernel_details",
@@ -40,26 +65,27 @@ COLS_IGNORE = [
 
 
 def test_detect_recompute_e2e(tmp_path):
-    """Generate perf report with detect_recompute=True and compare to reference xlsx."""
+    """Generate perf report with detect_recompute=True and compare to reference CSVs."""
     if not os.path.exists(TRACE_PATH):
         pytest.skip(f"Test trace not found: {TRACE_PATH}")
-    if not os.path.exists(REF_XLSX):
-        pytest.skip(f"Reference xlsx not found: {REF_XLSX}")
+    if not os.path.isdir(REF_CSV_DIR):
+        pytest.skip(f"Reference CSV directory not found: {REF_CSV_DIR}")
 
-    fn_report_path = str(tmp_path / "test_recompute_perf_report.xlsx")
+    fn_csv_dir = str(tmp_path / "recompute_perf_report_csvs")
 
     generate_perf_report_pytorch(
         profile_json_path=TRACE_PATH,
-        output_xlsx_path=fn_report_path,
+        output_xlsx_path=None,
+        output_csvs_dir=fn_csv_dir,
         detect_recompute=True,
     )
 
-    assert os.path.exists(fn_report_path), "Generated report not created"
+    assert os.path.isdir(fn_csv_dir), "Generated report directory not created"
 
-    sheets = pd.ExcelFile(REF_XLSX).sheet_names
+    sheets = list_perf_report_csv_sheets(REF_CSV_DIR)
     for sheet in sheets:
-        df_ref = pd.read_excel(REF_XLSX, sheet_name=sheet)
-        df_test = pd.read_excel(fn_report_path, sheet_name=sheet)
+        df_ref = read_perf_report_csv(REF_CSV_DIR, sheet)
+        df_test = read_perf_report_csv(fn_csv_dir, sheet)
         if df_ref.empty:
             continue
 
@@ -75,7 +101,7 @@ def test_detect_recompute_e2e(tmp_path):
 
     # Verify is_recompute column exists in the expected sheets
     for sheet_name in SHEETS_WITH_RECOMPUTE:
-        df = pd.read_excel(fn_report_path, sheet_name=sheet_name)
+        df = read_perf_report_csv(fn_csv_dir, sheet_name)
         assert (
             "is_recompute" in df.columns
         ), f"is_recompute column missing from {sheet_name}"
@@ -83,6 +109,15 @@ def test_detect_recompute_e2e(tmp_path):
         assert not df[
             "is_recompute"
         ].all(), f"All rows marked as recompute in {sheet_name} — expected a mix"
+
+    # Verify is_recompute propagates to perf metrics sheets (build_df_perf_metrics)
+    all_sheets = list_perf_report_csv_sheets(fn_csv_dir)
+    for sheet_name in PERF_METRICS_SHEETS:
+        if sheet_name in all_sheets:
+            df = read_perf_report_csv(fn_csv_dir, sheet_name)
+            assert (
+                "is_recompute" in df.columns
+            ), f"is_recompute column missing from perf metrics sheet {sheet_name}"
 
 
 def test_detect_recompute_disabled_no_impact(tmp_path):
@@ -92,11 +127,12 @@ def test_detect_recompute_disabled_no_impact(tmp_path):
 
     dict_name2df = generate_perf_report_pytorch(
         profile_json_path=TRACE_PATH,
-        output_xlsx_path=str(tmp_path / "no_recompute.xlsx"),
+        output_xlsx_path=None,
+        output_csvs_dir=str(tmp_path / "no_recompute_csvs"),
         detect_recompute=False,
     )
 
-    for sheet_name in SHEETS_WITH_RECOMPUTE:
+    for sheet_name in SHEETS_WITH_RECOMPUTE + PERF_METRICS_SHEETS:
         if sheet_name in dict_name2df:
             df = dict_name2df[sheet_name]
             assert (

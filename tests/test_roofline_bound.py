@@ -20,6 +20,8 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
 
+from conftest import list_perf_report_csv_sheets
+
 MI300X_ARCH = {
     "name": "MI300X",
     "mem_bw_gbps": 5300,
@@ -50,35 +52,37 @@ VALID_BOUND_VALUES = {"COMPUTE_BOUND", "MEMORY_BOUND"}
 
 @pytest.fixture(scope="module")
 def perf_report(tmp_path_factory):
-    """Generate a perf report with GPU arch config once for the module."""
+    """Generate a perf report with GPU arch config once for the module (CSV sheets)."""
     output_dir = tmp_path_factory.mktemp("roofline_bound")
     arch_path = str(output_dir / "mi300x.json")
-    report_path = str(output_dir / "perf_report.xlsx")
+    csv_dir = str(output_dir / "perf_report_csvs")
 
     with open(arch_path, "w") as f:
         json.dump(MI300X_ARCH, f)
 
     generate_perf_report_pytorch(
         profile_json_path=TRACE_PATH,
-        output_xlsx_path=report_path,
+        output_xlsx_path=None,
+        output_csvs_dir=csv_dir,
         gpu_arch_json_path=arch_path,
+        enable_origami=True,
     )
 
-    return report_path
+    return csv_dir
 
 
-def _find_roofline_bound_col(df):
+def _find_col(df, prefix):
     """Find the Roofline Bound column, which may have an aggregation suffix."""
     for col in df.columns:
-        if col == "Roofline Bound" or col.startswith("Roofline Bound"):
+        if col.startswith(prefix):
             return col
     return None
 
 
 def test_roofline_bound_in_unified_perf_summary(perf_report):
     """Roofline Bound column must appear in unified_perf_summary."""
-    df = pd.read_excel(perf_report, sheet_name="unified_perf_summary")
-    bound_col = _find_roofline_bound_col(df)
+    df = pd.read_csv(os.path.join(perf_report, "unified_perf_summary.csv"))
+    bound_col = _find_col(df, "Roofline Bound")
     assert bound_col is not None, (
         f"'Roofline Bound' missing from unified_perf_summary. "
         f"Columns: {list(df.columns)}"
@@ -87,16 +91,27 @@ def test_roofline_bound_in_unified_perf_summary(perf_report):
     assert bound_vals <= VALID_BOUND_VALUES, f"Unexpected values: {bound_vals}"
 
 
+def test_origami_time_in_unified_perf_summary(perf_report):
+    """Origami Time (µs) column must appear in unified_perf_summary."""
+    # this test does not test the functionality of the Origami time column,
+    # it only tests that the column appears in the perf report, because we do not control Origami
+    df = pd.read_csv(os.path.join(perf_report, "unified_perf_summary.csv"))
+    bound_col = _find_col(df, "Origami Time (µs)")
+    assert bound_col is not None, (
+        f"'Origami Time (µs)' missing from unified_perf_summary. "
+        f"Columns: {list(df.columns)}"
+    )
+
+
 def test_roofline_bound_in_category_sheets(perf_report):
     """Roofline Bound column must appear in per-category sheets that have roofline data."""
-    xls = pd.ExcelFile(perf_report)
     sheets_with_roofline = []
-    for sheet in xls.sheet_names:
-        df = pd.read_excel(xls, sheet_name=sheet)
+    for sheet in list_perf_report_csv_sheets(perf_report):
+        df = pd.read_csv(os.path.join(perf_report, f"{sheet}.csv"))
         roofline_time_cols = [c for c in df.columns if c.startswith("Roofline Time")]
         if roofline_time_cols:
             sheets_with_roofline.append(sheet)
-            bound_col = _find_roofline_bound_col(df)
+            bound_col = _find_col(df, "Roofline Bound")
             assert bound_col is not None, (
                 f"Sheet '{sheet}' has roofline time but missing "
                 f"'Roofline Bound'. Columns: {list(df.columns)}"
