@@ -89,3 +89,14 @@ def test_position_based_matching_all_reduce_clusters(tracediff_report, df_trace1
             tracediff_report["lowest_common_ancestor_id"] == lca_id
         ].shape[0]
         assert 2 <= count <= 5, f"Expected 2-5 rows for LCA ID {lca_id}, found {count}"
+
+
+def test_gpu_op_uid_present_and_non_null(tracediff_report):
+    """gpu_op_uid column should exist and contain no null values."""
+    assert "gpu_op_uid" in tracediff_report.columns
+    assert tracediff_report["gpu_op_uid"].notna().all()
+
+
+def test_gpu_op_uid_unique_per_row(tracediff_report):
+    """Each diff_stats row represents one kernel instance, so gpu_op_uid should be unique."""
+    assert tracediff_report["gpu_op_uid"].is_unique

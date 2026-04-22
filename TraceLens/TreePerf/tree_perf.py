@@ -288,6 +288,7 @@ class TreePerfAnalyzer:
                 "name": kernel["name"],
                 "dur": kernel["dur"],
                 "stream": kernel.get("args", {}).get("stream", None),
+                "gpu_op_uid": kernel.get("UID"),
             }
             for kernel in list_kernels
         ]
@@ -1656,6 +1657,7 @@ class TreePerfAnalyzer:
                                 "name": gpu_event.get("name"),
                                 "dur": gpu_event.get("dur"),
                                 "stream": gpu_event.get("args", {}).get("stream"),
+                                "gpu_op_uid": gpu_event.get("UID"),
                             }
                         )
                 row["kernel_details"] = kernel_details if kernel_details else None
