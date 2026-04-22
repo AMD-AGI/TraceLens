@@ -242,17 +242,10 @@ def _comparative_efficiency_percent_from_row(
 ) -> None:
     """
     When comparative columns support it, set ``efficiency_percent`` to
-    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped from below by the
-    trace1 roofline utilisation so that projected savings never exceed what
-    trace1's hardware can physically achieve.
+    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped by trace1 roofline
 
     t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t2/t1.
     If comparative metrics cannot be computed, leaves ``result`` unchanged for those keys.
-
-    Roofline floor: if ``Pct Roofline_mean`` is present and ``comp_pct`` is below it,
-    the efficiency is raised to the roofline value.  This caps savings at
-    ``time_ms * (1 - roofline_pct / 100)`` — the maximum physically achievable
-    improvement on trace1's platform.
     """
     kt = row.get("Kernel Time (µs)_sum")
     if kt is None or pd.isna(kt):
@@ -275,8 +268,6 @@ def _comparative_efficiency_percent_from_row(
     if comp_pct is None:
         return
 
-    # Clamp to roofline floor: trace2 may be faster than trace1's hardware
-    # ceiling for this op, so cap the projected efficiency at the roofline.
     roofline_pct = row.get("Pct Roofline_mean")
     roofline_floor: Optional[float] = None
     if roofline_pct is not None and not pd.isna(roofline_pct):
@@ -771,7 +762,9 @@ def run_category_analysis(
     if compute_impact:
         baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
         impact_estimates = compute_impact_estimates(
-            operations, category, baseline_ms=baseline_ms,
+            operations,
+            category,
+            baseline_ms=baseline_ms,
             analysis_mode=comparison_scope,
         )
     else:
