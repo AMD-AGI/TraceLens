@@ -139,10 +139,17 @@ class BaseTraceToTree(ABC):
             stack = dict_pidtid2stack[stack_key]
             nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
-            while (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+            # Pop the stack top while it either (a) has already ended before this
+            # event starts, or (b) would end before this event ends and therefore
+            # cannot fully contain it. Case (b) handles "event bleed" where a
+            # runtime event (e.g. hipLaunchKernel) is timestamped slightly inside
+            # a sibling CPU op but extends past it; without popping past that
+            # sibling, the event would otherwise be dropped from the tree.
+            while stack and (
+                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                or event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
@@ -150,15 +157,6 @@ class BaseTraceToTree(ABC):
                 # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
-
-            if (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-            ):
-                # TODO add following to logging when logging level is debug
-                # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
-                continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
             if nn_module_stack:
