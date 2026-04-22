@@ -9,6 +9,7 @@
 
 from pprint import pprint
 from typing import Dict, Any, List, Optional, Tuple
+import copy
 import re
 import warnings
 import time
@@ -414,7 +415,9 @@ class EventReplayer:
             self.event_replay_IR["list_kwargs"],
         )
         # Convert TensorCfg to dict for JSON serialization
-        list_pos_args_copy, list_kwargs_copy = list_pos_args.copy(), list_kwargs.copy()
+        list_pos_args_copy, list_kwargs_copy = copy.deepcopy(
+            list_pos_args
+        ), copy.deepcopy(list_kwargs)
         for idx, val in enumerate(list_pos_args_copy):
             if isinstance(val["value"], TensorCfg):
                 list_pos_args_copy[idx]["value"] = val["value"].__dict__
