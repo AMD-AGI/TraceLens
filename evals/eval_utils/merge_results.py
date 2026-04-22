@@ -25,7 +25,15 @@ def main():
         "quality_scripted_results.csv",
         "quality_llm_results.csv",
     ]
-    expected_cols = ["index", "category", "issue_summary", "result", "details"]
+    expected_cols = [
+        "index",
+        "category",
+        "issue_summary",
+        "result",
+        "details",
+        "root_cause",
+        "recommended_fix",
+    ]
     out = args.output or os.path.join(args.results_dir, "eval_summary.csv")
 
     frames = []
@@ -50,6 +58,8 @@ def main():
                     "issue_summary": "No eval results produced",
                     "result": "FAIL",
                     "details": f"Missing: {', '.join(missing_csvs) if missing_csvs else 'all result CSVs'}",
+                    "root_cause": "pipeline",
+                    "recommended_fix": "Re-run eval pipeline to produce result CSVs",
                 }
             ]
         )

@@ -68,9 +68,33 @@ def aggregate_eval_summaries(runs):
                         "issue_summary": row.get("issue_summary", ""),
                         "result": row.get("result", ""),
                         "details": row.get("details", ""),
+                        "root_cause": row.get("root_cause", ""),
+                        "recommended_fix": row.get("recommended_fix", ""),
                     }
                 )
     return rows
+
+
+def _classify_stability(pass_count: int, total: int) -> str:
+    """Classify eval stability across repeated runs.
+
+    Returns one of:
+      STABLE_PASS  - all runs passed
+      FLAKY_PASS   - >50% passed but not all
+      FLAKY_FAIL   - >0% passed but <=50%
+      STABLE_FAIL  - all runs failed
+    """
+    if total == 0:
+        return "N/A"
+    rate = pass_count / total
+    if rate == 1.0:
+        return "STABLE_PASS"
+    elif rate > 0.5:
+        return "FLAKY_PASS"
+    elif rate > 0.0:
+        return "FLAKY_FAIL"
+    else:
+        return "STABLE_FAIL"
 
 
 def build_pass_rate_summary(rows):
@@ -108,6 +132,35 @@ def build_pass_rate_summary(rows):
         )
         summary_rows.append(row)
     return summary_rows, ["trace_id"] + all_evals + ["overall_pass_rate"]
+
+
+def build_stability_summary(rows):
+    """Build a per-(trace, eval) stability classification table."""
+    counts = defaultdict(lambda: {"pass": 0, "total": 0})
+    for r in rows:
+        if r["result"] == "MISSING":
+            continue
+        key = (r["trace_id"], r["eval_index"])
+        counts[key]["total"] += 1
+        if r["result"] == "PASS":
+            counts[key]["pass"] += 1
+
+    all_evals = sorted({k[1] for k in counts})
+    all_traces = sorted({k[0] for k in counts})
+    stability_rows = []
+    class_totals = defaultdict(int)
+    for trace_id in all_traces:
+        row = {"trace_id": trace_id}
+        for ev in all_evals:
+            c = counts.get((trace_id, ev))
+            if c and c["total"] > 0:
+                label = _classify_stability(c["pass"], c["total"])
+                row[ev] = label
+                class_totals[label] += 1
+            else:
+                row[ev] = "N/A"
+        stability_rows.append(row)
+    return stability_rows, ["trace_id"] + all_evals, dict(class_totals)
 
 
 def parse_ndjson_stream(ndjson_path):
@@ -322,6 +375,8 @@ EVAL_COLS = [
     "issue_summary",
     "result",
     "details",
+    "root_cause",
+    "recommended_fix",
 ]
 
 
@@ -347,6 +402,15 @@ def main():
         os.path.join(OUTPUT_DIR, "pass_rate_summary.csv"), summary_rows, summary_cols
     )
 
+    print("\nPart A2: Building stability classification...")
+    stability_rows, stability_cols, class_totals = build_stability_summary(eval_rows)
+    write_csv(
+        os.path.join(OUTPUT_DIR, "stability_summary.csv"),
+        stability_rows,
+        stability_cols,
+    )
+    print("  Stability breakdown: {}".format(class_totals))
+
     print("\nPart B: Parsing analysis_stream.ndjson files...")
     stream_rows = aggregate_stream_diagnostics(runs)
     write_csv(
@@ -365,6 +429,19 @@ def main():
     )
     if total_evals > 0:
         print("Overall pass rate: {:.1f}%".format(100 * passed / total_evals))
+
+    if class_totals:
+        stable_pass = class_totals.get("STABLE_PASS", 0)
+        flaky_pass = class_totals.get("FLAKY_PASS", 0)
+        flaky_fail = class_totals.get("FLAKY_FAIL", 0)
+        stable_fail = class_totals.get("STABLE_FAIL", 0)
+        ct = stable_pass + flaky_pass + flaky_fail + stable_fail
+        print(
+            "Stability: {} STABLE_PASS, {} FLAKY_PASS, {} FLAKY_FAIL, {} STABLE_FAIL "
+            "(of {} trace-eval pairs)".format(
+                stable_pass, flaky_pass, flaky_fail, stable_fail, ct
+            )
+        )
 
     outcomes = defaultdict(int)
     for r in stream_rows:
