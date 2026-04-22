@@ -8,6 +8,39 @@
 Utils. for perf. model.
 """
 
+import os
+
+
+def add_simulation_time_columns(
+    dict_metrics,
+    simulated_time,
+    gflops,
+    bytes_moved,
+    busy_kernel_time,
+):
+    """
+    Add simulated time columns when using Origami
+    """
+    if not simulated_time:
+        return
+    dict_metrics["Origami Time (µs)"] = simulated_time
+    dict_metrics["Origami TFLOPS/s"] = (
+        (gflops / 1e3) / (simulated_time / 1e6) if simulated_time > 0 else float("nan")
+    )
+    if bytes_moved is not None:
+        dict_metrics["Origami TB/s"] = (
+            (bytes_moved / 1e12) / (simulated_time / 1e6)
+            if simulated_time > 0
+            else float("nan")
+        )
+    else:
+        dict_metrics["Origami TB/s"] = float("nan")
+    dict_metrics["Pct Origami"] = (
+        (simulated_time / busy_kernel_time) * 100
+        if busy_kernel_time > 0
+        else float("nan")
+    )
+
 
 def name2bpe(name):
     """

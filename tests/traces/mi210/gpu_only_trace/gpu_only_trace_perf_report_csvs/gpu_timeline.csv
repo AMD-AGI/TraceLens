@@ -1,0 +1,9 @@
+type,time ms,percent
+computation_time,5.3433701171875,89.3614432507144
+exposed_comm_time,0.0,0.0
+exposed_memcpy_time,0.0,0.0
+busy_time,5.3433701171875,89.3614432507144
+idle_time,0.6361328125,10.638556749285605
+total_time,5.9795029296875,100.0
+total_comm_time,0.0,0.0
+total_memcpy_time,0.0,0.0
