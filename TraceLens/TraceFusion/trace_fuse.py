@@ -138,7 +138,7 @@ class TraceFuse:
                 if isinstance(value, int):
                     max_values[field] = max(max_values[field], value)
         self.offset_multiplier = {
-            field: 10 ** (math.ceil(math.log10(max_value)) + 1)
+            field: 10 ** (math.ceil(math.log10(max(max_value, 1))) + 1)
             for field, max_value in max_values.items()
         }
 
