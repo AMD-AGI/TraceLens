@@ -93,7 +93,7 @@ def generate_collective_report(
     world_size: Optional[int] = None,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
-    detailed_analysis: bool = False,
+    detailed_analysis: bool = True,
     agg_metrics: List[str] = ["mean", "median", "min", "max"],
     strict_world_size_check: bool = True,
     use_multiprocessing: bool = False,
@@ -241,6 +241,12 @@ def generate_collective_report(
         if df_all2allv is not None and not df_all2allv.empty:
             report_dfs["nccl_all2allv"] = df_all2allv
 
+    # Straggler summary — always generated when implicit-sync data exists
+    print("Generating straggler summary...")
+    df_straggler = nccl_analyser.build_df_straggler_summary()
+    if not df_straggler.empty:
+        report_dfs["straggler_summary"] = df_straggler
+
     # Add node_id and node_span columns when gpus_per_node is known
     if gpus_per_node is not None and gpus_per_node > 0:
         print(f"Adding node_span columns (gpus_per_node={gpus_per_node})...")
@@ -323,7 +329,10 @@ def main():
 
     # Analysis options
     parser.add_argument(
-        "--detailed_analysis", action="store_true", help="Include detailed information"
+        "--detailed_analysis",
+        action="store_true",
+        default=True,
+        help="Include detailed information (enabled by default)",
     )
     parser.add_argument(
         "--agg_metrics",
