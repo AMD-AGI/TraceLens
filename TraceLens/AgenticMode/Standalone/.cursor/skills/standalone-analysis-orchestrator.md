@@ -325,22 +325,19 @@ Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 
 **Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
 
-#### Partitioning: Mapped vs Unmapped Categories
+#### Subagent Selection
 
-Partition `compute_categories` into two groups:
+For each category in `compute_categories`, resolve `{agent_file}`:
+- If the category is in the Agent File Map above, use the listed agent file.
+- Otherwise (unmapped category), fall back to `generic-op-analyzer.md` — it is `<cat>`-parameterized and handles any category by substitution.
 
-- **Mapped**: category exists in the Agent File Map above → gets a dedicated subagent
-- **Unmapped**: category is NOT in the Agent File Map → goes into a single **batched generic** subagent/ `other` is a special case: it IS in  the map but uses `generic-op-analyzer.md`. Include it in the batched generic subagent alongside unmapped categories.
-
-Launch all subagents simultaneously in a single parallel batch:
-- One **dedicated subagent** per mapped category
-- One **batched generic subagent** for all unmapped + `other` categories (if any)
+Launch all subagents simultaneously in a single parallel batch.
 
 ---
 
 #### Shared Compute Kernel Preamble
 
-Include this block in every compute kernel subagent prompt (dedicated and batched):
+Include this block in every compute kernel subagent prompt:
 
 <Shared Compute Kernel Preamble>:
 ```
@@ -363,9 +360,9 @@ Include this block in every compute kernel subagent prompt (dedicated and batche
 
 ---
 
-#### Dedicated Compute Kernel Subagent Prompt
+#### Compute Kernel Subagent Prompt
 
-For each mapped category, launch a Task (subagent_type: generalPurpose):
+For each category, launch a Task (subagent_type: generalPurpose):
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
@@ -375,43 +372,12 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 Read and follow the FULL instructions in:
   TraceLens/AgenticMode/Standalone/.cursor/agents/{agent_file}
 
+- Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
   category_data/{category}_tree_data.json (if available)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
-```
-
----
-
-#### Batched Generic Subagent Prompt
-
-If `generic_batch` is non-empty, launch ONE Task (subagent_type: generalPurpose) that handles all generic categories sequentially:
-
-```
-You are analyzing multiple operation categories for a PyTorch trace on {platform}.
-
-<Shared Compute Kernel Preamble>
-
-Read the analysis instructions ONCE from:
-  TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md
-
-Then apply that workflow sequentially to EACH of these categories:
-{for each cat in generic_batch}
-  - {cat}: run `other_analysis.py --category {cat} --output-dir <output_dir>`,
-    read {cat}_metrics.json, write category_findings/{cat}_findings.md
-{end for}
-
-For the category named "other" (if present in the list): run `other_analysis.py`
-without the --category flag (it defaults to "other").
-
-- For each category {cat}, input files are: category_data/{cat}_ops.csv,
-  metadata/{cat}_metadata.json, category_data/{cat}_tree_data.json (if available)
-- For each category {cat}, output file is: category_findings/{cat}_findings.md
-- After writing each findings file, run:
-  write_impact_estimates('<output_dir>', '{cat}', 'compute')
-
-Process all categories. Return "DONE" when all are complete.
 ```
 
 ### 7.3 Wait for All Compute Kernel Subagents to Complete
@@ -427,7 +393,7 @@ After all compute kernel subagents complete:
    - Does `category_findings/<category>_findings.md` exist?
    - If it exists, does it contain "Status: ERROR"?
 2. Collect a list of **failed** categories (missing file OR Status: ERROR).
-3. **Retry each failed category exactly once** by re-launching its dedicated subagent (or including it in a new batched generic subagent) with the same prompt structure from Step 7.2. Launch all retries in parallel and wait for completion.
+3. **Retry each failed category exactly once** by re-launching its subagent with the same prompt structure from Step 7.2. Launch all retries in parallel and wait for completion.
 4. After retries, re-check outputs. Any category that still fails is excluded from aggregation and recommendations.
 5. **CRITICAL: Do NOT attempt to manually analyze failed categories — only automated subagent retry is allowed.**
 
