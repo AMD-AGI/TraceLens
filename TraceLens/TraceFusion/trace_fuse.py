@@ -117,9 +117,14 @@ class TraceFuse:
             ),
             None,
         )
-        self.linking_key = (
-            "correlation" if "correlation" in launch_event["args"] else "External id"
-        )
+        if launch_event is None:
+            self.linking_key = "External id"
+        else:
+            self.linking_key = (
+                "correlation"
+                if "correlation" in launch_event["args"]
+                else "External id"
+            )
 
     def _set_offset_multiplier(self, events):
         """Calculate offset multipliers for each field."""

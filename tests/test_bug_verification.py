@@ -150,6 +150,138 @@ class TestBug6BytesBwdWrongKwargs:
         assert result is not None
 
 
+class TestBug8NullLaunchEvent:
+    """
+    BUG #8 — trace_fuse.py:121
+    next(..., None) returns None when no matching launch event exists;
+    the very next line subscripts launch_event["args"] → TypeError.
+    """
+
+    def test_set_linking_key_raises_on_missing_launch_event(self):
+        """
+        FAILS while the bug exists (TypeError).
+        PASSES once the fix is applied.
+        """
+        from TraceLens.TraceFusion.trace_fuse import TraceFuse
+
+        fuse = object.__new__(TraceFuse)
+        # events list has no cuda_runtime/cuda_driver "launch" event
+        events = [{"cat": "cpu_op", "name": "aten::mm", "args": {}}]
+        try:
+            fuse._set_linking_key(events)
+            # If no exception, the bug is fixed — linking_key should be set
+            assert hasattr(fuse, "linking_key")
+        except TypeError:
+            pytest.fail(
+                "TypeError raised: launch_event is None but code subscripts it. "
+                "Fix: guard with 'if launch_event is None' before accessing launch_event[\"args\"]"
+            )
+
+
+class TestBug9ShallowCopyMutatesIR:
+    """
+    BUG #9 — event_replay.py:417
+    list.copy() is shallow — inner dicts are shared references.
+    Mutating the copy's inner dict also mutates the original list.
+
+    NOTE: Unlike other tests in this file, test_shallow_copy_mutates_original
+    is a "prove the behavior" test, not a regression guard. It passes while the
+    bug exists (asserting the wrong behavior is happening) and will pass forever
+    because it tests plain Python list.copy() semantics, not the application code.
+    A proper regression test would require calling EventReplayer.get_repro_info()
+    with a real TensorCfg object (needs torch), so this minimal version is kept
+    as documentation of the root cause only.
+    """
+
+    def test_shallow_copy_mutates_original(self):
+        """
+        PROVES the bug: shallow copy shares inner dict references.
+        This test documents the WRONG behaviour (mutation of original).
+        If this assertion starts FAILING, the bug has been fixed.
+        """
+        original = [{"value": "original_value"}]
+        copy = original.copy()
+        copy[0]["value"] = "mutated"
+        # Bug: original is also mutated because copy shares the inner dict
+        assert original[0]["value"] == "mutated", (
+            "If this fails, the shallow-copy bug no longer applies to plain list.copy(). "
+            "The fix is to use copy.deepcopy() in event_replay.py:417."
+        )
+
+    def test_deepcopy_does_not_mutate_original(self):
+        """
+        CORRECT behaviour: deepcopy must isolate inner dicts.
+        """
+        import copy
+
+        original = [{"value": "original_value"}]
+        deep = copy.deepcopy(original)
+        deep[0]["value"] = "mutated"
+        assert (
+            original[0]["value"] == "original_value"
+        ), "deepcopy must not mutate the original list."
+
+
+class TestBug10DefaultCategorizerSig:
+    """
+    BUG #10 — trace_to_tree.py:321
+    JaxTraceToTree.default_categorizer is @staticmethod expecting one arg (event),
+    but the base class calls self.default_categorizer() with zero args → TypeError.
+    """
+
+    def test_jax_trace_to_tree_default_categorizer_raises(self):
+        """
+        FAILS while the bug exists (TypeError on instantiation).
+        PASSES once the fix is applied.
+        """
+        from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree
+
+        try:
+            # Instantiation triggers base __init__ → self.default_categorizer()
+            # With @staticmethod expecting event arg, this raises TypeError
+            JaxTraceToTree(events_data=[], event_to_category=None)
+            # If we get here, the bug is fixed
+        except TypeError as exc:
+            pytest.fail(
+                f"TypeError on JaxTraceToTree init: {exc}. "
+                "Fix: change default_categorizer from @staticmethod to a proper instance method."
+            )
+        except Exception:
+            # Other errors (e.g. missing data) are acceptable — we only care about TypeError
+            pass
+
+
+class TestBug11Log10Zero:
+    """
+    BUG #11 — trace_fuse.py:136
+    math.log10(max_value) crashes with ValueError when max_value == 0
+    (defaultdict(int) default for fields with no integer values).
+    """
+
+    def test_set_offset_multiplier_raises_on_zero_max_value(self):
+        """
+        FAILS while the bug exists (ValueError: math domain error).
+        PASSES once the fix is applied.
+        """
+        import math
+        from TraceLens.TraceFusion.trace_fuse import TraceFuse
+
+        fuse = object.__new__(TraceFuse)
+        fuse.linking_key = "correlation"
+        fuse.fields_to_adjust_offset = ["id"]
+        # Event with "id": 0 → max_values["id"] = 0 → math.log10(0) crashes
+        events = [{"cat": "cpu_op", "name": "op", "id": 0, "args": {}}]
+        try:
+            fuse._set_offset_multiplier(events)
+        except ValueError as exc:
+            if "math domain error" in str(exc) or "log10" in str(exc).lower():
+                pytest.fail(
+                    f"ValueError from math.log10(0): {exc}. "
+                    "Fix: use math.log10(max(max_value, 1)) to guard against zero."
+                )
+            raise
+
+
 # ---------------------------------------------------------------------------
 # Template for adding future bug tests
 # ---------------------------------------------------------------------------
