@@ -242,10 +242,17 @@ def _comparative_efficiency_percent_from_row(
 ) -> None:
     """
     When comparative columns support it, set ``efficiency_percent`` to
-    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), and clear roofline anomaly flags.
+    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped from below by the
+    trace1 roofline utilisation so that projected savings never exceed what
+    trace1's hardware can physically achieve.
 
     t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t2/t1.
     If comparative metrics cannot be computed, leaves ``result`` unchanged for those keys.
+
+    Roofline floor: if ``Pct Roofline_mean`` is present and ``comp_pct`` is below it,
+    the efficiency is raised to the roofline value.  This caps savings at
+    ``time_ms * (1 - roofline_pct / 100)`` — the maximum physically achievable
+    improvement on trace1's platform.
     """
     kt = row.get("Kernel Time (µs)_sum")
     if kt is None or pd.isna(kt):
@@ -267,9 +274,29 @@ def _comparative_efficiency_percent_from_row(
 
     if comp_pct is None:
         return
+
+    # Clamp to roofline floor: trace2 may be faster than trace1's hardware
+    # ceiling for this op, so cap the projected efficiency at the roofline.
+    roofline_pct = row.get("Pct Roofline_mean")
+    roofline_floor: Optional[float] = None
+    if roofline_pct is not None and not pd.isna(roofline_pct):
+        roofline_floor = float(roofline_pct)
+
+    clamped = False
+    if roofline_floor is not None and comp_pct < roofline_floor:
+        comp_pct = roofline_floor
+        clamped = True
+
     result["efficiency_percent"] = round(comp_pct, 2)
     result["is_anomaly"] = False
-    result["warning"] = None
+    if clamped:
+        result["warning"] = (
+            f"[ROOFLINE CAP] Projected efficiency clamped to roofline "
+            f"({result['efficiency_percent']:.1f}%); trace2 gap exceeds "
+            f"trace1 hardware ceiling."
+        )
+    else:
+        result["warning"] = None
 
 
 def _apply_standalone_efficiency_percent(
