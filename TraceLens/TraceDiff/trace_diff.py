@@ -1333,7 +1333,9 @@ class TraceDiff:
         df_filtered = self.diff_stats_df
         if op_name:
             df_filtered = df_filtered[df_filtered["name"] == op_name]
-        df_filtered = df_filtered.drop(columns=["lowest_common_ancestor_id", "gpu_op_uid"])
+        df_filtered = df_filtered.drop(
+            columns=["lowest_common_ancestor_id", "gpu_op_uid"]
+        )
 
         # 3. Identify “argument” columns (everything that isn’t a metric)
         metric_columns = ["kernel_time"]
