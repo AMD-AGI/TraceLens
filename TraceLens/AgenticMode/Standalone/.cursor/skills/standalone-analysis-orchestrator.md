@@ -279,17 +279,20 @@ Execute every step in the agent file. Return "DONE" when complete.
 
 ### 6.3 Wait for System-Level Subagents to Complete
 
-The three subagents must complete before proceeding to Step 7.
+The three subagents must complete before proceeding to Step 6.4.
 Each writes findings to `system_findings/<name>_findings.md`.
 
-### 6.4 Verify System Outputs
+### 6.4 Verify System Outputs and Retry Failures (up to 1 retry per subagent)
 
-After both subagents complete:
+After all system-level subagents complete:
 
-1. Check each findings file in `system_findings/` for "Status: ERROR"
-2. Collect failed analyses and error summaries
-3. **CRITICAL: Exclude failed analyses from aggregation**
-4. **CRITICAL: Do NOT attempt manual analysis of failed system checks**
+1. For each expected system category from the manifest, check:
+   - Does `system_findings/<category>_findings.md` exist?
+   - If it exists, does it contain "Status: ERROR"?
+2. Collect a list of **failed** categories (missing file OR Status: ERROR).
+3. **Retry each failed category exactly once** by re-launching its subagent with the same prompt from Step 6.2. Wait for all retries to complete before proceeding.
+4. After retries, re-check outputs. Any category that still fails is excluded from aggregation.
+5. **CRITICAL: Do NOT attempt manual analysis of failed system checks — only automated subagent retry is allowed.**
 
 ---
 
@@ -413,19 +416,20 @@ Process all categories. Return "DONE" when all are complete.
 
 ### 7.3 Wait for All Compute Kernel Subagents to Complete
 
-All subagents must complete before proceeding to Step 8.
+All subagents must complete before proceeding to Step 7.4.
 Each subagent writes its findings to `category_findings/<category>_findings.md`.
 
-**Self-check:** After all compute kernel subagents complete, verify that every category in the manifest with `tier: compute_kernel` has a corresponding `category_findings/<category>_findings.md` file. If any are missing, re-iinvoke the subagent for that category before proceeding to Step 8.
+### 7.4 Verify Outputs and Retry Failures (up to 1 retry per subagent)
 
-### 7.4 Verify Outputs and Collect Errors
+After all compute kernel subagents complete:
 
-After all subagents complete:
-
-1. Check each `<category>_findings.md` for "Status: ERROR"
-2. Collect list of failed categories and their error summaries
-3. **CRITICAL: Exclude failed categories from aggregation and recommendations**
-4. **CRITICAL: Do NOT attempt to manually analyze failed categories**
+1. For each category in the manifest with `tier: compute_kernel`, check:
+   - Does `category_findings/<category>_findings.md` exist?
+   - If it exists, does it contain "Status: ERROR"?
+2. Collect a list of **failed** categories (missing file OR Status: ERROR).
+3. **Retry each failed category exactly once** by re-launching its dedicated subagent (or including it in a new batched generic subagent) with the same prompt structure from Step 7.2. Launch all retries in parallel and wait for completion.
+4. After retries, re-check outputs. Any category that still fails is excluded from aggregation and recommendations.
+5. **CRITICAL: Do NOT attempt to manually analyze failed categories — only automated subagent retry is allowed.**
 
 ---
 
@@ -459,9 +463,13 @@ load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
-### 9.1 Model Identification (Subagent)
+### 9.1 Model Identification (Subagent, retry once on failure)
 
-Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
+
+**On failure (subagent error, timeout, or `model_info.json` not written):**
+1. **Retry exactly once** by re-launching the same subagent with the same prompt.
+2. If the retry also fails, write fallback `metadata/model_info.json` with all four fields set to `"Cannot be inferred from trace"`.
 
 Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
 
