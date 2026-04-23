@@ -32,7 +32,7 @@ import json
 import os
 import re
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib
@@ -479,7 +479,16 @@ def generate_impact_savings_plot(
 
 # Pattern A: P-item card Impact line  ("**Impact**: impact_score: X.X")
 _RE_PITEM_IMPACT = re.compile(
-    r"^(\*\*Impact\*\*:\s*)impact_score:\s*([\d.]+)\s*$",
+    r"^(\*\*Impact\*\*:\s*)\[?impact_score:\s*([\d.]+)\]?\s*$",
+    re.MULTILINE,
+)
+# Broader walker: matches both the quantifiable form above AND the
+# "Not quantifiable from trace data" form. Used so we can advance the
+# priority_data category cursor in lock-step with P-item rank order even
+# across non-quantifiable cards (e.g. Pn = customcollective).
+_RE_PITEM_IMPACT_ANY = re.compile(
+    r"^\*\*Impact\*\*:\s*"
+    r"(?:\[?impact_score:\s*[\d.]+\]?|Not quantifiable from trace data)\s*$",
     re.MULTILINE,
 )
 
@@ -539,6 +548,23 @@ def _load_metadata_for_category(output_dir: str, category: str) -> dict:
         return {}
     with open(path, "r") as f:
         return json.load(f)
+
+
+def _load_priority_categories(output_dir: str) -> List[str]:
+    """Return ``[category, ...]`` from ``priority_data.json::priorities[]``
+    in P1..PN rank order. Includes non-quantifiable entries so the index
+    stays aligned with the order of P-item cards in standalone_analysis.md.
+    Returns ``[]`` if the file is missing or malformed.
+    """
+    path = os.path.join(output_dir, "priority_data.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    return [p.get("category", "") for p in data.get("priorities", [])]
 
 
 def _impact_score_range_for_file(output_dir: str, filename: str) -> List[Tuple[float, float, float]]:
@@ -604,6 +630,7 @@ def _rehydrate_pattern_a(
     text: str,
     baseline_ms: float,
     pair_pool: List[Tuple[float, float]],
+    category_pool: Optional[List[str]] = None,
 ) -> str:
     """Rewrite each P-item Impact line, consuming low/high pairs in order.
 
@@ -611,24 +638,61 @@ def _rehydrate_pattern_a(
     pair (in markdown order) and emit ``**Impact**: ~<low_ms>-<high_ms> ms
     savings (<low>-<high>% of E2E)``. If the pair pool is exhausted, fall back
     to using only the matched mid value (rendered as a single number).
+
+    When ``category_pool`` is provided (orchestrator-assembled
+    ``standalone_analysis.md`` only), additionally append the legacy trailing
+    prose ``from closing efficiency gaps to 75-100% of roofline (pre-computed
+    from `<category>_metrics.json` impact_estimates).`` for quantifiable
+    P-items, popping one category per P-item card encountered (including
+    non-quantifiable cards) so the cursor stays aligned with rank order.
     """
-    pool = list(pair_pool)
+    pair_idx = [0]
+    cat_idx = [0]
+    pairs = list(pair_pool)
+    cats = list(category_pool) if category_pool is not None else None
 
     def _rewrite(m: re.Match) -> str:
-        prefix = m.group(1)
-        mid_pct = float(m.group(2))
-        if pool:
-            lo_pct, hi_pct = pool.pop(0)
+        line = m.group(0)
+        # Non-quantifiable cards have nothing to rewrite, but we still need to
+        # advance the priority cursor so the next quantifiable card maps to
+        # the correct category.
+        if "Not quantifiable" in line:
+            if cats is not None:
+                cat_idx[0] += 1
+            return line
+
+        prefix_match = re.match(
+            r"^(\*\*Impact\*\*:\s*)\[?impact_score:\s*([\d.]+)\]?\s*$", line
+        )
+        if prefix_match is None:
+            return line
+        prefix = prefix_match.group(1)
+        mid_pct = float(prefix_match.group(2))
+
+        if pair_idx[0] < len(pairs):
+            lo_pct, hi_pct = pairs[pair_idx[0]]
+            pair_idx[0] += 1
         else:
             lo_pct, hi_pct = mid_pct, mid_pct
         lo_ms = lo_pct * baseline_ms / 100.0
         hi_ms = hi_pct * baseline_ms / 100.0
-        return (
-            f"{prefix}~{lo_ms:.1f}-{hi_ms:.1f} ms savings "
-            f"({lo_pct:.1f}-{hi_pct:.1f}% of E2E)"
+        body = (
+            f"{prefix}~{lo_ms:.1f}\u2013{hi_ms:.1f} ms savings "
+            f"({lo_pct:.1f}\u2013{hi_pct:.1f}% of E2E)"
         )
 
-    return _RE_PITEM_IMPACT.sub(_rewrite, text)
+        if cats is not None:
+            if cat_idx[0] < len(cats) and cats[cat_idx[0]]:
+                category = cats[cat_idx[0]]
+                body += (
+                    f" from closing efficiency gaps to 75\u2013100% of roofline "
+                    f"(pre-computed from `{category}_metrics.json` impact_estimates)."
+                )
+            cat_idx[0] += 1
+
+        return body
+
+    return _RE_PITEM_IMPACT_ANY.sub(_rewrite, text)
 
 
 def _rehydrate_pattern_cd(text: str) -> str:
@@ -679,6 +743,13 @@ def _rehydrate_pattern_e(
     body_lines: List[str] = []
     consumed = 0
     for line in lines:
+        if not line.strip():
+            # A blank line *before* any body row is the separator-trailing
+            # newline; a blank line *after* body rows ends the table.
+            if body_lines:
+                break
+            consumed += 1
+            continue
         if line.startswith("|") and line.rstrip().endswith("|"):
             body_lines.append(line)
             consumed += 1
@@ -691,7 +762,11 @@ def _rehydrate_pattern_e(
         if len(cells) < 2:
             rewritten_rows.append(row)
             continue
-        category = cells[1].lower().replace(" ", "_")
+        # Cell may carry a parenthetical backend hint (e.g. "MoE Fused (AITER)")
+        # that wasn't part of the legacy ORI category name. Strip it before
+        # mapping to the on-disk metadata filename.
+        raw_cat = re.sub(r"\s*\([^)]*\)\s*", "", cells[1]).strip()
+        category = raw_cat.lower().replace(" ", "_")
         meta = _load_metadata_for_category(output_dir, category)
         opportunity = "--"
         for entry in meta.get("impact_estimates", []):
@@ -703,7 +778,10 @@ def _rehydrate_pattern_e(
                 continue
             lo_ms = lo_pct * baseline_ms / 100.0
             hi_ms = hi_pct * baseline_ms / 100.0
-            opportunity = f"~{lo_ms:.1f}-{hi_ms:.1f} ms ({lo_pct:.1f}-{hi_pct:.1f}%)"
+            opportunity = (
+                f"~{lo_ms:.1f}\u2013{hi_ms:.1f} ms "
+                f"({lo_pct:.1f}\u2013{hi_pct:.1f}%)"
+            )
             break
         rewritten_rows.append(row.rstrip() + f" {opportunity} |")
 
@@ -775,7 +853,13 @@ def _rehydrate_one_file(path: str, output_dir: str, baseline_ms: float) -> str:
         if not pair_pool:
             triples = _impact_score_range_for_file(output_dir, path)
             pair_pool = [(lo, hi) for lo, _, hi in triples]
-        text = _rehydrate_pattern_a(text, baseline_ms, pair_pool)
+        # Only the orchestrator-assembled standalone report carries the
+        # trailing "...pre-computed from <cat>_metrics.json impact_estimates."
+        # prose; per-category and system findings keep the short form.
+        cat_pool: Optional[List[str]] = None
+        if os.path.basename(path) == "standalone_analysis.md":
+            cat_pool = _load_priority_categories(output_dir)
+        text = _rehydrate_pattern_a(text, baseline_ms, pair_pool, cat_pool)
 
     if has_cd:
         text = _rehydrate_pattern_cd(text)
