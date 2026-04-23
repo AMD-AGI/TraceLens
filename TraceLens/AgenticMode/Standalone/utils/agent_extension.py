@@ -695,22 +695,99 @@ def _rehydrate_pattern_a(
     return _RE_PITEM_IMPACT_ANY.sub(_rewrite, text)
 
 
-def _rehydrate_pattern_cd(text: str) -> str:
-    """Restore the legacy 5-column ``## Impact Summary`` header.
+_LEGACY_HEADER_5COL = (
+    "| Recommendation | Type | Estimated Savings (ms) | "
+    "Estimated Improvement (E2E %) | Confidence |\n"
+    "|---------------|------|----------------------|"
+    "-------------------------------|------------|"
+)
 
-    Header-only swap: data rows (kernel-fusion) are NOT cell-expanded. Their
-    ``impact_score`` cell stays as a single number, so the row will visually
-    have one column fewer than the 5-column header. This is acceptable per the
-    plan -- agents emit data rows infrequently and the column meaning is
-    self-evident.
+
+def _expand_impact_summary_row(row: str, baseline_ms: float) -> str:
+    """Expand a post-Phase-1 4-cell data row into the legacy 5-cell form.
+
+    Input row shape (4 cells, ignoring leading/trailing pipes):
+        ``| <Recommendation> | <Type> | <impact_score> | <Confidence> |``
+
+    Output row shape (5 cells):
+        ``| <Recommendation> | <Type> | <savings_ms> | <impact_score> | <Confidence> |``
+
+    where ``savings_ms = impact_score * baseline_ms / 100``. The original
+    ``impact_score`` value (already in % of E2E) populates the new
+    "Estimated Improvement (E2E %)" column verbatim.
+
+    Rows that do not parse as 4 cells, or whose impact_score cell is not a
+    parseable number (e.g. ``"--"``, ``"N/A"``), are returned unchanged so
+    we do not corrupt agent-authored variants.
     """
-    replacement = (
-        "| Recommendation | Type | Estimated Savings (ms) | "
-        "Estimated Improvement (E2E %) | Confidence |\n"
-        "|---------------|------|----------------------|"
-        "-------------------------------|------------|"
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    if len(cells) != 4:
+        return row
+    rec, type_, score_cell, conf = cells
+    try:
+        score = float(score_cell)
+    except ValueError:
+        return row
+    savings_ms = score * baseline_ms / 100.0
+    return (
+        f"| {rec} | {type_} | {savings_ms:.2f} | "
+        f"{score:.2f} | {conf} |"
     )
-    return _RE_IMPACT_SUMMARY_HEADER.sub(replacement, text)
+
+
+def _rehydrate_pattern_cd(text: str, baseline_ms: float) -> str:
+    """Restore the legacy 5-column ``## Impact Summary`` header **and** expand
+    its 4-cell post-Phase-1 data rows into the legacy 5-cell shape.
+
+    Walks each match of ``_RE_IMPACT_SUMMARY_HEADER`` in turn:
+
+    1. Replaces the 4-column header+separator with the legacy 5-column form.
+    2. Reads contiguous body rows (lines starting and ending with ``|``)
+       until a blank line or a non-table line is hit.
+    3. Expands every parseable 4-cell row to 5 cells via
+       ``_expand_impact_summary_row``. Rows that fail to parse (kernel-fusion
+       variants, agent-authored prose-in-cell, etc.) are left untouched so
+       we never corrupt them.
+
+    Idempotent: once a header is rewritten to the legacy 5-column form it no
+    longer matches ``_RE_IMPACT_SUMMARY_HEADER`` on a subsequent pass.
+    """
+    out: List[str] = []
+    cursor = 0
+    for m in _RE_IMPACT_SUMMARY_HEADER.finditer(text):
+        out.append(text[cursor:m.start()])
+        out.append(_LEGACY_HEADER_5COL)
+        cursor = m.end()
+        # Walk forward over body rows immediately after the header (allowing a
+        # single trailing newline before the first row).
+        rest = text[cursor:]
+        lines = rest.split("\n")
+        consumed_lines = 0
+        body_out: List[str] = []
+        seen_body = False
+        for line in lines:
+            if not line.strip():
+                if seen_body:
+                    break
+                consumed_lines += 1
+                continue
+            if line.startswith("|") and line.rstrip().endswith("|"):
+                body_out.append(_expand_impact_summary_row(line, baseline_ms))
+                consumed_lines += 1
+                seen_body = True
+            else:
+                break
+        if body_out:
+            out.append("\n" + "\n".join(body_out))
+        # Re-anchor cursor past the consumed lines.
+        consumed_chars = sum(len(l) + 1 for l in lines[:consumed_lines])
+        cursor += consumed_chars
+        # Trim the trailing newline we re-added if the next chunk starts mid-line.
+        if consumed_chars and rest[:consumed_chars].endswith("\n"):
+            # ensure exactly one separating newline before next chunk
+            pass
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 def _rehydrate_pattern_e(
@@ -862,7 +939,7 @@ def _rehydrate_one_file(path: str, output_dir: str, baseline_ms: float) -> str:
         text = _rehydrate_pattern_a(text, baseline_ms, pair_pool, cat_pool)
 
     if has_cd:
-        text = _rehydrate_pattern_cd(text)
+        text = _rehydrate_pattern_cd(text, baseline_ms)
 
     if has_e:
         text = _rehydrate_pattern_e(text, output_dir, baseline_ms)
