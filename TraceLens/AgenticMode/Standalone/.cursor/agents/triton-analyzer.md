@@ -117,8 +117,8 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 | <op_name> | X.X       | X.X%          | N           |
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
 ```
 
 **Key rules for the findings file:**

@@ -118,8 +118,8 @@ Write `<output_dir>/system_findings/cpu_idle_findings.md` using the command pref
 | Avg Kernel Time | X.X µs |
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
 
 ## Recommendations
 

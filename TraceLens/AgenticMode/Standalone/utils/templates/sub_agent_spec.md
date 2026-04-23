@@ -33,7 +33,7 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 ### P1: <Brief Title> (<Library>)            <!-- (<Library>) only on compute tier -->
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E), OR "Not quantifiable from trace data"]   <!-- compute tier only -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]   <!-- compute tier only -->
 ```
 
 - **Compute tier**: include all three fields. Pull `**Impact**` from `impact_estimates` in the metrics JSON.
@@ -82,7 +82,7 @@ blank line between them. The validator checks for these as substring matches.
 | `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
-| `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the three-bullet format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` |
+| `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the two-bullet low/high `impact_score` format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` The mid `impact_score` itself is not duplicated here — it is rendered on the P-item card. |
 
 ### Sentence quality
 
@@ -144,13 +144,19 @@ Sub-agents write an **`impact_estimates` array** into
 - Each entry sums only the operations that its candidate covers (not the entire
   category).
 - No insights → empty array `[]`.
-- **Compute tier only:** use `kernel_tuning` estimates from the pre-computed
-  metrics JSON (`savings_ms_low`–`savings_ms_high`, `e2e_pct_low`–`e2e_pct_high`).
-  Do NOT manually estimate algorithmic, fusion, or system savings.
+- **Compute tier only:** use the `kernel_tuning` `impact_score` from the
+  pre-computed metrics JSON (`impact_score_low` / `impact_score_high` are also
+  available in the rollup; rendered as low/high bullets inside
+  `## Detailed Analysis`). Do NOT manually estimate algorithmic, fusion, or
+  system savings.
 - **Confidence:** `high` = clear, measurable gap to peak; `medium` = likely
   opportunity but outcome depends on implementation; `low` = rough estimate.
 
 ### JSON schema
+
+`impact_score` is the % of end-to-end GPU time recoverable by tuning the
+operations covered by this candidate. The mid value is the primary metric;
+the low/high values represent the 75%–100% roofline-closure range.
 
 Element shape (quantifiable):
 
@@ -158,10 +164,9 @@ Element shape (quantifiable):
 {
   "impact_estimates": [
     {
-      "low_e2e_ms": <number>,
-      "high_e2e_ms": <number>,
-      "low_e2e_percent": <number>,
-      "high_e2e_percent": <number>,
+      "impact_score_low": <number>,
+      "impact_score": <number>,
+      "impact_score_high": <number>,
       "quantifiable": true
     }
   ]
@@ -174,10 +179,9 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 {
   "impact_estimates": [
     {
-      "low_e2e_ms": null,
-      "high_e2e_ms": null,
-      "low_e2e_percent": null,
-      "high_e2e_percent": null,
+      "impact_score_low": null,
+      "impact_score": null,
+      "impact_score_high": null,
       "quantifiable": false
     }
   ]
@@ -186,15 +190,38 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ### Rendering in `## Detailed Analysis`
 
-**Quantifiable:**
+**Quantifiable:** two bullets — low and high. The mid `impact_score` is not
+duplicated here; it appears on the P-item card.
 
 ```markdown
-- Low end (75% roofline target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
-- High end (100% roofline target): <high_e2e_ms> ms savings (<high_e2e_percent>% E2E)
-- Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
+- Low end impact_score (75% roofline target): <impact_score_low>
+- High end impact_score (100% roofline target): <impact_score_high>
 ```
 
 **Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
+
+### `## Impact Summary` section (agent-internal, optional)
+
+When agents include a `## Impact Summary` section above `## Recommendations`,
+it SHOULD be a markdown table in this canonical form. The orchestrator does
+NOT parse this section; it exists for human readability only.
+
+```markdown
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
+| <P-item title> | <kernel_tuning|fusion|...> | <mid impact_score, or "N/A"> | <high|medium|low> |
+```
+
+- `impact_score` is the rolled-up mid value from
+  `metadata/<cat>_metadata.json -> impact_estimates[i].impact_score`. Use a
+  single number (e.g. `4.98`); low/high stay inside `## Detailed Analysis`.
+- For non-quantifiable rows (system tier, or compute tier with empty
+  `impact_estimates`), write `N/A` in the `impact_score` column.
+- Do NOT include `Estimated Savings (ms)` or `Estimated Improvement (E2E %)`
+  columns. Do NOT show a low–high range here.
+
+Header-only variants (no data rows under the header) remain valid for agents
+that intentionally do not enumerate per-recommendation impact.
 
 ### Write impact estimates to metadata
 

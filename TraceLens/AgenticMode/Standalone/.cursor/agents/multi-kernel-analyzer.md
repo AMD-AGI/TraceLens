@@ -199,8 +199,8 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
    - Recommendation: [specific action]
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
 
 ## Recommendations
 

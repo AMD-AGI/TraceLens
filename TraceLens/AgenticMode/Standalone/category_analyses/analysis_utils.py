@@ -436,35 +436,56 @@ def build_operation_metrics(
 def compute_impact_estimates(
     operations: List[dict],
     category: str,
-    min_savings_ms: float = 0.1,
+    min_impact_score: float = 0.01,
     baseline_ms: float = 0,
 ) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
 
-    Computes the gap to 100% roofline and estimates how much of that gap
-    tuning can close (75%–100%). Produces a range:
-      - savings_ms_high = gap                   [close 100% of the gap]
-      - savings_ms_low  = 0.75 * gap            [close 75% of the gap]
-      - savings_ms      = 0.875 * gap           [midpoint]
+    Two-step computation:
 
-    where gap = op_time_ms * (1 - efficiency_pct / 100).
+      1. Per-op unitless ``gap`` (fraction of this op's time that is "wasted"
+         relative to the roofline target). ``time_ms`` is intentionally NOT a
+         factor here:
+            gap_high = max(0, 1 - efficiency_pct / TARGET_HIGH)
+            gap_low  = (TARGET_LOW / TARGET_HIGH) * gap_high
+            gap_mid  = (TARGET_MID / TARGET_HIGH) * gap_high
 
-    The midpoint (87.5%) is the primary estimate used for plots and aggregation.
-    Anomalous efficiencies (>100%) are excluded.
+      2. ``impact_score`` = the percentage of end-to-end GPU time recoverable
+         by tuning this op, obtained by weighting the gap by the op's share
+         of E2E:
+            impact_score_high = gap_high * time_ms / baseline_ms * 100
+            impact_score_low  = gap_low  * time_ms / baseline_ms * 100
+            impact_score      = gap_mid  * time_ms / baseline_ms * 100
 
-    When baseline_ms > 0, each estimate also includes e2e_pct_low / e2e_pct_high
-    (savings as a percentage of end-to-end time).
+    The midpoint (87.5% of the way from 75%->100% target closure) is the
+    primary estimate used for plots and aggregation. Anomalous efficiencies
+    (>100%) are excluded.
+
+    If ``baseline_ms`` is missing or non-positive, ``impact_score`` is undefined
+    (would divide by zero or produce a negative percentage). In that case this
+    function emits a stderr warning and returns an empty list.
 
     Args:
         operations: List of operation metric dicts (from build_operation_metrics)
         category: Category name for labelling
-        min_savings_ms: Minimum savings threshold to include (default 0.1 ms)
-        baseline_ms: Total end-to-end GPU time for E2E % calculation (0 to skip)
+        min_impact_score: Minimum ``impact_score_high`` threshold to include,
+            in % of E2E units (default 0.01, i.e. 0.01% of E2E time).
+        baseline_ms: Total end-to-end GPU time for impact_score calculation.
+            Must be > 0; otherwise an empty list is returned.
 
     Returns:
-        List of impact estimate dicts sorted by savings descending
+        List of impact estimate dicts sorted by ``impact_score`` descending.
     """
+    if baseline_ms is None or baseline_ms <= 0:
+        print(
+            f"[analysis_utils.compute_impact_estimates] baseline_ms="
+            f"{baseline_ms!r} is invalid; skipping impact_score computation "
+            f"for category={category!r}",
+            file=sys.stderr,
+        )
+        return []
+
     estimates = []
     for op in operations:
         if op.get("fusion_flagged"):
@@ -477,30 +498,31 @@ def compute_impact_estimates(
         if time_ms <= 0:
             continue
 
-        savings_high = max(0, time_ms * (1 - eff_pct / TARGET_HIGH))
-        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
-        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
+        gap_high = max(0, 1 - eff_pct / TARGET_HIGH)
+        gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
+        gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
 
-        if savings_high < min_savings_ms:
+        impact_score_high = gap_high * time_ms / baseline_ms * 100
+        impact_score_low = gap_low * time_ms / baseline_ms * 100
+        impact_score_mid = gap_mid * time_ms / baseline_ms * 100
+
+        if impact_score_high < min_impact_score:
             continue
         confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
         estimate = {
             "operation": op.get("name", "Unknown"),
             "category": category,
             "type": "kernel_tuning",
-            "savings_ms": round(savings_mid, 3),
-            "savings_ms_low": round(savings_low, 3),
-            "savings_ms_high": round(savings_high, 3),
+            "impact_score": round(impact_score_mid, 2),
+            "impact_score_low": round(impact_score_low, 2),
+            "impact_score_high": round(impact_score_high, 2),
             "confidence": confidence,
             "efficiency_pct": round(eff_pct, 2),
             "bound_type": eff.get("bound_type"),
             "time_ms": round(time_ms, 3),
         }
-        if baseline_ms > 0:
-            estimate["e2e_pct_low"] = round(savings_low / baseline_ms * 100, 2)
-            estimate["e2e_pct_high"] = round(savings_high / baseline_ms * 100, 2)
         estimates.append(estimate)
-    return sorted(estimates, key=lambda x: x["savings_ms"], reverse=True)
+    return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
 
 def parse_first_shape(dims_str):

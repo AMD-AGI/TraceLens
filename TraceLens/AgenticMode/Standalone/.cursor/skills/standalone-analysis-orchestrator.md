@@ -475,6 +475,25 @@ generate_perf_plot(sys.argv[1], sys.argv[2])
 
 If the plot fails, retry once. If still failing, proceed to Step 11 without the plot.
 
+### 10.4 Detailed impact-savings extension (auto-detected)
+
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it.
+The extension generates a detailed 2-panel cumulative-savings plot AND
+rehydrates all markdown reports back to the pre-Phase-1 ms-savings format. If
+the file is absent, skip this step silently — the standalone analysis is
+complete in its impact_score form.
+
+```bash
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ -f "$EXT" ]; then
+  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
+fi
+```
+
+The extension is opt-in by file presence. To disable, delete or rename the
+file. To re-enable, restore it from git. There are no opt-out flags — the
+extension always runs both the detailed plot and the markdown rehydration.
+
 ---
 
 ## Step 11: Generate Final Report (<output_dir>/standalone_analysis.md)

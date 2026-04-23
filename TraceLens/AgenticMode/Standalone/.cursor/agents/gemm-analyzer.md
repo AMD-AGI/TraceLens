@@ -115,7 +115,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/gemm_findings.md` using the output format defined there, with `<category>` = `gemm`. Do NOT use `classification.gemm_type` for the Type column — that field distinguishes quantized vs regular, not the compute/memory bound type.
 
-Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
+Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` impact_score.
 
 ### Step 5.1: Write Impact Estimates to Metadata
 

@@ -111,14 +111,18 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "operation": "aten::mm",
                 "category": "gemm",
                 "type": "kernel_tuning",
-                "savings_ms": 100.0,
+                "impact_score": 100.0,
+                "impact_score_low": 85.0,
+                "impact_score_high": 115.0,
                 "confidence": "high",
             },
             {
                 "operation": "aten::mm",
                 "category": "gemm",
                 "type": "kernel_tuning",
-                "savings_ms": 50.0,
+                "impact_score": 50.0,
+                "impact_score_low": 42.0,
+                "impact_score_high": 58.0,
                 "confidence": "medium",
             },
         ],
@@ -135,7 +139,9 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "operation": "flash_attn_forward",
                 "category": "sdpa_fwd",
                 "type": "kernel_tuning",
-                "savings_ms": 80.0,
+                "impact_score": 80.0,
+                "impact_score_low": 68.0,
+                "impact_score_high": 92.0,
                 "confidence": "medium",
             },
         ],
@@ -209,15 +215,21 @@ def test_compute_impact_estimates_basic():
             },
         },
     ]
-    estimates = compute_impact_estimates(operations, "gemm")
+    # gap_mid = 0.875 * (1 - eff/100); impact_score = gap_mid * time_ms / baseline_ms * 100
+    # baseline = 100 ms ->
+    #   op_a: 0.875 * 0.5 * 10 / 100 * 100 = 4.375 -> rounded 4.38
+    #   op_b: 0.875 * 0.2 * 5  / 100 * 100 = 0.875 -> rounded 0.88
+    estimates = compute_impact_estimates(operations, "gemm", baseline_ms=100.0)
     assert len(estimates) == 2
-    # gap = time * (1 - eff/100), savings_ms = 0.875 * gap
-    # op_a: 0.875 * 10 * 0.5 = 4.375, op_b: 0.875 * 5 * 0.2 = 0.875
-    assert estimates[0]["savings_ms"] == 4.375
+    assert estimates[0]["impact_score"] == 4.38
     assert estimates[0]["operation"] == "op_a"
     assert estimates[0]["category"] == "gemm"
     assert estimates[0]["type"] == "kernel_tuning"
-    assert estimates[1]["savings_ms"] == 0.875
+    assert "impact_score_low" in estimates[0]
+    assert "impact_score_high" in estimates[0]
+    assert "savings_ms" not in estimates[0]
+    assert "e2e_pct_high" not in estimates[0]
+    assert estimates[1]["impact_score"] == 0.88
 
 
 def test_compute_impact_estimates_excludes_anomaly():
@@ -228,11 +240,11 @@ def test_compute_impact_estimates_excludes_anomaly():
             "efficiency": {"efficiency_percent": 120.0, "is_anomaly": True},
         },
     ]
-    estimates = compute_impact_estimates(operations, "gemm")
+    estimates = compute_impact_estimates(operations, "gemm", baseline_ms=100.0)
     assert len(estimates) == 0
 
 
-def test_compute_impact_estimates_min_savings():
+def test_compute_impact_estimates_min_impact_score():
     operations = [
         {
             "name": "op_a",
@@ -244,17 +256,19 @@ def test_compute_impact_estimates_min_savings():
             },
         },
     ]
-    estimates = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1)
+    # impact_score_high = 0.5 * 1 / 100 * 100 = 0.5
+    estimates = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=100.0
+    )
     assert len(estimates) == 1
-    assert estimates[0]["savings_ms"] == 0.438
-    estimates_strict = compute_impact_estimates(operations, "gemm", min_savings_ms=1.0)
+    assert estimates[0]["impact_score_high"] == 0.5
+    estimates_strict = compute_impact_estimates(
+        operations, "gemm", min_impact_score=1.0, baseline_ms=100.0
+    )
     assert len(estimates_strict) == 0
 
 
-def test_compute_impact_estimates_no_e2e_pct_gate():
-    # Sub-1% E2E ops are retained: 0.5 ms at 10% eff -> 0.45 ms savings = 0.15%
-    # of a 300 ms baseline. compute_impact_estimates does not filter by E2E
-    # share; long-tail noise filtering is the consumer's responsibility.
+def test_compute_impact_estimates_no_baseline_returns_empty():
     operations = [
         {
             "name": "tiny_op",
@@ -266,14 +280,21 @@ def test_compute_impact_estimates_no_e2e_pct_gate():
             },
         },
     ]
+    # impact_score requires baseline_ms; with default baseline_ms=0 the
+    # function returns an empty list (and emits a stderr warning).
+    assert compute_impact_estimates(operations, "elementwise") == []
+    assert (
+        compute_impact_estimates(operations, "elementwise", baseline_ms=0) == []
+    )
+    assert (
+        compute_impact_estimates(operations, "elementwise", baseline_ms=-5.0) == []
+    )
+
+    # With a positive baseline, the estimate is computed.
+    # gap_high = 0.9; impact_score_high = 0.9 * 0.5 / 300 * 100 = 0.15
     estimates = compute_impact_estimates(operations, "elementwise", baseline_ms=300.0)
     assert len(estimates) == 1
-    assert estimates[0]["e2e_pct_high"] == 0.15
-    assert estimates[0]["savings_ms_high"] == 0.45
-
-    estimates_no_baseline = compute_impact_estimates(operations, "elementwise")
-    assert len(estimates_no_baseline) == 1
-    assert "e2e_pct_high" not in estimates_no_baseline[0]
+    assert estimates[0]["impact_score_high"] == 0.15
 
 
 # ----- Unit tests: generate_priority_data -----
@@ -299,8 +320,11 @@ def test_generate_priority_data(output_dir_with_manifest_and_metrics):
     assert "gemm" in categories
     assert "sdpa_fwd" in categories
     gemm_rec = next(r for r in recs if r["category"] == "gemm")
-    assert gemm_rec["savings_ms"] == 150.0
+    assert gemm_rec["impact_score"] == 150.0
+    assert gemm_rec["impact_score_low"] == 127.0
+    assert gemm_rec["impact_score_high"] == 173.0
     assert gemm_rec["operation_count"] == 2
+    assert "savings_ms" not in gemm_rec
 
 
 def test_generate_priority_data_skips_error_metrics(tmp_path):

@@ -169,10 +169,9 @@ def load_findings(output_dir):
 def _non_quantifiable_entry() -> dict:
     """Return a single non-quantifiable impact estimate entry."""
     return {
-        "low_e2e_ms": None,
-        "high_e2e_ms": None,
-        "low_e2e_percent": None,
-        "high_e2e_percent": None,
+        "impact_score_low": None,
+        "impact_score": None,
+        "impact_score_high": None,
         "quantifiable": False,
     }
 
@@ -211,30 +210,26 @@ def write_impact_estimates(output_dir: str, category: str, tier: str) -> None:
         if n_candidates == 0:
             meta["impact_estimates"] = []
         elif estimates:
-            low = round(sum(e.get("savings_ms_low", 0) for e in estimates), 3)
-            high = round(sum(e.get("savings_ms_high", 0) for e in estimates), 3)
-            low_pct = round(sum(e.get("e2e_pct_low", 0) for e in estimates), 2)
-            high_pct = round(sum(e.get("e2e_pct_high", 0) for e in estimates), 2)
+            score_low = round(sum(e.get("impact_score_low", 0) for e in estimates), 2)
+            score_mid = round(sum(e.get("impact_score", 0) for e in estimates), 2)
+            score_high = round(sum(e.get("impact_score_high", 0) for e in estimates), 2)
             rollup = {
-                "low_e2e_ms": low,
-                "high_e2e_ms": high,
-                "low_e2e_percent": low_pct,
-                "high_e2e_percent": high_pct,
+                "impact_score_low": score_low,
+                "impact_score": score_mid,
+                "impact_score_high": score_high,
                 "quantifiable": True,
             }
             if n_candidates == 1:
                 meta["impact_estimates"] = [rollup]
             else:
-                per_candidate = round(low / n_candidates, 3)
-                per_high = round(high / n_candidates, 3)
-                per_low_pct = round(low_pct / n_candidates, 2)
-                per_high_pct = round(high_pct / n_candidates, 2)
+                per_low = round(score_low / n_candidates, 2)
+                per_mid = round(score_mid / n_candidates, 2)
+                per_high = round(score_high / n_candidates, 2)
                 meta["impact_estimates"] = [
                     {
-                        "low_e2e_ms": per_candidate,
-                        "high_e2e_ms": per_high,
-                        "low_e2e_percent": per_low_pct,
-                        "high_e2e_percent": per_high_pct,
+                        "impact_score_low": per_low,
+                        "impact_score": per_mid,
+                        "impact_score_high": per_high,
                         "quantifiable": True,
                     }
                     for _ in range(n_candidates)
