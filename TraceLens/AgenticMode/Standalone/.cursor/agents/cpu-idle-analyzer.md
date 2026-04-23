@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: cpu-idle-analyzer
 description: Report GPU idle time percentage and utilization breakdown. Invoked when idle_time_percent exceeds 15%.
-model: inherit
+model: claude-4.6-sonnet
 ---
 
 # CPU/Idle Analysis Subagent

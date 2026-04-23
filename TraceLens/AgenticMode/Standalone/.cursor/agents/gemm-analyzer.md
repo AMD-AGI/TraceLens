@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: gemm-analyzer
 description: Analyze GEMM (matrix multiplication) operations for performance bottlenecks. Use when orchestrator needs GEMM category analysis.
-model: inherit
+model: claude-4.6-sonnet
 ---
 
 # GEMM Analysis Subagent

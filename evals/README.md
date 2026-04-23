@@ -49,9 +49,11 @@ curl https://cursor.com/install -fsS | bash
 ```
 Verify with `agent --version`
 
-### 4. Set Model to Claude Opus 4.6
+### 4. Set Model to Claude Opus 4.7
 
-The `agent` invocations require setting the default model to **Claude Opus 4.6**.
+The `agent` invocations in this repo require model `claude-4.7-opus-high`. The eval shell scripts under `eval_scripts/` pass `--model claude-4.7-opus-high` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
+
+Sub-agents invoked by the standalone-analysis orchestrator are split across two tiers: judgment-heavy ones (`kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`) inherit `claude-4.7-opus-high`; the other ten run on `claude-4.6-sonnet`. See `[../docs/sub_agent_model_audit.md](../docs/sub_agent_model_audit.md)`.
 
 ## Running Scripts
 
@@ -139,21 +141,21 @@ You can run each stage independently using the `agent` CLI. Examples:
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --force "Run standalone analysis on <trace_path> with platform <platform>, node <node>, container <container>, output to <output_dir>"
+agent --model claude-4.7-opus-high --force "Run standalone analysis on <trace_path> with platform <platform>, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Workflow Eval:**
 
 ```bash
 cd evals
-agent --force "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
+agent --model claude-4.7-opus-high --force "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
 ```
 
 **Quality Eval:**
 
 ```bash
 cd evals
-agent --force "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
+agent --model claude-4.7-opus-high --force "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
 ```
 
 ## Post-Processing Skill
@@ -173,7 +175,7 @@ You can re-run the post-processing skill on any previous results without re-runn
 
 ```bash
 cd evals
-agent --print --force --trust \
+agent --model claude-4.7-opus-high --print --force --trust \
     "Run eval post processing on results_root=<results_root> suite=<suite> test_traces_csv=<csv_path> report_dir=<report_dir> container=<container>"
 ```
 
@@ -181,7 +183,7 @@ Example:
 
 ```bash
 cd evals
-agent --print --force --trust \
+agent --model claude-4.7-opus-high --print --force --trust \
     "Run eval post processing on results_root=evals/eval_reports/my_run/results/e2e_repeatability_results suite=e2e test_traces_csv=evals/e2e_test_traces.csv report_dir=evals/eval_reports/my_run/reports container=modular_evals"
 ```
 

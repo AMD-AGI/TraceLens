@@ -57,7 +57,7 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 ### To run via Cursor chat:
 
-1. **In a Cursor (v2.5+) chat with Claude-4.6-Opus-High, invoke:**
+1. **In a Cursor (v2.5+) chat with Claude-4.7-Opus-High, invoke:**
    ```
    Run standalone analysis on <path_to_trace.json>
    ```
@@ -79,7 +79,7 @@ Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify yo
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --model claude-4.6-opus-high --print --force --trust \
+agent --model claude-4.7-opus-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -87,7 +87,7 @@ agent --model claude-4.6-opus-high --print --force --trust \
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --model claude-4.6-opus-high --print --force --trust \
+agent --model claude-4.7-opus-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -95,11 +95,12 @@ agent --model claude-4.6-opus-high --print --force --trust \
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --model claude-4.6-opus-high --print --force --trust \
+agent --model claude-4.7-opus-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
+
 
 3. **Get results:**
    - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with Compute Kernel Insights, Kernel Fusion Insights (three-label format: Identification, Data, Impact estimate), and System-Level Insights (five-label format).
@@ -216,6 +217,12 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | `convolution-analyzer` | Analyzes convolution operations |
 | `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
 
+### Sub-agent model tiers
+
+The orchestrator dispatches per-category analysis to sub-agents whose model tier is declared in each agent file's front matter:
+
+- **`claude-4.7-opus-high`**: Orchestrator + 3 judgment-heavy sub-agents: `kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`.
+- **`claude-4.6-sonnet`**: 10 templated / light-reasoning sub-agents: `cpu-idle-analyzer`, `gemm-analyzer`, `sdpa-analyzer`, `norm-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `convolution-analyzer`, `triton-analyzer`, `moe-analyzer`, `multi-kernel-analyzer`.
 
 ## Supported Analysis Modes
 

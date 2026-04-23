@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: kernel-fusion-analyzer
 description: Analyze kernel fusion opportunities from pre-extracted candidate data. Use when orchestrator detects fusion candidates in Step 4b.
-model: inherit
+model: claude-4.7-opus-high
 ---
 
 # Kernel Fusion Analyzer (Experimental)

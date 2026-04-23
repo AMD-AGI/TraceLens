@@ -73,7 +73,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
                 agent_attempts=$((agent_attempts + 1))
                 (
                     cd "$STANDALONE_DIR"
-                    agent --print --force --trust --output-format stream-json \
+                    agent --model claude-4.7-opus-high --print --force --trust --output-format stream-json \
                         "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
                 ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
@@ -107,7 +107,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
             echo "    -> LLM workflow evals"
             (
                 cd "$EVALS_DIR"
-                agent --print --force --trust --output-format stream-json \
+                agent --model claude-4.7-opus-high --print --force --trust --output-format stream-json \
                     "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id. Write results to $CASE_RESULTS/workflow_llm_results.csv"
             ) < /dev/null > "$CASE_RESULTS/workflow_llm_eval.ndjson" 2>&1 &
             eval_pids+=($!)
@@ -122,7 +122,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
             echo "    -> LLM quality evals"
             (
                 cd "$EVALS_DIR"
-                agent --print --force --trust --output-format stream-json \
+                agent --model claude-4.7-opus-high --print --force --trust --output-format stream-json \
                     "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_llm_results.csv"
             ) < /dev/null > "$CASE_RESULTS/quality_llm_eval.ndjson" 2>&1 &
             eval_pids+=($!)
