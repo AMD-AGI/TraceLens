@@ -96,9 +96,13 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops.
 
+The whole table block (header + separator + every body row) must be wrapped in a `kind=top_ops` marker. Each body row needs a per-row trailer carrying the `low`/`high` impact_score values for that category, sourced from `priority_data.json::priorities[]` (`impact_score_low` / `impact_score_high`). For categories without a quantifiable rollup, emit `low=null high=null` on the trailer.
+
+<!-- impact-begin kind=top_ops -->
 | Rank | Category | Time (ms) | % of Compute Time | Ops |
 |------|----------|-----------|-------------------|-----|
-| 1 | ... | ... | ... | ... |
+| 1 | ... | ... | ... | ... | <!-- top-ops-row low=<impact_score_low> high=<impact_score_high> -->
+<!-- impact-end -->
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
@@ -109,7 +113,9 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
+<!-- impact-begin kind=p_item category=<priority_data.priorities[0].category> low=<priority_data.priorities[0].impact_score_low> mid=<priority_data.priorities[0].impact_score> high=<priority_data.priorities[0].impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
+<!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P1](#detailed-analysis-compute-p1) for details*
 
@@ -121,7 +127,9 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
+<!-- impact-begin kind=p_item category=<priority_data.priorities[1].category> low=<priority_data.priorities[1].impact_score_low> mid=<priority_data.priorities[1].impact_score> high=<priority_data.priorities[1].impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
+<!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P2](#detailed-analysis-compute-p2) for details*
 
@@ -133,17 +141,21 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
+<!-- impact-begin kind=p_item category=<priority_data.priorities[2].category> low=<priority_data.priorities[2].impact_score_low> mid=<priority_data.priorities[2].impact_score> high=<priority_data.priorities[2].impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
+<!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P3](#detailed-analysis-compute-p3) for details*
 
-<!-- All additional P-items (P4, P5, ...) follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Compute kernel insights > PN](#detailed-analysis-compute-pN) for details* -->
+<!-- All additional P-items (P4, P5, ...) follow the same pattern with marker wrapping (kind=p_item with category, low, mid, high attrs sourced from priority_data.priorities[N-1]) and Detailed Analysis links: → *See [Detailed Analysis: Compute kernel insights > PN](#detailed-analysis-compute-pN) for details* -->
 
 ---
 
 ## Kernel Fusion Opportunities (Experimental)
 
+<!-- impact-begin kind=fusion_blurb variant=long -->
 > **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual recoverable time depends on implementation feasibility and interaction effects.
+<!-- impact-end -->
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
@@ -233,7 +245,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 
+<!-- impact-begin kind=fusion_blurb variant=short -->
 > **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
+<!-- impact-end -->
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->

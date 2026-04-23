@@ -45,8 +45,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
-10. Generate Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
-11. Generate Final Report (composable System + Compute sections)
+10. Generate Performance Improvement Plot (reads priority_data.json → priority_data.json + simple PNG IF agent_extension.py is absent)
+11. Generate Final Report (composable System + Compute sections), validate it,
+    optionally invoke agent_extension.py to render the detailed plot and
+    rehydrate marker-wrapped impact_score blocks back to ms-savings form,
+    then embed the PNG into the report.
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -463,36 +466,22 @@ generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```
 
-### 10.3 Generate Plot and Base64 File
+### 10.3 Generate Plot and Base64 File (conditional on extension absence)
+
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the simple single-bar perf plot here. If the extension is present, **skip this step**: the extension will render the detailed `perf_improvement.png` in Step 11.5 (after the report is written) and Step 11.2 will embed it.
 
 ```bash
-<prefix> python3 -c \"
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ ! -f "$EXT" ]; then
+  <prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
 \" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
-```
-
-If the plot fails, retry once. If still failing, proceed to Step 11 without the plot.
-
-### 10.4 Detailed impact-savings extension (auto-detected)
-
-If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it.
-The extension generates a detailed 2-panel cumulative-savings plot AND
-rehydrates all markdown reports back to the pre-Phase-1 ms-savings format. If
-the file is absent, skip this step silently — the standalone analysis is
-complete in its impact_score form.
-
-```bash
-EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
-if [ -f "$EXT" ]; then
-  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
 fi
 ```
 
-The extension is opt-in by file presence. To disable, delete or rename the
-file. To re-enable, restore it from git. There are no opt-out flags — the
-extension always runs both the detailed plot and the markdown rehydration.
+If the plot fails (extension-absent branch), retry once. If still failing, proceed to Step 11 without the plot.
 
 ---
 
@@ -550,23 +539,82 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 2. Run validation again.
-3. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning.
+3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
 ---
 
-### 11.2 Generate and Embed Performance Improvement Plot
+### 11.15 Marker-Count Check (pre-rehydration)
 
-Render `perf_improvement.png`, and embed the base64-encoded plot into the report.
+The orchestrator template and sub-agent spec emit data-bearing HTML-comment markers (`<!-- impact-begin kind=... -->` ... `<!-- impact-end -->`) around every block whose contents depend on `impact_score` values. Step 11.5 (the `agent_extension.py` invocation) consumes those markers when rehydrating reports back to ms-savings form. Before they are consumed, do a quick sanity check.
+
+For `<output_dir>/standalone_analysis.md`, count `<!-- impact-begin` occurrences and verify:
+- At least one `kind=top_ops` marker is present.
+- The number of `kind=p_item` markers in the Compute Kernel Optimizations section equals the number of compute P-items in `priority_data.json::priorities[]` (filtered to the same compute-tier set used to fill the cards).
+
+For each `<output_dir>/category_findings/<cat>_findings.md`, verify:
+- The number of `kind=p_item` markers equals the P-item count in that file's `## Recommendations`.
+- The number of `kind=detail_estimate` markers does not exceed the number of quantifiable entries in `metadata/<cat>_metadata.json::impact_estimates[]`.
+
+```bash
+<prefix> python3 -c \"
+import sys, re, glob, os, json
+out_dir = sys.argv[1]
+issues = []
+def count_markers(path, kind):
+    with open(path) as f:
+        text = f.read()
+    return len(re.findall(rf'<!--\s*impact-begin\s+kind=' + re.escape(kind) + r'\b', text))
+sp = os.path.join(out_dir, 'standalone_analysis.md')
+if os.path.isfile(sp):
+    if count_markers(sp, 'top_ops') < 1:
+        issues.append('standalone_analysis.md missing kind=top_ops marker')
+for path in sorted(glob.glob(os.path.join(out_dir, 'category_findings', '*.md'))):
+    n = count_markers(path, 'p_item')
+    if n == 0:
+        issues.append(f'{os.path.basename(path)} has 0 kind=p_item markers')
+for issue in issues:
+    print('WARN:', issue)
+print('marker-count check complete (' + str(len(issues)) + ' warning(s))')
+\" '<output_dir>'
+```
+
+Warnings here do NOT abort. They surface that some agent (or the template) failed to wrap an impact block; rehydration in Step 11.5 will silently skip those blocks and leave them in their post-Phase-1 form.
+
+---
+
+### 11.5 Detailed impact-savings extension (auto-detected)
+
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it. The extension does two things in a single invocation:
+
+1. Renders the detailed 2-panel cumulative-savings chart and writes it as `perf_improvement.png` (overwriting the simple plot if Step 10.3 was taken in the no-extension branch).
+2. Walks every marker block in `standalone_analysis.md`, `category_findings/*.md`, and `system_findings/*.md`, replacing each `<!-- impact-begin ... -->...<!-- impact-end -->` block with the legacy ms-savings rendering.
+
+If the file is absent, skip this step silently — the standalone analysis is complete in its impact_score form and the simple plot from Step 10.3 stays in place.
+
+```bash
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ -f "$EXT" ]; then
+  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
+fi
+```
+
+The extension is opt-in by file presence. To disable, delete or rename the file. To re-enable, restore it from git. There are no opt-out flags — the extension always runs both the detailed plot and the marker-driven rehydration.
+
+---
+
+### 11.2 Embed Performance Improvement Plot
+
+The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 (no extension, simple plot) or Step 11.5 (extension, detailed plot). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
 
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
-generate_and_embed_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
+embed_plot_in_report(sys.argv[1])
+\" '<output_dir>'
 ```
 
-If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
+If the base64 sidecar is missing (plot generation failed), `embed_plot_in_report` removes the `{{PERF_PLOT}}` placeholder so the report remains clean.
 
 ---
 

@@ -39,6 +39,7 @@ __all__ = [
     "generate_perf_plot",
     "generate_priority_data",
     "generate_and_embed_plot",
+    "embed_plot_in_report",
 ]
 
 _CAT_PALETTE = [
@@ -343,7 +344,7 @@ def generate_perf_plot(
     return True
 
 
-def _embed_plot_in_report(
+def embed_plot_in_report(
     output_dir: str,
     report_filename: str = "standalone_analysis.md",
     placeholder: str = "{{PERF_PLOT}}",
@@ -417,6 +418,6 @@ def generate_and_embed_plot(output_dir: str, title: str) -> dict:
 
     results["plot"] = generate_perf_plot(output_dir, title)
     if results["plot"]:
-        results["embed"] = _embed_plot_in_report(output_dir)
+        results["embed"] = embed_plot_in_report(output_dir)
 
     return results

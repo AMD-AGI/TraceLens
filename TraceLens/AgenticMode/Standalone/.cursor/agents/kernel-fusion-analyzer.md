@@ -132,6 +132,8 @@ Then look for novel patterns:
 
 Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
+**Pay particular attention to § Impact markers (REQUIRED) in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md).** Every P-item `**Impact**` line, every Detailed Analysis `**Impact estimate:**` two-bullet block, and the `## Impact Summary` table (header-only or with rows) must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `category_data/kernel_fusion_metrics.json::impact_estimates[]`.
+
 Number findings P1, P2, P3... sequentially by impact_score (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
 
 | Confidence | Icon |
@@ -160,7 +162,9 @@ Found N kernel fusion opportunities across M module types.
 
 **Action:** <Specific recommendation>
 
+<!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
 **Impact:** impact_score: X.X (with all N kernels modelled)
+<!-- impact-end -->
 
 **Confidence:** High -- <brief reason from fusion pattern classification>
 
@@ -181,8 +185,10 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 
 **Impact estimate:**
 
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
 - Low end impact_score (75% roofline target): X.XX
 - High end impact_score (100% roofline target): X.XX
+<!-- impact-end -->
 - Coverage: M of N kernels modelled
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
 - Confidence: High/Medium/Low — <brief reason>
@@ -190,8 +196,10 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 
 ## Impact Summary
+<!-- impact-begin kind=impact_summary -->
 | Recommendation | Type | impact_score | Confidence |
 |----------------|------|--------------|------------|
+<!-- impact-end -->
 ```
 
 If no fusion opportunities detected:
@@ -201,8 +209,10 @@ If no fusion opportunities detected:
 No kernel fusion opportunities detected.
 
 ## Impact Summary
+<!-- impact-begin kind=impact_summary -->
 | Recommendation | Type | impact_score | Confidence |
 |----------------|------|--------------|------------|
+<!-- impact-end -->
 ```
 
 ### Step 4.1: Validate Findings

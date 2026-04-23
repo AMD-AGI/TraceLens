@@ -115,6 +115,8 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/norm_findings.md` using the output format defined there, with `<category>` = `norm`.
 
+**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line, every Detailed Analysis `**Impact estimate:**` two-bullet block, and the `## Impact Summary` table must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/norm_metadata.json::impact_estimates[]`.
+
 ### Step 6.1: Write Impact Estimates to Metadata
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:

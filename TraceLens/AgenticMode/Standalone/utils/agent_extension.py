@@ -7,9 +7,15 @@
 """Optional standalone-analysis extension: detailed plot + ms-savings rehydration.
 
 Hosts the legacy 2-panel cumulative-savings chart (cumulative stacked E2E bars
-+ throughput cone with the 75-100% roofline band) and an idempotent rewriter
-that converts all post-Phase-1 ``impact_score``-format markdown reports back
-to the pre-Phase-1 ``ms savings (% of E2E)`` format.
++ throughput cone with the 75-100% roofline band) and a marker-driven rewriter
+that converts post-Phase-1 ``impact_score``-format markdown reports back to
+the pre-Phase-1 ``ms savings (% of E2E)`` format.
+
+The rewriter is driven entirely by data-bearing HTML-comment markers
+(``<!-- impact-begin kind=... ... -->`` / ``<!-- impact-end -->``) emitted by
+the sub-agent spec and the orchestrator template. It does not parse the
+post-Phase-1 markdown with regex, so it cannot rehydrate older reports that
+predate the marker rollout (they are silently skipped as no-ops).
 
 CLI usage:
 
@@ -17,9 +23,10 @@ CLI usage:
         --output-dir <dir> \\
         --title '<Model> on <Platform> -- Kernel Tuning Potential'
 
-Both ``generate_impact_savings_plot`` and ``rehydrate_reports_to_ms`` always
-run when invoked via the CLI -- there are no opt-out flags. To disable, delete
-or rename this file; the orchestrator skill auto-detects its presence.
+The CLI always runs both the detailed plot (writing ``perf_improvement.png``,
+overwriting the simple plot if the orchestrator already produced one) and the
+rehydration walker. To disable, delete or rename this file; the orchestrator
+skill auto-detects its presence.
 
 The extension is opt-in by file presence and is NOT re-exported from
 ``TraceLens.AgenticMode.Standalone.utils.__init__``.
@@ -32,7 +39,7 @@ import json
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import matplotlib
@@ -366,7 +373,7 @@ def _render_throughput_cone(ax, proj):
 def generate_impact_savings_plot(
     output_dir: str,
     title: str,
-    output_filename: str = "impact_savings.png",
+    output_filename: str = "perf_improvement.png",
     write_base64: bool = False,
     show_error_bars: bool = True,
 ) -> bool:
@@ -473,62 +480,27 @@ def generate_impact_savings_plot(
 
 
 # ---------------------------------------------------------------------------
-# Markdown rehydration: post-Phase-1 impact_score -> pre-Phase-1 ms savings
+# Markdown rehydration: marker-driven impact_score -> pre-Phase-1 ms savings
 # ---------------------------------------------------------------------------
+#
+# The rehydrator no longer parses post-Phase-1 markdown with regex. Instead,
+# producers (sub-agent spec + orchestrator template) emit data-bearing HTML
+# comments around every block whose contents depend on impact_score values:
+#
+#     <!-- impact-begin kind=KIND attr1=value1 attr2=value2 -->
+#     ...arbitrary post-Phase-1 markdown content (the "raw" form)...
+#     <!-- impact-end -->
+#
+# The walker locates each begin/end pair, dispatches on `kind`, and replaces
+# the entire block (markers included) with the rendered legacy ms-form text.
+# Rehydration is destructive: once consumed, the markers are gone, so a second
+# pass is a no-op.
 
-
-# Pattern A: P-item card Impact line  ("**Impact**: impact_score: X.X")
-_RE_PITEM_IMPACT = re.compile(
-    r"^(\*\*Impact\*\*:\s*)\[?impact_score:\s*([\d.]+)\]?\s*$",
-    re.MULTILINE,
-)
-# Broader walker: matches both the quantifiable form above AND the
-# "Not quantifiable from trace data" form. Used so we can advance the
-# priority_data category cursor in lock-step with P-item rank order even
-# across non-quantifiable cards (e.g. Pn = customcollective).
-_RE_PITEM_IMPACT_ANY = re.compile(
-    r"^\*\*Impact\*\*:\s*"
-    r"(?:\[?impact_score:\s*[\d.]+\]?|Not quantifiable from trace data)\s*$",
-    re.MULTILINE,
-)
-
-# Pattern B: Detailed Analysis low/high bullets
-_RE_DETAIL_LOW = re.compile(
-    r"^(?P<indent>[ \t-]*)Low end impact_score \(75% roofline target\):\s*([\d.]+)\s*$",
-    re.MULTILINE,
-)
-_RE_DETAIL_HIGH = re.compile(
-    r"^(?P<indent>[ \t-]*)High end impact_score \(100% roofline target\):\s*([\d.]+)\s*$",
-    re.MULTILINE,
-)
-
-# Pattern C/D: ## Impact Summary canonical 4-column header
-_RE_IMPACT_SUMMARY_HEADER = re.compile(
-    r"^\| Recommendation \| Type \| impact_score \| Confidence \|\s*\n"
-    r"^\|[\-+ ]+\|[\-+ ]+\|[\-+ ]+\|[\-+ ]+\|\s*$",
-    re.MULTILINE,
-)
-
-# Pattern E: Top Operations table (5-column post-Phase-1 form)
-_RE_TOP_OPS_HEADER = re.compile(
-    r"^\| Rank \| Category \| Time \(ms\) \| % of Compute Time \| Ops \|\s*\n"
-    r"^\|[\-+ ]+\|[\-+ ]+\|[\-+ ]+\|[\-+ ]+\|[\-+ ]+\|\s*$",
-    re.MULTILINE,
-)
-
-# Pattern F: fusion methodology blurb (post-Phase-1 wording)
-_RE_FUSION_BLURB = re.compile(
-    r"impact_score projections use a roofline projection model "
-    r"\(75-100% of peak\) with 85% memory/compute pipeline overlap\. "
-    r"Kernels without perf models use their measured trace time as-is\. "
-    r"(?:Candidates where fewer than 75% of kernels have perf models are not reported\. "
-    r"Each finding shows both a \*\*Confidence\*\* \(fusion pattern quality\) and perf model coverage in the \*\*Impact\*\* line\. )?"
-    r"Actual recoverable time depends on implementation feasibility and interaction effects\."
-)
-
-# Detection regex: any pre-Phase-1 ms-form already present?
-_RE_ALREADY_MS = re.compile(
-    r"~?\d+(?:\.\d+)?\s*[-\u2013\u2014]\s*\d+(?:\.\d+)?\s*ms\s*savings",
+_RE_MARKER_BEGIN = re.compile(r"<!--\s*impact-begin\s+(.*?)\s*-->")
+_RE_MARKER_END = re.compile(r"<!--\s*impact-end\s*-->")
+# Per-row trailer carried inside Top Operations table body rows.
+_RE_TOP_OPS_ROW_TRAILER = re.compile(
+    r"\s*<!--\s*top-ops-row\s+(.*?)\s*-->\s*$"
 )
 
 
@@ -541,158 +513,87 @@ def _load_baseline_ms(output_dir: str) -> float:
     return float(manifest.get("gpu_utilization", {}).get("total_time_ms", 0) or 0)
 
 
-def _load_metadata_for_category(output_dir: str, category: str) -> dict:
-    """Read metadata/<category>_metadata.json. Returns {} if missing."""
-    path = os.path.join(output_dir, "metadata", f"{category}_metadata.json")
-    if not os.path.isfile(path):
-        return {}
-    with open(path, "r") as f:
-        return json.load(f)
+def _parse_attrs(attr_str: str) -> Dict[str, Optional[str]]:
+    """Parse ``key=value`` pairs from a marker attribute string.
 
-
-def _load_priority_categories(output_dir: str) -> List[str]:
-    """Return ``[category, ...]`` from ``priority_data.json::priorities[]``
-    in P1..PN rank order. Includes non-quantifiable entries so the index
-    stays aligned with the order of P-item cards in standalone_analysis.md.
-    Returns ``[]`` if the file is missing or malformed.
+    Supports bare tokens (``low=4.21``) and double-quoted values
+    (``category="moe fused"``). Returns ``None`` for the literal token
+    ``null`` so callers can distinguish "not provided" from "explicit null".
     """
-    path = os.path.join(output_dir, "priority_data.json")
-    if not os.path.isfile(path):
-        return []
+    attrs: Dict[str, Optional[str]] = {}
+    for match in re.finditer(r'(\w+)=("([^"]*)"|(\S+))', attr_str):
+        key = match.group(1)
+        value = match.group(3) if match.group(3) is not None else match.group(4)
+        attrs[key] = None if value == "null" else value
+    return attrs
+
+
+def _attr_float(attrs: Dict[str, Optional[str]], key: str) -> Optional[float]:
+    raw = attrs.get(key)
+    if raw is None:
+        return None
     try:
-        with open(path, "r") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
-    return [p.get("category", "") for p in data.get("priorities", [])]
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
-def _impact_score_range_for_file(output_dir: str, filename: str) -> List[Tuple[float, float, float]]:
-    """Return list of (low, mid, high) impact_score tuples for a findings file's category.
-
-    File path -> category mapping: ``<cat>_findings.md`` -> ``<cat>``.
-    Returns one tuple per ``impact_estimates`` entry in the metadata, in order.
-    """
-    base = os.path.basename(filename)
-    if not base.endswith("_findings.md"):
-        return []
-    category = base[: -len("_findings.md")]
-    meta = _load_metadata_for_category(output_dir, category)
-    triples: List[Tuple[float, float, float]] = []
-    for entry in meta.get("impact_estimates", []):
-        if not entry.get("quantifiable", True):
-            triples.append((0.0, 0.0, 0.0))
-            continue
-        triples.append(
-            (
-                float(entry.get("impact_score_low", 0) or 0),
-                float(entry.get("impact_score", 0) or 0),
-                float(entry.get("impact_score_high", 0) or 0),
-            )
-        )
-    return triples
+# --- Per-kind renderers --------------------------------------------------
 
 
-def _extract_pairs_from_detail_blocks(text: str) -> List[Tuple[float, float]]:
-    """Walk the markdown and pair Low/High impact_score bullets in file order.
-
-    Returns ``[(low, high), ...]`` in the order they appear.
-    """
-    lows = [(m.start(), float(m.group(2))) for m in _RE_DETAIL_LOW.finditer(text)]
-    highs = [(m.start(), float(m.group(2))) for m in _RE_DETAIL_HIGH.finditer(text)]
-    pairs: List[Tuple[float, float]] = []
-    for (_, lo), (_, hi) in zip(lows, highs):
-        pairs.append((lo, hi))
-    return pairs
-
-
-def _rehydrate_pattern_b(text: str, baseline_ms: float) -> str:
-    """Rewrite Detailed Analysis Low/High bullets to ms+E2E% form."""
-
-    def _rewrite_low(m: re.Match) -> str:
-        indent = m.group(1)
-        pct = float(m.group(2))
-        ms = pct * baseline_ms / 100.0
-        return f"{indent}Low end (75% roofline): {ms:.3f} ms savings ({pct:.2f}% E2E)"
-
-    def _rewrite_high(m: re.Match) -> str:
-        indent = m.group(1)
-        pct = float(m.group(2))
-        ms = pct * baseline_ms / 100.0
-        return f"{indent}High end (100% roofline): {ms:.3f} ms savings ({pct:.2f}% E2E)"
-
-    text = _RE_DETAIL_LOW.sub(_rewrite_low, text)
-    text = _RE_DETAIL_HIGH.sub(_rewrite_high, text)
-    return text
-
-
-def _rehydrate_pattern_a(
-    text: str,
+def _render_p_item(
+    attrs: Dict[str, Optional[str]],
+    body: str,
     baseline_ms: float,
-    pair_pool: List[Tuple[float, float]],
-    category_pool: Optional[List[str]] = None,
 ) -> str:
-    """Rewrite each P-item Impact line, consuming low/high pairs in order.
+    """Render a P-item Impact line in legacy ms-savings form.
 
-    For each ``**Impact**: impact_score: X.X`` line, pop the next ``(low, high)``
-    pair (in markdown order) and emit ``**Impact**: ~<low_ms>-<high_ms> ms
-    savings (<low>-<high>% of E2E)``. If the pair pool is exhausted, fall back
-    to using only the matched mid value (rendered as a single number).
+    Quantifiable cards (numeric `low`/`high` attrs) render as
+    ``**Impact**: ~<lo>-<hi> ms savings (<lo>-<hi>% of E2E)``. When a
+    ``category`` attribute is present (orchestrator-assembled
+    ``standalone_analysis.md`` only), the legacy trailing prose
+    ``from closing efficiency gaps to 75-100% of roofline (pre-computed
+    from `<cat>_metrics.json` impact_estimates).`` is appended.
 
-    When ``category_pool`` is provided (orchestrator-assembled
-    ``standalone_analysis.md`` only), additionally append the legacy trailing
-    prose ``from closing efficiency gaps to 75-100% of roofline (pre-computed
-    from `<category>_metrics.json` impact_estimates).`` for quantifiable
-    P-items, popping one category per P-item card encountered (including
-    non-quantifiable cards) so the cursor stays aligned with rank order.
+    Non-quantifiable cards (any of `low`/`high` is null) render as
+    ``**Impact**: Not quantifiable from trace data``.
     """
-    pair_idx = [0]
-    cat_idx = [0]
-    pairs = list(pair_pool)
-    cats = list(category_pool) if category_pool is not None else None
+    lo = _attr_float(attrs, "low")
+    hi = _attr_float(attrs, "high")
+    if lo is None or hi is None:
+        return "**Impact**: Not quantifiable from trace data"
 
-    def _rewrite(m: re.Match) -> str:
-        line = m.group(0)
-        # Non-quantifiable cards have nothing to rewrite, but we still need to
-        # advance the priority cursor so the next quantifiable card maps to
-        # the correct category.
-        if "Not quantifiable" in line:
-            if cats is not None:
-                cat_idx[0] += 1
-            return line
-
-        prefix_match = re.match(
-            r"^(\*\*Impact\*\*:\s*)\[?impact_score:\s*([\d.]+)\]?\s*$", line
+    lo_ms = lo * baseline_ms / 100.0
+    hi_ms = hi * baseline_ms / 100.0
+    rendered = (
+        f"**Impact**: ~{lo_ms:.1f}\u2013{hi_ms:.1f} ms savings "
+        f"({lo:.1f}\u2013{hi:.1f}% of E2E)"
+    )
+    category = attrs.get("category")
+    if category:
+        rendered += (
+            f" from closing efficiency gaps to 75\u2013100% of roofline "
+            f"(pre-computed from `{category}_metrics.json` impact_estimates)."
         )
-        if prefix_match is None:
-            return line
-        prefix = prefix_match.group(1)
-        mid_pct = float(prefix_match.group(2))
+    return rendered
 
-        if pair_idx[0] < len(pairs):
-            lo_pct, hi_pct = pairs[pair_idx[0]]
-            pair_idx[0] += 1
-        else:
-            lo_pct, hi_pct = mid_pct, mid_pct
-        lo_ms = lo_pct * baseline_ms / 100.0
-        hi_ms = hi_pct * baseline_ms / 100.0
-        body = (
-            f"{prefix}~{lo_ms:.1f}\u2013{hi_ms:.1f} ms savings "
-            f"({lo_pct:.1f}\u2013{hi_pct:.1f}% of E2E)"
-        )
 
-        if cats is not None:
-            if cat_idx[0] < len(cats) and cats[cat_idx[0]]:
-                category = cats[cat_idx[0]]
-                body += (
-                    f" from closing efficiency gaps to 75\u2013100% of roofline "
-                    f"(pre-computed from `{category}_metrics.json` impact_estimates)."
-                )
-            cat_idx[0] += 1
-
+def _render_detail_estimate(
+    attrs: Dict[str, Optional[str]],
+    body: str,
+    baseline_ms: float,
+) -> str:
+    """Render the two-bullet Low/High Impact estimate block in ms+E2E% form."""
+    lo = _attr_float(attrs, "low")
+    hi = _attr_float(attrs, "high")
+    if lo is None or hi is None:
         return body
-
-    return _RE_PITEM_IMPACT_ANY.sub(_rewrite, text)
+    lo_ms = lo * baseline_ms / 100.0
+    hi_ms = hi * baseline_ms / 100.0
+    return (
+        f"- Low end (75% roofline): {lo_ms:.3f} ms savings ({lo:.2f}% E2E)\n"
+        f"- High end (100% roofline): {hi_ms:.3f} ms savings ({hi:.2f}% E2E)"
+    )
 
 
 _LEGACY_HEADER_5COL = (
@@ -704,21 +605,16 @@ _LEGACY_HEADER_5COL = (
 
 
 def _expand_impact_summary_row(row: str, baseline_ms: float) -> str:
-    """Expand a post-Phase-1 4-cell data row into the legacy 5-cell form.
+    """Expand a 4-cell post-Phase-1 row into the legacy 5-cell shape.
 
-    Input row shape (4 cells, ignoring leading/trailing pipes):
-        ``| <Recommendation> | <Type> | <impact_score> | <Confidence> |``
+    Input shape (4 cells):
+        ``| Recommendation | Type | impact_score | Confidence |``
+    Output shape (5 cells):
+        ``| Recommendation | Type | Estimated Savings (ms) | impact_score | Confidence |``
 
-    Output row shape (5 cells):
-        ``| <Recommendation> | <Type> | <savings_ms> | <impact_score> | <Confidence> |``
-
-    where ``savings_ms = impact_score * baseline_ms / 100``. The original
-    ``impact_score`` value (already in % of E2E) populates the new
-    "Estimated Improvement (E2E %)" column verbatim.
-
-    Rows that do not parse as 4 cells, or whose impact_score cell is not a
-    parseable number (e.g. ``"--"``, ``"N/A"``), are returned unchanged so
-    we do not corrupt agent-authored variants.
+    Rows that don't parse as 4 cells, or whose impact_score cell isn't
+    numeric (e.g. ``N/A``, ``--``), are returned unchanged so we never
+    corrupt agent-authored variants.
     """
     cells = [c.strip() for c in row.strip().strip("|").split("|")]
     if len(cells) != 4:
@@ -729,224 +625,195 @@ def _expand_impact_summary_row(row: str, baseline_ms: float) -> str:
     except ValueError:
         return row
     savings_ms = score * baseline_ms / 100.0
-    return (
-        f"| {rec} | {type_} | {savings_ms:.2f} | "
-        f"{score:.2f} | {conf} |"
-    )
+    return f"| {rec} | {type_} | {savings_ms:.2f} | {score:.2f} | {conf} |"
 
 
-def _rehydrate_pattern_cd(text: str, baseline_ms: float) -> str:
-    """Restore the legacy 5-column ``## Impact Summary`` header **and** expand
-    its 4-cell post-Phase-1 data rows into the legacy 5-cell shape.
-
-    Walks each match of ``_RE_IMPACT_SUMMARY_HEADER`` in turn:
-
-    1. Replaces the 4-column header+separator with the legacy 5-column form.
-    2. Reads contiguous body rows (lines starting and ending with ``|``)
-       until a blank line or a non-table line is hit.
-    3. Expands every parseable 4-cell row to 5 cells via
-       ``_expand_impact_summary_row``. Rows that fail to parse (kernel-fusion
-       variants, agent-authored prose-in-cell, etc.) are left untouched so
-       we never corrupt them.
-
-    Idempotent: once a header is rewritten to the legacy 5-column form it no
-    longer matches ``_RE_IMPACT_SUMMARY_HEADER`` on a subsequent pass.
-    """
-    out: List[str] = []
-    cursor = 0
-    for m in _RE_IMPACT_SUMMARY_HEADER.finditer(text):
-        out.append(text[cursor:m.start()])
-        out.append(_LEGACY_HEADER_5COL)
-        cursor = m.end()
-        # Walk forward over body rows immediately after the header (allowing a
-        # single trailing newline before the first row).
-        rest = text[cursor:]
-        lines = rest.split("\n")
-        consumed_lines = 0
-        body_out: List[str] = []
-        seen_body = False
-        for line in lines:
-            if not line.strip():
-                if seen_body:
-                    break
-                consumed_lines += 1
-                continue
-            if line.startswith("|") and line.rstrip().endswith("|"):
-                body_out.append(_expand_impact_summary_row(line, baseline_ms))
-                consumed_lines += 1
-                seen_body = True
-            else:
-                break
-        if body_out:
-            out.append("\n" + "\n".join(body_out))
-        # Re-anchor cursor past the consumed lines.
-        consumed_chars = sum(len(l) + 1 for l in lines[:consumed_lines])
-        cursor += consumed_chars
-        # Trim the trailing newline we re-added if the next chunk starts mid-line.
-        if consumed_chars and rest[:consumed_chars].endswith("\n"):
-            # ensure exactly one separating newline before next chunk
-            pass
-    out.append(text[cursor:])
-    return "".join(out)
-
-
-def _rehydrate_pattern_e(
-    text: str,
-    output_dir: str,
+def _render_impact_summary(
+    attrs: Dict[str, Optional[str]],
+    body: str,
     baseline_ms: float,
 ) -> str:
-    """Restore the dropped ``Potential improvement (time, E2E %)`` column on the
-    Top Operations table inside ``standalone_analysis.md``.
-
-    Strategy: find the 5-column header, locate the contiguous data rows
-    immediately after, look up each row's category in metadata, and append the
-    opportunity column (or ``--`` if no quantifiable rollup exists).
-    """
-    m = _RE_TOP_OPS_HEADER.search(text)
-    if not m:
-        return text
-
-    header_start = m.start()
-    header_end = m.end()
-    new_header = (
-        "| Rank | Category | Time (ms) | % of Compute Time | Ops | "
-        "Potential improvement (time, E2E %) |\n"
-        "|------|----------|-----------|-------------------|-----|"
-        "-------------------------------------|"
-    )
-
-    rest = text[header_end:]
-    lines = rest.split("\n")
-    body_lines: List[str] = []
-    consumed = 0
-    for line in lines:
-        if not line.strip():
-            # A blank line *before* any body row is the separator-trailing
-            # newline; a blank line *after* body rows ends the table.
-            if body_lines:
-                break
-            consumed += 1
+    """Replace the 4-column header+separator and expand any body rows."""
+    lines = body.split("\n")
+    out_lines: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        # Header line check: 4 cells matching canonical column names.
+        if stripped.startswith("| Recommendation | Type | impact_score | Confidence |"):
+            out_lines.append(_LEGACY_HEADER_5COL)
+            i += 2  # skip the header and its separator line
             continue
         if line.startswith("|") and line.rstrip().endswith("|"):
-            body_lines.append(line)
-            consumed += 1
+            out_lines.append(_expand_impact_summary_row(line, baseline_ms))
         else:
-            break
+            out_lines.append(line)
+        i += 1
+    return "\n".join(out_lines)
 
-    rewritten_rows: List[str] = []
-    for row in body_lines:
-        cells = [c.strip() for c in row.strip("|").split("|")]
-        if len(cells) < 2:
-            rewritten_rows.append(row)
-            continue
-        # Cell may carry a parenthetical backend hint (e.g. "MoE Fused (AITER)")
-        # that wasn't part of the legacy ORI category name. Strip it before
-        # mapping to the on-disk metadata filename.
-        raw_cat = re.sub(r"\s*\([^)]*\)\s*", "", cells[1]).strip()
-        category = raw_cat.lower().replace(" ", "_")
-        meta = _load_metadata_for_category(output_dir, category)
+
+_LEGACY_TOP_OPS_HEADER = (
+    "| Rank | Category | Time (ms) | % of Compute Time | Ops | "
+    "Potential improvement (time, E2E %) |\n"
+    "|------|----------|-----------|-------------------|-----|"
+    "-------------------------------------|"
+)
+
+
+def _render_top_ops_row(row: str, baseline_ms: float) -> str:
+    """Append the legacy Potential-improvement column to a Top Ops body row.
+
+    The per-row ``<!-- top-ops-row low=X.X high=Y.Y -->`` trailer carries the
+    impact_score range. Rows without a trailer (or with ``null`` values)
+    receive a ``--`` placeholder.
+    """
+    trailer = _RE_TOP_OPS_ROW_TRAILER.search(row)
+    if trailer is None:
+        return row.rstrip() + " -- |"
+    base = row[: trailer.start()].rstrip()
+    attrs = _parse_attrs(trailer.group(1))
+    lo = _attr_float(attrs, "low")
+    hi = _attr_float(attrs, "high")
+    if lo is None or hi is None or hi <= 0:
         opportunity = "--"
-        for entry in meta.get("impact_estimates", []):
-            if not entry.get("quantifiable", True):
-                continue
-            lo_pct = float(entry.get("impact_score_low", 0) or 0)
-            hi_pct = float(entry.get("impact_score_high", 0) or 0)
-            if hi_pct <= 0:
-                continue
-            lo_ms = lo_pct * baseline_ms / 100.0
-            hi_ms = hi_pct * baseline_ms / 100.0
-            opportunity = (
-                f"~{lo_ms:.1f}\u2013{hi_ms:.1f} ms "
-                f"({lo_pct:.1f}\u2013{hi_pct:.1f}%)"
-            )
-            break
-        rewritten_rows.append(row.rstrip() + f" {opportunity} |")
-
-    suffix_after_rows = "\n".join(lines[consumed:])
-    new_body = "\n".join(rewritten_rows)
-    if new_body:
-        new_table = new_header + "\n" + new_body
     else:
-        new_table = new_header
+        lo_ms = lo * baseline_ms / 100.0
+        hi_ms = hi * baseline_ms / 100.0
+        opportunity = (
+            f"~{lo_ms:.1f}\u2013{hi_ms:.1f} ms "
+            f"({lo:.1f}\u2013{hi:.1f}%)"
+        )
+    return f"{base} {opportunity} |"
 
-    return text[:header_start] + new_table + ("\n" + suffix_after_rows if suffix_after_rows else "")
+
+def _render_top_ops(
+    attrs: Dict[str, Optional[str]],
+    body: str,
+    baseline_ms: float,
+) -> str:
+    """Restore the dropped Potential-improvement column on the Top Ops table."""
+    lines = body.split("\n")
+    out_lines: List[str] = []
+    swapped_header = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if (
+            not swapped_header
+            and stripped.startswith("| Rank | Category | Time (ms) | % of Compute Time | Ops |")
+        ):
+            out_lines.append(_LEGACY_TOP_OPS_HEADER)
+            swapped_header = True
+            i += 2  # skip header + separator
+            continue
+        if line.startswith("|") and line.rstrip().endswith("|"):
+            out_lines.append(_render_top_ops_row(line, baseline_ms))
+        elif _RE_TOP_OPS_ROW_TRAILER.search(line):
+            # Standalone trailer line (shouldn't occur, but be safe)
+            out_lines.append(_render_top_ops_row(line, baseline_ms))
+        else:
+            out_lines.append(line)
+        i += 1
+    return "\n".join(out_lines)
 
 
-def _rehydrate_pattern_f(text: str) -> str:
-    """Replace post-Phase-1 fusion methodology wording with the legacy form."""
-    legacy_long = (
-        "Savings projections use a roofline projection model (75-100% of peak) "
-        "with 85% memory/compute pipeline overlap. Kernels without perf models "
-        "use their measured trace time as-is. Candidates where fewer than 75% "
-        "of kernels have perf models are not reported. Each finding shows both "
-        "a **Confidence** (fusion pattern quality) and perf model coverage in "
-        "the **Impact** line. Actual savings depend on implementation "
-        "feasibility and interaction effects."
+_LEGACY_FUSION_BLURB_LONG = (
+    "> **Note:** Kernel fusion analysis is experimental. Savings projections "
+    "use a roofline projection model (75-100% of peak) with 85% memory/compute "
+    "pipeline overlap. Kernels without perf models use their measured trace "
+    "time as-is. Candidates where fewer than 75% of kernels have perf models "
+    "are not reported. Each finding shows both a **Confidence** (fusion "
+    "pattern quality) and perf model coverage in the **Impact** line. Actual "
+    "savings depend on implementation feasibility and interaction effects."
+)
+_LEGACY_FUSION_BLURB_SHORT = (
+    "> **Note:** Kernel fusion analysis is experimental. Savings projections "
+    "use a roofline projection model (75-100% of peak) with 85% memory/compute "
+    "pipeline overlap. Kernels without perf models use their measured trace "
+    "time as-is. Actual savings depend on implementation feasibility and "
+    "interaction effects."
+)
+
+
+def _render_fusion_blurb(
+    attrs: Dict[str, Optional[str]],
+    body: str,
+    baseline_ms: float,
+) -> str:
+    variant = (attrs.get("variant") or "long").lower()
+    return (
+        _LEGACY_FUSION_BLURB_LONG
+        if variant == "long"
+        else _LEGACY_FUSION_BLURB_SHORT
     )
-    legacy_short = (
-        "Savings projections use a roofline projection model (75-100% of peak) "
-        "with 85% memory/compute pipeline overlap. Kernels without perf models "
-        "use their measured trace time as-is. Actual savings depend on "
-        "implementation feasibility and interaction effects."
-    )
 
-    def _pick(m: re.Match) -> str:
-        return legacy_long if "Candidates where fewer than 75%" in m.group(0) else legacy_short
 
-    return _RE_FUSION_BLURB.sub(_pick, text)
+_RENDERERS = {
+    "p_item": _render_p_item,
+    "detail_estimate": _render_detail_estimate,
+    "impact_summary": _render_impact_summary,
+    "top_ops": _render_top_ops,
+    "fusion_blurb": _render_fusion_blurb,
+}
+
+
+def _render_legacy(
+    kind: str,
+    attrs: Dict[str, Optional[str]],
+    body: str,
+    baseline_ms: float,
+) -> Optional[str]:
+    """Dispatch to the per-kind renderer. Returns ``None`` for unknown kinds
+    (the walker leaves such blocks untouched, including their markers).
+    """
+    renderer = _RENDERERS.get(kind)
+    if renderer is None:
+        return None
+    return renderer(attrs, body, baseline_ms)
+
+
+# --- Walker --------------------------------------------------------------
 
 
 def _rehydrate_one_file(path: str, output_dir: str, baseline_ms: float) -> str:
-    """Rehydrate one markdown file in place. Returns a status string."""
+    """Walk markers in ``path`` and splice rendered legacy text in place of
+    each begin..end block. Returns a status string.
+    """
     with open(path, "r") as f:
         original = f.read()
 
-    has_a = bool(_RE_PITEM_IMPACT.search(original))
-    has_b = bool(_RE_DETAIL_LOW.search(original)) or bool(
-        _RE_DETAIL_HIGH.search(original)
-    )
-    has_cd = bool(_RE_IMPACT_SUMMARY_HEADER.search(original))
-    has_e = (
-        os.path.basename(path) == "standalone_analysis.md"
-        and bool(_RE_TOP_OPS_HEADER.search(original))
-    )
-    has_f = bool(_RE_FUSION_BLURB.search(original))
+    out_parts: List[str] = []
+    cursor = 0
+    rewrote_any = False
 
-    if not (has_a or has_b or has_cd or has_e or has_f):
-        if _RE_ALREADY_MS.search(original):
-            return "skipped_already_ms"
+    for begin in _RE_MARKER_BEGIN.finditer(original):
+        if begin.start() < cursor:
+            continue  # nested marker swallowed by the previous block
+        end = _RE_MARKER_END.search(original, begin.end())
+        if end is None:
+            # Malformed: no closing marker. Stop processing further markers.
+            break
+        attrs = _parse_attrs(begin.group(1))
+        kind = attrs.pop("kind", None) or ""
+        body = original[begin.end():end.start()]
+        # Strip a single leading/trailing newline so renderers operate on
+        # the inner content without surrounding blank lines from the marker.
+        body_stripped = body.strip("\n")
+        rendered = _render_legacy(kind, attrs, body_stripped, baseline_ms)
+        if rendered is None:
+            continue  # leave unknown kinds + their markers untouched
+        out_parts.append(original[cursor:begin.start()])
+        out_parts.append(rendered)
+        cursor = end.end()
+        rewrote_any = True
+
+    if not rewrote_any:
         return "skipped_no_match"
 
-    text = original
-
-    if has_b:
-        text = _rehydrate_pattern_b(text, baseline_ms)
-
-    if has_a:
-        # Use values present in this file's Detailed Analysis bullets first
-        # (already converted by pattern B above? -- pull from the original
-        # text instead so we read raw impact_score values, not rewritten ms).
-        pair_pool = _extract_pairs_from_detail_blocks(original)
-        if not pair_pool:
-            triples = _impact_score_range_for_file(output_dir, path)
-            pair_pool = [(lo, hi) for lo, _, hi in triples]
-        # Only the orchestrator-assembled standalone report carries the
-        # trailing "...pre-computed from <cat>_metrics.json impact_estimates."
-        # prose; per-category and system findings keep the short form.
-        cat_pool: Optional[List[str]] = None
-        if os.path.basename(path) == "standalone_analysis.md":
-            cat_pool = _load_priority_categories(output_dir)
-        text = _rehydrate_pattern_a(text, baseline_ms, pair_pool, cat_pool)
-
-    if has_cd:
-        text = _rehydrate_pattern_cd(text, baseline_ms)
-
-    if has_e:
-        text = _rehydrate_pattern_e(text, output_dir, baseline_ms)
-
-    if has_f:
-        text = _rehydrate_pattern_f(text)
-
+    out_parts.append(original[cursor:])
+    text = "".join(out_parts)
     if text == original:
         return "skipped_no_match"
 
@@ -956,19 +823,16 @@ def _rehydrate_one_file(path: str, output_dir: str, baseline_ms: float) -> str:
 
 
 def rehydrate_reports_to_ms(output_dir: str) -> Dict[str, str]:
-    """Rewrite all standalone-analysis markdown to pre-Phase-1 ms-savings format.
+    """Rewrite all standalone-analysis markdown to legacy ms-savings format.
 
-    Reads ``baseline_ms`` from ``category_data/category_manifest.json`` and
-    per-category ``impact_score_low/mid/high`` from ``metadata/<cat>_metadata.json``
-    (used as a fallback when a findings file lacks Detailed Analysis bullets,
-    and for the Top Operations table in ``standalone_analysis.md``).
-
-    Walks ``standalone_analysis.md``, ``category_findings/*.md``, and
-    ``system_findings/*.md``. Idempotent: files already in ms form are
-    detected (``_RE_ALREADY_MS``) and skipped.
+    Reads ``baseline_ms`` from ``category_data/category_manifest.json`` (used
+    to convert ``impact_score`` percentages back to milliseconds at the marker
+    boundary). Walks ``standalone_analysis.md``, ``category_findings/*.md``,
+    and ``system_findings/*.md``. Idempotent: rehydrated files have no
+    remaining markers, so a second pass is a silent no-op.
 
     Returns a per-file status dict:
-        {<path>: "rewritten" | "skipped_already_ms" | "skipped_no_match"}
+        {<path>: "rewritten" | "skipped_no_match" | "error: ..."}
     """
     baseline_ms = _load_baseline_ms(output_dir)
     if baseline_ms <= 0:
@@ -997,7 +861,7 @@ def rehydrate_reports_to_ms(output_dir: str) -> Dict[str, str]:
     n_skipped = len(results) - n_rewritten
     print(
         f"Rehydration complete: {n_rewritten} file(s) rewritten, "
-        f"{n_skipped} skipped (already ms or no match)."
+        f"{n_skipped} skipped (no markers or already rehydrated)."
     )
     return results
 
@@ -1026,7 +890,12 @@ def main():
     )
     args = parser.parse_args()
 
-    generate_impact_savings_plot(args.output_dir, args.title)
+    generate_impact_savings_plot(
+        args.output_dir,
+        args.title,
+        output_filename="perf_improvement.png",
+        write_base64=True,
+    )
     rehydrate_reports_to_ms(args.output_dir)
 
 

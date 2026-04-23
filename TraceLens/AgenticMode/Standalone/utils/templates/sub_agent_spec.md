@@ -33,13 +33,16 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 ### P1: <Brief Title> (<Library>)            <!-- (<Library>) only on compute tier -->
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
+<!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]   <!-- compute tier only -->
+<!-- impact-end -->
 ```
 
 - **Compute tier**: include all three fields. Pull `**Impact**` from `impact_estimates` in the metrics JSON.
-- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix.
+- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix. System-tier P-items still wrap `**Impact**` in `kind=p_item` markers when they choose to emit one (typically as `Not quantifiable from trace data`); see § Impact markers (REQUIRED) below.
 - **Field labels are exact** — always `**Insight**`, `**Action**`, `**Impact**`.
 - **`(<Library>)` suffix**: comma-separated list of unique non-null `library` values across the bottleneck operations. If all are `null`, omit the parenthetical entirely.
+- **Marker required** — see § Impact markers (REQUIRED). The `low`/`mid`/`high` attributes carry the raw `impact_score_low/mid/high` values from `metadata/<category>_metadata.json::impact_estimates[i]`. For non-quantifiable cards use `low=null mid=null high=null`.
 
 ---
 
@@ -191,25 +194,32 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 ### Rendering in `## Detailed Analysis`
 
 **Quantifiable:** two bullets — low and high. The mid `impact_score` is not
-duplicated here; it appears on the P-item card.
+duplicated here; it appears on the P-item card. The two-bullet block must be
+wrapped in `kind=detail_estimate` markers (see § Impact markers (REQUIRED)).
 
 ```markdown
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
 - Low end impact_score (75% roofline target): <impact_score_low>
 - High end impact_score (100% roofline target): <impact_score_high>
+<!-- impact-end -->
 ```
 
-**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
+**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.` (no marker required for non-quantifiable estimates)
 
 ### `## Impact Summary` section (agent-internal, optional)
 
 When agents include a `## Impact Summary` section above `## Recommendations`,
 it SHOULD be a markdown table in this canonical form. The orchestrator does
-NOT parse this section; it exists for human readability only.
+NOT parse this section; it exists for human readability only. The whole
+`## Impact Summary` table block (header + separator + body rows) must be
+wrapped in `kind=impact_summary` markers (see § Impact markers (REQUIRED)).
 
 ```markdown
+<!-- impact-begin kind=impact_summary -->
 | Recommendation | Type | impact_score | Confidence |
 |----------------|------|--------------|------------|
 | <P-item title> | <kernel_tuning|fusion|...> | <mid impact_score, or "N/A"> | <high|medium|low> |
+<!-- impact-end -->
 ```
 
 - `impact_score` is the rolled-up mid value from
@@ -221,7 +231,88 @@ NOT parse this section; it exists for human readability only.
   columns. Do NOT show a low–high range here.
 
 Header-only variants (no data rows under the header) remain valid for agents
-that intentionally do not enumerate per-recommendation impact.
+that intentionally do not enumerate per-recommendation impact. The marker
+wrapper is still required so the rehydrator can find them.
+
+## Impact markers (REQUIRED)
+
+Every block whose contents depend on `impact_score*` values must be wrapped in
+a paired HTML-comment marker. The orchestrator extension (`agent_extension.py`)
+consumes these markers to rehydrate reports back to the legacy
+`ms savings (% of E2E)` form. Markers are HTML comments and therefore invisible
+in rendered markdown, so the impact_score-form report stays clean even when the
+extension is absent.
+
+### Marker shape
+
+```
+<!-- impact-begin kind=KIND attr1=value1 attr2=value2 -->
+...arbitrary post-Phase-1 markdown content (the "raw" form)...
+<!-- impact-end -->
+```
+
+Begin tag carries all the data the rehydrator needs as `key=value` attributes.
+End tag is plain. The block between them is exactly the impact_score-form text
+you would otherwise emit.
+
+### `kind` values you must emit
+
+| `kind` | Where | Required attributes | Optional attributes |
+|--------|-------|--------------------|---------------------|
+| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` for non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
+| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip for non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
+| `impact_summary` | Around the entire `## Impact Summary` table (header + separator + any body rows). Header-only variants must still be wrapped. | none | none |
+
+### Value-source rule
+
+The numbers in marker attributes (`low`, `mid`, `high`) **must** be transcribed
+verbatim from `metadata/<category>_metadata.json::impact_estimates[i]`
+(`impact_score_low`, `impact_score`, `impact_score_high` respectively). Do not
+re-derive, round, or scale them. Do not pull them from any other source.
+
+### Examples
+
+P-item card (compute tier, quantifiable):
+
+```markdown
+### P1: Low GEMM efficiency on large MoE projections (AITER)
+**Insight**: AITER GEMM kernels reach only 35% of MAF on the 4096-wide projections.
+**Action**: Switch to the rocBLAS Tensile fp8 path or a tile-tuned variant for these shapes.
+<!-- impact-begin kind=p_item low=4.21 mid=4.98 high=5.75 -->
+**Impact**: impact_score: 4.98
+<!-- impact-end -->
+```
+
+P-item card (non-quantifiable):
+
+```markdown
+<!-- impact-begin kind=p_item low=null mid=null high=null -->
+**Impact**: Not quantifiable from trace data
+<!-- impact-end -->
+```
+
+Detailed Analysis estimate (quantifiable):
+
+```markdown
+**Impact estimate:**
+<!-- impact-begin kind=detail_estimate low=4.21 high=5.75 -->
+- Low end impact_score (75% roofline target): 4.21
+- High end impact_score (100% roofline target): 5.75
+<!-- impact-end -->
+```
+
+Impact Summary table:
+
+```markdown
+## Impact Summary
+<!-- impact-begin kind=impact_summary -->
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
+| AITER GEMM tile tuning | kernel_tuning | 4.98 | high |
+<!-- impact-end -->
+```
+
+---
 
 ### Write impact estimates to metadata
 

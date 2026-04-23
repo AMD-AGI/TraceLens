@@ -115,6 +115,8 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/gemm_findings.md` using the output format defined there, with `<category>` = `gemm`. Do NOT use `classification.gemm_type` for the Type column — that field distinguishes quantized vs regular, not the compute/memory bound type.
 
+**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line, every Detailed Analysis `**Impact estimate:**` two-bullet block, and the `## Impact Summary` table must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/gemm_metadata.json::impact_estimates[]`.
+
 Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` impact_score.
 
 ### Step 5.1: Write Impact Estimates to Metadata
