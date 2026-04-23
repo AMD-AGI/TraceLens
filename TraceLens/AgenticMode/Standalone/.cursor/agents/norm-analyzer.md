@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: norm-analyzer
 description: Analyze normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) for memory bandwidth efficiency. Use when orchestrator needs norm category analysis.
-model: inherit
+model: claude-4.6-sonnet-medium-thinking
 ---
 
 # Normalization Analysis Subagent
