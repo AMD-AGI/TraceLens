@@ -1,0 +1,78 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+name: Sync from upstream
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [public-sync]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+
+      - name: Merge upstream changes
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/AMD-AGI/TraceLens.git
+          git fetch upstream main
+          git fetch origin main
+
+          # No sync if origin/main already contains all of upstream/main (same tip or fork ahead)
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "No changes to sync (origin/main is up to date with upstream/main)."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
+
+          git merge upstream/main --no-edit --strategy-option theirs
+          git checkout origin/main -- .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit --amend --no-edit
+          fi
+
+          git push origin "$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR
+        if: steps.merge.outputs.has_changes == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          resp=$(gh api repos/${{ github.repository }}/pulls \
+            -f title="[Auto] Sync from public TraceLens repo" \
+            -f body="Automated sync from public TraceLens repo: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
+            -f head="$BRANCH" \
+            -f base="main")
+          echo "number=$(echo "$resp" | jq -r .number)" >> "$GITHUB_OUTPUT"
+
+      - name: Merge PR
+        if: steps.merge.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          gh api -X PUT \
+            "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/merge" \
+            -f merge_method=merge
+
+          ENC_BRANCH=$(echo -n "$BRANCH" | jq -sRr @uri)
+          gh api -X DELETE \
+            "repos/${{ github.repository }}/git/refs/heads/${ENC_BRANCH}" \
+            || true

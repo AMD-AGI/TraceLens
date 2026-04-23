@@ -6,8 +6,7 @@
 ###############################################################################
 
 """
-Adapter around tigertron's find_kernel_loops for discovering repeating
-kernel patterns in GPU traces.
+Discover repeating kernel patterns in GPU traces using loop detection.
 
 Handles multi-stream traces by detecting the primary GPU stream (most
 kernels) and running pattern discovery on that stream only.  All output
@@ -17,6 +16,7 @@ need to know about the stream split.
 Usage:
     python pattern_finder.py <extracted.json> [-o pattern.json]
 """
+
 import argparse
 import json
 import sys

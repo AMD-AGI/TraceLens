@@ -95,34 +95,10 @@ Detailed docs: [compare_perf_reports_pytorch.md](docs/compare_perf_reports_pytor
 ```bash
 TraceLens_generate_multi_rank_collective_report_pytorch \
     --trace_dir /path/to/traces \
-    --world_size 8 \
+    --world_size 8
 ```
+
 Detailed docs: [generate_multi_rank_collective_report_pytorch.md](docs/generate_multi_rank_collective_report_pytorch.md).
-
-Refer to the individual module docs in the `docs/` directory and the example notebooks under `examples/` for further guidance.
-
-**Development & testing** — Install in editable mode and run tests:
-
-```bash
-git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
-pip install -e .
-python -m pytest tests/ -v
-```
-
-Pftrace report tests only: `python -m pytest tests/test_pftrace_hip_api_perf_report.py tests/test_pftrace_hip_activity_report.py -v`.
-
-**📦 Custom Workflows**: Check out [examples/custom_workflows/](examples/custom_workflows/) for community-contributed utilities including **roofline_analyzer** and **traceMap** — powerful tools we're working on integrating more tightly into the core library.
-
-## Supported Profile Formats
-
-TraceLens supports multiple profiling formats:
-
-| Format | Tool | Documentation |
-|--------|------|---------------|
-| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
-| **JAX** | XPlane protobuf | [docs/generate_perf_report_jax.md](docs/generate_perf_report_jax.md) |
-| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
-| **rocprofv3 pftrace** | Perfetto-style (e.g. rocprofv3 `--output-format pftrace`) | See [pftrace reports](#pftrace-rocprofv3--perfetto) below |
 
 ### rocprofv3 JSON
 

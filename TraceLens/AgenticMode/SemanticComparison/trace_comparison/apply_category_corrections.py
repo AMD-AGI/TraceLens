@@ -36,6 +36,7 @@ Usage:
         --labels-a <dir_a>/semantic_labels.json \
         --labels-b <dir_b>/semantic_labels.json
 """
+
 import argparse
 import json
 import sys

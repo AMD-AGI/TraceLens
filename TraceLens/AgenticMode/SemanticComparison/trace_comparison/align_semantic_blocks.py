@@ -23,9 +23,9 @@ Usage:
         --name-a MI355 --name-b B200 \
         -o alignment.json
 """
+
 import argparse
 import json
-import os
 import sys
 from collections import OrderedDict
 

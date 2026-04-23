@@ -20,7 +20,12 @@ Usage (single region):
 
 Usage (batch -- all regions share one tree build):
     python extract_tree_context.py <trace.json> --regions-dir <output_dir>/
+
+Capture-trace augmentation (graph-mode traces):
+    python extract_tree_context.py <graph_trace.json> <extracted.json> \
+        --capture-trace <capture_trace.json> [-o tree_context.json]
 """
+
 import argparse
 import json
 import os
@@ -35,8 +40,25 @@ from TraceLens.util import DataLoader, TraceEventUtils
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 
-def load_and_build_tree(trace_path):
-    """Load a trace file and build a TraceToTree."""
+def load_and_build_tree(trace_path, capture_trace_path=None):
+    """Load a trace file and build a TraceToTree.
+
+    When capture_trace_path is provided, merges the capture-phase tree into
+    the graph-replay tree so that GPU kernels inherit cpu_op ancestors from
+    the capture recording.  This restores near-100% tree coverage for
+    graph-mode traces.
+    """
+    if capture_trace_path:
+        from TraceLens.Trace2Tree.trace_capture_merge import (
+            merge_capture_trace_into_graph,
+        )
+
+        print(
+            f"Merging capture trace {capture_trace_path} into {trace_path}...",
+            file=sys.stderr,
+        )
+        return merge_capture_trace_into_graph(capture_trace_path, trace_path)
+
     data = DataLoader.load_data(trace_path)
     events = data.get("traceEvents", [])
     _, non_meta_events = TraceEventUtils.split_event_list(events)
@@ -87,7 +109,7 @@ def _find_cpu_op_ancestor(tree, event):
         current = parent
 
 
-def extract_tree_context(tree, extracted_data, ts_index=None):
+def extract_tree_context(tree, extracted_data, ts_index=None, capture_augmented=False):
     """Match extracted kernels to tree events and extract context.
 
     Args:
@@ -95,6 +117,8 @@ def extract_tree_context(tree, extracted_data, ts_index=None):
         extracted_data: dict from extract_trace_data.py with "kernels" list.
         ts_index: optional pre-built (name, ts) index from _build_ts_index().
             Pass this when processing multiple regions against the same tree.
+        capture_augmented: if True, the tree was built with capture-trace
+            augmentation and the flag is propagated into the output JSON.
 
     Returns dict with per-kernel tree context, labeled/unlabeled indices,
     and coverage stats.
@@ -143,16 +167,18 @@ def extract_tree_context(tree, extracted_data, ts_index=None):
     total = len(kernels)
     coverage = len(labeled_indices) / total if total > 0 else 0.0
 
-    return {
+    result = {
         "source_file": extracted_data.get("source_file", ""),
         "total_kernels": total,
         "coverage": round(coverage, 4),
         "labeled_count": len(labeled_indices),
         "unlabeled_count": len(unlabeled_indices),
+        "capture_augmented": capture_augmented,
         "labeled_indices": labeled_indices,
         "unlabeled_indices": unlabeled_indices,
         "kernels": kernel_contexts,
     }
+    return result
 
 
 def _find_region_subdirs(regions_dir):
@@ -167,14 +193,18 @@ def _find_region_subdirs(regions_dir):
     return regions
 
 
-def _process_single(tree, ts_index, extracted_path, output_path):
+def _process_single(
+    tree, ts_index, extracted_path, output_path, capture_augmented=False
+):
     """Process one extracted.json against a pre-built tree and ts_index."""
     with open(extracted_path) as f:
         extracted = json.load(f)
 
     n_kernels = len(extracted["kernels"])
     print(f"  Matching {n_kernels} kernels...", file=sys.stderr, end=" ")
-    result = extract_tree_context(tree, extracted, ts_index=ts_index)
+    result = extract_tree_context(
+        tree, extracted, ts_index=ts_index, capture_augmented=capture_augmented
+    )
     print(f"{result['coverage']:.1%} coverage", file=sys.stderr)
 
     with open(output_path, "w") as f:
@@ -202,14 +232,26 @@ def main():
         "with extracted.json. Builds tree once, writes "
         "tree_context.json into each region subdir.",
     )
+    parser.add_argument(
+        "--capture-trace",
+        help="Path to a capture-phase trace file. When provided, the "
+        "capture tree is merged into the graph-replay tree before "
+        "extracting context, restoring cpu_op ancestry for kernels "
+        "that would otherwise be hidden under cudaGraphLaunch.",
+    )
     args = parser.parse_args()
 
     if not args.extracted_json and not args.regions_dir:
         parser.error("provide either extracted_json or --regions-dir")
 
+    capture_augmented = args.capture_trace is not None
+
     print(f"Building trace tree from {args.trace}...", file=sys.stderr)
-    tree = load_and_build_tree(args.trace)
+    tree = load_and_build_tree(args.trace, capture_trace_path=args.capture_trace)
     ts_index = _build_ts_index(tree)
+
+    if capture_augmented:
+        print("Capture-trace augmentation active", file=sys.stderr)
 
     if args.regions_dir:
         regions = _find_region_subdirs(args.regions_dir)
@@ -224,7 +266,13 @@ def main():
             print(f"Region '{name}':", file=sys.stderr)
             extracted_path = os.path.join(subdir, "extracted.json")
             output_path = os.path.join(subdir, "tree_context.json")
-            _process_single(tree, ts_index, extracted_path, output_path)
+            _process_single(
+                tree,
+                ts_index,
+                extracted_path,
+                output_path,
+                capture_augmented=capture_augmented,
+            )
         print(
             f"Wrote tree_context.json to {len(regions)} region subdirs", file=sys.stderr
         )
@@ -236,7 +284,9 @@ def main():
             f"Matching {len(extracted['kernels'])} kernels to tree events...",
             file=sys.stderr,
         )
-        result = extract_tree_context(tree, extracted, ts_index=ts_index)
+        result = extract_tree_context(
+            tree, extracted, ts_index=ts_index, capture_augmented=capture_augmented
+        )
 
         print(
             f"Tree context: {result['labeled_count']}/{result['total_kernels']} "
