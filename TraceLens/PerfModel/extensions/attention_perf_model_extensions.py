@@ -22,6 +22,12 @@ class InferenceAttention:
     Subclasses only need to implement ``get_param_details`` to extract
     parameters from their framework-specific event format. The returned
     dict must contain at least the keys listed in ``REQUIRED_PARAM_KEYS``.
+
+    **No perf estimate:** If parsing fails, :meth:`get_param_details` returns
+    :meth:`no_perf_param_details` (includes ``_no_perf: True``). In that case
+    :meth:`flops`, :meth:`bytes`, and :meth:`get_compute_precision` return
+    ``None``. Subclasses that extend the parent dict should return early when
+    ``params.get("_no_perf")`` is true.
     """
 
     REQUIRED_PARAM_KEYS = (
@@ -56,68 +62,97 @@ class InferenceAttention:
         self.d_h_v = self.param_details["d_h_v"]
 
     @staticmethod
-    def get_param_details(event):
-        annotation = str(event.get("annotation"))
-        if annotation == "NA":
-            raise NotImplementedError(
-                "VLLM attention without annotation is not supported"
-            )
-
-        if "sq" not in annotation:
-            requests = annotation.replace("(", "_").replace(")", "_").split("_")
-            if len(requests) < 8:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[3])
-            c_sk = int(requests[3])
-            c_sqsq = int(requests[4])
-            c_sqsk = int(requests[4])
-            g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
-        else:
-            name = annotation.replace("(", "_").replace(")", "_")
-            requests = re.sub(r"[sqk]+", "_", name).split("_")
-            if len(requests) < 16:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[5])
-            c_sk = int(requests[6])
-            c_sqsq = int(requests[7])
-            c_sqsk = int(requests[8])
-            g_sq = int(requests[13])
-            g_sk = int(requests[14])
-            g_sqsq = int(requests[15])
-            g_sqsk = int(requests[16])
-
-        input_dims = event["args"]["Input Dims"]
-        q_shape, k_shape = input_dims[0], input_dims[1]
-        N_Q, H_Q, d_h_qk = q_shape
-        N_KV, H_KV, d_h_v = k_shape[-3:]
-        dtype_Q = event["args"]["Input type"][0]
+    def no_perf_param_details():
+        """Placeholder params when annotation/inputs cannot be parsed; disables FLOPs/bytes."""
         return {
             "B": 1,
-            "N_Q": N_Q,
-            "H_Q": H_Q,
-            "H_V": H_KV,
-            "H_K": H_KV,
-            "N_KV": N_KV,
-            "H_KV": H_KV,
-            "d_h_qk": d_h_qk,
-            "d_h_v": d_h_v,
+            "N_Q": 0,
+            "H_Q": 0,
+            "N_KV": 0,
+            "H_KV": 0,
+            "d_h_qk": 0,
+            "d_h_v": 0,
+            "c_sq": 0,
+            "c_sk": 0,
+            "c_sqsq": 0,
+            "c_sqsk": 0,
+            "g_sq": 0,
+            "g_sk": 0,
+            "g_sqsq": 0,
+            "g_sqsk": 0,
             "dropout": 0.0,
             "causal": False,
             "flash_impl": True,
-            "c_sq": c_sq,
-            "c_sk": c_sk,
-            "c_sqsq": c_sqsq,
-            "c_sqsk": c_sqsk,
-            "g_sq": g_sq,
-            "g_sk": g_sk,
-            "g_sqsq": g_sqsq,
-            "g_sqsk": g_sqsk,
-            "dtype_Q": dtype_Q,
+            "dtype_Q": None,
+            "_no_perf": True,
         }
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            if annotation == "NA":
+                raise NotImplementedError(
+                    "VLLM attention without annotation is not supported"
+                )
+
+            if "sq" not in annotation:
+                requests = annotation.replace("(", "_").replace(")", "_").split("_")
+                if len(requests) < 8:
+                    raise NotImplementedError(
+                        "VLLM attention without annotation is not supported"
+                    )
+                c_sq = int(requests[3])
+                c_sk = int(requests[3])
+                c_sqsq = int(requests[4])
+                c_sqsk = int(requests[4])
+                g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
+            else:
+                name = annotation.replace("(", "_").replace(")", "_")
+                requests = re.sub(r"[sqk]+", "_", name).split("_")
+                if len(requests) < 16:
+                    raise NotImplementedError(
+                        "VLLM attention without annotation is not supported"
+                    )
+                c_sq = int(requests[5])
+                c_sk = int(requests[6])
+                c_sqsq = int(requests[7])
+                c_sqsk = int(requests[8])
+                g_sq = int(requests[13])
+                g_sk = int(requests[14])
+                g_sqsq = int(requests[15])
+                g_sqsk = int(requests[16])
+
+            input_dims = event["args"]["Input Dims"]
+            q_shape, k_shape = input_dims[0], input_dims[1]
+            N_Q, H_Q, d_h_qk = q_shape
+            N_KV, H_KV, d_h_v = k_shape[-3:]
+            dtype_Q = event["args"]["Input type"][0]
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": H_KV,
+                "H_K": H_KV,
+                "N_KV": N_KV,
+                "H_KV": H_KV,
+                "d_h_qk": d_h_qk,
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                "c_sq": c_sq,
+                "c_sk": c_sk,
+                "c_sqsq": c_sqsq,
+                "c_sqsk": c_sqsk,
+                "g_sq": g_sq,
+                "g_sk": g_sk,
+                "g_sqsq": g_sqsq,
+                "g_sqsk": g_sqsk,
+                "dtype_Q": dtype_Q,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
 
     # ------------------------------------------------------------------
     # Static helpers – reusable across subclasses
@@ -181,6 +216,8 @@ class InferenceAttention:
     # ------------------------------------------------------------------
 
     def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
         if self.param_details["c_sq"] == 0 and self.param_details["g_sq"] == 0:
             raise NotImplementedError(
                 "Attention perf model for decode phase requires custom annotations"
@@ -194,7 +231,12 @@ class InferenceAttention:
             self.param_details["g_sqsk"],
         )
 
-    def bytes(self, bytes_per_element=2):
+    def bytes(self, bytes_per_element=None):
+        if self.param_details.get("_no_perf"):
+            return None
+        bpe = bytes_per_element
+        if bpe is None:
+            bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
         return self.bytes_func(
             self.B,
             self.H_Q,
@@ -205,7 +247,7 @@ class InferenceAttention:
             self.param_details["c_sk"],
             self.param_details["g_sq"],
             self.param_details["g_sk"],
-            bytes_per_element,
+            bpe,
         )
 
     def flops_bwd(self):
@@ -215,6 +257,8 @@ class InferenceAttention:
         raise NotImplementedError("Backward pass for attention is not defined.")
 
     def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
         dtype = self.param_details.get("dtype_Q", None)
         return torch_dtype_map(dtype) if dtype else None
 
@@ -232,6 +276,30 @@ class mha_varlen_fwd(InferenceAttention):
     pass
 
 
+class aiter_fmha_v3_varlen_fwd(InferenceAttention):
+    """
+    Performance model for ``aiter::fmha_v3_varlen_fwd`` (inference: sglang / vLLM).
+
+    Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
+    on the event). Sets ``d_h_v`` from the **v** tensor (``Input Dims[2]``) so MLA
+    shapes with differing Q/K vs V head dims are modeled correctly.
+
+    Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
+    (see base class); no packed-tensor fallback.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) > 2 and len(dims[2]) >= 1:
+            params["d_h_v"] = dims[2][-1]
+        return params
+
+
 class mla_decode_fwd(InferenceAttention):
     pass
 
@@ -241,6 +309,8 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
     @staticmethod
     def get_param_details(event):
         params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
         concrete = event.get("Concrete Inputs", [])
         if len(concrete) < 5:
             params["d_h_v"] = 512
