@@ -598,6 +598,33 @@ class aiter_silu_and_mul(UnaryElementwise):
         return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
 
 
+class sgl_kernel_silu_and_mul(aiter_silu_and_mul):
+    """
+    Performance model for sgl_kernel::silu_and_mul.
+
+    Gated SiLU (same math as aiter::silu_and_mul):
+        out[..., :inter_dim] = silu(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    SGLang registers this op from sgl_kernel (e.g. sgl_kernel/elementwise.py silu_and_mul,
+    used by srt/layers/activation.py SiluAndMul).
+
+    Signature: silu_and_mul(out, input) -> None
+        out   — shape [M, inter_dim],     dtype BFloat16
+        input — shape [M, 2 * inter_dim], dtype BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+        e.g. [(65536, 2304), (65536, 4608)]
+
+    Expected Input type from trace:
+        [dtype_out, dtype_input]
+
+    FLOPs and bytes are inherited from aiter_silu_and_mul.
+    """
+
+    pass
+
+
 class aiter_gelu_and_mul(aiter_silu_and_mul):
     """
     Performance model for aiter::gelu_and_mul.
