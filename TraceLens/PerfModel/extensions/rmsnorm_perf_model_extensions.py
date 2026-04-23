@@ -59,8 +59,7 @@ class aiter_rmsnorm(RMSNorm):
     Same roofline as aiter_rms_norm and RMSNorm, but a different bound op and profiler layout:
     explicit out tensor first (see aiter_rms_norm for aiter::rms_norm).
 
-    RMSNorm with separate output tensor (HIP rmsnorm; AITER rmsnorm2d_fwd uses this when
-    hidden_dim <= 8192 and use_model_sensitive_rmsnorm == 0).
+    RMSNorm with separate output tensor.
 
     Signature: rmsnorm(out, input, weight, epsilon)
         out      — shape [M, N], dtype BFloat16
@@ -263,9 +262,7 @@ class aiter_add_rmsnorm(aiter_rmsnorm2d_fwd_with_add_ck):
     """
     Performance model for aiter::add_rmsnorm.
 
-    Fused residual-add + RMSNorm (HIP add_rmsnorm). AITER rmsnorm2d_fwd_with_add uses this
-    when hidden_dim <= 8192 and use_model_sensitive_rmsnorm == 0; otherwise it uses CK
-    rmsnorm2d_fwd_with_add_ck (see aiter_rmsnorm2d_fwd_with_add_ck).
+    Fused residual-add + RMSNorm (HIP add_rmsnorm).
 
     Signature: add_rmsnorm(out, input, residual_in, residual_out, weight, epsilon)
         out           — shape [M, N], dtype BFloat16 (RMSNorm output)
