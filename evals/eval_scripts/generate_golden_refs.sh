@@ -54,7 +54,7 @@ generate_single_ref() {
         agent_attempts=$((agent_attempts + 1))
         (
             cd "$STANDALONE_DIR"
-            agent --model claude-4.7-opus-high --print --force --trust --output-format stream-json \
+            agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                 "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 

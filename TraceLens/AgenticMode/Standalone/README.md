@@ -57,7 +57,7 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 ### To run via Cursor chat:
 
-1. **In a Cursor (v2.5+) chat with Claude-4.7-Opus-High, invoke:**
+1. **In a Cursor (v2.5+) chat with Claude Opus 4.7 High, invoke:**
    ```
    Run standalone analysis on <path_to_trace.json>
    ```
@@ -79,7 +79,7 @@ Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify yo
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --model claude-4.7-opus-high --print --force --trust \
+agent --model claude-opus-4-7-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -87,7 +87,7 @@ agent --model claude-4.7-opus-high --print --force --trust \
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --model claude-4.7-opus-high --print --force --trust \
+agent --model claude-opus-4-7-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -95,7 +95,7 @@ agent --model claude-4.7-opus-high --print --force --trust \
 
 ```bash
 cd TraceLens/AgenticMode/Standalone
-agent --model claude-4.7-opus-high --print --force --trust \
+agent --model claude-opus-4-7-high --print --force --trust \
     "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -221,8 +221,8 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 The orchestrator dispatches per-category analysis to sub-agents whose model tier is declared in each agent file's front matter:
 
-- **`claude-4.7-opus-high`**: Orchestrator + 3 judgment-heavy sub-agents: `kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`.
-- **`claude-4.6-sonnet`**: 10 templated / light-reasoning sub-agents: `cpu-idle-analyzer`, `gemm-analyzer`, `sdpa-analyzer`, `norm-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `convolution-analyzer`, `triton-analyzer`, `moe-analyzer`, `multi-kernel-analyzer`.
+- **`claude-opus-4-7-high`**: Orchestrator + 3 judgment-heavy sub-agents: `kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`.
+- **`claude-4.6-sonnet-medium-thinking`**: 10 templated / light-reasoning sub-agents: `cpu-idle-analyzer`, `gemm-analyzer`, `sdpa-analyzer`, `norm-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `convolution-analyzer`, `triton-analyzer`, `moe-analyzer`, `multi-kernel-analyzer`.
 
 ## Supported Analysis Modes
 

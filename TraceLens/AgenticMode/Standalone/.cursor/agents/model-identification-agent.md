@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: model-identification-agent
 description: Infer model name, architecture, scale, and precision from perf report data for standalone analysis appendix. Invoked by orchestrator after category data preparation.
-model: claude-4.7-opus-high
+model: claude-opus-4-7-high
 ---
 
 # Model Identification Subagent

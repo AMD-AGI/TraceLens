@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: elementwise-analyzer
 description: Analyze elementwise operations for performance bottlenecks and optimization opportunities. Use when orchestrator needs elementwise category analysis.
-model: claude-4.6-sonnet
+model: claude-4.6-sonnet-medium-thinking
 ---
 
 # Elementwise Analysis Subagent

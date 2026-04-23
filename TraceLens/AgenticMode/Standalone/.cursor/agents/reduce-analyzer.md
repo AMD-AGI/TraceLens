@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: reduce-analyzer
 description: Analyze reduce operations for performance bottlenecks and optimization opportunities. Use when orchestrator needs reduce category analysis.
-model: claude-4.6-sonnet
+model: claude-4.6-sonnet-medium-thinking
 ---
 
 # Reduce Analysis Subagent
