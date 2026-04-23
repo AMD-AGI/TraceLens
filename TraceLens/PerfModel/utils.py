@@ -101,13 +101,11 @@ def torch_dtype_map(dtype):
         "c10::half": "fp16",
         "c10::bfloat16": "bf16",
         "c10::float8_e4m3fnuz": "fp8",
-        "c10::float8_e4m3fn": "fp8",
-        "c10::float8_e5m2": "fp8",
-        "c10::float8_e8m0fnu": "fp8",
         "unsigned char": "fp8",
         "fp8": "fp8",
         "fp4": "fp4",
         "mxfp4": "fp4",
         "c10::float4_e2m1fn_x2": "fp4",
+        "c10::float8_e4m3fn": "fp8",
     }
     return dict_dtype2simulation.get(dtype.lower(), None)
