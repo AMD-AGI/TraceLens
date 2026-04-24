@@ -55,11 +55,8 @@ def perf_analysis(
     assert profile_path.endswith(".xplane.pb")
     perf_analyzer = JaxTreePerfAnalyzer.from_file(
         profile_filepath=profile_path,
-        kernel_metadata_keyword_filters=kwargs.get(
-            "kernel_metadata_keyword_filters", None
-        ),
+        **kwargs,
     )
-
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline()
     df_gpu_events_averages = perf_analyzer.get_df_gpu_events_averages()
@@ -144,12 +141,20 @@ def generate_perf_report_jax(
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
     kernel_metadata_keyword_filters=None,
+    gpu_arch_json_path: Optional[str] = None,
+    enable_origami: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-
+    if gpu_arch_json_path:
+        with open(gpu_arch_json_path, "r") as f:
+            gpu_arch_json = json.load(f)
+    else:
+        gpu_arch_json = None
     # Analyze trace profile
     dict_name2df = perf_analysis(
         profile_path,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
+        arch=gpu_arch_json,
+        enable_origami=enable_origami,
     )
 
     # Write all DataFrames to separate sheets in an Excel workbook
@@ -216,6 +221,19 @@ def main():
         default=None,
         help="Kernel metadata keyword filters, performance analysis is computed only for the events containing the kerword in the metadata e.g. in framework name scope, e.g. --kernel_metadata_keyword_filters remat checkpoint",
     )
+    parser.add_argument(
+        "--gpu_arch_json_path",
+        type=str,
+        default=None,
+        help="Path to the GPU architecture JSON file",
+    )
+    parser.add_argument(
+        "--enable-origami",
+        action="store_true",
+        default=False,
+        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
+
     args = parser.parse_args()
 
     generate_perf_report_jax(
@@ -223,6 +241,8 @@ def main():
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
+        gpu_arch_json_path=args.gpu_arch_json_path,
+        enable_origami=args.enable_origami,
     )
 
 

@@ -436,11 +436,13 @@ Operations are automatically categorized based on name patterns and kernel chara
 | `total_direct_kernel_time_ms` | Total GPU time in milliseconds | `total_direct_kernel_time_sum / 1000` |
 | `Percentage (%)` | Percentage of total GPU time | `(total_direct_kernel_time_ms / sum of all kernel time) * 100` |
 | `Cumulative Percentage (%)` | Running cumulative percentage | Sum of percentages from top to current row |
+| `is_recompute` | *(Optional)* Whether this operation is part of activation recomputation | `True` or `False`. Only present when `--detect_recompute` is enabled. Same op name may appear in two rows (one for recompute, one for non-recompute). |
 
 **What this shows**:
 - Each unique operation name gets one row (e.g., one row for all `aten::addmm` calls)
 - All instances of the same operation are aggregated together, regardless of their input shapes, dtypes, or other arguments
 - More granular than category view, but still hides variation due to different input arguments
+- When `--detect_recompute` is enabled, rows are further split by recompute status
 
 **Use this when**: "I see GEMM is expensive - which specific GEMM operation is the problem: `aten::addmm`, `aten::mm`, or `aten::bmm`?"
 
@@ -473,6 +475,7 @@ Operations are automatically categorized based on name patterns and kernel chara
 | `trunc_kernel_details` | Truncated kernel details | Shortened version of kernel_details_summary for readability |
 | `Percentage (%)` | Percentage of total GPU time | `(total_direct_kernel_time_sum / sum of all kernel time) * 100` |
 | `Cumulative Percentage (%)` | Running cumulative percentage | Sum of percentages from top to current row |
+| `is_recompute` | *(Optional)* Whether this operation is part of activation recomputation | `True` or `False`. Only present when `--detect_recompute` is enabled. |
 
 **What makes arguments "unique"**:
 - Same operation with different input shapes → different rows (e.g., `aten::addmm` with (1024, 512) vs (2048, 1024))
@@ -939,6 +942,8 @@ Depending on the command-line arguments used when generating the report, additio
 - **kernel_summary**: Per-kernel statistics aggregated by kernel name (enabled with `--kernel_summary`)
 
 - **short_kernel_histogram**, **short_kernels_summary**: Analysis of very short kernels (enabled with `--short_kernel_study`)
+
+- **unified_perf_summary**: Unified perf metrics for all ops with perf models or leaf ops that launch GPU kernels. Includes GFLOPS, TFLOPS/s, Data Moved, FLOPS/Byte, TB/s metrics aggregated by unique args. When `--detect_recompute` is enabled, an `is_recompute` column is added to split rows by recompute status.
 
 ---
 

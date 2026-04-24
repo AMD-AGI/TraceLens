@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: generic-op-analyzer
 description: Analyze uncategorized GPU operations. Use when orchestrator needs other category analysis.
-model: inherit
+model: claude-opus-4-7-high
 ---
 
 # Uncategorized Operations Analysis Subagent

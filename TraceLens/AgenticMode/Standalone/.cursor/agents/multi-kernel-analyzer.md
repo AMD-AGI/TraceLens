@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: multi-kernel-analyzer
 description: Analyze cross-cutting multi-kernel issues including memcpy D2H/H2D patterns, NCCL blocking compute, and compute/communication overlap. System-level analysis tier.
-model: inherit
+model: claude-4.6-sonnet-medium-thinking
 ---
 
 # Multi-Kernel Issue Analysis Subagent
