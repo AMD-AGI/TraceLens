@@ -20,6 +20,7 @@ import pytest
 
 from TraceLens.Reporting.tracediff_comparison_extension import (
     _apply_lca_consolidation,
+    _build_gpu_op_uid_to_key_index,
     _build_lca_consolidation,
     _build_trace2_time_lookup,
     _enrich_sheet_with_trace2,
@@ -61,10 +62,11 @@ def _make_diff_stats_row(
     cpu_op_uid=None,
     busy_time=None,
     thread_name="",
+    gpu_op_uid=None,
 ):
     if cpu_op_uid is None:
         cpu_op_uid = (lca_id, name, source)
-    return {
+    row = {
         "name": name,
         "cpu_op_name": cpu_op_name,
         "cpu_op_uid": cpu_op_uid,
@@ -81,6 +83,9 @@ def _make_diff_stats_row(
         "nn_module_stack": nn_module_stack,
         "nn_module_parent": nn_module_parent,
     }
+    if gpu_op_uid is not None:
+        row["gpu_op_uid"] = gpu_op_uid
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -1400,8 +1405,12 @@ class TestBuildTrace2TimeLookup:
         ]
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
         assert len(lookup) == 2
-        assert lookup[("aten::mm", "(32,64)", "float", "", "", "")] == pytest.approx(40.0)
-        assert lookup[("aten::mm", "(64,128)", "float", "", "", "")] == pytest.approx(90.0)
+        assert lookup[("aten::mm", "(32,64)", "float", "", "", "")] == pytest.approx(
+            40.0
+        )
+        assert lookup[("aten::mm", "(64,128)", "float", "", "", "")] == pytest.approx(
+            90.0
+        )
         assert lc[("aten::mm", "(32,64)", "float", "", "", "")] == 1
         assert lc[("aten::mm", "(64,128)", "float", "", "", "")] == 1
 
@@ -2151,3 +2160,233 @@ class TestConsolidationViaReport:
         assert "aiter::fmha_v3_bwd" in lca99["name"]
         assert "aten::fill_" in lca99["name"]
         assert " | " in lca99["name"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: gpu_op_uid direct lookup
+# ---------------------------------------------------------------------------
+class TestGpuOpUidDirectLookup:
+    """Verify gpu_op_uid-based matching between diff_stats and unified_perf_summary."""
+
+    def test_direct_match_via_gpu_op_uid(self):
+        """diff_stats row with gpu_op_uid matching a kernel in
+        unified_perf_summary.kernel_details_summary resolves correctly,
+        even when cpu_op_name is a pseudo-op that wouldn't match by name."""
+        diff_rows = [
+            _make_diff_stats_row(
+                "gemm_kernel",
+                "pseudo::synthetic_mm",
+                "trace1",
+                200.0,
+                "lca",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                busy_time=200.0,
+                gpu_op_uid=7001,
+            ),
+            _make_diff_stats_row(
+                "gemm_kernel_v2",
+                "pseudo::synthetic_mm",
+                "trace2",
+                150.0,
+                "lca",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                busy_time=150.0,
+                gpu_op_uid=8001,
+            ),
+        ]
+        diff_df = pd.DataFrame(diff_rows)
+
+        perf1 = {
+            "unified_perf_summary": pd.DataFrame(
+                {
+                    "name": ["aten::mm"],
+                    "Input Dims": ["[32,64]"],
+                    "Input type": ["float"],
+                    "Input Strides": [""],
+                    "Concrete Inputs": [""],
+                    "Kernel Time (µs)_sum": [200.0],
+                    "kernel_details_summary": [
+                        str([{"gpu_op_uid": 7001, "name": "gemm_kernel", "dur": 200.0}])
+                    ],
+                }
+            ),
+        }
+        enriched = enrich_perf_report_dict_inplace(
+            {k: v.copy() for k, v in perf1.items()},
+            diff_df,
+            None,
+        )
+        ups = enriched["unified_perf_summary"]
+        assert "speedup (trace2/trace1)" in ups.columns
+        assert ups.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(150.0 / 200.0)
+
+    def test_fallback_when_gpu_op_uid_absent(self):
+        """When gpu_op_uid is not in diff_stats, falls back to cpu_op_uid/name matching."""
+        diff_rows = [
+            _make_diff_stats_row(
+                "gemm_kernel",
+                "aten::mm",
+                "trace1",
+                200.0,
+                "mm",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                busy_time=200.0,
+            ),
+            _make_diff_stats_row(
+                "gemm_kernel_v2",
+                "aten::mm",
+                "trace2",
+                160.0,
+                "mm",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                busy_time=160.0,
+            ),
+        ]
+        diff_df = pd.DataFrame(diff_rows)
+
+        perf1 = {
+            "unified_perf_summary": pd.DataFrame(
+                {
+                    "name": ["aten::mm"],
+                    "Input Dims": ["[32,64]"],
+                    "Input type": ["float"],
+                    "Input Strides": [""],
+                    "Concrete Inputs": [""],
+                    "Kernel Time (µs)_sum": [200.0],
+                }
+            ),
+        }
+        enriched = enrich_perf_report_dict_inplace(
+            {k: v.copy() for k, v in perf1.items()},
+            diff_df,
+            None,
+        )
+        ups = enriched["unified_perf_summary"]
+        assert "speedup (trace2/trace1)" in ups.columns
+        assert ups.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(160.0 / 200.0)
+
+    def test_graceful_degradation_no_kernel_details_column(self):
+        """When kernel_details_summary is absent from unified_perf_summary,
+        the gpu index is empty and matching falls back to name-based keys."""
+        diff_rows = [
+            _make_diff_stats_row(
+                "gemm_kernel",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                busy_time=100.0,
+                gpu_op_uid=9001,
+            ),
+            _make_diff_stats_row(
+                "gemm_kernel_v2",
+                "aten::mm",
+                "trace2",
+                90.0,
+                "mm",
+                10,
+                input_dims="[32,64]",
+                input_type="float",
+                busy_time=90.0,
+                gpu_op_uid=9002,
+            ),
+        ]
+        diff_df = pd.DataFrame(diff_rows)
+
+        perf1 = {
+            "unified_perf_summary": pd.DataFrame(
+                {
+                    "name": ["aten::mm"],
+                    "Input Dims": ["[32,64]"],
+                    "Input type": ["float"],
+                    "Input Strides": [""],
+                    "Concrete Inputs": [""],
+                    "Kernel Time (µs)_sum": [100.0],
+                }
+            ),
+        }
+        enriched = enrich_perf_report_dict_inplace(
+            {k: v.copy() for k, v in perf1.items()},
+            diff_df,
+            None,
+        )
+        ups = enriched["unified_perf_summary"]
+        assert "speedup (trace2/trace1)" in ups.columns
+        assert ups.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(90.0 / 100.0)
+
+    def test_build_gpu_op_uid_index_empty_when_no_column(self):
+        """_build_gpu_op_uid_to_key_index returns empty dict when column is missing."""
+        df = pd.DataFrame({"name": ["aten::mm"], "Input Dims": [""]})
+        idx = _build_gpu_op_uid_to_key_index(df)
+        assert idx == {}
+
+    def test_build_gpu_op_uid_index_parses_kernel_details(self):
+        """_build_gpu_op_uid_to_key_index correctly maps UIDs to row keys."""
+        df = pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "Input Dims": ["[32,64]"],
+                "Input type": ["float"],
+                "Input Strides": [""],
+                "Concrete Inputs": [""],
+                "kernel_details_summary": [
+                    str(
+                        [
+                            {"gpu_op_uid": 5001, "name": "k1", "dur": 100.0},
+                            {"gpu_op_uid": 5002, "name": "k2", "dur": 50.0},
+                        ]
+                    )
+                ],
+            }
+        )
+        idx = _build_gpu_op_uid_to_key_index(df)
+        assert 5001 in idx
+        assert 5002 in idx
+        expected_key = _make_str_key("aten::mm", df.iloc[0])
+        assert idx[5001] == expected_key
+        assert idx[5002] == expected_key
+
+    def test_gpu_op_uid_preferred_in_trace2_uid_set(self):
+        """_trace2_cpu_op_uid_set_for_lca prefers gpu_op_uid over cpu_op_uid."""
+        from TraceLens.Reporting.tracediff_comparison_extension import (
+            _trace2_cpu_op_uid_set_for_lca,
+        )
+
+        rows = [
+            _make_diff_stats_row(
+                "k1",
+                "aten::mm",
+                "trace2",
+                80.0,
+                "mm",
+                10,
+                busy_time=80.0,
+                gpu_op_uid=3001,
+                cpu_op_uid=42,
+            ),
+            _make_diff_stats_row(
+                "k2",
+                "aten::mm",
+                "trace2",
+                60.0,
+                "mm",
+                10,
+                busy_time=60.0,
+                gpu_op_uid=3002,
+                cpu_op_uid=42,
+            ),
+        ]
+        df = pd.DataFrame(rows)
+        uid_set = _trace2_cpu_op_uid_set_for_lca(df, 10)
+        assert uid_set == {3001, 3002}

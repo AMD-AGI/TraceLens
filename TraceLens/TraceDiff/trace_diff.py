@@ -1083,6 +1083,7 @@ class TraceDiff:
                                         "busy_time": lca_busy_time,
                                         "lowest_common_ancestor_name": lca_name,
                                         "lowest_common_ancestor_id": node["merged_id"],
+                                        "gpu_op_uid": gpu_uid,
                                         "nn_module_stack": ";".join(
                                             str(x)
                                             for x in parent_node.get(
@@ -1183,6 +1184,7 @@ class TraceDiff:
                                 "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
+                                "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
                                     for x in parent_node.get("nn_module_stack", [])
@@ -1258,6 +1260,7 @@ class TraceDiff:
                                 "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
+                                "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
                                     for x in parent_node.get("nn_module_stack", [])
@@ -1330,7 +1333,9 @@ class TraceDiff:
         df_filtered = self.diff_stats_df
         if op_name:
             df_filtered = df_filtered[df_filtered["name"] == op_name]
-        df_filtered = df_filtered.drop(columns=["lowest_common_ancestor_id"])
+        df_filtered = df_filtered.drop(
+            columns=["lowest_common_ancestor_id", "gpu_op_uid"]
+        )
 
         # 3. Identify “argument” columns (everything that isn’t a metric)
         metric_columns = ["kernel_time"]

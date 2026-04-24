@@ -32,6 +32,8 @@ diff row's ``cpu_op_name`` and arg columns.
 
 from __future__ import annotations
 
+import ast
+import re
 from collections import deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -173,14 +175,16 @@ def _normalize_val(v: str) -> str:
 
 
 def _trace2_cpu_op_uid_set_for_lca(trace2: pd.DataFrame, lca_id) -> Set[Any]:
-    """Distinct ``cpu_op_uid`` values for trace2 ``diff_stats`` rows under ``lca_id``.
+    """Distinct operation UID values for trace2 ``diff_stats`` rows under ``lca_id``.
 
-    If ``cpu_op_uid`` is missing or all null (e.g. synthetic test frames), fall
-    back to row indices so each row still counts as distinct.
+    Prefers ``gpu_op_uid`` (more granular) over ``cpu_op_uid``. Falls back to
+    row indices when neither column has non-null values.
     """
     sub = trace2[trace2["lowest_common_ancestor_id"] == lca_id]
     if sub.empty:
         return set()
+    if "gpu_op_uid" in sub.columns and sub["gpu_op_uid"].notna().any():
+        return set(sub["gpu_op_uid"].dropna().tolist())
     if "cpu_op_uid" in sub.columns and sub["cpu_op_uid"].notna().any():
         return set(sub["cpu_op_uid"].dropna().tolist())
     return set(sub.index.tolist())
@@ -227,6 +231,40 @@ def _unified_perf_summary_key_set(df: pd.DataFrame) -> Set[tuple]:
     for _, r in df.iterrows():
         keys.add(_make_str_key(r.get("name", ""), r))
     return keys
+
+
+def _build_gpu_op_uid_to_key_index(
+    ups: pd.DataFrame,
+) -> Dict[Any, tuple]:
+    """Map gpu_op_uid -> unified_perf row tuple key from kernel_details_summary."""
+    index: Dict[Any, tuple] = {}
+    if ups is None or ups.empty or "kernel_details_summary" not in ups.columns:
+        return index
+    for _, row in ups.iterrows():
+        key = _make_str_key(row.get("name", ""), row)
+        kds = row.get("kernel_details_summary")
+        if kds is None or (isinstance(kds, float) and pd.isna(kds)):
+            continue
+        if isinstance(kds, str):
+            kds = ast.literal_eval(re.sub(r"np\.(?:float|int)\d*\((.*?)\)", r"\1", kds))
+        if not isinstance(kds, list):
+            continue
+        for kd in kds:
+            if isinstance(kd, dict) and "gpu_op_uid" in kd:
+                uid = kd["gpu_op_uid"]
+                if uid is not None:
+                    index[uid] = key
+    return index
+
+
+def _parse_kernel_details(kds_str: str):
+    """Parse a kernel_details_summary string into a list of dicts."""
+    try:
+        return ast.literal_eval(
+            re.sub(r"np\.(?:float|int)\d*\((.*?)\)", r"\1", kds_str)
+        )
+    except (ValueError, SyntaxError):
+        return None
 
 
 def _ensure_parent_to_children(tree) -> Dict[int, list]:
@@ -306,12 +344,21 @@ def _tree_resolve_uid_to_key(
 
 
 def _resolve_row_to_key(
-    row, tree=None, uid_cache=None, perf_summary_keys=None
+    row,
+    tree=None,
+    uid_cache=None,
+    perf_summary_keys=None,
+    gpu_uid_index=None,
 ) -> Optional[tuple]:
     if uid_cache is None:
         uid_cache = {}
     if perf_summary_keys is None:
         perf_summary_keys = set()
+
+    if gpu_uid_index:
+        gpu_uid = row.get("gpu_op_uid")
+        if gpu_uid is not None and pd.notna(gpu_uid) and gpu_uid in gpu_uid_index:
+            return gpu_uid_index[gpu_uid]
 
     if tree is not None and perf_summary_keys:
         uid = _row_cpu_op_uid(row)
@@ -329,8 +376,21 @@ def _enrichment_row_lookup_key(
     tree,
     perf_summary_keys: Set[tuple],
     uid_cache: Dict,
+    gpu_uid_index=None,
 ) -> tuple:
     """Key into trace2 time lookup for a perf-sheet row (UID-first when possible)."""
+    if gpu_uid_index:
+        kds = row.get("kernel_details_summary")
+        if kds is not None and not (isinstance(kds, float) and pd.isna(kds)):
+            if isinstance(kds, str):
+                kds = _parse_kernel_details(kds)
+            if isinstance(kds, list):
+                for kd in kds:
+                    if isinstance(kd, dict):
+                        uid = kd.get("gpu_op_uid")
+                        if uid is not None and uid in gpu_uid_index:
+                            return gpu_uid_index[uid]
+
     if tree is not None and perf_summary_keys:
         uid = _row_cpu_op_uid(row)
         if uid is not None:
@@ -344,6 +404,7 @@ def _build_lca_consolidation(
     diff_stats_df: pd.DataFrame,
     trace1_tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
+    gpu_uid_index=None,
 ) -> Tuple[
     Dict[tuple, float],
     Dict[tuple, float],
@@ -394,6 +455,7 @@ def _build_lca_consolidation(
             tree=trace1_tree,
             uid_cache=uid_cache,
             perf_summary_keys=psk,
+            gpu_uid_index=gpu_uid_index,
         )
         if dominant_key is None:
             continue
@@ -417,6 +479,7 @@ def _build_lca_consolidation(
                 tree=trace1_tree,
                 uid_cache=uid_cache,
                 perf_summary_keys=psk,
+                gpu_uid_index=gpu_uid_index,
             )
             if nd_key is None:
                 continue
@@ -489,6 +552,7 @@ def _build_trace2_time_lookup(
     diff_stats_df: pd.DataFrame,
     tree=None,
     perf_summary_keys: Optional[Set[tuple]] = None,
+    gpu_uid_index=None,
 ) -> Tuple[Dict[tuple, float], Dict[tuple, List], Dict[tuple, int]]:
     if diff_stats_df.empty:
         return {}, {}, {}
@@ -533,7 +597,11 @@ def _build_trace2_time_lookup(
             key_row = grp.iloc[0]
 
         key = _resolve_row_to_key(
-            key_row, tree=tree, uid_cache=uid_cache, perf_summary_keys=psk
+            key_row,
+            tree=tree,
+            uid_cache=uid_cache,
+            perf_summary_keys=psk,
+            gpu_uid_index=gpu_uid_index,
         )
         if key is None:
             continue
@@ -559,6 +627,7 @@ def _enrich_sheet_with_trace2(
     lca_ids_lookup: Optional[Dict[tuple, List]] = None,
     count_lookup: Optional[Dict[tuple, int]] = None,
     debug: bool = False,
+    gpu_uid_index=None,
 ) -> pd.DataFrame:
     """Add speedup, delta, trace2 kernel time, and trace2 unique-``cpu_op_uid`` count."""
     if df_sheet.empty or not lookup:
@@ -575,7 +644,7 @@ def _enrich_sheet_with_trace2(
     lca_id_lists: List[str] = []
     need_lca_debug = debug and lca_ids_lookup is not None
     for _, row in df.iterrows():
-        key = _enrichment_row_lookup_key(row, tree, psk, uid_cache)
+        key = _enrichment_row_lookup_key(row, tree, psk, uid_cache, gpu_uid_index)
         trace2_times.append(lookup.get(key, np.nan))
         cv = clookup.get(key)
         trace2_counts.append(np.nan if cv is None else float(cv))
@@ -647,6 +716,7 @@ def _enrich_consolidated_perf_sheets(
     lca_ids_lookup: Optional[Dict[tuple, List]] = None,
     count_lookup: Optional[Dict[tuple, int]] = None,
     debug: bool = False,
+    gpu_uid_index=None,
 ) -> Dict[str, pd.DataFrame]:
     """Add speedup, delta, trace2 time, and ``operation_count_trace2`` to ``unified_perf_summary``."""
     result: Dict[str, pd.DataFrame] = {}
@@ -670,6 +740,7 @@ def _enrich_consolidated_perf_sheets(
             lca_ids_lookup=lca_ids_lookup,
             count_lookup=count_lookup,
             debug=debug,
+            gpu_uid_index=gpu_uid_index,
         )
     return result
 
@@ -684,9 +755,9 @@ def enrich_perf_report_dict_inplace(
         return perf_dfs
 
     ups = perf_dfs.get("unified_perf_summary")
-    perf_summary_keys = _unified_perf_summary_key_set(
-        ups if isinstance(ups, pd.DataFrame) else pd.DataFrame()
-    )
+    ups_df = ups if isinstance(ups, pd.DataFrame) else pd.DataFrame()
+    perf_summary_keys = _unified_perf_summary_key_set(ups_df)
+    gpu_uid_index = _build_gpu_op_uid_to_key_index(ups_df)
 
     (
         time_additions,
@@ -698,6 +769,7 @@ def enrich_perf_report_dict_inplace(
         diff_stats_df,
         trace1_tree=trace1_tree,
         perf_summary_keys=perf_summary_keys,
+        gpu_uid_index=gpu_uid_index,
     )
     consolidated_t1 = _apply_lca_consolidation(
         {k: v.copy() for k, v in perf_dfs.items()},
@@ -708,6 +780,7 @@ def enrich_perf_report_dict_inplace(
         diff_stats_df,
         tree=trace1_tree,
         perf_summary_keys=perf_summary_keys,
+        gpu_uid_index=gpu_uid_index,
     )
     lookup, merged_lca_ids, merged_count_lookup = _merge_dominant_into_lookup(
         diff_lookup,
@@ -725,6 +798,7 @@ def enrich_perf_report_dict_inplace(
         lca_ids_lookup=merged_lca_ids if debug else None,
         count_lookup=merged_count_lookup,
         debug=debug,
+        gpu_uid_index=gpu_uid_index,
     )
 
 
