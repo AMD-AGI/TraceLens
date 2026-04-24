@@ -551,10 +551,12 @@ def format_args(input_dims_str, input_type_str) -> Optional[str]:
     if pd.isna(input_dims_str) or pd.isna(input_type_str):
         return None
     try:
-        pairs = list(zip(
-            ast.literal_eval(str(input_dims_str)),
-            ast.literal_eval(str(input_type_str)),
-        ))
+        pairs = list(
+            zip(
+                ast.literal_eval(str(input_dims_str)),
+                ast.literal_eval(str(input_type_str)),
+            )
+        )
     except Exception:
         return None
 

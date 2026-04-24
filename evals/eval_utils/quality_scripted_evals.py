@@ -106,7 +106,12 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
 
 
 EVAL_REGISTRY = [
-    ("TraceLens Perf report CSVs alignment", _check_csv_alignment, "data", "Regenerate golden refs with current TraceLens version"),
+    (
+        "TraceLens Perf report CSVs alignment",
+        _check_csv_alignment,
+        "data",
+        "Regenerate golden refs with current TraceLens version",
+    ),
 ]
 
 

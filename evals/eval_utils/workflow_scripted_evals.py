@@ -230,20 +230,61 @@ def _check_plot(output_dir: str) -> tuple[str, str]:
 
 
 EVAL_REGISTRY = [
-    ("Directory structure created", _check_directories, "pipeline", "Re-run standalone analysis pipeline from Step 1"),
-    ("Metadata files exist on disk", _check_metadata_files, "pipeline", "Re-run orchestrator_prepare.py to regenerate metadata"),
-    ("Model info JSON exists and valid", _check_model_info, "pipeline", "Check model-identification subagent; add fallback skeleton in prepare step"),
-    ("Unified perf. report exists", _check_unified_perf_report, "pipeline", "Re-run TraceLens_generate_perf_report_pytorch (Step 1)"),
-    ("Tree data files exist on disk", _check_tree_data_files, "pipeline", "Re-run orchestrator_prepare.py to regenerate tree data"),
-    ("Categorical findings .md files exist", _check_findings_exist, "pipeline", "Retry failed subagent(s) for missing findings files"),
-    ("All findings exist", _check_findings_placement, "pipeline", "Fix tier assignment in orchestrator_prepare.py"),
-    ("Plot generated on disk", _check_plot, "pipeline", "Check priority_data.json; add fallback empty plot_data.json"),
+    (
+        "Directory structure created",
+        _check_directories,
+        "pipeline",
+        "Re-run standalone analysis pipeline from Step 1",
+    ),
+    (
+        "Metadata files exist on disk",
+        _check_metadata_files,
+        "pipeline",
+        "Re-run orchestrator_prepare.py to regenerate metadata",
+    ),
+    (
+        "Model info JSON exists and valid",
+        _check_model_info,
+        "pipeline",
+        "Check model-identification subagent; add fallback skeleton in prepare step",
+    ),
+    (
+        "Unified perf. report exists",
+        _check_unified_perf_report,
+        "pipeline",
+        "Re-run TraceLens_generate_perf_report_pytorch (Step 1)",
+    ),
+    (
+        "Tree data files exist on disk",
+        _check_tree_data_files,
+        "pipeline",
+        "Re-run orchestrator_prepare.py to regenerate tree data",
+    ),
+    (
+        "Categorical findings .md files exist",
+        _check_findings_exist,
+        "pipeline",
+        "Retry failed subagent(s) for missing findings files",
+    ),
+    (
+        "All findings exist",
+        _check_findings_placement,
+        "pipeline",
+        "Fix tier assignment in orchestrator_prepare.py",
+    ),
+    (
+        "Plot generated on disk",
+        _check_plot,
+        "pipeline",
+        "Check priority_data.json; add fallback empty plot_data.json",
+    ),
 ]
 
 
 # ---------------------------------------------------------------------------
 # Helpers for per-item deterministic checks (evals 9-14, excl. 12 = LLM)
 # ---------------------------------------------------------------------------
+
 
 def _make_row(index, summary, result, details, root_cause, fix):
     return {
@@ -382,7 +423,10 @@ def _check_compute_impact(content):
         if row.get("Type", "").strip().lower() not in ("kernel_tuning", "")
     ]
     if invalid:
-        return "FAIL", f"Invalid Type values: {', '.join(invalid)} (expected kernel_tuning)"
+        return (
+            "FAIL",
+            f"Invalid Type values: {', '.join(invalid)} (expected kernel_tuning)",
+        )
     return "PASS", ""
 
 
@@ -394,7 +438,10 @@ def _check_system_impact(content):
 
     table_rows = _parse_impact_table_rows(impact_section)
     if table_rows:
-        return "FAIL", f"System findings should have 0 data rows, found {len(table_rows)}"
+        return (
+            "FAIL",
+            f"System findings should have 0 data rows, found {len(table_rows)}",
+        )
     return "PASS", ""
 
 
@@ -417,17 +464,18 @@ def _check_report_template(output_dir):
     if content is None:
         return [
             _make_row(
-                "workflow_eval_9", "Report Template Rendering", "FAIL",
-                "standalone_analysis.md not found", "pipeline",
+                "workflow_eval_9",
+                "Report Template Rendering",
+                "FAIL",
+                "standalone_analysis.md not found",
+                "pipeline",
                 "Re-run report generation",
             )
         ]
 
     rows = []
     for key, header_text in _REPORT_HEADERS.items():
-        found = bool(
-            re.search(rf"^## {re.escape(header_text)}", content, re.MULTILINE)
-        )
+        found = bool(re.search(rf"^## {re.escape(header_text)}", content, re.MULTILINE))
         rows.append(
             _make_row(
                 f"workflow_eval_9_{key}",
@@ -469,8 +517,11 @@ def _check_exec_summary(output_dir):
     if content is None:
         return [
             _make_row(
-                "workflow_eval_10", "Executive Summary has metrics table", "FAIL",
-                "standalone_analysis.md not found", "pipeline",
+                "workflow_eval_10",
+                "Executive Summary has metrics table",
+                "FAIL",
+                "standalone_analysis.md not found",
+                "pipeline",
                 "Re-run report generation",
             )
         ]
@@ -479,8 +530,11 @@ def _check_exec_summary(output_dir):
     if not exec_section:
         return [
             _make_row(
-                "workflow_eval_10", "Executive Summary has metrics table", "FAIL",
-                "Executive Summary section not found", "template",
+                "workflow_eval_10",
+                "Executive Summary has metrics table",
+                "FAIL",
+                "Executive Summary section not found",
+                "template",
                 "Add Executive Summary section",
             )
         ]
@@ -527,7 +581,8 @@ def _check_exec_summary(output_dir):
             _make_row(
                 f"workflow_eval_10_{key}",
                 f"Exec Summary row: {labels[0]}",
-                result, detail,
+                result,
+                detail,
                 "template" if result == "FAIL" else "",
                 "Fix value in Executive Summary table" if result == "FAIL" else "",
             )
@@ -541,8 +596,11 @@ def _check_issue_template(output_dir):
     if content is None:
         return [
             _make_row(
-                "workflow_eval_11", "Issue Template rendering", "FAIL",
-                "standalone_analysis.md not found", "pipeline",
+                "workflow_eval_11",
+                "Issue Template rendering",
+                "FAIL",
+                "standalone_analysis.md not found",
+                "pipeline",
                 "Re-run report generation",
             )
         ]
@@ -584,8 +642,11 @@ def _check_issue_template(output_dir):
     if not rows:
         rows.append(
             _make_row(
-                "workflow_eval_11", "Issue Template rendering", "FAIL",
-                "No P-items found in report", "template",
+                "workflow_eval_11",
+                "Issue Template rendering",
+                "FAIL",
+                "No P-items found in report",
+                "template",
                 "Ensure report contains priority items",
             )
         )
@@ -599,8 +660,10 @@ def _check_impact_summary(output_dir):
         return [
             _make_row(
                 "workflow_eval_13",
-                "Sub-agent findings structure and Impact Summary types", "FAIL",
-                "category_manifest.json not found", "pipeline",
+                "Sub-agent findings structure and Impact Summary types",
+                "FAIL",
+                "category_manifest.json not found",
+                "pipeline",
                 "Re-run orchestrator_prepare.py",
             )
         ]
@@ -642,7 +705,8 @@ def _check_impact_summary(output_dir):
             _make_row(
                 f"workflow_eval_13_{name}",
                 f"Impact Summary: {name}",
-                result, detail,
+                result,
+                detail,
                 "pipeline" if result == "FAIL" else "",
                 "Fix Impact Summary in findings file" if result == "FAIL" else "",
             )
@@ -653,7 +717,10 @@ def _check_impact_summary(output_dir):
             _make_row(
                 "workflow_eval_13",
                 "Sub-agent findings structure and Impact Summary types",
-                "PASS", "No categories in manifest", "", "",
+                "PASS",
+                "No categories in manifest",
+                "",
+                "",
             )
         ]
     return rows
@@ -670,16 +737,22 @@ def _check_model_id(output_dir):
     if not os.path.isfile(model_info_path):
         return [
             _make_row(
-                "workflow_eval_14", "Model identification in report", "FAIL",
-                "metadata/model_info.json not found", "pipeline",
+                "workflow_eval_14",
+                "Model identification in report",
+                "FAIL",
+                "metadata/model_info.json not found",
+                "pipeline",
                 "Run model identification subagent",
             )
         ]
     if not os.path.isfile(report_path):
         return [
             _make_row(
-                "workflow_eval_14", "Model identification in report", "FAIL",
-                "standalone_analysis.md not found", "pipeline",
+                "workflow_eval_14",
+                "Model identification in report",
+                "FAIL",
+                "standalone_analysis.md not found",
+                "pipeline",
                 "Re-run report generation",
             )
         ]
@@ -690,8 +763,11 @@ def _check_model_id(output_dir):
     except (json.JSONDecodeError, OSError):
         return [
             _make_row(
-                "workflow_eval_14", "Model identification in report", "FAIL",
-                "Invalid model_info.json", "pipeline",
+                "workflow_eval_14",
+                "Model identification in report",
+                "FAIL",
+                "Invalid model_info.json",
+                "pipeline",
                 "Fix model identification subagent",
             )
         ]
@@ -703,8 +779,11 @@ def _check_model_id(output_dir):
     if not appendix:
         return [
             _make_row(
-                "workflow_eval_14", "Model identification in report", "FAIL",
-                "Appendix section not found in report", "template",
+                "workflow_eval_14",
+                "Model identification in report",
+                "FAIL",
+                "Appendix section not found in report",
+                "template",
                 "Add Appendix section to report",
             )
         ]
@@ -720,7 +799,8 @@ def _check_model_id(output_dir):
                     f"Model ID: {field}",
                     "PASS",
                     f"Field not determined ('{value}') — skipped",
-                    "", "",
+                    "",
+                    "",
                 )
             )
             continue

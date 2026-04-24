@@ -15,6 +15,8 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _helpers import infer_model_info
 
 # Per-layer body mapping: offset within layer -> semantic_block.
 # Default template for MoE architecture (period=16). Use --config to infer ffn_type
@@ -54,34 +56,20 @@ PREAMBLE_LABELS = [
 
 def _infer_architecture_and_ffn_type(args, classified):
     """Infer architecture, ffn_type, and optional layer_types from config or classified."""
-    architecture = "unknown"
-    ffn_type = "moe"  # default for LAYER_BODY_MAP template
-    layer_types = None
-
+    config = None
     if args.config and os.path.exists(args.config):
         try:
             with open(args.config) as f:
-                cfg = json.load(f)
-            tc = cfg.get("text_config", cfg)
-            num_experts = tc.get("num_experts", tc.get("num_local_experts", 0))
-            ffn_type = "moe" if num_experts > 0 else "dense"
-            architecture = tc.get("model_type", cfg.get("model_type", "unknown"))
-            layer_types = tc.get("layer_types")
+                config = json.load(f)
         except (json.JSONDecodeError, KeyError):
             pass
 
-    if architecture == "unknown":
-        # Infer ffn_type from classified kernel types if no config
-        moe_types = {"MoE GEMM", "MoE Finalize", "MoE Routing", "MoE Quantize"}
-        ktypes = {
-            c.get("kernel_type", "") for c in classified.get("classified_kernels", [])
-        }
-        if any(t in ktypes for t in moe_types):
-            ffn_type = "moe"
-        else:
-            ffn_type = "dense"
-
-    return architecture, ffn_type, layer_types
+    cls_by_idx = {c["index"]: c for c in classified.get("classified_kernels", [])}
+    info = infer_model_info(cls_by_idx, num_layers=0, config=config)
+    ffn_type = info.get("ffn_type", "moe")
+    if ffn_type == "unknown":
+        ffn_type = "moe"
+    return info["architecture"], ffn_type, info.get("layer_types")
 
 
 def main():

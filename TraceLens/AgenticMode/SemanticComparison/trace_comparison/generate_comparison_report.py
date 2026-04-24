@@ -47,13 +47,11 @@ from itertools import zip_longest
 import pandas as pd
 from openpyxl.styles import PatternFill
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _helpers import load_labels
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trace_breakdown"))
 from category_mappings import get_perf_category
-
-
-def load_labels(path):
-    with open(path) as f:
-        return json.load(f)
 
 
 def _load_diff_stats(diff_dir, comparison_df):

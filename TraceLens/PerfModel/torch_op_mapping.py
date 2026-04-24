@@ -36,7 +36,19 @@ op_to_perf_model_class_map = {
     "aiter::_flash_attn_backward": perf_model.aiter__flash_attn_backward,
     "aiter::wrapper_fmha_v3_fwd": perf_model.aiter__fmha_v3_forward,
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
+    "aiter::mha_fwd": perf_model.aiter__mha_fwd,
+    "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::mha_bwd": perf_model.aiter__mha_bwd,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
+    "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
+    "EvoformerAttention": perf_model.evoformer_attention,
+    "LigerSiLUMulFunction": perf_model.liger_silu_mul_function,
+    "primus_turbo::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_impl": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo_cpp_extension::grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo::grouped_gemm_variable_k_impl": perf_model.primus_turbo_grouped_gemm_variable_k,
+    "primus_turbo_cpp_extension::grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
     # TEv2 pseudo ops
     "_Linear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
@@ -44,6 +56,20 @@ op_to_perf_model_class_map = {
     "_LayerNormLinear_yfwd_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_xgrad_mm": perf_model.tev2_pseudo_gemm,
     "_LayerNormLinearBackward_wgrad_mm": perf_model.tev2_pseudo_gemm,
+    # CK grouped GEMM (same layout as primus_turbo grouped GEMM)
+    "primus_turbo_cpp_extension::ck_grouped_gemm": perf_model.primus_turbo_grouped_gemm,
+    "primus_turbo_cpp_extension::ck_grouped_gemm_variable_k": perf_model.primus_turbo_grouped_gemm_variable_k,
+    # MoE dispatch/combine (communication — bytes only, flops = 0)
+    "MoEDispatch": perf_model.moe_dispatch,
+    "MoECombine": perf_model.moe_combine,
+    # Causal Conv1D (SSM / Mamba depthwise conv)
+    "DaoAILab::_causal_conv1d_fwd_cpp": perf_model.causal_conv1d_fwd,
+    # RoPE (elementwise rotation)
+    "FusedRoPEFunc": perf_model.fused_rope_fwd,
+    # CrossEntropy (fused softmax + nll loss)
+    "CrossEntropyFunction": perf_model.cross_entropy_fwd,
+    # Mamba SSD (fused conv1d + selective scan, issue #552)
+    "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
 }
 
 # Add pseudo-op extension mappings
@@ -121,6 +147,7 @@ norm_ops = {
 }
 
 
+# Single-GPU reduce operations (sum, mean, max, min, norm over dimensions)
 reduce_ops = [
     "aten::sum",
     "aten::mean",
@@ -148,12 +175,18 @@ for op in reduce_ops:
 
 dict_base_class2category = {
     perf_model.GEMM: "GEMM",
+    perf_model.GroupedGemm: "GEMM",
     perf_model.CONV: "CONV",
     perf_model.SDPA: "SDPA",
     perf_model.UnaryElementwise: "UnaryElementwise",
     perf_model.BinaryElementwise: "BinaryElementwise",
     perf_model.Normalization: "Normalization",
     perf_model.Reduce: "Reduce",
+    perf_model.MoEComm: "MoE_comm",
+    perf_model.CausalConv1d: "SSM",
+    perf_model.FusedRoPE: "RoPE",
+    perf_model.CrossEntropy: "CrossEntropy",
+    perf_model.MambaSSD: "SSM",
 }
 
 # Add pseudo-op extension categories
@@ -176,12 +209,23 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
 
 def categorize_torch_op(row):
     """
-    Categorizes a row based on the 'name' and 'kernel_names' fields.
+    Categorizes a row based on the 'name' and 'kernel_details' fields.
+
     Args:
-        row (dict): A dictionary representing a row with 'name' and 'kernel_names' keys.
+        row (dict): A dictionary with at minimum a 'name' key. May also contain
+            a 'kernel_details' key — a list of dicts each having a 'name' field
+            that holds the underlying GPU kernel name.
+
     Returns:
-        str: The category of the row, which can be one of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'triton', 'GroupQuant', 'elementwise', 'reduce', 'multi_tensor_apply', or 'other'.
+        str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
+             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused',
+             'SSM_fwd', 'SSM_bwd', 'MoE_comm_fwd', 'MoE_comm_bwd',
+             'RoPE_fwd', 'RoPE_bwd', 'CrossEntropy_fwd', 'CrossEntropy_bwd',
+             'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
+             'record_param_comms', or 'other'.
+
+        Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
+        are categorization-only (timing without GFLOPS or TB/s).
     """
 
     debug = False
@@ -201,14 +245,17 @@ def categorize_torch_op(row):
         "ConvBiasReLU_Backward",
     ]:
         return "CONV_bwd"
-    elif row["name"] in norm_ops.keys():
-        if row["name"].endswith("_backward"):
+    elif row["name"] in norm_ops.keys() or row["name"] in dict_cat2names.get(
+        "Normalization", []
+    ):
+        if row["name"].endswith("_backward") or row["name"].endswith("Backward"):
             return "NORM_bwd"
         else:
             return "NORM_fwd"
     # SDPA ops: distinguish forward and backward
     sdpa_bwd_names = [
         "FlashAttnFuncBackward",
+        "FusedAttnFuncBackward",
         "flash_attn::_flash_attn_backward",
         "flash_attn::_flash_attn_varlen_backward",
         "aten::_scaled_dot_product_cudnn_attention_backward",
@@ -216,12 +263,50 @@ def categorize_torch_op(row):
         "aten::_scaled_dot_product_flash_attention_backward",
         "aiter::_flash_attn_backward",
         "aiter::wrapper_fmha_v3_bwd",
+        "aiter::mha_bwd",
     ]
     if row["name"] in dict_cat2names["SDPA"]:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
+    elif row["name"] in dict_cat2names.get("MoE_fused", []):
+        return "MoE_fused"
+    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
+        return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
+        "MambaSplitConv1dScanCombinedFn",
+    ]:
+        return "SSM_fwd"
+    elif row["name"] in [
+        "MambaSplitConv1dScanCombinedFnBackward",
+        "DaoAILab::_causal_conv1d_bwd_cpp",
+    ]:
+        return "SSM_bwd"
+    elif row["name"] in dict_cat2names.get("MoE_comm", []) or row["name"] in [
+        "TokenPermuteMaskMap",
+        "_OperationFuserAutogradFunction",
+    ]:
+        return "MoE_comm_fwd"
+    elif row["name"] in [
+        "MoEDispatchBackward",
+        "MoECombineBackward",
+        "TokenPermuteMaskMapBackward",
+        "_OperationFuserAutogradFunctionBackward",
+    ]:
+        return "MoE_comm_bwd"
+    elif row["name"] in dict_cat2names.get("RoPE", []):
+        return "RoPE_fwd"
+    elif row["name"] in ["FusedRoPEFuncBackward"]:
+        return "RoPE_bwd"
+    elif row["name"] in dict_cat2names.get("CrossEntropy", []):
+        return "CrossEntropy_fwd"
+    elif row["name"] in ["CrossEntropyFunctionBackward"]:
+        return "CrossEntropy_bwd"
+    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
+        return "elementwise"
+    elif row["name"] in dict_cat2names.get("Reduce", []):
+        return "reduce"
     elif row["name"].startswith("triton"):
         return "triton"
     elif row["name"] in [

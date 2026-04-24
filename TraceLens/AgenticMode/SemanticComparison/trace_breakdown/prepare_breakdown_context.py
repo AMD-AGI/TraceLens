@@ -20,12 +20,17 @@ Usage:
         --pattern <dir>/pattern.json \
         -o <dir>/breakdown_context.json
 """
+
 import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import OrderedDict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _helpers import build_rle, detect_period
 
 _comparison_dir = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "trace_comparison"
@@ -33,48 +38,6 @@ _comparison_dir = os.path.join(
 sys.path.insert(0, _comparison_dir)
 
 from functional_label_catalog import FUNCTIONAL_LABEL_CATALOG
-
-
-def _build_rle(kernel_indices, cls_by_idx):
-    """Run-length encode kernel indices by perf_category.
-
-    Returns list of (perf_category, [kernel_indices]).
-    """
-    if not kernel_indices:
-        return []
-
-    groups = []
-    cur_cat = cls_by_idx.get(kernel_indices[0], {}).get("perf_category", "Others")
-    cur_indices = [kernel_indices[0]]
-
-    for idx in kernel_indices[1:]:
-        cat = cls_by_idx.get(idx, {}).get("perf_category", "Others")
-        if cat == cur_cat:
-            cur_indices.append(idx)
-        else:
-            groups.append((cur_cat, cur_indices[:]))
-            cur_cat = cat
-            cur_indices = [idx]
-
-    groups.append((cur_cat, cur_indices[:]))
-    return groups
-
-
-def _detect_period(rle_groups):
-    """Find the shortest repeating period in RLE groups (by perf_category)."""
-    cats = [g[0] for g in rle_groups]
-    n = len(cats)
-    if n < 6:
-        return n
-
-    for p in range(3, n // 2 + 1):
-        prefix = cats[:p]
-        matches = sum(1 for i in range(p, n) if cats[i] == prefix[i % p])
-        total = n - p
-        if total > 0 and matches / total > 0.85 and total >= 2 * p:
-            return p
-
-    return n
 
 
 def _kernel_summary(idx, kernels, cls_by_idx, tree_ctx_by_idx):
@@ -127,6 +90,8 @@ def _block_summary(
         if name not in seen:
             unique_names.append(name)
             seen.add(name)
+            if len(unique_names) >= 5:
+                break
     block["unique_kernel_names"] = unique_names
 
     cpu_ops = set()
@@ -144,11 +109,6 @@ def _block_summary(
         block["cpu_ops"] = sorted(cpu_ops)
     if nn_modules:
         block["nn_module_stacks"] = sorted(nn_modules)
-
-    tree_count = sum(
-        1 for i in kernel_indices if tree_ctx_by_idx.get(i, {}).get("cpu_op_name", "")
-    )
-    block["tree_context_count"] = tree_count
 
     return block
 
@@ -178,6 +138,57 @@ def _compute_fingerprint(layer_cycle, preamble_kernels, epilogue_kernels):
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+_MOE_RE = re.compile(r"moe|expert|topk|top_k", re.IGNORECASE)
+_QUANT_RE = re.compile(r"quant|dequant|fp8|int8|mxfp", re.IGNORECASE)
+_COMM_RE = re.compile(r"allreduce|allgather|reduce_scatter|nccl|rccl", re.IGNORECASE)
+_GRAPH_RE = re.compile(r"graph.?launch|hipGraphLaunch|cudaGraphLaunch", re.IGNORECASE)
+
+
+def _filter_label_catalog(catalog, layer_cycle, preamble_kernels, epilogue_kernels):
+    """Return a copy of the catalog containing only relevant nn_module families."""
+    all_cats = set()
+    all_names = set()
+    for block in layer_cycle:
+        all_cats.add(block.get("perf_category", ""))
+        for n in block.get("unique_kernel_names", []):
+            all_names.add(n)
+    for k in preamble_kernels + epilogue_kernels:
+        all_cats.add(k.get("perf_category", ""))
+        all_names.add(k.get("name", ""))
+
+    name_blob = " ".join(all_names)
+    has_moe = any("MoE" in c or "moe" in c.lower() for c in all_cats) or bool(
+        _MOE_RE.search(name_blob)
+    )
+    has_gemm = any("GEMM" in c for c in all_cats)
+    has_quant = any("Quant" in c for c in all_cats) or bool(_QUANT_RE.search(name_blob))
+    has_comm = bool(_COMM_RE.search(name_blob))
+    has_graph = bool(_GRAPH_RE.search(name_blob))
+
+    keep = {"Self-Attention", "Normalization", "Embedding", "Output Head"}
+    if has_moe:
+        keep.add("MoE FFN")
+    if has_gemm and not has_moe:
+        keep.add("Dense FFN")
+    if has_gemm and has_moe:
+        keep.add("Dense FFN")
+        keep.add("MoE FFN")
+    if has_quant:
+        keep.add("Quantization / Dequantization")
+    if has_comm:
+        keep.add("Communication")
+    if has_graph:
+        keep.add("Graph Launch Overhead")
+    if "Residual / Skip Connection" in catalog.get("nn_modules", []):
+        keep.add("Residual / Skip Connection")
+
+    filtered = {
+        "nn_modules": [m for m in catalog.get("nn_modules", []) if m in keep],
+        "cpu_ops": {k: v for k, v in catalog.get("cpu_ops", {}).items() if k in keep},
+    }
+    return filtered
+
+
 def build_breakdown_context(extracted, tree_context, classified, pattern):
     """Build the full breakdown context for LLM labeling."""
     kernels = extracted["kernels"]
@@ -195,12 +206,12 @@ def build_breakdown_context(extracted, tree_context, classified, pattern):
         if i not in preamble_set and i not in epilogue_set and i not in secondary_set
     ]
 
-    body_rle = _build_rle(body_indices, cls_by_idx)
-    period = _detect_period(body_rle)
+    body_rle = build_rle(body_indices, cls_by_idx)
+    period = detect_period(body_rle)
     num_layers = len(body_rle) // period if period > 0 else 0
 
     layer_cycle = []
-    for g_idx, (cat, indices) in enumerate(body_rle[:period]):
+    for g_idx, (cat, _count, indices, _types) in enumerate(body_rle[:period]):
         layer_cycle.append(
             _block_summary(g_idx, cat, indices, kernels, cls_by_idx, tree_ctx_by_idx)
         )
@@ -230,6 +241,7 @@ def build_breakdown_context(extracted, tree_context, classified, pattern):
         "graph_mode": is_graph_mode,
         "graph_launch_count": extracted["metadata"].get("graph_launch_count", 0),
         "has_python_stack": extracted["metadata"].get("has_python_stack", False),
+        "capture_augmented": tree_context.get("capture_augmented", False),
     }
     context["trace_info"] = {
         "total_kernels": total_kernels,
@@ -255,7 +267,9 @@ def build_breakdown_context(extracted, tree_context, classified, pattern):
     context["fingerprint"] = _compute_fingerprint(
         layer_cycle, preamble_kernels, epilogue_kernels
     )
-    context["label_catalog"] = FUNCTIONAL_LABEL_CATALOG
+    context["label_catalog"] = _filter_label_catalog(
+        FUNCTIONAL_LABEL_CATALOG, layer_cycle, preamble_kernels, epilogue_kernels
+    )
 
     return context
 

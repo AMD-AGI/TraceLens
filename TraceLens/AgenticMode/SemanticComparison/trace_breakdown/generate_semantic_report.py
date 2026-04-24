@@ -166,7 +166,7 @@ def build_category_breakdown(labels_data, shapes_data):
     return pd.DataFrame(rows)
 
 
-def build_semantic_group_summary(labels_data, shapes_data, gpu_arch):
+def build_semantic_group_summary(labels_data, shapes_data):
     """Sheet 2: semantic_group_summary."""
     groups = OrderedDict()
     for k in labels_data["labeled_kernels"]:
@@ -498,7 +498,7 @@ def main():
         labels_data, shapes_data
     )
     dict_name2df["semantic_group_summary"] = build_semantic_group_summary(
-        labels_data, shapes_data, gpu_arch
+        labels_data, shapes_data
     )
     dict_name2df["unified_perf_summary"] = build_unified_perf_summary(
         labels_data, shapes_data, gpu_arch

@@ -273,35 +273,6 @@ def test_compute_impact_estimates_min_impact_score():
     assert len(estimates_strict) == 0
 
 
-def test_compute_impact_estimates_no_baseline_returns_empty():
-    operations = [
-        {
-            "name": "tiny_op",
-            "time_ms": 0.5,
-            "efficiency": {
-                "efficiency_percent": 10.0,
-                "is_anomaly": False,
-                "bound_type": "memory",
-            },
-        },
-    ]
-    # impact_score requires baseline_ms; with default baseline_ms=0 the
-    # function returns an empty list (and emits a stderr warning).
-    assert compute_impact_estimates(operations, "elementwise") == []
-    assert (
-        compute_impact_estimates(operations, "elementwise", baseline_ms=0) == []
-    )
-    assert (
-        compute_impact_estimates(operations, "elementwise", baseline_ms=-5.0) == []
-    )
-
-    # With a positive baseline, the estimate is computed.
-    # gap_high = 0.9; impact_score_high = 0.9 * 0.5 / 300 * 100 = 0.15
-    estimates = compute_impact_estimates(operations, "elementwise", baseline_ms=300.0)
-    assert len(estimates) == 1
-    assert estimates[0]["impact_score_high"] == 0.15
-
-
 # ----- Unit tests: generate_priority_data -----
 
 

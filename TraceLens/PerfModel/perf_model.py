@@ -26,13 +26,16 @@ class GEMM:
     """
 
     cache_gemm_results = {}  # This is used to cache gemm results
+    _origami_import_error_printed = False
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
+        self.enable_origami = enable_origami
+        kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
         elif "kernel_details" in event and len(event["kernel_details"]) > 0:
@@ -43,7 +46,7 @@ class GEMM:
             if self.parsed_kernel_info is not None:
                 break
         self.param_details = self.get_param_details(event)
-        if not hasattr(self.param_details, "B"):
+        if "B" not in self.param_details:
             self.param_details["B"] = 1
 
         if self.parsed_kernel_info is not None:
@@ -62,7 +65,14 @@ class GEMM:
             if dtype is None:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
             self.simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
-                arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+                arch,
+                self.M,
+                self.N,
+                self.K,
+                self.B,
+                dtype,
+                self.python_path,
+                enable_origami=enable_origami,
             )
 
     @staticmethod
@@ -140,7 +150,16 @@ class GEMM:
 
     @staticmethod
     def get_simulation_time_func(
-        arch, M, N, K, B, dtype, python_path=None, force_to_l1=False, num_cus=None
+        arch,
+        M,
+        N,
+        K,
+        B,
+        dtype,
+        python_path=None,
+        force_to_l1=False,
+        num_cus=None,
+        enable_origami=False,
     ):
         if "GEMM_SIMULATOR_PATH" in os.environ:
             if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
@@ -233,6 +252,8 @@ class GEMM:
             else:
                 raise AssertionError("Failed to simulate ", cmd, stdout, stderr)
         else:
+            if not enable_origami:
+                return None, None
             # try to use Origami for estimating performance
             try:
                 # assumes this PR has completed
@@ -278,8 +299,16 @@ class GEMM:
                     f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
                 )
 
-            except ImportError:
-                # Todo: Naive simulation
+            except ImportError as e:
+                if not GEMM._origami_import_error_printed:
+                    print(
+                        "TraceLens: enable_origami is set but the 'origami' package "
+                        f"could not be imported: {e}. Install rocm-origami (or ensure "
+                        "the Origami Python bindings are on PYTHONPATH), or disable "
+                        "Origami simulation.",
+                        file=sys.stderr,
+                    )
+                    GEMM._origami_import_error_printed = True
                 return None, None
 
     def get_simulation_time(self):
@@ -289,7 +318,14 @@ class GEMM:
             if dtype is None:
                 dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
             simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
-                self.arch, self.M, self.N, self.K, self.B, dtype, self.python_path
+                self.arch,
+                self.M,
+                self.N,
+                self.K,
+                self.B,
+                dtype,
+                self.python_path,
+                enable_origami=self.enable_origami,
             )
         return simulation_time
 
@@ -685,8 +721,8 @@ class tex_ts_te_gemm_ts(GEMM):
 
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
 
     def get_param_details(self, event):
         input_dims = event["args"]["Input Dims"]
@@ -820,7 +856,7 @@ class tev2_pseudo_gemm(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = (
@@ -1208,6 +1244,15 @@ class aten_conv_bwd(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
+    def bytes_bwd(self):
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            raise ValueError(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
 
 class ConvBias_(CONV):
     """
@@ -1218,9 +1263,9 @@ class ConvBias_(CONV):
     # Cache to store forward pass parameters for backward pass lookup
     fwd_pass_cache = {}
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         # Call parent init first
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch, python_path, **kwargs)
 
         # Cache forward pass parameters for backward pass using sequence number
         seq_num = event["args"].get("Sequence number")
@@ -1405,6 +1450,19 @@ class ConvBias_Backward(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
+    def bytes_bwd(self):
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
 
 class ConvBiasReLU_(CONV):
     """
@@ -1415,9 +1473,9 @@ class ConvBiasReLU_(CONV):
     # Cache to store forward pass parameters for backward pass lookup
     fwd_pass_cache = {}
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         # Call parent init first
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch, python_path, **kwargs)
 
         # Cache forward pass parameters for backward pass using sequence number
         seq_num = event["args"].get("Sequence number")
@@ -1598,6 +1656,19 @@ class ConvBiasReLU_Backward(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
+    def bytes_bwd(self):
+        if self.param_details["input_shape"] is None:
+            return None
+        dtype_input_weight = self.param_details["dtype_input_weight"]
+        if dtype_input_weight[0] is None or dtype_input_weight[1] is None:
+            return None
+        if dtype_input_weight[0] != dtype_input_weight[1]:
+            warnings.warn(
+                f"Data types of input and weight are different: {dtype_input_weight}"
+            )
+        bpe = name2bpe(dtype_input_weight[0])
+        return super().bytes_bwd(bpe)
+
 
 # 3. Softmax
 class Softmax:
@@ -1670,7 +1741,7 @@ class Softmax:
 # 4. Scaled Dot Product Attention
 class SDPA:
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         # S = QK^T
         # P = softmax(S)
         # O = PV
@@ -1678,10 +1749,13 @@ class SDPA:
         self.param_details = self.get_param_details(event)
         self.arch = arch
         self.python_path = python_path
+        self.enable_origami = enable_origami
         self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h_qk, self.d_h_v = (
             self.param_details[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
+        # Head dimension alias for roofline / simulation helpers (see get_simulation_time).
+        self.d_h = self.d_h_qk
 
     def get_param_details(event):
         # to be implemented in the child class
@@ -1839,7 +1913,18 @@ class SDPA:
 
     @staticmethod
     def get_simulation_time_func(
-        arch, dtype, python_path, dtype_A_B, bytes, B, H_Q, N_Q, N_KV, d_h, fa=True
+        arch,
+        dtype,
+        python_path,
+        dtype_A_B,
+        bytes,
+        B,
+        H_Q,
+        N_Q,
+        N_KV,
+        d_h,
+        fa=True,
+        enable_origami=False,
     ):
         force_to_l1 = False
         block_N_Q = N_Q
@@ -1867,7 +1952,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if qkt_time is None:
+            return None
         qkt_time = num_waves * qkt_time
 
         softmax_time = num_waves * Softmax.get_time(
@@ -1889,7 +1977,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if pv_time is None:
+            return None
         pv_time = num_waves * pv_time
 
         mem_time = (
@@ -1906,29 +1997,45 @@ class SDPA:
     def get_simulation_time(self):
         simulated_time = None
         if self.arch is not None:
-            dtype = self.param_details.get("simulation_dtype")
-            if dtype is None:
-                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-            bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = True if type(self).__name__ == "flash_attention" else False
-            simulated_time = SDPA.get_simulation_time_func(
-                self.arch,
-                dtype,
-                self.python_path,
-                self.param_details["dtype_A_B"][0],
-                bytes,
-                self.B,
-                self.H_Q,
-                self.N_Q,
-                self.N_KV,
-                self.d_h,
-                fa,
-            )
+            try:
+                dtype = self.param_details.get("simulation_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+                bytes = self.bytes(name2bpe(self.param_details["dtype_A_B"][0]))
+                fa = True if type(self).__name__ == "flash_attention" else False
+                simulated_time = SDPA.get_simulation_time_func(
+                    self.arch,
+                    dtype,
+                    self.python_path,
+                    self.param_details["dtype_A_B"][0],
+                    bytes,
+                    self.B,
+                    self.H_Q,
+                    self.N_Q,
+                    self.N_KV,
+                    self.d_h,
+                    fa,
+                    enable_origami=self.enable_origami,
+                )
+            except Exception:
+                # Origami/GEMM may not support all dtypes on a given arch JSON; omit simulated time.
+                simulated_time = None
         return simulated_time
 
     @staticmethod
     def get_simulation_time_bwd_func(
-        arch, dtype, python_path, dtype_A_B, bytes, B, H_Q, N_Q, N_KV, d_h, fa=True
+        arch,
+        dtype,
+        python_path,
+        dtype_A_B,
+        bytes,
+        B,
+        H_Q,
+        N_Q,
+        N_KV,
+        d_h,
+        fa=True,
+        enable_origami=False,
     ):
         force_to_l1 = False
         block_N_Q = N_Q
@@ -1959,7 +2066,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if qkt_fwd_time is None:
+            return None
 
         qkt_fwd_time = num_waves * qkt_fwd_time
 
@@ -1974,7 +2084,10 @@ class SDPA:
             python_path=python_path,
             force_to_l1=force_to_l1,
             num_cus=1,
+            enable_origami=enable_origami,
         )
+        if pv_fwd_time is None:
+            return None
         pv_fwd_time = num_waves * pv_fwd_time
 
         if fa:
@@ -2063,25 +2176,32 @@ class SDPA:
     def get_simulation_time_bwd(self):
         simulated_time = None
         if self.arch is not None:
-            dtype = self.param_details.get("simulation_dtype")
-            if dtype is None:
-                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
+            try:
+                dtype = self.param_details.get("simulation_dtype")
+                if dtype is None:
+                    dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
 
-            bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
-            fa = type(self).__name__ in ("flash_attention", "flash_attention_backward")
-            simulated_time = SDPA.get_simulation_time_bwd_func(
-                self.arch,
-                dtype,
-                self.python_path,
-                self.param_details["dtype_A_B"][0],
-                bytes,
-                self.B,
-                self.H_Q,
-                self.N_Q,
-                self.N_KV,
-                self.d_h,
-                fa,
-            )
+                bytes = self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
+                fa = type(self).__name__ in (
+                    "flash_attention",
+                    "flash_attention_backward",
+                )
+                simulated_time = SDPA.get_simulation_time_bwd_func(
+                    self.arch,
+                    dtype,
+                    self.python_path,
+                    self.param_details["dtype_A_B"][0],
+                    bytes,
+                    self.B,
+                    self.H_Q,
+                    self.N_Q,
+                    self.N_KV,
+                    self.d_h,
+                    fa,
+                    enable_origami=self.enable_origami,
+                )
+            except Exception:
+                simulated_time = None
         return simulated_time
 
 
@@ -2182,8 +2302,8 @@ class flash_attention(SDPA):
 class flash_attention_backward(SDPA):
     """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.d_h = (
             self.d_h_qk
         )  # head dimension for simulation (used by get_simulation_time_bwd_func)
@@ -2242,8 +2362,8 @@ class flash_attention_backward(SDPA):
 
 
 class flash_attention_varlen_forward(SDPA):
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -2345,8 +2465,8 @@ class flash_attention_varlen_forward(SDPA):
 
 
 class flash_attention_varlen_backward(SDPA):
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -2489,6 +2609,8 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             else False
         )
 
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2500,6 +2622,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": False,
+            "dtype_A_B": dtype_A_B,
         }
 
 
@@ -2541,6 +2664,8 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
         )
         # scale = float(concrete_inputs[7]) if concrete_inputs[7] not in ('', 'None') else None
 
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2552,6 +2677,7 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": False,
+            "dtype_A_B": dtype_A_B,
         }
 
 
@@ -2590,6 +2716,8 @@ class aten__scaled_dot_product_flash_attention(SDPA):
         )
         # scale = float(concrete_inputs[5]) if concrete_inputs[5] not in ('', 'None') else None
 
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
         return {
             "B": B,
             "N_Q": N_Q,
@@ -2601,6 +2729,7 @@ class aten__scaled_dot_product_flash_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
         }
 
 
@@ -2832,9 +2961,243 @@ class aiter__fmha_v3_backward(SDPA):
         return self.bytes_bwd(bytes_per_element)
 
 
+def _parse_aiter_mha_fwd_args(event):
+    """Shared parser for aiter::mha_fwd and aiter::fmha_v3_fwd.
+
+    Both ops share the same argument layout:
+      q[0], k[1], v[2] — raw shape (B, N, H, d_h) in bnhd order;
+      bhnd_idx=(0,2,1,3) extracts B, H, N, d_h from the bnhd tuple.
+      dropout_p[3], softmax_scale[4], is_causal[5].
+    """
+    input_dims = event["args"]["Input Dims"]
+    concrete_inputs = event["args"]["Concrete Inputs"]
+    q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[2]
+    bhnd_idx = 0, 2, 1, 3
+    sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+    B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+        sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+    )
+    dropout_p = 0.0
+    if concrete_inputs[3] not in ("", "None"):
+        try:
+            dropout_p = float(concrete_inputs[3])
+        except (ValueError, TypeError):
+            pass
+    is_causal = (
+        concrete_inputs[5].lower() == "true"
+        if concrete_inputs[5] not in ("", "None")
+        else False
+    )
+    return {
+        "B": B,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_KV,
+        "H_KV": H_KV,
+        "d_h_qk": d_h_qk,
+        "d_h_v": d_h_v,
+        "dropout": dropout_p,
+        "causal": is_causal,
+        "flash_impl": True,
+    }
+
+
+class aiter__mha_fwd(SDPA):
+    # aiter::mha_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Raw tensor shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_mha_fwd_args(event)
+
+
+class aiter__fmha_v3_fwd(SDPA):
+    # aiter::fmha_v3_fwd(q, k, v, dropout_p, softmax_scale, is_causal, ...)
+    # Same argument layout as aiter::mha_fwd — raw shape (B, N, H, d_h) in bnhd order.
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_mha_fwd_args(event)
+
+
+class aiter__mha_bwd(SDPA):
+    # aiter::mha_bwd(dout, q, k, v, out, softmax_lse, dropout_p, softmax_scale, is_causal, ...)
+    # q[1], k[2], v[3] — raw shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[1], input_dims[2], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if concrete_inputs[6] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[6])
+            except (ValueError, TypeError):
+                pass
+        is_causal = (
+            concrete_inputs[8].lower() == "true"
+            if concrete_inputs[8] not in ("", "None")
+            else False
+        )
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
+class vllm_unified_attention_with_output(SDPA):
+
+    @staticmethod
+    def get_param_details(event):
+        annotation = str(event.get("annotation"))
+        if annotation == "NA":
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
+        requests = annotation.replace("(", "_").replace(")", "_").split("_")
+        if len(requests) < 8:
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
+        input_dims = event["args"]["Input Dims"]
+
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[3]
+        bhnd_idx = 0, 2, 1, 3
+        B = 1
+        N_Q, H_Q, d_h_qk = q_shape
+        N_KV, H_KV, d_h_v = k_shape
+        dropout_p = 0.0
+        is_causal = False
+
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+            "sum_ctx_tokens": int(requests[3]),
+            "sum_ctx_squared_tokens": int(requests[4]),
+            "sum_gen_tokens": int(requests[8]),
+        }
+
+    def flops(self):
+        # prefill part
+        if self.param_details["sum_ctx_tokens"] == 0:
+            raise NotImplementedError(
+                "Roofline for pure generation phase is not defined"
+            )
+        ctx_flops_qk = self.H_Q * (
+            2 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_qk
+        )
+        ctx_flops_pv = self.H_Q * (
+            2 * self.param_details["sum_ctx_squared_tokens"] * self.d_h_v
+        )
+        # Generation tokens
+        ## ToDo: Add seqlen for KV
+        gen_flops_qk = self.H_Q * (
+            2 * self.param_details["sum_gen_tokens"] * self.d_h_qk
+        )
+        gen_flops_pv = self.H_Q * (
+            2 * self.param_details["sum_gen_tokens"] * self.d_h_v
+        )
+
+        return ctx_flops_qk + ctx_flops_pv + gen_flops_qk + gen_flops_pv
+
+    def bytes_func_vllm(
+        self, B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
+    ):
+        ## Prefill
+        elems_q_read = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_qk
+        elems_k_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_qk
+        elems_v_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_v
+        elems_out_write = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_v
+        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        # Decode - this will not be used as needs additional information from vLLM engine
+
+        # elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
+        # elems_k_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_qk
+        # elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
+        # elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
+        # total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        return total_elems_moved * bytes_per_element
+
+    # TODO make bytes_per_element based on profile info
+    def bytes(self, bytes_per_element=2):
+
+        return self.bytes_func_vllm(
+            self.B,
+            self.N_Q,
+            self.H_Q,
+            self.N_KV,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+            bytes_per_element,
+        )
+
+
+class evoformer_attention(SDPA):
+    # EvoformerAttention(Q, K, V, res_mask, pair_bias)
+    # Q, K, V: [Batch, N_seq, N_res, Head, Dim] — N_seq is an MSA/template depth
+    # dimension that is folded into the effective batch.  Attention is computed
+    # over N_res for every (Batch, N_seq) slice; always non-causal.
+    # res_mask  [Batch, N_seq, 1, 1, N_res] and
+    # pair_bias [Batch, 1,     Head, N_res, N_res] are extra reads not counted
+    # in the standard SDPA bytes formula.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"].get("Input type", [])
+        # Q is input 0: [Batch, N_seq, N_res, Head, Dim]
+        q_shape = input_dims[0]
+        B, N_seq, N_res, Head, Dim = q_shape
+        dtype = input_types[0] if input_types else None
+        return {
+            "B": B * N_seq,
+            "N_Q": N_res,
+            "H_Q": Head,
+            "N_KV": N_res,
+            "H_KV": Head,
+            "d_h_qk": Dim,
+            "d_h_v": Dim,
+            "causal": False,
+            "flash_impl": False,
+            "dtype_A_B": [dtype],
+        }
+
+
 class UnaryElementwise:
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -2900,7 +3263,7 @@ class aten_unary_elementwise(UnaryElementwise):
 
 class BinaryElementwise:
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -3008,13 +3371,39 @@ class aten_binary_elementwise(BinaryElementwise):
         }
 
 
+class liger_silu_mul_function(BinaryElementwise):
+    # LigerSiLUMulFunction(a, b)  — from linkedin/Liger-Kernel (swiglu.py)
+    # Fused Triton kernel: output = SiLU(a) * b
+    # a, b: same shape; output has the same shape and dtype.
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+        input_strides = event["args"]["Input Strides"]
+        a_shape = tuple(input_dims[0])
+        b_shape = tuple(input_dims[1])
+        dtype_a = input_types[0]
+        dtype_b = input_types[1]
+        stride_a = tuple(input_strides[0])
+        stride_b = tuple(input_strides[1])
+        return {
+            "shape_in1": a_shape,
+            "shape_in2": b_shape,
+            "dtype_in1_in2_out": (dtype_a, dtype_b, None),
+            "stride_input1": stride_a,
+            "stride_input2": stride_b,
+            "stride_output": None,
+        }
+
+
 class Reduce:
     """
     Base class for single-GPU reduce operations (sum, mean, max, min, norm, etc.).
     Models reduction over one or more dimensions of a tensor.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.python_path = python_path
@@ -3023,6 +3412,7 @@ class Reduce:
         self.num_output_elems = self.param_details["num_output_elems"]
         self.dtype_in_out = self.param_details["dtype_in_out"]
 
+        # Safely convert dtypes to bytes-per-element, allowing unknown/missing dtypes.
         dtype_in = self.dtype_in_out[0] if self.dtype_in_out else None
         if isinstance(dtype_in, str) and dtype_in:
             self.bpe_in = name2bpe(dtype_in)
@@ -3036,10 +3426,15 @@ class Reduce:
             else:
                 self.bpe_out = None
         else:
+            # If output dtype is unknown, default to input BPE (may be None).
             self.bpe_out = self.bpe_in
 
     @staticmethod
     def flops_func(num_input_elems, num_output_elems, reduce_type="sum"):
+        # Each input element is read and combined: ~1 op per input element.
+        # Sum/mean: N-1 adds (and 1 div for mean) over reduced dimension(s).
+        # Max/min: N-1 comparisons. Norm: N muls + N-1 adds + 1 sqrt.
+        # Use num_input_elems as the dominant term for roofline modeling.
         return num_input_elems
 
     def flops(self):
@@ -3074,6 +3469,8 @@ class Reduce:
 
     @staticmethod
     def flops_bwd_func(num_input_elems, num_output_elems, reduce_type="sum"):
+        # Backward: grad_output is broadcast/copied to grad_input (sum/mean),
+        # or scattered for max/min. Dominant work is writing grad_input.
         return num_input_elems
 
     def flops_bwd(self):
@@ -3085,6 +3482,7 @@ class Reduce:
 
     @staticmethod
     def bytes_bwd_func(num_input_elems, num_output_elems, bpe_in, bpe_out):
+        # Read grad_output, write grad_input (broadcast or scatter).
         if None in {bpe_in, bpe_out}:
             return None
         return num_output_elems * bpe_out + num_input_elems * bpe_in
@@ -3251,7 +3649,7 @@ class GroupedGemm:
             - Total bytes: (2*M*N) * bpe_out + (2*M*K) * bpe_in + (2*G*K*N) * bpe_in
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.arch = arch
@@ -3292,6 +3690,247 @@ class GroupedGemm:
     def bytes_bwd(self):
         return self.bytes_bwd_func(
             self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
+        )
+
+
+def _collect_2d_shapes(obj):
+    """Recursively extract all (rows, cols) int pairs from nested lists/tuples."""
+    shapes = []
+    if isinstance(obj, (list, tuple)):
+        if len(obj) == 2 and all(isinstance(v, int) and v > 0 for v in obj):
+            shapes.append((obj[0], obj[1]))
+        else:
+            for item in obj:
+                shapes.extend(_collect_2d_shapes(item))
+    return shapes
+
+
+class primus_turbo_grouped_gemm(GroupedGemm):
+    """
+    Primus Turbo fixed-K grouped GEMM: X(M,K) @ W(G,K,N) -> Y(M,N).
+
+    All groups share the same K and N, matching GroupedGemm's canonical layout.
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [G,K,N]] or [[M,K], [G,N,K]]
+      - Zipped:         [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]]
+
+    Inherits flops(), bytes(), flops_bwd(), bytes_bwd() from GroupedGemm.
+
+    Mapped op names:
+      primus_turbo::grouped_gemm
+      primus_turbo::grouped_gemm_impl
+      primus_turbo_cpp_extension::grouped_gemm
+    """
+
+    @staticmethod
+    def _extract_impl_dims(input_dims):
+        """
+        Parse compact _impl trace format: [[M,K], [G,K,N]] or [[M,K], [G,N,K]].
+        Returns (M, K, N, G), or None if the format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) >= 2
+            and len(b_shape) == 3
+            and all(isinstance(v, int) and v > 0 for v in a_shape[:2])
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        G = int(b_shape[0])
+        # Some traces store grouped W as [G,K,N]; others use [G,N,K].
+        if b_shape[1] == K:
+            N = int(b_shape[2])
+        elif b_shape[2] == K:
+            N = int(b_shape[1])
+        else:
+            return None
+        return M, K, N, G
+
+    @staticmethod
+    def _extract_zipped_dims(input_dims):
+        """
+        Parse zipped trace format: [[(M_1,K),(M_2,K),...], [(K,N),(K,N),...]].
+        Requires uniform K and N across all groups.
+        Returns (M_total, K, N, G), or None if the format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        K = lhs[0][1]
+        N = rhs[0][1]
+        if not all(a[1] == K and b[0] == K and b[1] == N for a, b in zip(lhs, rhs)):
+            return None
+        M_total = sum(a[0] for a in lhs)
+        G = len(lhs)
+        return M_total, K, N, G
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        dims = primus_turbo_grouped_gemm._extract_impl_dims(input_dims)
+        if dims is None:
+            dims = primus_turbo_grouped_gemm._extract_zipped_dims(input_dims)
+        if dims is None:
+            raise ValueError(
+                f"primus_turbo::grouped_gemm could not parse Input Dims: {input_dims}"
+            )
+        M, K, N, G = dims
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        return {"M": M, "K": K, "N": N, "G": G, "bpe_in": bpe_in, "bpe_out": bpe_out}
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
+
+
+class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
+    """
+    Primus Turbo variable-K grouped GEMM: each group i computes X_i(M_i,K_i) @ W_i(K_i,N_i).
+
+    Because K (and potentially N) differs per group, GroupedGemm's single-tensor bytes
+    formula (M*K + G*K*N) does not apply. flops() and bytes() are overridden to sum
+    per-group contributions using GroupedGemm.flops_func / GroupedGemm.bytes_func(G=1).
+
+    Supports two trace formats:
+      - Compact _impl:  [[M,K], [M,N]]  (aggregate view; treated as one group)
+      - Zipped:         [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]]
+
+    Mapped op names:
+      primus_turbo::grouped_gemm_variable_k
+      primus_turbo::grouped_gemm_variable_k_impl
+      primus_turbo_cpp_extension::grouped_gemm_variable_k
+    """
+
+    @staticmethod
+    def _extract_impl_pairs(input_dims):
+        """
+        Parse compact variable-K _impl trace format: [[M,K], [M,N]].
+        The trace gives aggregate totals; treated as a single effective group.
+        Returns a list with one ((M,K),(K,N)) pair, or None if format does not match.
+        """
+        if not isinstance(input_dims, (list, tuple)) or len(input_dims) < 2:
+            return None
+        a_shape, b_shape = input_dims[0], input_dims[1]
+        if not (
+            isinstance(a_shape, (list, tuple))
+            and isinstance(b_shape, (list, tuple))
+            and len(a_shape) == 2
+            and len(b_shape) == 2
+            and all(isinstance(v, int) and v > 0 for v in a_shape)
+            and all(isinstance(v, int) and v > 0 for v in b_shape)
+        ):
+            return None
+        M, K = int(a_shape[0]), int(a_shape[1])
+        N = int(b_shape[1])
+        return [((M, K), (K, N))]
+
+    @staticmethod
+    def _extract_zipped_pairs(input_dims):
+        """
+        Parse zipped trace format with variable K: [[(M_1,K_1),(M_2,K_2),...], [(K_1,N_1),(K_2,N_2),...]].
+        Returns list of ((M_i,K_i),(K_i,N_i)) pairs, or None if format does not match.
+        """
+        if not (
+            isinstance(input_dims, (list, tuple))
+            and len(input_dims) >= 2
+            and isinstance(input_dims[0], (list, tuple))
+            and isinstance(input_dims[1], (list, tuple))
+        ):
+            return None
+        lhs = _collect_2d_shapes(input_dims[0])
+        rhs = _collect_2d_shapes(input_dims[1])
+        if not (lhs and rhs and len(lhs) == len(rhs)):
+            return None
+        if not all(a[1] == b[0] for a, b in zip(lhs, rhs)):
+            return None
+        return list(zip(lhs, rhs))
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        group_pairs = primus_turbo_grouped_gemm_variable_k._extract_impl_pairs(
+            input_dims
+        )
+        if group_pairs is None:
+            group_pairs = primus_turbo_grouped_gemm_variable_k._extract_zipped_pairs(
+                input_dims
+            )
+        if not group_pairs:
+            raise ValueError(
+                "primus_turbo::grouped_gemm_variable_k could not parse"
+                f" Input Dims: {input_dims}"
+            )
+        dtype_list = event["args"].get("Input type", [])
+        dtype_in = dtype_list[0] if dtype_list else None
+        dtype_out = dtype_list[1] if len(dtype_list) > 1 else dtype_in
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        bpe_out = name2bpe(dtype_out) if dtype_out is not None else bpe_in
+        first_a, first_b = group_pairs[0]
+        return {
+            # M/K/N/G are approximate aggregates; overridden flops/bytes use group_pairs.
+            "M": sum(a[0] for a, _ in group_pairs),
+            "K": first_a[1],
+            "N": first_b[1],
+            "G": len(group_pairs),
+            "bpe_in": bpe_in,
+            "bpe_out": bpe_out,
+            "group_pairs": group_pairs,
+        }
+
+    def flops(self):
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            total += GroupedGemm.flops_func(M=a_shape[0], K=a_shape[1], N=b_shape[1])
+        return total
+
+    def bytes(self):
+        bpe_in, bpe_out = self.bpe_in, self.bpe_out
+        if bpe_in is None or bpe_out is None:
+            return None
+        total = 0
+        for a_shape, b_shape in self.param_details["group_pairs"]:
+            # Each group has its own weight matrix (G_i=1), so reads X_i + W_i, writes Y_i.
+            total += GroupedGemm.bytes_func(
+                M=a_shape[0],
+                K=a_shape[1],
+                N=b_shape[1],
+                G=1,
+                bpe_in=bpe_in,
+                bpe_out=bpe_out,
+            )
+        return total
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
+        )
+
+    def bytes_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm_variable_k is not defined."
         )
 
 
@@ -3485,7 +4124,7 @@ class jax_conv:
         int: the number of flops
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape = self.param_details["input_shape"]
@@ -3572,7 +4211,7 @@ def parse_list(input: str, dtype):
 
 
 class Normalization:
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -4273,3 +4912,444 @@ class RMSNormBwd(Normalization):
         if self.is_affine:
             bytes += self.num_channels * self.bpe_in * 2  # weight and grad_weight
         return bytes
+
+
+# ==============================================================================
+# MoE Communication – MoEDispatch / MoECombine (token routing)
+# ==============================================================================
+
+
+class MoEComm:
+    """
+    MoE all-to-all token dispatch/combine: pure communication, no FLOPS.
+
+    In the trace:
+      MoEDispatch:  Input Dims[0] = (num_tokens_local, hidden_dim)
+      MoECombine:   Input Dims[0] = (num_tokens_dispatched, hidden_dim)
+
+    bytes() = num_tokens × hidden_dim × bpe (data volume moved).
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_tokens = self.param_details["num_tokens"]
+        self.hidden_dim = self.param_details["hidden_dim"]
+        self.bpe = self.param_details["bpe"]
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"].get("Input Dims", [])
+        input_types = event["args"].get("Input type", [])
+        tok_shape = input_dims[0] if input_dims else []
+        num_tokens = tok_shape[0] if len(tok_shape) >= 1 else None
+        hidden_dim = tok_shape[1] if len(tok_shape) >= 2 else None
+        dtype = input_types[0] if input_types else ""
+        bpe = name2bpe(dtype) if dtype else None
+        return {"num_tokens": num_tokens, "hidden_dim": hidden_dim, "bpe": bpe}
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        if self.num_tokens is None or self.hidden_dim is None or self.bpe is None:
+            return None
+        return self.num_tokens * self.hidden_dim * self.bpe
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+
+class moe_dispatch(MoEComm):
+    """MoEDispatch (forward): routes local tokens to remote expert ranks."""
+
+    pass
+
+
+class moe_combine(MoEComm):
+    """MoECombine (forward): collects expert outputs back to local tokens."""
+
+    pass
+
+
+# ==============================================================================
+# Causal Conv1D – DaoAILab depthwise 1D convolution
+# ==============================================================================
+
+
+class CausalConv1d:
+    """
+    DaoAILab causal_conv1d: depthwise 1D convolution used in Mamba/SSM.
+
+    In the trace:
+      Input Dims[0] = (batch, channels, seq_len)  — input tensor
+      Input Dims[1] = (channels, kernel_size)      — conv weight
+      Input Dims[2] = (channels,)                  — bias (optional)
+
+    FLOPS = 2 × batch × channels × seq_len × kernel_size (depthwise conv).
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+
+        x_shape = input_dims[0]
+        w_shape = input_dims[1]
+
+        batch = x_shape[0]
+        channels = x_shape[1]
+        seq_len = x_shape[2]
+        kernel_size = w_shape[1]
+
+        has_bias = (
+            len(input_dims) > 2
+            and isinstance(input_dims[2], (list, tuple))
+            and len(input_dims[2]) > 0
+        )
+
+        return {
+            "batch": batch,
+            "channels": channels,
+            "seq_len": seq_len,
+            "kernel_size": kernel_size,
+            "has_bias": has_bias,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 2 * p["batch"] * p["channels"] * p["seq_len"] * p["kernel_size"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        p = self.param_details
+        input_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
+        weight_bytes = p["channels"] * p["kernel_size"] * self.bpe
+        output_bytes = p["batch"] * p["channels"] * p["seq_len"] * self.bpe
+        bias_bytes = p["channels"] * self.bpe if p["has_bias"] else 0
+        return input_bytes + weight_bytes + output_bytes + bias_bytes
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        dtype = self.event["args"].get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class causal_conv1d_fwd(CausalConv1d):
+    """DaoAILab::_causal_conv1d_fwd_cpp forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# RoPE – Fused Rotary Position Embedding
+# ==============================================================================
+
+
+class FusedRoPE:
+    """
+    TransformerEngine FusedRoPEFunc: elementwise rotary position embedding.
+
+    In the trace:
+      Input Dims[0] = (seq_len, batch, heads, head_dim)  — input tensor
+      Input Dims[1] = (seq_len, 1, 1, head_dim)          — cos/sin table
+
+    FLOPS: each pair of elements in head_dim requires 4 muls + 2 adds = 6 ops.
+    Total = 3 × num_elements (since 6 ops per 2 elements).
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        t_shape = input_dims[0]
+        return {
+            "seq_len": t_shape[0],
+            "batch": t_shape[1],
+            "heads": t_shape[2],
+            "head_dim": t_shape[3],
+            "num_elements": prod(t_shape),
+        }
+
+    def flops(self):
+        return 3 * self.param_details["num_elements"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        n = self.param_details["num_elements"]
+        return 2 * n * self.bpe
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class fused_rope_fwd(FusedRoPE):
+    """FusedRoPEFunc forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# CrossEntropy – Fused softmax + negative log-likelihood
+# ==============================================================================
+
+
+class CrossEntropy:
+    """
+    Fused CrossEntropyFunction: online softmax + cross-entropy loss.
+
+    In the trace:
+      Input Dims[0] = (batch, 1, vocab_size)  — logits
+      Input Dims[1] = (batch, 1)              — targets
+
+    FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        logits_shape = input_dims[0]
+        batch = logits_shape[0]
+        vocab_size = logits_shape[-1]
+        return {
+            "batch": batch,
+            "vocab_size": vocab_size,
+            "logits_shape": logits_shape,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 5 * p["batch"] * p["vocab_size"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        p = self.param_details
+        logits_bytes = prod(p["logits_shape"]) * self.bpe
+        target_bpe = 8  # long int
+        target_bytes = p["batch"] * target_bpe
+        output_bytes = p["batch"] * 4  # loss is float32
+        return logits_bytes + target_bytes + output_bytes
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        input_types = self.event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else None
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class cross_entropy_fwd(CrossEntropy):
+    """CrossEntropyFunction forward pass."""
+
+    pass
+
+
+# ==============================================================================
+# MambaSSD – MambaSplitConv1dScanCombinedFn (fused SSM kernel)
+# ==============================================================================
+
+
+class MambaSSD:
+    """
+    Perf model for MambaSplitConv1dScanCombinedFn (Mamba-2 SSD algorithm).
+
+    This fused autograd function combines conv1d + selective scan using the
+    State Space Duality (SSD) chunked algorithm from Tri Dao et al.
+    (https://arxiv.org/abs/2405.21060).
+
+    Trace layout (18 input slots):
+      [0] zxbcdt         (B, T, combined_dim)  — fused projection
+      [1] conv1d_weight  (conv_channels, d_conv)
+      [2] conv1d_bias    (conv_channels,)
+      [3] dt_bias        (H,)                  — nheads
+      [4] A              (H,)
+      [5] D              (H,)
+      [6] chunk_size     Scalar = C
+      [15] headdim       Scalar = P
+      [16] ngroups       Scalar = G
+
+    Derived:
+      d_inner = H × P
+      d_state = (combined_dim − 2·d_inner − H) / (2·G)
+      conv_channels = d_inner + 2·G·d_state  (should match Input[1][0])
+
+    FLOPS (matmul terms from the 4-step SSD algorithm):
+      conv1d:         2 · B · conv_channels · T · d_conv
+      CB^T (step 1):  2 · B · G · T · C · N
+      M@X  (step 1):  2 · B · H · T · C · P
+      B^T@X (step 2): 2 · B · H · T · N · P
+      C@h   (step 4): 2 · B · H · T · N · P
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        input_types = event["args"].get("Input type", [])
+        dtype = input_types[0] if input_types else "c10::BFloat16"
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+        self.bpe_dt_bias = self._param_bpe(input_types, 3, 4)
+        self.bpe_A = self._param_bpe(input_types, 4, 4)
+        self.bpe_D = self._param_bpe(input_types, 5, self.bpe)
+
+    @staticmethod
+    def _param_bpe(input_types, slot, default):
+        """Derive bytes-per-element for a parameter slot, falling back to default."""
+        if len(input_types) > slot and input_types[slot]:
+            bpe = name2bpe(input_types[slot])
+            return bpe if bpe is not None else default
+        return default
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs", [])
+
+        zxbcdt_shape = input_dims[0]  # (B, T, combined_dim)
+        conv_w_shape = input_dims[1]  # (conv_channels, d_conv)
+        dt_bias_shape = input_dims[3]  # (H,)
+
+        B = zxbcdt_shape[0]
+        T = zxbcdt_shape[1]
+        combined_dim = zxbcdt_shape[2]
+        conv_channels = conv_w_shape[0]
+        d_conv = conv_w_shape[1]
+        H = dt_bias_shape[0]
+
+        C = int(concrete[6]) if len(concrete) > 6 and concrete[6] else 128
+        P = int(concrete[15]) if len(concrete) > 15 and concrete[15] else 64
+        G = int(concrete[16]) if len(concrete) > 16 and concrete[16] else 1
+
+        d_inner = H * P
+        numerator = combined_dim - 2 * d_inner - H
+        denom = 2 * G
+        if numerator <= 0 or numerator % denom != 0:
+            raise ValueError(
+                f"Cannot derive d_state: combined_dim={combined_dim}, "
+                f"H={H}, P={P}, G={G}, d_inner={d_inner}, "
+                f"numerator={numerator}, denom={denom}"
+            )
+        N = numerator // denom
+
+        return {
+            "B": B,
+            "T": T,
+            "H": H,
+            "P": P,
+            "G": G,
+            "N": N,
+            "C": C,
+            "d_inner": d_inner,
+            "d_conv": d_conv,
+            "conv_channels": conv_channels,
+            "combined_dim": combined_dim,
+        }
+
+    def flops(self):
+        p = self.param_details
+        B, T, H, P, G, N, C = (
+            p["B"],
+            p["T"],
+            p["H"],
+            p["P"],
+            p["G"],
+            p["N"],
+            p["C"],
+        )
+        conv_channels, d_conv = p["conv_channels"], p["d_conv"]
+
+        flops_conv1d = 2 * B * conv_channels * T * d_conv
+        flops_cbt = 2 * B * G * T * C * N  # Step 1a: C @ B^T
+        flops_mx = 2 * B * H * T * C * P  # Step 1b: M @ X
+        flops_chunk_state = 2 * B * H * T * N * P  # Step 2: B^T @ X
+        flops_state_out = 2 * B * H * T * N * P  # Step 4: C @ h
+
+        return flops_conv1d + flops_cbt + flops_mx + flops_chunk_state + flops_state_out
+
+    def bytes(self):
+        p = self.param_details
+        B, T = p["B"], p["T"]
+        combined_dim = p["combined_dim"]
+        d_inner = p["d_inner"]
+        conv_channels, d_conv = p["conv_channels"], p["d_conv"]
+        H = p["H"]
+
+        read_input = B * T * combined_dim * self.bpe
+        read_conv_w = conv_channels * d_conv * self.bpe
+        read_conv_b = conv_channels * self.bpe
+        read_params = H * self.bpe_dt_bias + H * self.bpe_A + H * self.bpe_D
+        write_output = B * T * d_inner * self.bpe
+
+        return read_input + read_conv_w + read_conv_b + read_params + write_output
+
+    def flops_bwd(self):
+        return self.flops()
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        dtype = self.event["args"].get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class mamba_ssd_fwd(MambaSSD):
+    """MambaSplitConv1dScanCombinedFn forward pass."""
+
+    pass
