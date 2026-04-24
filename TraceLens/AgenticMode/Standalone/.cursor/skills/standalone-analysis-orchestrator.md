@@ -475,7 +475,7 @@ if [ ! -f "$EXT" ]; then
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+\" '<output_dir>' '<Model> on <Platform> — Performance Breakdown'
 fi
 ```
 
@@ -541,34 +541,35 @@ f. For Args cell mismatches: copy the matching `operations[].args` value verbati
 
 ---
 
-### 11.15 Marker-Count Check
+### 11.15 Marker Structure Validation (Retry up to 2x)
 
-The orchestrator template and sub-agent spec emit data-bearing HTML-comment markers (`<!-- impact-begin kind=... -->` ... `<!-- impact-end -->`) around every block whose contents depend on `impact_score` values. Step 11.5, when invoked, may consume these markers. Do a quick sanity check before that step.
+Validate that every report markdown carries the expected `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers. Mirrors Step 11.1's retry pattern.
+
+**Validation procedure:**
 
 ```bash
 <prefix> python3 -c \"
-import sys, re, glob, os, json
-out_dir = sys.argv[1]
-issues = []
-def count_markers(path, kind):
-    with open(path) as f:
-        text = f.read()
-    return len(re.findall(rf'<!--\s*impact-begin\s+kind=' + re.escape(kind) + r'\b', text))
-sp = os.path.join(out_dir, 'standalone_analysis.md')
-if os.path.isfile(sp):
-    if count_markers(sp, 'top_ops') < 1:
-        issues.append('standalone_analysis.md missing kind=top_ops marker')
-for path in sorted(glob.glob(os.path.join(out_dir, 'category_findings', '*.md'))):
-    n = count_markers(path, 'p_item')
-    if n == 0:
-        issues.append(f'{os.path.basename(path)} has 0 kind=p_item markers')
-for issue in issues:
-    print('WARN:', issue)
-print('marker-count check complete (' + str(len(issues)) + ' warning(s))')
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_markers
+passed, errors = validate_markers(sys.argv[1])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: marker structure is valid')
 \" '<output_dir>'
 ```
 
-Warnings here do NOT abort. They surface that some agent (or the template) failed to wrap an impact block. Step 11.5, when invoked, silently skips any unwrapped blocks; the report is unaffected.
+**If validation fails (exit code 1):**
+
+1. Read the FAIL output to identify which file is missing or malformed markers. Fix in-place by re-emitting the affected block with the correct marker (do NOT rewrite the file from scratch).
+   - For a missing `kind=p_item` in a findings file: re-wrap the P-item `**Impact**` line per [`sub_agent_spec.md`](TraceLens/AgenticMode/Standalone/utils/templates/sub_agent_spec.md) § Impact markers.
+   - For a missing required attribute: copy the value from the corresponding `metadata/<cat>_metadata.json::impact_estimates[]` (compute findings) or use `low=null mid=null high=null` (system findings).
+   - For mixed null/numeric values: pick one shape based on whether the entry is quantifiable.
+   - For pairing mismatches: locate the unmatched `<!-- impact-begin -->` or `<!-- impact-end -->` and add the missing pair (or remove the orphan).
+2. Run validation again.
+3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
 ---
 
@@ -600,8 +601,6 @@ from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_repo
 embed_plot_in_report(sys.argv[1])
 \" '<output_dir>'
 ```
-
-If the base64 sidecar is missing (plot generation failed), `embed_plot_in_report` removes the `{{PERF_PLOT}}` placeholder so the report remains clean.
 
 ---
 

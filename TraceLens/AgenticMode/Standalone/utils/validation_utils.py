@@ -6,7 +6,7 @@
 
 """Validation utilities for TraceLens AgenticMode.
 
-Three validation levels, each at the boundary where issues are still fixable:
+Four validation levels, each at the boundary where issues are still fixable:
 
 Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
     Structural check on a single findings file. Sub-agent retries on failure.
@@ -16,6 +16,11 @@ Level 2 — validate_subagent_outputs (Step 8, batch)
 
 Level 3 — validate_report (Step 11.1, after report assembly)
     Final standalone_analysis.md structure: headers, metrics table, placeholders.
+
+Level 4 — validate_markers (Step 11.15, after report assembly)
+    Cross-file marker structure: pairing, kind attributes, per-file kind
+    expectations across standalone_analysis.md, category_findings/*.md,
+    and system_findings/*.md.
 """
 
 import json
@@ -69,6 +74,21 @@ _KNOWN_REPORT_PLACEHOLDERS = {
     "<scale>",
     "<precision>",
 }
+
+# Level 4: marker structure
+_MARKER_BEGIN_RE = re.compile(
+    r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL
+)
+_MARKER_END_RE = re.compile(r"<!--\s*impact-end\s*-->")
+_KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
+_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+_KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "impact_summary"}
+_REQUIRED_ATTRS_BY_KIND = {
+    "p_item": ("low", "mid", "high"),
+    "detail_estimate": ("low", "high"),
+}
+# Compute findings files that do NOT need a p_item marker.
+_COMPUTE_NO_P_ITEM = {"triton_findings.md"}
 
 
 # ---------------------------------------------------------------------------
@@ -433,3 +453,98 @@ def _validate_report_args_column(content, output_dir):
         for ln, cell in _scan_args_cells(content)
         if cell not in valid_args
     ]
+
+
+# ---------------------------------------------------------------------------
+# Level 4: cross-file marker validation (called at Step 11.15)
+# ---------------------------------------------------------------------------
+
+
+def validate_markers(output_dir):
+    """Validate impact-begin / impact-end marker structure across all report markdowns.
+
+    Walks standalone_analysis.md, category_findings/*.md, and system_findings/*.md.
+    Per file: checks marker pairing, presence of kind= attribute, per-kind
+    required attributes, and a minimum kind set (top_ops in the report,
+    p_item in each findings file unless exempt).
+
+    Returns (passed, errors). On failure, errors is a list of human-readable
+    issues; intended to be consumed by the orchestrator's Step 11.15
+    fail-with-retry block, mirroring validate_report.
+    """
+    errors = []
+    files = _enumerate_marker_files(output_dir)
+    if not files:
+        return False, ["<no report files found in output_dir>"]
+    for filepath, file_class in files:
+        errors.extend(_validate_one_marker_file(filepath, file_class))
+    return len(errors) == 0, errors
+
+
+def _enumerate_marker_files(output_dir):
+    """Return [(path, class)] for every markdown file we expect markers in."""
+    out = []
+    sp = os.path.join(output_dir, "standalone_analysis.md")
+    if os.path.isfile(sp):
+        out.append((sp, "report"))
+    for sub in ("category_findings", "system_findings"):
+        d = os.path.join(output_dir, sub)
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if name.endswith(".md"):
+                out.append((os.path.join(d, name), sub))
+    return out
+
+
+def _validate_one_marker_file(path, file_class):
+    """All per-file marker checks. Returns list of error strings (empty = clean)."""
+    rel = os.path.basename(path)
+    with open(path) as f:
+        text = f.read()
+
+    errors = []
+    begins = _MARKER_BEGIN_RE.findall(text)
+    n_end = len(_MARKER_END_RE.findall(text))
+    if len(begins) != n_end:
+        errors.append(
+            f"{rel}: marker pairing mismatch ({len(begins)} begin vs {n_end} end)"
+        )
+
+    seen_kinds = set()
+    for inner in begins:
+        kind_m = _KIND_ATTR_RE.search(inner)
+        if not kind_m:
+            errors.append(
+                f"{rel}: impact-begin missing kind= attribute: {inner.strip()}"
+            )
+            continue
+        kind = kind_m.group(1)
+        seen_kinds.add(kind)
+        if kind not in _KNOWN_KINDS:
+            errors.append(f"{rel}: unknown kind={kind}")
+            continue
+        attrs = dict(_ATTR_RE.findall(inner))
+        for required in _REQUIRED_ATTRS_BY_KIND.get(kind, ()):
+            if required not in attrs:
+                errors.append(
+                    f"{rel}: kind={kind} missing required attr {required}"
+                )
+        nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
+        if nums:
+            null_ct = sum(1 for v in nums if v == "null")
+            if 0 < null_ct < len(nums):
+                errors.append(
+                    f"{rel}: kind={kind} mixes null and numeric values "
+                    f"in low/mid/high"
+                )
+
+    if file_class == "report" and "top_ops" not in seen_kinds:
+        errors.append(f"{rel}: missing required kind=top_ops")
+    if file_class == "category_findings" and rel not in _COMPUTE_NO_P_ITEM:
+        if "p_item" not in seen_kinds:
+            errors.append(f"{rel}: missing required kind=p_item")
+    if file_class == "system_findings" and "p_item" not in seen_kinds:
+        errors.append(f"{rel}: missing required kind=p_item")
+
+    return errors
