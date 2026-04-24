@@ -85,7 +85,7 @@ blank line between them. The validator checks for these as substring matches.
 | `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
-| `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the two-bullet low/high `impact_score` format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` The mid `impact_score` itself is not duplicated here — it is rendered on the P-item card. |
+| `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the two-bullet low/high `impact_score` format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` |
 
 ### Sentence quality
 
@@ -157,7 +157,7 @@ Sub-agents write an **`impact_estimates` array** into
 
 ### JSON schema
 
-`impact_score` is the % of end-to-end GPU time recoverable by tuning the
+`impact_score` is the impact on end-to-end GPU time recoverable by tuning the
 operations covered by this candidate. The mid value is the primary metric;
 the low/high values represent the 75%–100% roofline-closure range.
 
@@ -193,8 +193,7 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ### Rendering in `## Detailed Analysis`
 
-**Quantifiable:** two bullets — low and high. The mid `impact_score` is not
-duplicated here; it appears on the P-item card. The two-bullet block must be
+**Quantifiable:** two bullets — low and high. The two-bullet block must be
 wrapped in `kind=detail_estimate` markers (see § Impact markers (REQUIRED)).
 
 ```markdown
@@ -241,37 +240,6 @@ The numbers in marker attributes (`low`, `mid`, `high`) **must** be transcribed
 verbatim from `metadata/<category>_metadata.json::impact_estimates[i]`
 (`impact_score_low`, `impact_score`, `impact_score_high` respectively). Do not
 re-derive, round, or scale them. Do not pull them from any other source.
-
-### Examples
-
-P-item card (compute tier, quantifiable):
-
-```markdown
-### P1: Low GEMM efficiency on large MoE projections (AITER)
-**Insight**: AITER GEMM kernels reach only 35% of MAF on the 4096-wide projections.
-**Action**: Switch to the rocBLAS Tensile fp8 path or a tile-tuned variant for these shapes.
-<!-- impact-begin kind=p_item low=4.21 mid=4.98 high=5.75 -->
-**Impact**: impact_score: 4.98
-<!-- impact-end -->
-```
-
-P-item card (non-quantifiable):
-
-```markdown
-<!-- impact-begin kind=p_item low=null mid=null high=null -->
-**Impact**: Not quantifiable from trace data
-<!-- impact-end -->
-```
-
-Detailed Analysis estimate (quantifiable):
-
-```markdown
-**Impact estimate:**
-<!-- impact-begin kind=detail_estimate low=4.21 high=5.75 -->
-- Low end impact_score (75% roofline target): 4.21
-- High end impact_score (100% roofline target): 5.75
-<!-- impact-end -->
-```
 
 ---
 

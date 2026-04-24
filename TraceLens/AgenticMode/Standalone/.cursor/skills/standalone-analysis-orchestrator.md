@@ -47,8 +47,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
 10. Generate Performance Improvement Plot (reads priority_data.json → priority_data.json + simple PNG IF agent_extension.py is absent)
 11. Generate Final Report (composable System + Compute sections), validate it,
-    optionally invoke agent_extension.py (when present), then embed the
-    PNG into the report.
+    optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -546,14 +545,6 @@ f. For Args cell mismatches: copy the matching `operations[].args` value verbati
 
 The orchestrator template and sub-agent spec emit data-bearing HTML-comment markers (`<!-- impact-begin kind=... -->` ... `<!-- impact-end -->`) around every block whose contents depend on `impact_score` values. Step 11.5, when invoked, may consume these markers. Do a quick sanity check before that step.
 
-For `<output_dir>/standalone_analysis.md`, count `<!-- impact-begin` occurrences and verify:
-- At least one `kind=top_ops` marker is present.
-- The number of `kind=p_item` markers in the Compute Kernel Optimizations section equals the number of compute P-items in `priority_data.json::priorities[]` (filtered to the same compute-tier set used to fill the cards).
-
-For each `<output_dir>/category_findings/<cat>_findings.md`, verify:
-- The number of `kind=p_item` markers equals the P-item count in that file's `## Recommendations`.
-- The number of `kind=detail_estimate` markers does not exceed the number of quantifiable entries in `metadata/<cat>_metadata.json::impact_estimates[]`.
-
 ```bash
 <prefix> python3 -c \"
 import sys, re, glob, os, json
@@ -594,7 +585,7 @@ if [ -f "$EXT" ]; then
 fi
 ```
 
-The extension is opt-in by file presence. To disable, delete or rename the file. To re-enable, restore it from git. There are no opt-out flags.
+This step is a hook for an optional extension; if `agent_extension.py` is not present, skip it.
 
 ---
 
