@@ -280,20 +280,22 @@ def generate_perf_plot(
         print("No compute-kernel segments to plot - skipping plot")
         return False
 
-    fig, ax = plt.subplots(figsize=(12, 2.0))
+    fig, ax = plt.subplots(figsize=(12, 3.0))
 
     cumulative = 0.0
     color_idx = 0
-    min_label_width = baseline_ms * 0.03
     for seg in segments:
         width = seg["time_ms"]
+        pct = width / baseline_ms * 100
         if seg["name"] == _REST_KEY:
             color = _REST_COLOR
-            label = "Non-computing"
+            display_name = "Non-computing"
         else:
             color = _CAT_PALETTE[color_idx % len(_CAT_PALETTE)]
             color_idx += 1
-            label = _short_name(seg["name"])
+            raw = seg["name"]
+            display_name = raw[0].upper() + raw[1:] if raw else raw
+        legend_label = f"{display_name} \u2014 {width:.1f} ms ({pct:.1f}%)"
         ax.barh(
             [0],
             [width],
@@ -302,20 +304,8 @@ def generate_perf_plot(
             edgecolor="white",
             linewidth=0.9,
             alpha=0.95,
-            label=label,
+            label=legend_label,
         )
-        if width >= min_label_width:
-            pct = width / baseline_ms * 100
-            ax.text(
-                cumulative + width / 2,
-                0,
-                f"{label}\n{width:.1f} ms ({pct:.1f}%)",
-                ha="center",
-                va="center",
-                fontsize=8,
-                color="black",
-                fontweight="bold",
-            )
         cumulative += width
 
     ax.set_xlim(0, baseline_ms)
@@ -325,6 +315,14 @@ def generate_perf_plot(
         ax.spines[side].set_visible(False)
     ax.set_xlabel("GPU time (ms)", fontsize=10)
     ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.4),
+        ncol=min(len(segments), 4),
+        frameon=False,
+        fontsize=9,
+    )
 
     plt.tight_layout()
 

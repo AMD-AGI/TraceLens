@@ -153,9 +153,7 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 ## Kernel Fusion Opportunities (Experimental)
 
-<!-- impact-begin kind=fusion_blurb variant=long -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual recoverable time depends on implementation feasibility and interaction effects.
-<!-- impact-end -->
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
@@ -245,9 +243,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 
-<!-- impact-begin kind=fusion_blurb variant=short -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
-<!-- impact-end -->
+> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual savings depend on implementation feasibility and interaction effects.
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->

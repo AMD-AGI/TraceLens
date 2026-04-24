@@ -223,9 +223,7 @@ whether or not any downstream tooling is run.
 <!-- impact-end -->
 ```
 
-Begin tag carries all numeric data downstream tooling needs as `key=value`
-attributes. End tag is plain. The block between them is exactly the
-`impact_score`-based markdown you would otherwise emit.
+The block between them is exactly the `impact_score`-based markdown you would otherwise emit.
 
 ### `kind` values you must emit
 

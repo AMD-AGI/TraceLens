@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Optional standalone-analysis extension: detailed plot + ms-savings rehydration.
+"""Optional standalone-analysis extension: detailed plot + ms-savings.
 
 Hosts the legacy 2-panel cumulative-savings chart (cumulative stacked E2E bars
 + throughput cone with the 75-100% roofline band) and a marker-driven rewriter
@@ -13,20 +13,13 @@ the pre-Phase-1 ``ms savings (% of E2E)`` format.
 
 The rewriter is driven entirely by data-bearing HTML-comment markers
 (``<!-- impact-begin kind=... ... -->`` / ``<!-- impact-end -->``) emitted by
-the sub-agent spec and the orchestrator template. It does not parse the
-post-Phase-1 markdown with regex, so it cannot rehydrate older reports that
-predate the marker rollout (they are silently skipped as no-ops).
+the sub-agent spec and the orchestrator template. 
 
 CLI usage:
 
     python TraceLens/AgenticMode/Standalone/utils/agent_extension.py \\
         --output-dir <dir> \\
         --title '<Model> on <Platform> -- Kernel Tuning Potential'
-
-The CLI always runs both the detailed plot (writing ``perf_improvement.png``,
-overwriting the simple plot if the orchestrator already produced one) and the
-rehydration walker. To disable, delete or rename this file; the orchestrator
-skill auto-detects its presence.
 
 The extension is opt-in by file presence and is NOT re-exported from
 ``TraceLens.AgenticMode.Standalone.utils.__init__``.
@@ -55,6 +48,31 @@ from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
 )
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest
 
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+_RE_MARKER_BEGIN = re.compile(r"<!--\s*impact-begin\s+(.*?)\s*-->")
+_RE_MARKER_END = re.compile(r"<!--\s*impact-end\s*-->")
+# Per-row trailer carried inside Top Operations table body rows.
+_RE_TOP_OPS_ROW_TRAILER = re.compile(
+    r"\s*<!--\s*top-ops-row\s+(.*?)\s*-->\s*$"
+)
+
+_LEGACY_HEADER_5COL = (
+    "| Recommendation | Type | Estimated Savings (ms) | "
+    "Estimated Improvement (E2E %) | Confidence |\n"
+    "|---------------|------|----------------------|"
+    "-------------------------------|------------|"
+)
+
+_LEGACY_TOP_OPS_HEADER = (
+    "| Rank | Category | Time (ms) | % of Compute Time | Ops | "
+    "Potential improvement (time, E2E %) |\n"
+    "|------|----------|-----------|-------------------|-----|"
+    "-------------------------------------|"
+)
 
 # ---------------------------------------------------------------------------
 # Detailed 2-panel chart (impact_score -> ms at the read boundary)
@@ -483,8 +501,7 @@ def generate_impact_savings_plot(
 # Markdown rehydration: marker-driven impact_score -> pre-Phase-1 ms savings
 # ---------------------------------------------------------------------------
 #
-# The rehydrator no longer parses post-Phase-1 markdown with regex. Instead,
-# producers (sub-agent spec + orchestrator template) emit data-bearing HTML
+# The sub-agent spec and the orchestrator template emit data-bearing HTML
 # comments around every block whose contents depend on impact_score values:
 #
 #     <!-- impact-begin kind=KIND attr1=value1 attr2=value2 -->
@@ -493,16 +510,6 @@ def generate_impact_savings_plot(
 #
 # The walker locates each begin/end pair, dispatches on `kind`, and replaces
 # the entire block (markers included) with the rendered legacy ms-form text.
-# Rehydration is destructive: once consumed, the markers are gone, so a second
-# pass is a no-op.
-
-_RE_MARKER_BEGIN = re.compile(r"<!--\s*impact-begin\s+(.*?)\s*-->")
-_RE_MARKER_END = re.compile(r"<!--\s*impact-end\s*-->")
-# Per-row trailer carried inside Top Operations table body rows.
-_RE_TOP_OPS_ROW_TRAILER = re.compile(
-    r"\s*<!--\s*top-ops-row\s+(.*?)\s*-->\s*$"
-)
-
 
 def _load_baseline_ms(output_dir: str) -> float:
     """Read baseline_ms from category_manifest.json. Returns 0 if missing."""
@@ -515,10 +522,6 @@ def _load_baseline_ms(output_dir: str) -> float:
 
 def _parse_attrs(attr_str: str) -> Dict[str, Optional[str]]:
     """Parse ``key=value`` pairs from a marker attribute string.
-
-    Supports bare tokens (``low=4.21``) and double-quoted values
-    (``category="moe fused"``). Returns ``None`` for the literal token
-    ``null`` so callers can distinguish "not provided" from "explicit null".
     """
     attrs: Dict[str, Optional[str]] = {}
     for match in re.finditer(r'(\w+)=("([^"]*)"|(\S+))', attr_str):
@@ -549,11 +552,7 @@ def _render_p_item(
     """Render a P-item Impact line in legacy ms-savings form.
 
     Quantifiable cards (numeric `low`/`high` attrs) render as
-    ``**Impact**: ~<lo>-<hi> ms savings (<lo>-<hi>% of E2E)``. When a
-    ``category`` attribute is present (orchestrator-assembled
-    ``standalone_analysis.md`` only), the legacy trailing prose
-    ``from closing efficiency gaps to 75-100% of roofline (pre-computed
-    from `<cat>_metrics.json` impact_estimates).`` is appended.
+    ``**Impact**: ~<lo>-<hi> ms savings (<lo>-<hi>% of E2E)``.
 
     Non-quantifiable cards (any of `low`/`high` is null) render as
     ``**Impact**: Not quantifiable from trace data``.
@@ -596,14 +595,6 @@ def _render_detail_estimate(
     )
 
 
-_LEGACY_HEADER_5COL = (
-    "| Recommendation | Type | Estimated Savings (ms) | "
-    "Estimated Improvement (E2E %) | Confidence |\n"
-    "|---------------|------|----------------------|"
-    "-------------------------------|------------|"
-)
-
-
 def _expand_impact_summary_row(row: str, baseline_ms: float) -> str:
     """Expand a 4-cell post-Phase-1 row into the legacy 5-cell shape.
 
@@ -612,9 +603,6 @@ def _expand_impact_summary_row(row: str, baseline_ms: float) -> str:
     Output shape (5 cells):
         ``| Recommendation | Type | Estimated Savings (ms) | impact_score | Confidence |``
 
-    Rows that don't parse as 4 cells, or whose impact_score cell isn't
-    numeric (e.g. ``N/A``, ``--``), are returned unchanged so we never
-    corrupt agent-authored variants.
     """
     cells = [c.strip() for c in row.strip().strip("|").split("|")]
     if len(cells) != 4:
@@ -651,14 +639,6 @@ def _render_impact_summary(
             out_lines.append(line)
         i += 1
     return "\n".join(out_lines)
-
-
-_LEGACY_TOP_OPS_HEADER = (
-    "| Rank | Category | Time (ms) | % of Compute Time | Ops | "
-    "Potential improvement (time, E2E %) |\n"
-    "|------|----------|-----------|-------------------|-----|"
-    "-------------------------------------|"
-)
 
 
 def _render_top_ops_row(row: str, baseline_ms: float) -> str:
@@ -718,44 +698,11 @@ def _render_top_ops(
         i += 1
     return "\n".join(out_lines)
 
-
-_LEGACY_FUSION_BLURB_LONG = (
-    "> **Note:** Kernel fusion analysis is experimental. Savings projections "
-    "use a roofline projection model (75-100% of peak) with 85% memory/compute "
-    "pipeline overlap. Kernels without perf models use their measured trace "
-    "time as-is. Candidates where fewer than 75% of kernels have perf models "
-    "are not reported. Each finding shows both a **Confidence** (fusion "
-    "pattern quality) and perf model coverage in the **Impact** line. Actual "
-    "savings depend on implementation feasibility and interaction effects."
-)
-_LEGACY_FUSION_BLURB_SHORT = (
-    "> **Note:** Kernel fusion analysis is experimental. Savings projections "
-    "use a roofline projection model (75-100% of peak) with 85% memory/compute "
-    "pipeline overlap. Kernels without perf models use their measured trace "
-    "time as-is. Actual savings depend on implementation feasibility and "
-    "interaction effects."
-)
-
-
-def _render_fusion_blurb(
-    attrs: Dict[str, Optional[str]],
-    body: str,
-    baseline_ms: float,
-) -> str:
-    variant = (attrs.get("variant") or "long").lower()
-    return (
-        _LEGACY_FUSION_BLURB_LONG
-        if variant == "long"
-        else _LEGACY_FUSION_BLURB_SHORT
-    )
-
-
 _RENDERERS = {
     "p_item": _render_p_item,
     "detail_estimate": _render_detail_estimate,
     "impact_summary": _render_impact_summary,
     "top_ops": _render_top_ops,
-    "fusion_blurb": _render_fusion_blurb,
 }
 
 
