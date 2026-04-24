@@ -481,8 +481,11 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
         launch_to_exec = rec.get("launch_to_exec_us")
         prequeued = rec.get("kernel_prequeued")
 
+        LAUNCH_ANOMALY_MIN_FRACTION = 0.25  # launch_to_exec must explain ≥25% of gap
         if prequeued is not None and launch_to_exec is not None:
-            if not prequeued and launch_to_exec > LAUNCH_ANOMALY_THRESH_NONPREQUEUED:
+            if (not prequeued
+                    and launch_to_exec > LAUNCH_ANOMALY_THRESH_NONPREQUEUED
+                    and launch_to_exec > LAUNCH_ANOMALY_MIN_FRACTION * duration):
                 rec["cpu_during_gap"] = "LAUNCH_ANOMALY"
                 rec["cpu_during_gap_detail"] = f"launch_to_exec={launch_to_exec:.1f}µs (launched_during_gap)"
                 results.append(rec)
