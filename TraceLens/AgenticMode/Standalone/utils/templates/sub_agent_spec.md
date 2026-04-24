@@ -1,8 +1,4 @@
-<!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-See LICENSE for license information.
--->
 
 # Sub-Agent Findings Specification
 
@@ -12,6 +8,7 @@ files. The orchestrator extracts these sections when composing the final
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
 > schema. Replace `<category>` with the actual category name
+
 ---
 
 ## Orchestrator-consumed sections
@@ -38,10 +35,10 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 <!-- impact-end -->
 ```
 
-- **Compute tier**: include all three fields. Pull `**Impact**` from `impact_estimates` in the metrics JSON.
-- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix. System-tier P-items still wrap `**Impact**` in `kind=p_item` markers when they choose to emit one (typically as `Not quantifiable from trace data`); see § Impact markers (REQUIRED) below.
-- **Field labels are exact** — always `**Insight**`, `**Action**`, `**Impact**`.
-- **`(<Library>)` suffix**: comma-separated list of unique non-null `library` values across the bottleneck operations. If all are `null`, omit the parenthetical entirely.
+- **Compute tier**: include all three fields. Pull `**Impact`** from `impact_estimates` in the metrics JSON.
+- **System tier**: omit `**Impact`** and the `(<Library>)` title suffix. System-tier P-items still wrap `**Impact**` in `kind=p_item` markers when they choose to emit one (typically as `Not quantifiable from trace data`); see § Impact markers (REQUIRED) below.
+- **Field labels are exact** — always `**Insight`**, `**Action**`, `**Impact**`.
+- `**(<Library>)` suffix**: comma-separated list of unique non-null `library` values across the bottleneck operations. If all are `null`, omit the parenthetical entirely.
 - **Marker required** — see § Impact markers (REQUIRED). The `low`/`mid`/`high` attributes carry the raw `impact_score_low/mid/high` values from `metadata/<category>_metadata.json::impact_estimates[i]`. For non-quantifiable cards use `low=null mid=null high=null`.
 
 ---
@@ -69,35 +66,39 @@ with an HTML comment and an `####` heading:
 
 ### HTML comment fields
 
-| Field | Values | Meaning |
-|-------|--------|---------|
-| `tier` | `compute` \| `system` | Must match the findings directory (`category_findings/` → compute, `system_findings/` → system). |
-| `rank` | Integer ≥ 1 | Agent-local priority within this file (1 = highest). |
+
+| Field  | Values               | Meaning                                                                                          |
+| ------ | -------------------- | ------------------------------------------------------------------------------------------------ |
+| `tier` | `compute` | `system` | Must match the findings directory (`category_findings/` → compute, `system_findings/` → system). |
+| `rank` | Integer ≥ 1          | Agent-local priority within this file (1 = highest).                                             |
+
 
 ### Required labels
 
 The five labels below must appear **in this order**, each on its own line with a
 blank line between them. The validator checks for these as substring matches.
 
-| Label | Purpose |
-|-------|---------|
-| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
-| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
-| `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
-| `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the two-bullet low/high `impact_score` format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` The mid `impact_score` itself is not duplicated here — it is rendered on the P-item card. |
+
+| Label                         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `**Identification:`**         | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact → keys)`parenthetical (artifact + keys backticked, e.g.`(source: gemm_metrics.json → operations[].efficiency.efficiency_percent < 70)`). When any flagged op has a non-null` library`(e.g.`Tensile`,` CK`,` AITER`,` Triton`,` rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include` operations[].library`in the`(source:)` parenthetical. |
+| `**Data:`**                   | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric | Value | Flagged`.                                                                                                                                                                                                                                                                                                                   |
+| `**Reasoning for Slowdown:`** | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.).                                                                                                                                                                                                                                                                                                                                                                       |
+| `**Resolution:*`*             | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action.                                                                                        |
+| `**Impact estimate:`**        | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the two-bullet low/high `impact_score` format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` The mid `impact_score` itself is not duplicated here — it is rendered on the P-item card.                                                                                                                                                                                                                                |
+
 
 ### Sentence quality
 
 - Each sentence should convey **one main idea**. Do not chain independent
-  observations with em-dashes, semicolons, or "while" bridges. Avoid run-on
-  sentences.
+observations with em-dashes, semicolons, or "while" bridges. Avoid run-on
+sentences.
 
 ---
 
 ## Operations Table Schema (compute tier)
 
-Standard column schema for operations breakdown tables and the `**Data:**` table
+Standard column schema for operations breakdown tables and the `**Data:`** table
 inside `## Detailed Analysis` blocks.
 
 ```markdown
@@ -106,6 +107,7 @@ inside `## Detailed Analysis` blocks.
 ```
 
 **Column mappings** (source: `metrics['operations']`):
+
 - **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
 - **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. Omit the column if every row is missing this field.
 - **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
@@ -125,10 +127,11 @@ Agents may add extra columns when needed (e.g. `Sub-Category` in the generic-op 
 
 When citing peak performance for a bottleneck, select the correct peak based on
 `operations[i].efficiency.bound_type`:
+
 - **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS).
-  Report achieved TFLOPS/s vs peak TFLOPS.
+Report achieved TFLOPS/s vs peak TFLOPS.
 - **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s).
-  Report achieved TB/s vs peak TB/s.
+Report achieved TB/s vs peak TB/s.
 
 Do not look up peaks independently from the metadata dict.
 
@@ -136,24 +139,24 @@ Do not look up peaks independently from the metadata dict.
 
 ## Impact Estimates
 
-Sub-agents write an **`impact_estimates` array** into
+Sub-agents write an `**impact_estimates` array** into
 `metadata/<category>_metadata.json`, then render impact bullets in their
 `## Detailed Analysis` block.
 
 ### Rules
 
 - Exactly **one array element per `<!-- reasoning-candidate -->` block** in the
-  same findings file, ordered by `rank` ascending.
+same findings file, ordered by `rank` ascending.
 - Each entry sums only the operations that its candidate covers (not the entire
-  category).
+category).
 - No insights → empty array `[]`.
 - **Compute tier only:** use the `kernel_tuning` `impact_score` from the
-  pre-computed metrics JSON (`impact_score_low` / `impact_score_high` are also
-  available in the rollup; rendered as low/high bullets inside
-  `## Detailed Analysis`). Do NOT manually estimate algorithmic, fusion, or
-  system savings.
+pre-computed metrics JSON (`impact_score_low` / `impact_score_high` are also
+available in the rollup; rendered as low/high bullets inside
+`## Detailed Analysis`). Do NOT manually estimate algorithmic, fusion, or
+system savings.
 - **Confidence:** `high` = clear, measurable gap to peak; `medium` = likely
-  opportunity but outcome depends on implementation; `low` = rough estimate.
+opportunity but outcome depends on implementation; `low` = rough estimate.
 
 ### JSON schema
 
@@ -206,37 +209,9 @@ wrapped in `kind=detail_estimate` markers (see § Impact markers (REQUIRED)).
 
 **Non-quantifiable:** `Impact estimate is not quantifiable from trace data.` (no marker required for non-quantifiable estimates)
 
-### `## Impact Summary` section (agent-internal, optional)
-
-When agents include a `## Impact Summary` section above `## Recommendations`,
-it SHOULD be a markdown table in this canonical form. The orchestrator does
-NOT parse this section; it exists for human readability only. The whole
-`## Impact Summary` table block (header + separator + body rows) must be
-wrapped in `kind=impact_summary` markers (see § Impact markers (REQUIRED)).
-
-```markdown
-<!-- impact-begin kind=impact_summary -->
-| Recommendation | Type | impact_score | Confidence |
-|----------------|------|--------------|------------|
-| <P-item title> | <kernel_tuning|fusion|...> | <mid impact_score, or "N/A"> | <high|medium|low> |
-<!-- impact-end -->
-```
-
-- `impact_score` is the rolled-up mid value from
-  `metadata/<cat>_metadata.json -> impact_estimates[i].impact_score`. Use a
-  single number (e.g. `4.98`); low/high stay inside `## Detailed Analysis`.
-- For non-quantifiable rows (system tier, or compute tier with empty
-  `impact_estimates`), write `N/A` in the `impact_score` column.
-- Do NOT include `Estimated Savings (ms)` or `Estimated Improvement (E2E %)`
-  columns. Do NOT show a low–high range here.
-
-Header-only variants (no data rows under the header) remain valid for agents
-that intentionally do not enumerate per-recommendation impact. The marker
-wrapper is still required so the rehydrator can find them.
-
 ## Impact markers (REQUIRED)
 
-Every block whose contents depend on `impact_score*` values must be wrapped in
+Every block whose contents depend on `impact_score`* values must be wrapped in
 a paired HTML-comment marker. The orchestrator extension (`agent_extension.py`)
 consumes these markers to rehydrate reports back to the legacy
 `ms savings (% of E2E)` form. Markers are HTML comments and therefore invisible
@@ -257,11 +232,12 @@ you would otherwise emit.
 
 ### `kind` values you must emit
 
-| `kind` | Where | Required attributes | Optional attributes |
-|--------|-------|--------------------|---------------------|
-| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` for non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
-| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip for non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
-| `impact_summary` | Around the entire `## Impact Summary` table (header + separator + any body rows). Header-only variants must still be wrapped. | none | none |
+
+| `kind`            | Where                                                                                                                                                                | Required attributes                                                | Optional attributes                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `p_item`          | Around every P-item `**Impact**` line in `## Recommendations`.                                                                                                       | `low`, `mid`, `high` (all three; use `null` for non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
+| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:`** in each `## Detailed Analysis` candidate. Skip for non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E).                     | none                                                                                 |
+
 
 ### Value-source rule
 
@@ -298,17 +274,6 @@ Detailed Analysis estimate (quantifiable):
 <!-- impact-begin kind=detail_estimate low=4.21 high=5.75 -->
 - Low end impact_score (75% roofline target): 4.21
 - High end impact_score (100% roofline target): 5.75
-<!-- impact-end -->
-```
-
-Impact Summary table:
-
-```markdown
-## Impact Summary
-<!-- impact-begin kind=impact_summary -->
-| Recommendation | Type | impact_score | Confidence |
-|----------------|------|--------------|------------|
-| AITER GEMM tile tuning | kernel_tuning | 4.98 | high |
 <!-- impact-end -->
 ```
 
@@ -354,3 +319,4 @@ or `system_findings` respectively.
 2. Fix the findings file — add missing sections, correct P-item labels, etc.
 3. Re-run validation
 4. Maximum 2 retry attempts. If still failing, return with a warning
+
