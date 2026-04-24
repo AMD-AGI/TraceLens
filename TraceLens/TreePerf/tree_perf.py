@@ -34,6 +34,7 @@ from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_in
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
+from .idle_time_analysis import IdleTimeAnalyser
 from .jax_analyses import JaxAnalyses
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..PerfModel.utils import add_simulation_time_columns
@@ -2540,6 +2541,37 @@ class TreePerfAnalyzer:
         out = pd.concat(dfs, ignore_index=True)
         cols = ["type", "time ms", "percent", "is_recompute"]
         return out[[c for c in cols if c in out.columns]]
+
+    def get_df_idle_analysis(self, stream_id=None, launch_overhead_thresh_us=10.0):
+        """Classify every idle gap on GPU stream(s) by root cause.
+
+        Returns a DataFrame with one row per gap. See IdleTimeAnalyser for
+        the full taxonomy of gap reasons.
+        """
+        analyser = IdleTimeAnalyser(
+            self.tree,
+            event_to_category=self.event_to_category,
+            launch_overhead_thresh_us=launch_overhead_thresh_us,
+        )
+        return analyser.get_gaps_df(stream_id=stream_id)
+
+    def get_idle_summary_df(self, stream_id=None, launch_overhead_thresh_us=10.0):
+        """Aggregated idle time breakdown by reason category."""
+        analyser = IdleTimeAnalyser(
+            self.tree,
+            event_to_category=self.event_to_category,
+            launch_overhead_thresh_us=launch_overhead_thresh_us,
+        )
+        return analyser.get_summary_df(stream_id=stream_id)
+
+    def get_top_idle_gaps(self, n=10, stream_id=None, launch_overhead_thresh_us=10.0):
+        """The N largest idle gaps with their classifications."""
+        analyser = IdleTimeAnalyser(
+            self.tree,
+            event_to_category=self.event_to_category,
+            launch_overhead_thresh_us=launch_overhead_thresh_us,
+        )
+        return analyser.get_top_gaps(n=n, stream_id=stream_id)
 
     def get_kernel_details(
         self,
