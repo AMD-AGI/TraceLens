@@ -19,6 +19,7 @@ from .util import DataLoader, TraceEventUtils, JaxProfileProcessor
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 from .TraceDiff.trace_diff import TraceDiff
+from .IdleTimeAnalyser import IdleTimeAnalyser
 from .Reporting import *
 
 __all__ = [
@@ -41,5 +42,6 @@ __all__ = [
     "JaxProfileProcessor",
     "JaxProfileProcessor",
     "TraceDiff",
+    "IdleTimeAnalyser",
     "Reporting",
 ]

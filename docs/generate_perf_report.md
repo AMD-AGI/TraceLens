@@ -47,6 +47,9 @@ python generate_perf_report_jax.py --profile_path path/to/profile.xplane.pb
 | `short_kernels_histogram`  | Histogram showing the distribution of kernel durations below the short-duration threshold.                   |
 | `short_kernels_all_details`| Detailed list of short-duration kernels, including count, total/mean time, runtime percentage, and parent op.   |
 | Roofline Sheets            | Roofline analysis for each operation category (GEMM, CONV, etc.), including TFLOPs, TB/s, and FLOPs/byte metrics. |
+| `idle_overview`            | Coarse summary of GPU idle time grouped by `(drain_type, cpu_during_gap)`. Added when `--enable_idle_analysis` is set. |
+| `idle_summary`             | Detailed summary grouped by `(drain_type, cpu_during_gap, dominant_op)`, with cumulative percentages. |
+| `idle_intervals`           | Per-interval detail with UIDs for cross-referencing in Trace2Tree. Sorted by duration descending. |
 
 Note: JAX outputs do not include `short_kernels_histogram` or `short_kernels_all_details`, these are for PyTorch only.
 
@@ -81,6 +84,8 @@ The script supports several optional arguments to customize the output report. B
 | `--short_kernel_threshold_us X`   | `10`              | Threshold (in microseconds) to classify a kernel as "short".             |
 | `--short_kernel_histogram_bins B` | `100`             | Number of bins to use for the short-kernel duration histogram.              |
 | `--detect_recompute`              | `False`           | Detect activation recomputation (checkpointing) and add an `is_recompute` column to `ops_summary`, `ops_unique_args`, and `unified_perf_summary`. See [Activation Recompute Detection](#-activation-recompute-detection) below. |
+| `--enable_idle_analysis`          | `False`           | Add GPU idle time classification sheets (`idle_overview`, `idle_summary`, `idle_intervals`) to the report. See [idle_time_guide.md](idle_time_guide.md). |
+| `--enable_augmented_trace`        | `False`           | Write an augmented trace with idle time annotations for visual analysis in Perfetto. Requires `--enable_idle_analysis`. |
 | `--output_xlsx_path PATH`         | `<auto-inferred>` | Path to save the Excel report. Auto-inferred if not provided.              |
 | `--output_csvs_dir DIR`           | `None`            | If set, saves each sheet as a CSV file in the specified directory.         |
 

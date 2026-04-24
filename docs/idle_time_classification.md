@@ -1,7 +1,14 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Idle Time Classification Sheets -- Column Documentation
 
-These sheets are added to the `generate_perf_report` Excel output when the idle
-time extension is enabled (`--extension_file idle_time_extension.py`).
+These sheets are added to the `generate_perf_report` Excel output when idle time
+analysis is enabled (`--enable_idle_analysis`). See `docs/idle_time_guide.md` for
+a conceptual introduction and usage examples.
 
 ## Sheet: `idle_overview`
 

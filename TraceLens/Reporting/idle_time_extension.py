@@ -1,15 +1,13 @@
 """
-Extension for generate_perf_report_pytorch that adds idle time classification sheets.
+DEPRECATED: Use --enable_idle_analysis instead.
 
-Usage:
+This extension file is superseded by the built-in IdleTimeAnalyser submodule.
+Prefer:
     python -m TraceLens.Reporting.generate_perf_report_pytorch \
         --profile_json_path trace.json \
-        --extension_file /path/to/idle_time_extension.py
+        --enable_idle_analysis
 
-Adds three sheets to the perf report Excel:
-    - idle_overview: coarse summary grouped by (drain_type, cpu_during_gap), ~5-8 rows
-    - idle_summary: grouped idle time breakdown by (drain_type, cpu_during_gap, dominant_op)
-    - idle_intervals: per-interval detail with timestamps, sync info, and classification
+This file is kept for backward compatibility but will be removed in a future release.
 """
 import numpy as np
 import pandas as pd

@@ -408,5 +408,88 @@ class TestClassifyIdleIntervalsIntegration:
         assert results == []
 
 
+class TestIdleTimeAnalyserWrapper:
+    """Tests for the IdleTimeAnalyser class (submodule entry point)."""
+
+    def test_classify_returns_list(self):
+        from TraceLens.IdleTimeAnalyser import IdleTimeAnalyser
+
+        tree = _make_synthetic_tree()
+        analyser = IdleTimeAnalyser(tree)
+        classified = analyser.classify()
+        assert isinstance(classified, list)
+        assert len(classified) > 0
+
+    def test_classify_caches_results(self):
+        from TraceLens.IdleTimeAnalyser import IdleTimeAnalyser
+
+        tree = _make_synthetic_tree()
+        analyser = IdleTimeAnalyser(tree)
+        first = analyser.classify()
+        second = analyser.classify()
+        assert first is second
+
+    def test_get_dataframes(self):
+        from TraceLens.IdleTimeAnalyser import IdleTimeAnalyser
+
+        tree = _make_synthetic_tree()
+        analyser = IdleTimeAnalyser(tree)
+        dfs = analyser.get_dataframes()
+        assert "idle_overview" in dfs
+        assert "idle_summary" in dfs
+        assert "idle_intervals" in dfs
+        assert len(dfs["idle_intervals"]) > 0
+
+    def test_get_augmented_events(self):
+        from TraceLens.IdleTimeAnalyser import IdleTimeAnalyser
+
+        tree = _make_synthetic_tree()
+        analyser = IdleTimeAnalyser(tree)
+        events = analyser.get_augmented_events(gpu_pid=1)
+        assert isinstance(events, list)
+        assert len(events) > 0
+        for evt in events:
+            assert evt["pid"] == 1
+
+
+class TestBuildIdleDataframes:
+    """Tests for report.py build_idle_dataframes function."""
+
+    def test_overview_columns(self):
+        from TraceLens.IdleTimeAnalyser.report import build_idle_dataframes
+        from TraceLens.IdleTimeAnalyser.classify import classify_idle_intervals, assign_idle_ids
+
+        tree = _make_synthetic_tree()
+        classified = classify_idle_intervals(tree)
+        assign_idle_ids(classified)
+        dfs = build_idle_dataframes(classified)
+        overview = dfs["idle_overview"]
+        for col in ["drain_type", "cpu_during_gap", "count", "total_time_ms", "pct_of_idle"]:
+            assert col in overview.columns, f"Missing column: {col}"
+
+    def test_intervals_columns(self):
+        from TraceLens.IdleTimeAnalyser.report import build_idle_dataframes
+        from TraceLens.IdleTimeAnalyser.classify import classify_idle_intervals, assign_idle_ids
+
+        tree = _make_synthetic_tree()
+        classified = classify_idle_intervals(tree)
+        assign_idle_ids(classified)
+        dfs = build_idle_dataframes(classified)
+        intervals = dfs["idle_intervals"]
+        required_cols = [
+            "idle_id", "group", "start_us", "end_us", "duration_us",
+            "drain_type", "cpu_during_gap", "launch_to_exec_us",
+        ]
+        for col in required_cols:
+            assert col in intervals.columns, f"Missing column: {col}"
+
+    def test_empty_classification(self):
+        from TraceLens.IdleTimeAnalyser.report import build_idle_dataframes
+
+        dfs = build_idle_dataframes([])
+        assert dfs["idle_overview"].empty
+        assert dfs["idle_intervals"].empty
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
