@@ -289,6 +289,75 @@ def test_comparative_impact_from_operations_trace2_faster():
     assert out[1]["savings_ms"] == round(0.2 * 0.875, 3)
 
 
+def test_comparative_roofline_cap_clamps_savings():
+    """Projected savings must not exceed trace1 roofline when trace2 is faster than the ceiling."""
+    # trace2 is 4x faster than trace1 (comp_pct = 25%) but roofline is 60%.
+    # The physically achievable efficiency floor is 60%, so savings should be
+    # capped at time * (1 - 60/100), not time * (1 - 25/100).
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "delta_us (trace2 - trace1)": [-7_500.0],  # comp_pct = 25%
+            "Pct Roofline_mean": [60.0],               # roofline floor
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    operations = build_operation_metrics(df, metadata, {}, comparison_scope="comparative")
+    mm_op = operations[0]
+    eff = mm_op["efficiency"]
+    # efficiency_percent clamped to roofline (60), not raw comp_pct (25)
+    assert eff["efficiency_percent"] == 60.0
+    assert eff["warning"] is not None
+    assert "ROOFLINE CAP" in eff["warning"]
+    # savings_high = 10ms * (1 - 60/100) = 4ms (not 7.5ms)
+    out = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1, baseline_ms=1000.0)
+    assert len(out) == 1
+    assert out[0]["savings_ms_high"] == 4.0
+    assert out[0]["savings_ms"] == round(4.0 * 0.875, 3)
+
+
+def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
+    """When trace2 efficiency is already above the roofline (slower), no clamping occurs."""
+    # comp_pct = 80% (trace2 is 1.25x faster), roofline = 60%.
+    # 80 > 60 so no clamping — savings = time * (1 - 80/100).
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "delta_us (trace2 - trace1)": [-2_000.0],  # comp_pct = 80%
+            "Pct Roofline_mean": [60.0],
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    operations = build_operation_metrics(df, metadata, {}, comparison_scope="comparative")
+    eff = operations[0]["efficiency"]
+    assert eff["efficiency_percent"] == 80.0
+    assert eff["warning"] is None
+    out = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1, baseline_ms=1000.0)
+    assert out[0]["savings_ms_high"] == 2.0
+
+
+def test_comparative_roofline_cap_no_roofline_column():
+    """When Pct Roofline_mean is absent, comparative efficiency is unchanged."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "delta_us (trace2 - trace1)": [-7_500.0],  # comp_pct = 25%
+            # no Pct Roofline_mean column
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    operations = build_operation_metrics(df, metadata, {}, comparison_scope="comparative")
+    eff = operations[0]["efficiency"]
+    assert eff["efficiency_percent"] == 25.0
+    assert eff["warning"] is None
+
+
 # ----- Unit tests: generate_plot_data -----
 
 

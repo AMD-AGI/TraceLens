@@ -242,7 +242,7 @@ def _comparative_efficiency_percent_from_row(
 ) -> None:
     """
     When comparative columns support it, set ``efficiency_percent`` to
-    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), and clear roofline anomaly flags.
+    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped by trace1 roofline
 
     t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t2/t1.
     If comparative metrics cannot be computed, leaves ``result`` unchanged for those keys.
@@ -267,9 +267,27 @@ def _comparative_efficiency_percent_from_row(
 
     if comp_pct is None:
         return
+
+    roofline_pct = row.get("Pct Roofline_mean")
+    roofline_floor: Optional[float] = None
+    if roofline_pct is not None and not pd.isna(roofline_pct):
+        roofline_floor = float(roofline_pct)
+
+    clamped = False
+    if roofline_floor is not None and comp_pct < roofline_floor:
+        comp_pct = roofline_floor
+        clamped = True
+
     result["efficiency_percent"] = round(comp_pct, 2)
     result["is_anomaly"] = False
-    result["warning"] = None
+    if clamped:
+        result["warning"] = (
+            f"[ROOFLINE CAP] Projected efficiency clamped to roofline "
+            f"({result['efficiency_percent']:.1f}%); trace2 gap exceeds "
+            f"trace1 hardware ceiling."
+        )
+    else:
+        result["warning"] = None
 
 
 def _apply_standalone_efficiency_percent(
@@ -744,7 +762,9 @@ def run_category_analysis(
     if compute_impact:
         baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
         impact_estimates = compute_impact_estimates(
-            operations, category, baseline_ms=baseline_ms,
+            operations,
+            category,
+            baseline_ms=baseline_ms,
             analysis_mode=comparison_scope,
         )
     else:
