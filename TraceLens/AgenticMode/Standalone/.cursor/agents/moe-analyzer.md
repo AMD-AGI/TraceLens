@@ -107,7 +107,7 @@ For each validated bottleneck, provide recommendations in both categories:
 
 **Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/moe_fused_findings.md` using the output format defined there, with `<category>` = `moe_fused`.
 
-**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line, every Detailed Analysis `**Impact estimate:**` two-bullet block, and the `## Impact Summary` table must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/moe_fused_metadata.json::impact_estimates[]`.
+**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/moe_fused_metadata.json::impact_estimates[]`.
 
 Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` impact_score.
 

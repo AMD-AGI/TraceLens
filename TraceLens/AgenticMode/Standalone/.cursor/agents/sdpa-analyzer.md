@@ -151,7 +151,7 @@ For each validated bottleneck, provide recommendations based on attention type. 
 
 **Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/<sdpa>_findings.md` using the output format defined there, with `<category>` = `<sdpa>` (i.e., `sdpa_fwd` or `sdpa_bwd`).
 
-**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line, every Detailed Analysis `**Impact estimate:**` two-bullet block, and the `## Impact Summary` table must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/<sdpa>_metadata.json::impact_estimates[]`.
+**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/<sdpa>_metadata.json::impact_estimates[]`.
 
 Additionally include:
 - Attention type detected (Flash, Paged, Standard)

@@ -210,23 +210,23 @@ wrapped in `kind=detail_estimate` markers (see § Impact markers (REQUIRED)).
 ## Impact markers (REQUIRED)
 
 Every block whose contents depend on `impact_score*` values must be wrapped in
-a paired HTML-comment marker. The orchestrator extension (`agent_extension.py`)
-consumes these markers to rehydrate reports back to the legacy
-`ms savings (% of E2E)` form. Markers are HTML comments and therefore invisible
-in rendered markdown, so the impact_score-form report stays clean even when the
-extension is absent.
+a paired HTML-comment marker. The markers carry the underlying numeric data as
+key=value attributes so that optional downstream tooling can re-process the
+block deterministically without re-parsing prose. Markers are HTML comments and
+therefore invisible in rendered markdown — the report renders identically
+whether or not any downstream tooling is run.
 
 ### Marker shape
 
 ```
 <!-- impact-begin kind=KIND attr1=value1 attr2=value2 -->
-...arbitrary post-Phase-1 markdown content (the "raw" form)...
+...rendered markdown content for this block...
 <!-- impact-end -->
 ```
 
-Begin tag carries all the data the rehydrator needs as `key=value` attributes.
-End tag is plain. The block between them is exactly the impact_score-form text
-you would otherwise emit.
+Begin tag carries all numeric data downstream tooling needs as `key=value`
+attributes. End tag is plain. The block between them is exactly the
+`impact_score`-based markdown you would otherwise emit.
 
 ### `kind` values you must emit
 

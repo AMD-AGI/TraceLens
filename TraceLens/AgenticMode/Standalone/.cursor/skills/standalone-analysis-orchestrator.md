@@ -47,9 +47,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
 10. Generate Performance Improvement Plot (reads priority_data.json → priority_data.json + simple PNG IF agent_extension.py is absent)
 11. Generate Final Report (composable System + Compute sections), validate it,
-    optionally invoke agent_extension.py to render the detailed plot and
-    rehydrate marker-wrapped impact_score blocks back to ms-savings form,
-    then embed the PNG into the report.
+    optionally invoke agent_extension.py (when present), then embed the
+    PNG into the report.
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -466,9 +465,9 @@ generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```
 
-### 10.3 Generate Plot and Base64 File (conditional on extension absence)
+### 10.3 Generate Plot and Base64 File (conditional)
 
-If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the simple single-bar perf plot here. If the extension is present, **skip this step**: the extension will render the detailed `perf_improvement.png` in Step 11.5 (after the report is written) and Step 11.2 will embed it.
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the perf plot here. If the file is present, **skip this step** — Step 11.5 will produce `perf_improvement.png` and Step 11.2 will embed it.
 
 ```bash
 EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
@@ -543,9 +542,9 @@ f. For Args cell mismatches: copy the matching `operations[].args` value verbati
 
 ---
 
-### 11.15 Marker-Count Check (pre-rehydration)
+### 11.15 Marker-Count Check
 
-The orchestrator template and sub-agent spec emit data-bearing HTML-comment markers (`<!-- impact-begin kind=... -->` ... `<!-- impact-end -->`) around every block whose contents depend on `impact_score` values. Step 11.5 (the `agent_extension.py` invocation) consumes those markers when rehydrating reports back to ms-savings form. Before they are consumed, do a quick sanity check.
+The orchestrator template and sub-agent spec emit data-bearing HTML-comment markers (`<!-- impact-begin kind=... -->` ... `<!-- impact-end -->`) around every block whose contents depend on `impact_score` values. Step 11.5, when invoked, may consume these markers. Do a quick sanity check before that step.
 
 For `<output_dir>/standalone_analysis.md`, count `<!-- impact-begin` occurrences and verify:
 - At least one `kind=top_ops` marker is present.
@@ -578,18 +577,15 @@ print('marker-count check complete (' + str(len(issues)) + ' warning(s))')
 \" '<output_dir>'
 ```
 
-Warnings here do NOT abort. They surface that some agent (or the template) failed to wrap an impact block; rehydration in Step 11.5 will silently skip those blocks and leave them in their post-Phase-1 form.
+Warnings here do NOT abort. They surface that some agent (or the template) failed to wrap an impact block. Step 11.5, when invoked, silently skips any unwrapped blocks; the report is unaffected.
 
 ---
 
-### 11.5 Detailed impact-savings extension (auto-detected)
+### 11.5 Optional extension (auto-detected)
 
-If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it. The extension does two things in a single invocation:
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
 
-1. Renders the detailed 2-panel cumulative-savings chart and writes it as `perf_improvement.png` (overwriting the simple plot if Step 10.3 was taken in the no-extension branch).
-2. Walks every marker block in `standalone_analysis.md`, `category_findings/*.md`, and `system_findings/*.md`, replacing each `<!-- impact-begin ... -->...<!-- impact-end -->` block with the legacy ms-savings rendering.
-
-If the file is absent, skip this step silently — the standalone analysis is complete in its impact_score form and the simple plot from Step 10.3 stays in place.
+If the file is absent, skip this step silently. The standalone analysis is complete; the simple plot from Step 10.3 stays in place.
 
 ```bash
 EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
@@ -598,13 +594,13 @@ if [ -f "$EXT" ]; then
 fi
 ```
 
-The extension is opt-in by file presence. To disable, delete or rename the file. To re-enable, restore it from git. There are no opt-out flags — the extension always runs both the detailed plot and the marker-driven rehydration.
+The extension is opt-in by file presence. To disable, delete or rename the file. To re-enable, restore it from git. There are no opt-out flags.
 
 ---
 
 ### 11.2 Embed Performance Improvement Plot
 
-The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 (no extension, simple plot) or Step 11.5 (extension, detailed plot). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
+The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Step 11.5 (whichever ran). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
 
 ```bash
 <prefix> python3 -c \"
