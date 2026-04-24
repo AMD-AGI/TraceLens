@@ -12,6 +12,7 @@ Covers:
   - generate_excel_report smoke test
   - Edge cases: empty traces, single GPU event, zero-duration events
 """
+import os
 import pytest
 import tempfile
 
@@ -489,6 +490,50 @@ class TestBuildIdleDataframes:
         dfs = build_idle_dataframes([])
         assert dfs["idle_overview"].empty
         assert dfs["idle_intervals"].empty
+
+
+class TestRealTraceCoverage:
+    """Regression tests on real traces from the repo to ensure all classification
+    branches are exercised."""
+
+    TRACE_DIR = os.path.join(os.path.dirname(__file__), "traces")
+
+    @staticmethod
+    def _classify_trace(path):
+        from TraceLens import TreePerfAnalyzer
+        from TraceLens.IdleTimeAnalyser import IdleTimeAnalyser
+
+        pa = TreePerfAnalyzer.from_file(path)
+        analyser = IdleTimeAnalyser(pa.tree)
+        return analyser.classify()
+
+    def test_ddp_resnet18_has_memory_alloc(self):
+        """DDP resnet18 without CUDA memory pool has hipFree/hipMalloc dominated gaps."""
+        path = os.path.join(self.TRACE_DIR, "mi300", "ddp_resnet18_no_pool", "train_resnet18.json.gz")
+        if not os.path.exists(path):
+            pytest.skip("Trace not available")
+        classified = self._classify_trace(path)
+        macro = [r for r in classified if not r["label_noise"]]
+        rt_dominated = [r for r in macro if r["cpu_during_gap"] == "RUNTIME_DOMINATED"]
+        rt_details = [r["cpu_during_gap_detail"] for r in rt_dominated]
+        has_memory_alloc = any("MEMORY_ALLOC" in d for d in rt_details)
+        assert has_memory_alloc, (
+            "Expected MEMORY_ALLOC in RUNTIME_DOMINATED details, got: {}".format(
+                set(rt_details)
+            )
+        )
+
+    def test_fsdp_rank0_covers_all_cpu_categories(self):
+        """FSDP rank0 trace should exercise most cpu_during_gap categories."""
+        path = os.path.join(self.TRACE_DIR, "mi300", "llama_70b_fsdp", "rank0_trace_no_pyfn.json.gz")
+        if not os.path.exists(path):
+            pytest.skip("Trace not available")
+        classified = self._classify_trace(path)
+        macro = [r for r in classified if not r["label_noise"]]
+        cpu_categories = set(r["cpu_during_gap"] for r in macro)
+        expected = {"LAUNCH_ANOMALY", "CPU_DOMINATED", "LAUNCH_OVERHEAD_ONLY", "CPU_UNTRACED"}
+        missing = expected - cpu_categories
+        assert not missing, "Missing cpu_during_gap categories: {}".format(missing)
 
 
 if __name__ == "__main__":
