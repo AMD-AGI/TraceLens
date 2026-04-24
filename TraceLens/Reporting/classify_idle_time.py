@@ -43,6 +43,7 @@ ALLOC_FREE_NAMES = {
 LAUNCH_NAMES = {
     "hipLaunchKernel", "cudaLaunchKernel",
     "hipExtModuleLaunchKernel", "cuLaunchKernel",
+    "cudaLaunchKernelExC",
     "hipGraphLaunch", "cudaGraphLaunch",
 }
 
