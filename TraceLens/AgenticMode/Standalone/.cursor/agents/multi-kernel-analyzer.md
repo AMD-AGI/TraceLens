@@ -198,10 +198,6 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
    - Evidence: [metrics]
    - Recommendation: [specific action]
 
-## Impact Summary
-| Recommendation | Type | impact_score | Confidence |
-|----------------|------|--------------|------------|
-
 ## Recommendations
 
 ### System P<N>: [Highest Priority Multi-Kernel Issue]
@@ -230,7 +226,7 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 
 **Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
 
-**Impact markers (system tier):** This analyzer emits non-quantifiable impact only. Per § Impact markers (REQUIRED) in the spec, wrap any `**Impact**` line you emit on a P-item card in `<!-- impact-begin kind=p_item low=null mid=null high=null -->` ... `<!-- impact-end -->`. Do not emit `kind=detail_estimate` or `kind=impact_summary` markers — system-tier findings are not quantifiable.
+**Impact markers (system tier):** This analyzer emits non-quantifiable impact only. Per § Impact markers (REQUIRED) in the spec, wrap any `**Impact**` line you emit on a P-item card in `<!-- impact-begin kind=p_item low=null mid=null high=null -->` ... `<!-- impact-end -->`. Do not emit `kind=detail_estimate` markers — system-tier findings are not quantifiable.
 
 ### Step 7.1: Write Impact Estimates to Metadata
 
@@ -265,8 +261,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 ## Key Principles
 
 1. **System-level focus** - These are pipeline/framework issues, NOT individual kernel issues
-2. **Impact Summary is header-only** - System-level Impact Summary must include the table header row but zero data rows
-3. **Provide actionable solutions** - Specific steps, not vague suggestions
-4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
-5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is below threshold, multi-kernel issues start at P1
-6. **Do NOT duplicate category analysis** - This analysis is about cross-cutting patterns, not individual op efficiency
+2. **Provide actionable solutions** - Specific steps, not vague suggestions
+3. **Vendor-agnostic recommendations** - Focus on patterns and solutions
+4. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is below threshold, multi-kernel issues start at P1
+5. **Do NOT duplicate category analysis** - This analysis is about cross-cutting patterns, not individual op efficiency

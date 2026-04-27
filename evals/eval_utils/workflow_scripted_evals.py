@@ -384,69 +384,8 @@ def _check_p_item_fields(p_text, is_compute):
     return missing
 
 
-def _parse_impact_table_rows(section_text):
-    """Parse a markdown table in the Impact Summary section. Returns data rows as dicts."""
-    lines = section_text.strip().split("\n")
-    header = None
-    separator_seen = False
-    data_rows = []
-    for line in lines:
-        stripped = line.strip()
-        if "|" not in stripped:
-            if header and separator_seen:
-                break
-            continue
-        cells = [c.strip() for c in stripped.strip("|").split("|")]
-        if not cells:
-            continue
-        if header is None:
-            header = cells
-        elif not separator_seen:
-            if all(set(c) <= {"-", ":", " "} for c in cells):
-                separator_seen = True
-        else:
-            if len(cells) >= len(header):
-                data_rows.append(dict(zip(header, cells)))
-    return data_rows
-
-
-def _check_compute_impact(content):
-    """Check compute findings have valid Impact Summary with kernel_tuning types only."""
-    impact_section = _extract_section(content, "## Impact Summary")
-    if impact_section is None:
-        return "FAIL", "Missing ## Impact Summary section"
-
-    table_rows = _parse_impact_table_rows(impact_section)
-    invalid = [
-        row.get("Type", "").strip()
-        for row in table_rows
-        if row.get("Type", "").strip().lower() not in ("kernel_tuning", "")
-    ]
-    if invalid:
-        return (
-            "FAIL",
-            f"Invalid Type values: {', '.join(invalid)} (expected kernel_tuning)",
-        )
-    return "PASS", ""
-
-
-def _check_system_impact(content):
-    """Check system findings have Impact Summary with zero data rows."""
-    impact_section = _extract_section(content, "## Impact Summary")
-    if impact_section is None:
-        return "FAIL", "Missing ## Impact Summary section"
-
-    table_rows = _parse_impact_table_rows(impact_section)
-    if table_rows:
-        return (
-            "FAIL",
-            f"System findings should have 0 data rows, found {len(table_rows)}",
-        )
-    return "PASS", ""
-
-
 # ---------------------------------------------------------------------------
-# Per-item check functions (evals 9, 10, 11, 13, 14)
+# Per-item check functions (evals 9, 10, 11, 14)
 # ---------------------------------------------------------------------------
 
 _REPORT_HEADERS = {
@@ -653,91 +592,18 @@ def _check_issue_template(output_dir):
     return rows
 
 
-def _check_impact_summary(output_dir):
-    """Eval 13 — per-category check for Impact Summary structure in findings files."""
-    manifest = _load_manifest(output_dir)
-    if manifest is None:
-        return [
-            _make_row(
-                "workflow_eval_13",
-                "Sub-agent findings structure and Impact Summary types",
-                "FAIL",
-                "category_manifest.json not found",
-                "pipeline",
-                "Re-run orchestrator_prepare.py",
-            )
-        ]
-
-    rows = []
-    gpu_util = manifest.get("gpu_utilization", {})
-    idle_pct = gpu_util.get("idle_time_percent", 0)
-
-    for cat in manifest.get("categories", []):
-        name = cat["name"]
-        if name == "cpu_idle" and idle_pct <= 15:
-            continue
-        tier = cat.get("tier", "compute_kernel")
-        subdir = "system_findings" if tier == "system" else "category_findings"
-        findings_path = os.path.join(output_dir, subdir, f"{name}_findings.md")
-
-        if not os.path.isfile(findings_path):
-            rows.append(
-                _make_row(
-                    f"workflow_eval_13_{name}",
-                    f"Impact Summary: {name}",
-                    "FAIL",
-                    f"{subdir}/{name}_findings.md not found",
-                    "pipeline",
-                    "Re-run subagent for this category",
-                )
-            )
-            continue
-
-        with open(findings_path, encoding="utf-8", errors="replace") as f:
-            findings_content = f.read()
-
-        if tier == "system":
-            result, detail = _check_system_impact(findings_content)
-        else:
-            result, detail = _check_compute_impact(findings_content)
-
-        rows.append(
-            _make_row(
-                f"workflow_eval_13_{name}",
-                f"Impact Summary: {name}",
-                result,
-                detail,
-                "pipeline" if result == "FAIL" else "",
-                "Fix Impact Summary in findings file" if result == "FAIL" else "",
-            )
-        )
-
-    if not rows:
-        return [
-            _make_row(
-                "workflow_eval_13",
-                "Sub-agent findings structure and Impact Summary types",
-                "PASS",
-                "No categories in manifest",
-                "",
-                "",
-            )
-        ]
-    return rows
-
-
 _MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
 
 
 def _check_model_id(output_dir):
-    """Eval 14 — per-field check for model_info.json values in Appendix."""
+    """Eval 13 — per-field check for model_info.json values in Appendix."""
     model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
     report_path = os.path.join(output_dir, "standalone_analysis.md")
 
     if not os.path.isfile(model_info_path):
         return [
             _make_row(
-                "workflow_eval_14",
+                "workflow_eval_13",
                 "Model identification in report",
                 "FAIL",
                 "metadata/model_info.json not found",
@@ -748,7 +614,7 @@ def _check_model_id(output_dir):
     if not os.path.isfile(report_path):
         return [
             _make_row(
-                "workflow_eval_14",
+                "workflow_eval_13",
                 "Model identification in report",
                 "FAIL",
                 "standalone_analysis.md not found",
@@ -763,7 +629,7 @@ def _check_model_id(output_dir):
     except (json.JSONDecodeError, OSError):
         return [
             _make_row(
-                "workflow_eval_14",
+                "workflow_eval_13",
                 "Model identification in report",
                 "FAIL",
                 "Invalid model_info.json",
@@ -779,7 +645,7 @@ def _check_model_id(output_dir):
     if not appendix:
         return [
             _make_row(
-                "workflow_eval_14",
+                "workflow_eval_13",
                 "Model identification in report",
                 "FAIL",
                 "Appendix section not found in report",
@@ -795,10 +661,10 @@ def _check_model_id(output_dir):
         if not value or value.lower() == "cannot be inferred from trace":
             rows.append(
                 _make_row(
-                    f"workflow_eval_14_{field}",
-                    f"Model ID: {field}",
-                    "PASS",
-                    f"Field not determined ('{value}') — skipped",
+                f"workflow_eval_13_{field}",
+                f"Model ID: {field}",
+                "PASS",
+                f"Field not determined ('{value}') — skipped",
                     "",
                     "",
                 )
@@ -808,7 +674,7 @@ def _check_model_id(output_dir):
         found = value.lower() in appendix_lower
         rows.append(
             _make_row(
-                f"workflow_eval_14_{field}",
+                f"workflow_eval_13_{field}",
                 f"Model ID: {field}",
                 "PASS" if found else "FAIL",
                 "" if found else f"'{value}' not found in Appendix",
@@ -823,7 +689,6 @@ _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
     _check_issue_template,
-    _check_impact_summary,
     _check_model_id,
 ]
 
@@ -831,8 +696,7 @@ _GATE_FAIL_NEW_EVALS = [
     ("workflow_eval_9", "Report Template Rendering"),
     ("workflow_eval_10", "Executive Summary has metrics table"),
     ("workflow_eval_11", "Issue Template rendering"),
-    ("workflow_eval_13", "Sub-agent findings structure and Impact Summary types"),
-    ("workflow_eval_14", "Model identification in report"),
+    ("workflow_eval_13", "Model identification in report"),
 ]
 
 

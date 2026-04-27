@@ -132,7 +132,7 @@ Then look for novel patterns:
 
 Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
-**Pay particular attention to § Impact markers (REQUIRED) in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md).** Every P-item `**Impact**` line, every Detailed Analysis `**Impact estimate:**` two-bullet block, and the `## Impact Summary` table (header-only or with rows) must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `category_data/kernel_fusion_metrics.json::impact_estimates[]`.
+**Pay particular attention to § Impact markers (REQUIRED) in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md).** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `category_data/kernel_fusion_metrics.json::impact_estimates[]`.
 
 Number findings P1, P2, P3... sequentially by impact_score (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
 
@@ -194,12 +194,6 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 - Confidence: High/Medium/Low — <brief reason>
 
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
-
-## Impact Summary
-<!-- impact-begin kind=impact_summary -->
-| Recommendation | Type | impact_score | Confidence |
-|----------------|------|--------------|------------|
-<!-- impact-end -->
 ```
 
 If no fusion opportunities detected:
@@ -207,12 +201,6 @@ If no fusion opportunities detected:
 # Kernel Fusion Analysis Summary (Experimental)
 
 No kernel fusion opportunities detected.
-
-## Impact Summary
-<!-- impact-begin kind=impact_summary -->
-| Recommendation | Type | impact_score | Confidence |
-|----------------|------|--------------|------------|
-<!-- impact-end -->
 ```
 
 ### Step 4.1: Validate Findings
