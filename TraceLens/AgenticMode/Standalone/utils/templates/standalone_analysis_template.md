@@ -9,11 +9,11 @@ See LICENSE for license information.
 
 1. Warnings section: Only include if there were errors or high-variance operations; omit entirely if all succeeded and no variance flags.
 2. Executive Summary: Max ~20 lines.
-3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 10.2 with a base64-embedded
+3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 11.2 with a base64-embedded
    PNG data URI (![Performance Breakdown](data:image/png;base64,...)) of a single horizontal stacked
    bar showing the run's compute-time breakdown by kernel category. The plot is purely descriptive
    (no error bars, no throughput cone, no savings estimates). If the plot was not generated
-   (Step 9.5 failed), the placeholder is removed.
+   (Step 10.3 / Step 11.5 failed), the placeholder is removed.
 4. Compute Kernel Optimizations: P1-P3+ from category subagent findings. The P-item Impact line
    uses the canonical mid impact_score value, e.g. "impact_score: 4.98". Low/high values appear
    only in Detailed Analysis.

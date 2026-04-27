@@ -570,6 +570,7 @@ embed_plot_in_report(sys.argv[1])
 \" '<output_dir>'
 ```
 
+If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
 ---
 
 ## Error Handling

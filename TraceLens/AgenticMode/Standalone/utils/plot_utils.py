@@ -17,8 +17,6 @@ Public API:
 - ``generate_and_embed_plot`` -- end-to-end pipeline (priority_data -> plot
   -> embed).
 
-For the detailed cumulative-savings chart (formerly the 2-panel view), see
-``TraceLens.AgenticMode.Standalone.utils.agent_extension.generate_impact_savings_plot``.
 """
 
 import base64
@@ -74,8 +72,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
       - ``priorities``: ranked category list for report P-items (quantified
         categories sorted by ``impact_score``, then unmodeled categories with
         >5% of compute time sorted by ``gpu_kernel_time_ms``).
-      - ``recommendations``: same quantified categories, used by the optional
-        ``agent_extension.generate_impact_savings_plot``.
+      - ``recommendations``: same quantified categories.
       - ``all_estimates``: flat list of every per-operation estimate.
 
     Args:

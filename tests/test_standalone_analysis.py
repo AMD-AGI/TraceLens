@@ -49,11 +49,6 @@ from TraceLens.AgenticMode.Standalone.category_analyses.other_analysis import (
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
     generate_priority_data,
 )
-from TraceLens.AgenticMode.Standalone.utils.agent_extension import (
-    _render_legacy,
-    _parse_attrs,
-    rehydrate_reports_to_ms,
-)
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 

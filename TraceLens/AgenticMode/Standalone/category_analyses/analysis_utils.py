@@ -444,15 +444,12 @@ def compute_impact_estimates(
 
     Two-step computation:
 
-      1. Per-op unitless ``gap`` (fraction of this op's time that is "wasted"
-         relative to the roofline target). ``time_ms`` is intentionally NOT a
-         factor here:
+      1. Per-op roofline headroom ``gap``. 
             gap_high = max(0, 1 - efficiency_pct / TARGET_HIGH)
             gap_low  = (TARGET_LOW / TARGET_HIGH) * gap_high
             gap_mid  = (TARGET_MID / TARGET_HIGH) * gap_high
 
-      2. ``impact_score`` = the percentage of end-to-end GPU time recoverable
-         by tuning this op, obtained by weighting the gap by the op's share
+      2. ``impact_score`` = The impact estimate on E2E GPU time obtained by weighting the gap by the op's share
          of E2E:
             impact_score_high = gap_high * time_ms / baseline_ms * 100
             impact_score_low  = gap_low  * time_ms / baseline_ms * 100
