@@ -541,38 +541,6 @@ f. For Args cell mismatches: copy the matching `operations[].args` value verbati
 
 ---
 
-### 11.15 Marker Structure Validation (Retry up to 2x)
-
-Validate that every report markdown carries the expected `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers. Mirrors Step 11.1's retry pattern.
-
-**Validation procedure:**
-
-```bash
-<prefix> python3 -c \"
-import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_markers
-passed, errors = validate_markers(sys.argv[1])
-if not passed:
-    print('FAIL:')
-    for e in errors:
-        print('  - ' + e)
-    sys.exit(1)
-print('PASS: marker structure is valid')
-\" '<output_dir>'
-```
-
-**If validation fails (exit code 1):**
-
-1. Read the FAIL output to identify which file is missing or malformed markers. Fix in-place by re-emitting the affected block with the correct marker (do NOT rewrite the file from scratch).
-   - For a missing `kind=p_item` in a findings file: re-wrap the P-item `**Impact**` line per [`sub_agent_spec.md`](TraceLens/AgenticMode/Standalone/utils/templates/sub_agent_spec.md) § Impact markers.
-   - For a missing required attribute: copy the value from the corresponding `metadata/<cat>_metadata.json::impact_estimates[]` (compute findings) or use `low=null mid=null high=null` (system findings).
-   - For mixed null/numeric values: pick one shape based on whether the entry is quantifiable.
-   - For pairing mismatches: locate the unmatched `<!-- impact-begin -->` or `<!-- impact-end -->` and add the missing pair (or remove the orphan).
-2. Run validation again.
-3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
-
----
-
 ### 11.5 Optional extension (auto-detected)
 
 If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.

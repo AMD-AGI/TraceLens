@@ -6,21 +6,20 @@
 
 """Validation utilities for TraceLens AgenticMode.
 
-Four validation levels, each at the boundary where issues are still fixable:
+Three validation levels, each at the boundary where issues are still fixable:
 
 Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
-    Structural check on a single findings file. Sub-agent retries on failure.
+    Structural check on a single findings file, including marker structure
+    (pairing, kind attributes, per-kind required attrs, mandatory p_item).
+    Sub-agent retries on failure.
 
 Level 2 — validate_subagent_outputs (Step 8, batch)
     Cross-cutting checks that need all files: time sanity, coverage, priority.
 
 Level 3 — validate_report (Step 11.1, after report assembly)
-    Final standalone_analysis.md structure: headers, metrics table, placeholders.
-
-Level 4 — validate_markers (Step 11.15, after report assembly)
-    Cross-file marker structure: pairing, kind attributes, per-file kind
-    expectations across standalone_analysis.md, category_findings/*.md,
-    and system_findings/*.md.
+    Final standalone_analysis.md structure: headers, metrics table, placeholders,
+    and report-level marker structure (pairing, kind attributes, mandatory
+    top_ops).
 """
 
 import json
@@ -75,7 +74,7 @@ _KNOWN_REPORT_PLACEHOLDERS = {
     "<precision>",
 }
 
-# Level 4: marker structure
+# Marker structure (used by validate_findings_file and validate_report)
 _MARKER_BEGIN_RE = re.compile(
     r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL
 )
@@ -104,6 +103,10 @@ def validate_findings_file(filepath, tier):
     - P-item labels match tier (compute: Insight/Action/Impact; system: Insight/Action)
     - At least one reasoning-candidate block in Detailed Analysis
     - P-item count matches reasoning-candidate count
+    - Compute tier only: Args column cells match operations[].args verbatim
+    - Marker structure: pairing, kind= attribute, per-kind required attrs,
+      no mixed null/numeric values, mandatory kind=p_item (except for
+      triton_findings.md)
 
     Args:
         filepath: Path to the *_findings.md file
@@ -177,6 +180,10 @@ def validate_findings_file(filepath, tier):
     # Compute tier only: Args column cells must match operations[].args verbatim
     if tier == "compute":
         errors.extend(_validate_args_column(content, filepath))
+
+    # Marker structure (folded in from the former Level-4 validate_markers).
+    file_class = "category_findings" if tier == "compute" else "system_findings"
+    errors.extend(_per_file_marker_errors(filepath, file_class))
 
     passed = len(errors) == 0
     if passed:
@@ -364,9 +371,13 @@ def validate_report(output_dir):
     - Required ## section headers in standalone_analysis.md
     - Metrics table under Executive Summary (5 rows, no placeholders)
     - Unfilled template placeholders
+    - Args column cells match operations[].args verbatim
+    - Report-level marker structure: pairing, kind= attribute, per-kind
+      required attrs, mandatory kind=top_ops
 
     Findings files are validated separately by validate_findings_file
-    (Level 1, called within each sub-agent at Steps 6-7).
+    (Level 1, called within each sub-agent at Steps 6-7), which also
+    enforces per-file marker structure.
 
     Args:
         output_dir: Base output directory containing standalone_analysis.md
@@ -425,6 +436,10 @@ def validate_report(output_dir):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
+    # Report-level marker structure (folded in from the former Level-4
+    # validate_markers).
+    missing.extend(_report_marker_errors(report_path))
+
     return len(missing) == 0, missing
 
 
@@ -456,53 +471,21 @@ def _validate_report_args_column(content, output_dir):
 
 
 # ---------------------------------------------------------------------------
-# Level 4: cross-file marker validation (called at Step 11.15)
+# Marker validation helpers
+#
+# Used by validate_findings_file (per-file findings markers) and
+# validate_report (report markers). Previously a standalone Level-4
+# validate_markers walked all files; that has been folded in here.
 # ---------------------------------------------------------------------------
 
 
-def validate_markers(output_dir):
-    """Validate impact-begin / impact-end marker structure across all report markdowns.
+def _scan_markers(text, rel):
+    """Common per-file marker scan.
 
-    Walks standalone_analysis.md, category_findings/*.md, and system_findings/*.md.
-    Per file: checks marker pairing, presence of kind= attribute, per-kind
-    required attributes, and a minimum kind set (top_ops in the report,
-    p_item in each findings file unless exempt).
-
-    Returns (passed, errors). On failure, errors is a list of human-readable
-    issues; intended to be consumed by the orchestrator's Step 11.15
-    fail-with-retry block, mirroring validate_report.
+    Checks marker pairing, presence of kind= attribute, kind ∈ _KNOWN_KINDS,
+    per-kind required attrs, and no mixed null/numeric values in
+    low/mid/high. Returns (errors, seen_kinds).
     """
-    errors = []
-    files = _enumerate_marker_files(output_dir)
-    if not files:
-        return False, ["<no report files found in output_dir>"]
-    for filepath, file_class in files:
-        errors.extend(_validate_one_marker_file(filepath, file_class))
-    return len(errors) == 0, errors
-
-
-def _enumerate_marker_files(output_dir):
-    """Return [(path, class)] for every markdown file we expect markers in."""
-    out = []
-    sp = os.path.join(output_dir, "standalone_analysis.md")
-    if os.path.isfile(sp):
-        out.append((sp, "report"))
-    for sub in ("category_findings", "system_findings"):
-        d = os.path.join(output_dir, sub)
-        if not os.path.isdir(d):
-            continue
-        for name in sorted(os.listdir(d)):
-            if name.endswith(".md"):
-                out.append((os.path.join(d, name), sub))
-    return out
-
-
-def _validate_one_marker_file(path, file_class):
-    """All per-file marker checks. Returns list of error strings (empty = clean)."""
-    rel = os.path.basename(path)
-    with open(path) as f:
-        text = f.read()
-
     errors = []
     begins = _MARKER_BEGIN_RE.findall(text)
     n_end = len(_MARKER_END_RE.findall(text))
@@ -539,12 +522,37 @@ def _validate_one_marker_file(path, file_class):
                     f"in low/mid/high"
                 )
 
-    if file_class == "report" and "top_ops" not in seen_kinds:
-        errors.append(f"{rel}: missing required kind=top_ops")
+    return errors, seen_kinds
+
+
+def _per_file_marker_errors(path, file_class):
+    """Marker checks for a sub-agent findings file.
+
+    file_class must be "category_findings" or "system_findings". Adds the
+    per-tier "p_item required" check on top of _scan_markers, with the
+    triton exemption for category findings.
+    """
+    rel = os.path.basename(path)
+    with open(path) as f:
+        text = f.read()
+    errors, seen_kinds = _scan_markers(text, rel)
     if file_class == "category_findings" and rel not in _COMPUTE_NO_P_ITEM:
         if "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")
     if file_class == "system_findings" and "p_item" not in seen_kinds:
         errors.append(f"{rel}: missing required kind=p_item")
+    return errors
 
+
+def _report_marker_errors(path):
+    """Marker checks for the assembled standalone_analysis.md.
+
+    Adds the report-only "top_ops required" check on top of _scan_markers.
+    """
+    rel = os.path.basename(path)
+    with open(path) as f:
+        text = f.read()
+    errors, seen_kinds = _scan_markers(text, rel)
+    if "top_ops" not in seen_kinds:
+        errors.append(f"{rel}: missing required kind=top_ops")
     return errors

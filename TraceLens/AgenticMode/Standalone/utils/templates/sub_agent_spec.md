@@ -211,9 +211,7 @@ wrapped in `kind=detail_estimate` markers (see § Impact markers (REQUIRED)).
 Every block whose contents depend on `impact_score*` values must be wrapped in
 a paired HTML-comment marker. The markers carry the underlying numeric data as
 key=value attributes so that optional downstream tooling can re-process the
-block deterministically without re-parsing prose. Markers are HTML comments and
-therefore invisible in rendered markdown — the report renders identically
-whether or not any downstream tooling is run.
+block deterministically without re-parsing prose.
 
 ### Marker shape
 
@@ -256,7 +254,10 @@ re-derive, round, or scale them. Do not pull them from any other source.
 ## Validate findings (required before returning)
 
 After writing the findings file and impact estimates, run the programmatic
-validator. This replaces the previous manual self-check.
+validator. This replaces the previous manual self-check. The validator also
+enforces marker structure (pairing, `kind=`, per-kind required attrs,
+mandatory `kind=p_item` for category/system findings unless exempt) per
+§ Impact markers above.
 
 ```bash
 <prefix> python3 -c "
