@@ -153,7 +153,7 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 ## Kernel Fusion Opportunities (Experimental)
 
-> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual recoverable time depends on implementation feasibility and interaction effects.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
@@ -167,7 +167,9 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 **Action**: [1-2 sentences - which kernels to fuse and how]
 
-**Impact**: [~X.X ms savings (X.X% of E2E) at 75–100% of roofline, perf-model coverage Y/Z kernels]
+<!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[0].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[0].impact_score> high=<kernel_fusion_metrics.impact_estimates[0].impact_score_high> -->
+**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+<!-- impact-end -->
 
 **Confidence**: [high / medium / low - fusion pattern quality]
 
@@ -181,7 +183,9 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 **Action**: [1-2 sentences]
 
-**Impact**: [~X.X ms savings (X.X% of E2E) at 75–100% of roofline, perf-model coverage Y/Z kernels]
+<!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[1].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[1].impact_score> high=<kernel_fusion_metrics.impact_estimates[1].impact_score_high> -->
+**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+<!-- impact-end -->
 
 **Confidence**: [high / medium / low]
 
@@ -195,7 +199,9 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 **Action**: [1-2 sentences]
 
-**Impact**: [~X.X ms savings (X.X% of E2E) at 75–100% of roofline, perf-model coverage Y/Z kernels]
+<!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[2].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[2].impact_score> high=<kernel_fusion_metrics.impact_estimates[2].impact_score_high> -->
+**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+<!-- impact-end -->
 
 **Confidence**: [high / medium / low]
 
@@ -284,11 +290,11 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 
-> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
-<!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available." -->
+<!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion impact estimates available." -->
 
 <a id="detailed-analysis-fusion-P1"></a>
 #### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
