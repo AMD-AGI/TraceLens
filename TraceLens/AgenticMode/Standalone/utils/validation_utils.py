@@ -9,16 +9,19 @@
 Three validation levels, each at the boundary where issues are still fixable:
 
 Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
-    Structural check on a single findings file. Sub-agent retries on failure.
+    Structural check on a single findings file, including marker structure
+    via MarkerValidator (pairing, kind attributes, per-kind required attrs,
+    mandatory p_item). Sub-agent retries on failure.
 
 Level 2 — validate_subagent_outputs (Step 8, batch)
     Cross-cutting checks that need all files: time sanity, coverage, priority.
 
 Level 3 — validate_report (Step 11.1, after report assembly)
-    Final standalone_analysis.md structure: headers, metrics table, placeholders.
+    Final standalone_analysis.md structure: headers, metrics table, placeholders,
+    and report-level marker structure via MarkerValidator (pairing, kind
+    attributes, mandatory top_ops).
 """
 
-import json
 import json
 import os
 import re
@@ -70,7 +73,6 @@ _KNOWN_REPORT_PLACEHOLDERS = {
     "<precision>",
 }
 
-
 # ---------------------------------------------------------------------------
 # Level 1: per-file findings validation (called within each sub-agent)
 # ---------------------------------------------------------------------------
@@ -84,6 +86,10 @@ def validate_findings_file(filepath, tier):
     - P-item labels match tier (compute: Insight/Action/Impact; system: Insight/Action)
     - At least one reasoning-candidate block in Detailed Analysis
     - P-item count matches reasoning-candidate count
+    - Compute tier only: Args column cells match operations[].args verbatim
+    - Marker structure: pairing, kind= attribute, per-kind required attrs,
+      no mixed null/numeric values, mandatory kind=p_item (except for
+      triton_findings.md)
 
     Args:
         filepath: Path to the *_findings.md file
@@ -157,6 +163,10 @@ def validate_findings_file(filepath, tier):
     # Compute tier only: Args column cells must match operations[].args verbatim
     if tier == "compute":
         errors.extend(_validate_args_column(content, filepath))
+
+    # Marker structure (folded in from the former Level-4 validate_markers).
+    file_class = "category_findings" if tier == "compute" else "system_findings"
+    errors.extend(MarkerValidator.check_findings_file(filepath, file_class))
 
     passed = len(errors) == 0
     if passed:
@@ -344,9 +354,13 @@ def validate_report(output_dir):
     - Required ## section headers in standalone_analysis.md
     - Metrics table under Executive Summary (5 rows, no placeholders)
     - Unfilled template placeholders
+    - Args column cells match operations[].args verbatim
+    - Report-level marker structure: pairing, kind= attribute, per-kind
+      required attrs, mandatory kind=top_ops
 
     Findings files are validated separately by validate_findings_file
-    (Level 1, called within each sub-agent at Steps 6-7).
+    (Level 1, called within each sub-agent at Steps 6-7), which also
+    enforces per-file marker structure.
 
     Args:
         output_dir: Base output directory containing standalone_analysis.md
@@ -405,6 +419,9 @@ def validate_report(output_dir):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
+    # Report-level marker structure
+    missing.extend(MarkerValidator.check_report(report_path))
+
     return len(missing) == 0, missing
 
 
@@ -433,3 +450,112 @@ def _validate_report_args_column(content, output_dir):
         for ln, cell in _scan_args_cells(content)
         if cell not in valid_args
     ]
+
+
+# ---------------------------------------------------------------------------
+# MarkerValidator
+#
+# Owns all `<!-- impact-begin ... -->` / `<!-- impact-end -->` marker config
+# and checks. Used by validate_findings_file (per-file findings markers) and
+# validate_report (report markers). .
+# ---------------------------------------------------------------------------
+
+
+class MarkerValidator:
+    """All marker (`<!-- impact-begin ... -->` / `<!-- impact-end -->`) checks.
+
+    Stateless: regexes and kind tables are class-level constants and the
+    entry points are classmethods.
+    """
+
+    BEGIN_RE = re.compile(r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL)
+    END_RE = re.compile(r"<!--\s*impact-end\s*-->")
+    KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
+    ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+
+    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "impact_summary"}
+    REQUIRED_ATTRS_BY_KIND = {
+        "p_item": ("low", "mid", "high"),
+        "detail_estimate": ("low", "high"),
+    }
+    # Compute findings files that do NOT need a p_item marker.
+    COMPUTE_NO_P_ITEM = {"triton_findings.md"}
+
+    @classmethod
+    def scan(cls, text, rel):
+        """Common per-file marker scan.
+
+        Checks marker pairing, presence of kind= attribute, kind ∈
+        KNOWN_KINDS, per-kind required attrs, and no mixed null/numeric
+        values in low/mid/high. Returns (errors, seen_kinds).
+        """
+        errors = []
+        begins = cls.BEGIN_RE.findall(text)
+        n_end = len(cls.END_RE.findall(text))
+        if len(begins) != n_end:
+            errors.append(
+                f"{rel}: marker pairing mismatch ({len(begins)} begin vs {n_end} end)"
+            )
+
+        seen_kinds = set()
+        for inner in begins:
+            kind_m = cls.KIND_ATTR_RE.search(inner)
+            if not kind_m:
+                errors.append(
+                    f"{rel}: impact-begin missing kind= attribute: {inner.strip()}"
+                )
+                continue
+            kind = kind_m.group(1)
+            seen_kinds.add(kind)
+            if kind not in cls.KNOWN_KINDS:
+                errors.append(f"{rel}: unknown kind={kind}")
+                continue
+            attrs = dict(cls.ATTR_RE.findall(inner))
+            for required in cls.REQUIRED_ATTRS_BY_KIND.get(kind, ()):
+                if required not in attrs:
+                    errors.append(
+                        f"{rel}: kind={kind} missing required attr {required}"
+                    )
+            nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
+            if nums:
+                null_ct = sum(1 for v in nums if v == "null")
+                if 0 < null_ct < len(nums):
+                    errors.append(
+                        f"{rel}: kind={kind} mixes null and numeric values "
+                        f"in low/mid/high"
+                    )
+
+        return errors, seen_kinds
+
+    @classmethod
+    def check_findings_file(cls, path, file_class):
+        """Marker checks for a sub-agent findings file.
+
+        file_class must be "category_findings" or "system_findings". Adds
+        the per-tier "p_item required" check on top of `scan`, with the
+        triton exemption for category findings.
+        """
+        rel = os.path.basename(path)
+        with open(path) as f:
+            text = f.read()
+        errors, seen_kinds = cls.scan(text, rel)
+        if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
+            if "p_item" not in seen_kinds:
+                errors.append(f"{rel}: missing required kind=p_item")
+        if file_class == "system_findings" and "p_item" not in seen_kinds:
+            errors.append(f"{rel}: missing required kind=p_item")
+        return errors
+
+    @classmethod
+    def check_report(cls, path):
+        """Marker checks for the assembled standalone_analysis.md.
+
+        Adds the report-only "top_ops required" check on top of `scan`.
+        """
+        rel = os.path.basename(path)
+        with open(path) as f:
+            text = f.read()
+        errors, seen_kinds = cls.scan(text, rel)
+        if "top_ops" not in seen_kinds:
+            errors.append(f"{rel}: missing required kind=top_ops")
+        return errors

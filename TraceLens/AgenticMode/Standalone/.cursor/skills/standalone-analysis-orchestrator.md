@@ -45,8 +45,9 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
-10. Generate Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
-11. Generate Final Report (composable System + Compute sections)
+10. Generate Performance Improvement Plot (reads priority_data.json → priority_data.json + simple PNG IF agent_extension.py is absent)
+11. Generate Final Report (composable System + Compute sections), validate it,
+    optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
 **Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
@@ -463,17 +464,22 @@ generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```
 
-### 10.3 Generate Plot and Base64 File
+### 10.3 Generate Plot and Base64 File (conditional)
+
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the perf plot here. If the file is present, **skip this step** — Step 11.5 will produce `perf_improvement.png` and Step 11.2 will embed it.
 
 ```bash
-<prefix> python3 -c \"
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ ! -f "$EXT" ]; then
+  <prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+\" '<output_dir>' '<Model> on <Platform> — Performance Breakdown'
+fi
 ```
 
-If the plot fails, retry once. If still failing, proceed to Step 11 without the plot.
+If the plot fails (extension-absent branch), retry once. If still failing, proceed to Step 11 without the plot.
 
 ---
 
@@ -531,24 +537,40 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 2. Run validation again.
-3. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning.
+3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
 ---
 
-### 11.2 Generate and Embed Performance Improvement Plot
+### 11.5 Optional extension (auto-detected)
 
-Render `perf_improvement.png`, and embed the base64-encoded plot into the report.
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
+
+If the file is absent, skip this step silently. The standalone analysis is complete; the simple plot from Step 10.3 stays in place.
+
+```bash
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ -f "$EXT" ]; then
+  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
+fi
+```
+
+This step is a hook for an optional extension; if `agent_extension.py` is not present, skip it.
+
+---
+
+### 11.2 Embed Performance Improvement Plot
+
+The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Step 11.5 (whichever ran). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
 
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
-generate_and_embed_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
+embed_plot_in_report(sys.argv[1])
+\" '<output_dir>'
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
-
 ---
 
 ## Error Handling

@@ -199,8 +199,8 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
    - Recommendation: [specific action]
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
 
 ## Recommendations
 
@@ -229,6 +229,8 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 ```
 
 **Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
+
+**Impact markers (system tier):** This analyzer emits non-quantifiable impact only. Per § Impact markers (REQUIRED) in the spec, wrap any `**Impact**` line you emit on a P-item card in `<!-- impact-begin kind=p_item low=null mid=null high=null -->` ... `<!-- impact-end -->`. Do not emit `kind=detail_estimate` or `kind=impact_summary` markers — system-tier findings are not quantifiable.
 
 ### Step 7.1: Write Impact Estimates to Metadata
 

@@ -117,9 +117,13 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 | <op_name> | X.X       | X.X%          | N           |
 
 ## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
+<!-- impact-begin kind=impact_summary -->
+| Recommendation | Type | impact_score | Confidence |
+|----------------|------|--------------|------------|
+<!-- impact-end -->
 ```
+
+**Impact markers (REQUIRED):** Per § Impact markers (REQUIRED) in [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), wrap the (header-only) `## Impact Summary` table in `<!-- impact-begin kind=impact_summary -->` ... `<!-- impact-end -->` markers as shown above. This analyzer does not emit `kind=p_item` or `kind=detail_estimate` markers because Triton has no quantifiable impact estimates.
 
 **Key rules for the findings file:**
 - The Impact Summary table must be present but must have **zero data rows**
