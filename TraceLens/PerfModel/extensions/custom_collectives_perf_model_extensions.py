@@ -130,12 +130,8 @@ class sgl_kernel_all_reduce_reg(custom_ar_all_reduce):
 
     Reference implementation:
         python/sglang/srt/distributed/device_communicators/custom_all_reduce_ops.py  # all_reduce_reg(fa, inp, out)
-        python/sglang/srt/distributed/device_communicators/custom_all_reduce.py      # CustomAllreduce.all_reduce_reg
-        sgl-kernel/csrc/allreduce/custom_all_reduce.cu                               # cross_device_reduce_2stage<T, world_size>
 
-    SGLang's registered-buffer custom all-reduce. Launches the
-    `sglang::cross_device_reduce_2stage<__hip_bfloat16, 8>` 2-stage ring kernel
-    (TP=8 here) on a pre-registered IPC buffer. Pure inter-GPU communication;
+    SGLang's registered-buffer custom all-reduce. Pure inter-GPU communication;
     no on-chip compute FLOPs.
 
     Signature: all_reduce_reg(fa, inp, out) -> None
@@ -163,10 +159,8 @@ class sgl_kernel_qr_all_reduce(custom_ar_all_reduce):
     Reference implementation:
         python/sglang/srt/distributed/device_communicators/custom_all_reduce_ops.py  # qr_all_reduce(fa, inp, out, quant_level, cast_bf2half)
         python/sglang/srt/distributed/device_communicators/quick_all_reduce.py        # QuickAllReduce.quick_all_reduce
-        sgl-kernel/csrc/allreduce/quick_all_reduce.cu                                # quickreduce::allreduce_prototype_*
 
-    SGLang's QuickReduce all-reduce variant (typically used for larger payloads
-    on the ROCm path). Launches `quickreduce::allreduce_prototype_twoshot<...>`
+    SGLang's QuickReduce all-reduce variant. Launches `quickreduce::allreduce_prototype_twoshot<...>`
     or related kernels. Same per-GPU HBM accounting as the registered
     all-reduce: read local input, write allreduced output.
 
@@ -201,9 +195,7 @@ class custom_ar_qr_all_reduce(custom_ar_all_reduce):
         vllm/distributed/device_communicators/quick_all_reduce.py # QuickAllReduce.quick_all_reduce
         csrc/custom_all_reduce/quick_all_reduce.cu                # quickreduce::allreduce_prototype_*
 
-    vLLM's QuickReduce all-reduce variant on the ROCm path. Launches
-    `quickreduce::allreduce_prototype_twoshot<...>` (CodecQ4 / CodecBF16 / etc.
-    depending on `quant_level`). Same per-GPU HBM accounting as a plain
+    vLLM's QuickReduce all-reduce variant.  Same per-GPU HBM accounting as a plain
     custom all-reduce: read local input, write the allreduced output.
 
     Signature: qr_all_reduce(fa, inp, out, quant_level, cast_bf2half) -> None

@@ -106,11 +106,6 @@ Check `category_specific` for implementation type:
 - Time: > 100ms OR > 5% of category time
 - Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound — consider sequence length and workload type)
 
-**Special considerations for Paged Attention:**
-- Decode-only workloads naturally have lower efficiency (5-15%)
-- Prefill-heavy workloads should achieve 30-50% efficiency
-- Mixed workloads typically achieve 10-30% efficiency
-
 ### Step 4: Analyze Kernel Breakdown (Paged Attention Only)
 
 If `paged_attention_detected` is true, analyze kernel composition from each operation's `classification.kernel_breakdown`:
@@ -229,13 +224,11 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 #### Decode-Heavy Workload
 - **Symptoms:** High `kernel_paged_attention_2d` %, low `_fwd_kernel` %, ctx_ratio < 0.2
-- **Expected efficiency:** 5-15% for single-token decode (memory-bound)
 - **Algorithmic:** Increase batch size, use speculative decoding
-- **Kernel:** Optimize paged attention kernel if below 10%
+- **Kernel:** Optimize paged attention kernel if well below the resolved memory roofline
 
 #### Prefill Bottleneck
 - **Symptoms:** High `_fwd_kernel` %, large `sum_ctx_tokens`, ctx_ratio > 0.8
-- **Expected efficiency:** 30-50% for medium-long sequences
 - **Algorithmic:** Enable chunked prefill, reduce max_model_len if memory-constrained
 - **Kernel:** Profile `_fwd_kernel` for tile size optimization
 
@@ -275,17 +268,6 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 | N = 2048 | 40-60% |
 | N > 4096 | 50-70% |
 
-### Paged Attention (vLLM)
-
-| Workload Type | Expected Efficiency | Notes |
-|---------------|---------------------|-------|
-| Decode-only (single token) | 5-15% | Memory-bound, batch helps |
-| Prefill-only (long sequence) | 30-50% | Similar to Flash Attention |
-| Mixed (typical inference) | 10-30% | Depends on ctx/gen ratio |
-| Short prefill (N < 512) | 5-15% | Same as Flash Attention |
-
-**Note:** Efficiency below these ranges indicates kernel optimization opportunity.
-
 ---
 
 ## Paged Attention Recommendations
@@ -294,7 +276,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 | Issue | Recommendation |
 |-------|----------------|
-| Low decode efficiency (<5%) | Increase decode batch size |
+| Decode efficiency well below resolved memory roofline | Increase decode batch size |
 | High latency long prefill | Enable chunked prefill |
 | Memory pressure | Tune max_model_len, enable KV cache quantization |
 | Single-request latency | Use speculative decoding |
@@ -303,8 +285,8 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 | Kernel | When to Optimize | Action |
 |--------|------------------|--------|
-| `kernel_paged_attention_2d` | >70% of time, <10% efficiency | Profile page table lookup, memory access |
-| `_fwd_kernel` | Prefill-heavy, <30% efficiency | Tune tile sizes, check GQA handling |
+| `kernel_paged_attention_2d` | >70% of time, well below resolved memory roofline | Profile page table lookup, memory access |
+| `_fwd_kernel` | Prefill-heavy, well below resolved roofline | Tune tile sizes, check GQA handling |
 | `reshape_and_cache` | >10% of operation time | Check KV cache block size, memory coalescing |
 
 ### Configuration Parameters to Check

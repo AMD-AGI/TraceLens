@@ -3,8 +3,13 @@ set -uo pipefail
 
 # ---------------------------------------------------------------------------
 # Configuration (run from repo root on the node)
+#
+# CONTAINER is optional. If set (e.g. CONTAINER=my_container), python and
+# setup commands run via: docker exec -w $REPO_ROOT $CONTAINER ...
+# If unset or empty, those commands run on the host in the current shell's
+# environment (still expects cwd to be REPO_ROOT).
 # ---------------------------------------------------------------------------
-CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
+CONTAINER="${CONTAINER:-}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 TEST_IDS="${TEST_IDS:-}"
 
@@ -13,10 +18,17 @@ STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/results}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
-DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
+
+if [[ -n "$CONTAINER" ]]; then
+    DEXEC=(docker exec -w "$REPO_ROOT" "$CONTAINER")
+    RUNTIME_LABEL="container $CONTAINER"
+else
+    DEXEC=()
+    RUNTIME_LABEL="host (no container)"
+fi
 
 mkdir -p "$RESULTS_ROOT"
-$DEXEC bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
+"${DEXEC[@]}" bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
 
 expand_archive() {
     local name="$1"
@@ -36,7 +48,7 @@ expand_archive e2e_tests
 echo "========================================="
 echo "  Standalone Analysis Evaluation"
 echo "  Node:      $(hostname)"
-echo "  Container: $CONTAINER"
+echo "  Runtime:   $RUNTIME_LABEL"
 if [[ -n "$TEST_IDS" ]]; then
     echo "  Test filter: $TEST_IDS"
 fi
@@ -56,8 +68,8 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     OUTPUT_DIR="$CASE_RESULTS/analysis_output"
     rm -rf "$CASE_RESULTS"
     mkdir -p "$OUTPUT_DIR"
-    $DEXEC bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
-    $DEXEC bash -c "mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS"
+    "${DEXEC[@]}" bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
+    "${DEXEC[@]}" bash -c "mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS"
 
     # Phase 1: Standalone Analysis (with retry + backoff)
     echo "  [$id] Analyzing $trace_path on $platform..."
@@ -68,7 +80,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
         (
             cd "$STANDALONE_DIR"
             agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), $RUNTIME_LABEL, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_RESULTS/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
@@ -92,7 +104,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     eval_pids=()
 
     echo "    -> Scripted workflow evals"
-    $DEXEC python3 "$EVALS_DIR/eval_utils/workflow_scripted_evals.py" \
+    "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/workflow_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" \
         --results "$CASE_RESULTS/workflow_scripted_results.csv" \
         > "$CASE_RESULTS/workflow_scripted_eval.log" 2>&1 &
@@ -107,7 +119,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     eval_pids+=($!)
 
     echo "    -> Scripted quality evals"
-    $DEXEC python3 "$EVALS_DIR/eval_utils/quality_scripted_evals.py" \
+    "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/quality_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" --reference-dir "$reference_dir" \
         --results "$CASE_RESULTS/quality_scripted_results.csv" \
         > "$CASE_RESULTS/quality_scripted_eval.log" 2>&1 &
@@ -127,7 +139,7 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     echo "  [$id] Evals complete."
 
     # Aggregate Results
-    $DEXEC python3 "$EVALS_DIR/eval_utils/merge_results.py" \
+    "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/merge_results.py" \
         --results-dir "$CASE_RESULTS" \
         --output "$CASE_RESULTS/eval_summary.csv" || true
     echo "  [$id] Summary written to $CASE_RESULTS/eval_summary.csv"
