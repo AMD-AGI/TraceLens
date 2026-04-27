@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: multi-kernel-analyzer
 description: Analyze cross-cutting multi-kernel issues including memcpy D2H/H2D patterns, NCCL blocking compute, and compute/communication overlap. System-level analysis tier.
-model: inherit
+model: claude-4.6-sonnet-medium-thinking
 ---
 
 # Multi-Kernel Issue Analysis Subagent
@@ -198,6 +198,10 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
    - Evidence: [metrics]
    - Recommendation: [specific action]
 
+## Impact Summary
+| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
+|---------------|------|----------------------|-------------------------------|------------|
+
 ## Recommendations
 
 ### System P<N>: [Highest Priority Multi-Kernel Issue]
@@ -226,7 +230,7 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 
 **Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
 
-### Step 7: Write Impact Estimates to Metadata
+### Step 7.1: Write Impact Estimates to Metadata
 
 Run the script below, then render impact bullets in your `## Detailed Analysis` block per `sub_agent_spec.md`.
 
@@ -234,12 +238,32 @@ Run the script below, then render impact bullets in your `## Detailed Analysis` 
 <prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'multi_kernel', 'system')"
 ```
 
+### Step 7.2: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/system_findings/multi_kernel_findings.md' 'system'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
+
 ---
 
 ## Key Principles
 
 1. **System-level focus** - These are pipeline/framework issues, NOT individual kernel issues
-2. **No impact estimates** - System-level impact cannot be reliably estimated from trace data
+2. **Impact Summary is header-only** - System-level Impact Summary must include the table header row but zero data rows
 3. **Provide actionable solutions** - Specific steps, not vague suggestions
 4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 5. **Priority numbering is sequential** - The orchestrator assigns final P-numbers. Use P<N> placeholders; if CPU/Idle is below threshold, multi-kernel issues start at P1

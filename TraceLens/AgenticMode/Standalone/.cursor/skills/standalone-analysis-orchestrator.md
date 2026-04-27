@@ -279,17 +279,20 @@ Execute every step in the agent file. Return "DONE" when complete.
 
 ### 6.3 Wait for System-Level Subagents to Complete
 
-The three subagents must complete before proceeding to Step 7.
+The three subagents must complete before proceeding to Step 6.4.
 Each writes findings to `system_findings/<name>_findings.md`.
 
-### 6.4 Verify System Outputs
+### 6.4 Verify System Outputs and Retry Failures (up to 1 retry per subagent)
 
-After both subagents complete:
+After all system-level subagents complete:
 
-1. Check each findings file in `system_findings/` for "Status: ERROR"
-2. Collect failed analyses and error summaries
-3. **CRITICAL: Exclude failed analyses from aggregation**
-4. **CRITICAL: Do NOT attempt manual analysis of failed system checks**
+1. For each expected system category from the manifest, check:
+   - Does `system_findings/<category>_findings.md` exist?
+   - If it exists, does it contain "Status: ERROR"?
+2. Collect a list of **failed** categories (missing file OR Status: ERROR).
+3. **Retry each failed category exactly once** by re-launching its subagent with the same prompt from Step 6.2. Wait for all retries to complete before proceeding.
+4. After retries, re-check outputs. Any category that still fails is excluded from aggregation.
+5. **CRITICAL: Do NOT attempt manual analysis of failed system checks — only automated subagent retry is allowed.**
 
 ---
 
@@ -322,22 +325,19 @@ Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 
 **Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
 
-#### Partitioning: Mapped vs Unmapped Categories
+#### Subagent Selection
 
-Partition `compute_categories` into two groups:
+For each category in `compute_categories`, resolve `{agent_file}`:
+- If the category is in the Agent File Map above, use the listed agent file.
+- Otherwise (unmapped category), fall back to `generic-op-analyzer.md` — it is `<cat>`-parameterized and handles any category by substitution.
 
-- **Mapped**: category exists in the Agent File Map above → gets a dedicated subagent
-- **Unmapped**: category is NOT in the Agent File Map → goes into a single **batched generic** subagent/ `other` is a special case: it IS in  the map but uses `generic-op-analyzer.md`. Include it in the batched generic subagent alongside unmapped categories.
-
-Launch all subagents simultaneously in a single parallel batch:
-- One **dedicated subagent** per mapped category
-- One **batched generic subagent** for all unmapped + `other` categories (if any)
+Launch all subagents simultaneously in a single parallel batch.
 
 ---
 
 #### Shared Compute Kernel Preamble
 
-Include this block in every compute kernel subagent prompt (dedicated and batched):
+Include this block in every compute kernel subagent prompt:
 
 <Shared Compute Kernel Preamble>:
 ```
@@ -360,9 +360,9 @@ Include this block in every compute kernel subagent prompt (dedicated and batche
 
 ---
 
-#### Dedicated Compute Kernel Subagent Prompt
+#### Compute Kernel Subagent Prompt
 
-For each mapped category, launch a Task (subagent_type: generalPurpose):
+For each category, launch a Task (subagent_type: generalPurpose):
 
 ```
 You are analyzing {category} operations for a PyTorch trace on {platform}.
@@ -372,6 +372,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 Read and follow the FULL instructions in:
   TraceLens/AgenticMode/Standalone/.cursor/agents/{agent_file}
 
+- Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
   category_data/{category}_tree_data.json (if available)
 - Output file: category_findings/{category}_findings.md
@@ -379,53 +380,22 @@ Read and follow the FULL instructions in:
 Execute every step in the agent file. Return "DONE" when complete.
 ```
 
----
-
-#### Batched Generic Subagent Prompt
-
-If `generic_batch` is non-empty, launch ONE Task (subagent_type: generalPurpose) that handles all generic categories sequentially:
-
-```
-You are analyzing multiple operation categories for a PyTorch trace on {platform}.
-
-<Shared Compute Kernel Preamble>
-
-Read the analysis instructions ONCE from:
-  TraceLens/AgenticMode/Standalone/.cursor/agents/generic-op-analyzer.md
-
-Then apply that workflow sequentially to EACH of these categories:
-{for each cat in generic_batch}
-  - {cat}: run `other_analysis.py --category {cat} --output-dir <output_dir>`,
-    read {cat}_metrics.json, write category_findings/{cat}_findings.md
-{end for}
-
-For the category named "other" (if present in the list): run `other_analysis.py`
-without the --category flag (it defaults to "other").
-
-- For each category {cat}, input files are: category_data/{cat}_ops.csv,
-  metadata/{cat}_metadata.json, category_data/{cat}_tree_data.json (if available)
-- For each category {cat}, output file is: category_findings/{cat}_findings.md
-- After writing each findings file, run:
-  write_impact_estimates('<output_dir>', '{cat}', 'compute')
-
-Process all categories. Return "DONE" when all are complete.
-```
-
 ### 7.3 Wait for All Compute Kernel Subagents to Complete
 
-All subagents must complete before proceeding to Step 8.
+All subagents must complete before proceeding to Step 7.4.
 Each subagent writes its findings to `category_findings/<category>_findings.md`.
 
-**Self-check:** After all compute kernel subagents complete, verify that every category in the manifest with `tier: compute_kernel` has a corresponding `category_findings/<category>_findings.md` file. If any are missing, re-iinvoke the subagent for that category before proceeding to Step 8.
+### 7.4 Verify Outputs and Retry Failures (up to 1 retry per subagent)
 
-### 7.4 Verify Outputs and Collect Errors
+After all compute kernel subagents complete:
 
-After all subagents complete:
-
-1. Check each `<category>_findings.md` for "Status: ERROR"
-2. Collect list of failed categories and their error summaries
-3. **CRITICAL: Exclude failed categories from aggregation and recommendations**
-4. **CRITICAL: Do NOT attempt to manually analyze failed categories**
+1. For each category in the manifest with `tier: compute_kernel`, check:
+   - Does `category_findings/<category>_findings.md` exist?
+   - If it exists, does it contain "Status: ERROR"?
+2. Collect a list of **failed** categories (missing file OR Status: ERROR).
+3. **Retry each failed category exactly once** by re-launching its subagent with the same prompt structure from Step 7.2. Launch all retries in parallel and wait for completion.
+4. After retries, re-check outputs. Any category that still fails is excluded from aggregation and recommendations.
+5. **CRITICAL: Do NOT attempt to manually analyze failed categories — only automated subagent retry is allowed.**
 
 ---
 
@@ -459,9 +429,13 @@ load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
-### 9.1 Model Identification (Subagent)
+### 9.1 Model Identification (Subagent, retry once on failure)
 
-Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion. On failure, write fallback `metadata/model_info.json` with all four fields `"Cannot be inferred from trace"`.
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
+
+**On failure (subagent error, timeout, or `model_info.json` not written):**
+1. **Retry exactly once** by re-launching the same subagent with the same prompt.
+2. If the retry also fails, write fallback `metadata/model_info.json` with all four fields set to `"Cannot be inferred from trace"`.
 
 Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
 
@@ -513,6 +487,8 @@ If the plot fails, retry once. If still failing, proceed to Step 11 without the 
    - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
    - `priority_data.json` — use `priorities` array for compute kernel P-item ordering (P1 = rank 1, P2 = rank 2, P3+ = rest). Categories with `source: "manifest_fallback"` use Impact: "Not quantifiable from trace data".
+   - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
+   - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
    - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
@@ -534,7 +510,7 @@ After writing `standalone_analysis.md`, validate that the report contains all re
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import validate_report
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_report
 passed, missing = validate_report(sys.argv[1])
 if not passed:
     print('FAIL:')
@@ -547,11 +523,15 @@ print('PASS: All required sections present')
 
 **If validation fails (exit code 1):**
 
-1. Read the FAIL output to identify missing sections
-2. Check if the report contains similar but incorrectly named headers (e.g., `## Compute Kernel Analysis` instead of `## Compute Kernel Optimizations`, or `## System-Level Analysis` instead of `## System-Level Optimizations`) and rename them to match the exact required names using string replacement. Do NOT rewrite the report from scratch.
-3. If sections are entirely absent, add them with the correct `##` headers, keeping existing content
-4. Run validation again
-5. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning
+1. Read the FAIL output to identify the issue. Fix in-place, do NOT rewrite the report from scratch.
+a. Check if the report contains similar but incorrectly named headers and rename them to match the exact required names. 
+b. If sections are entirely absent, add them with the correct `##` headers, keeping existing content.
+c. For "Missing metrics row" errors: add the row to the Executive Summary table using values from `category_data/category_manifest.json` (`gpu_utilization` keys) and `priority_data.json` (top bottleneck).
+d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary metrics table: replace each with the actual value from `category_manifest.json` -> `gpu_utilization`.
+e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
+f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
+2. Run validation again.
+3. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning.
 
 ---
 

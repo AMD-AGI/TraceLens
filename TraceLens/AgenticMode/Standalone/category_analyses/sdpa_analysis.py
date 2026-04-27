@@ -355,6 +355,7 @@ def main():
         config={
             "extra_fields": [
                 "Input Dims",
+                "Input type",
                 "has_perf_model",
                 "perf_params",
                 "kernel_details_summary",

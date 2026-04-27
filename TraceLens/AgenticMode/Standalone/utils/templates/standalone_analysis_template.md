@@ -145,7 +145,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 > **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
-<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
 <!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
@@ -223,9 +223,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Identification:**
 **Data:**
 
-| Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound |
-|-----------|-----------------|---------------|-------|------------|------------|-------|
-| ...       | ...             | ...           | ...   | ...        | ...        | ...   |
+| Operation | Args | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|-----------|------|-----------|------|-------|------------|------------|-------|
+| ...       | ...  | ...       | ...  | ...   | ...        | ...        | ...   |
 
 **Reasoning for Slowdown:**
 **Resolution:**

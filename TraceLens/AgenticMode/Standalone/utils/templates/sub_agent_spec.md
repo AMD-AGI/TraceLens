@@ -16,71 +16,30 @@ files. The orchestrator extracts these sections when composing the final
 
 ## Orchestrator-consumed sections
 
-The sections below must appear **at the end** of every findings file, in the
-order shown. Agents may include any additional sections before these (Overview,
-Operations Breakdown, Key Bottlenecks, etc.) — those are agent-internal and not
-parsed by the orchestrator.
-
-**Compute tier** (`category_findings/`):
-
-1. `## Impact Summary`
-2. `## Recommendations`
-3. `## Detailed Analysis`
-
-**System tier** (`system_findings/`):
+Every findings file must end with these two sections, in this order:
 
 1. `## Recommendations`
 2. `## Detailed Analysis`
 
-System-tier agents omit `## Impact Summary` — system-level impact is not
-quantifiable from trace data.
-
----
-
-## Impact Summary (compute tier only)
-
-```markdown
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
-| <rec title>   | kernel_tuning | X.X–Y.Y | X.X–Y.Y ms (X.X–Y.Y%) | high/medium/low |
-```
-
-- If `impact_estimates` is empty or no actionable bottlenecks found, keep the
-  header and separator only (zero data rows).
-- Only `kernel_tuning` rows from pre-computed data are valid. Do NOT add rows
-  with Type `algorithmic`, `system`, `—`, or any other value.
+Applies to both tiers (compute → `category_findings/`, system → `system_findings/`). Agents may include any other sections (Overview, Operations Breakdown, Key Bottlenecks, …) before them — those are agent-internal and not parsed by the orchestrator.
 
 ---
 
 ## Recommendations
 
-Each `## Recommendations` P-item must map 1:1 to a `## Detailed Analysis`
-reasoning candidate at the same rank.
-
-**Compute tier:**
+Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank.
 
 ```markdown
-### P1: <Brief Title> (<Library>)
+### P1: <Brief Title> (<Library>)            <!-- (<Library>) only on compute tier -->
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from Impact Summary, OR "Not quantifiable from trace data"]
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E), OR "Not quantifiable from trace data"]   <!-- compute tier only -->
 ```
 
-**Library parenthetical:** Collect the unique non-null `library` values from
-the bottleneck operations in the metrics JSON. Append them comma-separated
-in parentheses after the title. All `library: null`: omit the parenthetical
-entirely.
-
-**System tier:**
-
-```markdown
-### P1: <Brief Title>
-**Insight**: [1 sentence — what's wrong]
-**Action**: [1-2 sentences — what to do]
-```
-
-System-tier recommendations have no **Impact** field.
+- **Compute tier**: include all three fields. Pull `**Impact**` from `impact_estimates` in the metrics JSON.
+- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix.
+- **Field labels are exact** — always `**Insight**`, `**Action**`, `**Impact**`.
+- **`(<Library>)` suffix**: comma-separated list of unique non-null `library` values across the bottleneck operations. If all are `null`, omit the parenthetical entirely.
 
 ---
 
@@ -119,7 +78,7 @@ blank line between them. The validator checks for these as substring matches.
 
 | Label | Purpose |
 |-------|---------|
-| `**Identification:**` | How these operations were deemed an optimization opportunity. Body text must use **plain language only** — no JSON keys, dotted paths, or internal variable names. **Must** end with a `(source: <artifact> → <keys>)` parenthetical as the final text. Artifact names and keys must be wrapped in backticks (e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). All JSON keys and internal variable names belong **exclusively** inside this parenthetical. When the metrics JSON includes a non-null `library` field for an operation (e.g. `"Tensile"`, `"CK"`, `"AITER"`, `"Triton"`, `"rocBLAS"`), **always** state which library the operations use (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
+| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
 | `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
@@ -139,23 +98,23 @@ Standard column schema for operations breakdown tables and the `**Data:**` table
 inside `## Detailed Analysis` blocks.
 
 ```markdown
-| Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound |
-|-----------|-----------------|---------------|-------|------------|------------|-------|
+| Operation | Args | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|-----------|------|-----------|------|-------|------------|------------|-------|
 ```
 
 **Column mappings** (source: `metrics['operations']`):
-- **Kernel time (ms)**: `operations[i].time_ms`
-- **% of category**: `operations[i].percent_of_category`
-- **Count**: `operations[i].count` (total invocations, not unique signatures)
+- **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
+- **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. Omit the column if every row is missing this field.
+- **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
+- **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `null` ⇒ omit the column. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
+- **Count**: `operations[i].count` — total invocations, not unique signatures.
 - **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
-- **Efficiency**: `operations[i].efficiency.efficiency_percent` formatted by bound type:
+- **Efficiency**: `operations[i].efficiency.efficiency_percent`, formatted by `bound_type`:
   - `compute-bound`: `X.XX% of Y TFLOPS` (Y = `resolved_peak_maf`)
   - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_hbm_bw`)
-- **Bound**: `operations[i].efficiency.bound_type` with a `-bound` suffix (e.g., `memory-bound`, `compute-bound`)
+- **Bound**: `operations[i].efficiency.bound_type` + `-bound` suffix (e.g., `memory-bound`). Must reflect compute/memory bound type — never use `classification.gemm_type` or similar.
 
-Agents may extend the table with additional columns (e.g., `Sub-Category` for
-the generic-op analyzer). Do NOT use `classification.gemm_type` or similar
-internal fields for the Bound column — it must reflect compute/memory bound type.
+Agents may add extra columns when needed (e.g. `Sub-Category` in the generic-op analyzer).
 
 ---
 
@@ -249,22 +208,31 @@ Non-quantifiable entries use `null` values with `"quantifiable": false`:
 
 ---
 
-## Self-check
+## Validate findings (required before returning)
 
-Before returning, verify:
+After writing the findings file and impact estimates, run the programmatic
+validator. This replaces the previous manual self-check.
 
-**Compute tier:**
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/<subdir>/<category>_findings.md' '<tier>'
+```
 
-1. `## Impact Summary`, `## Recommendations`, and `## Detailed Analysis` are all
-   present, in that order, at the end of the findings file.
-2. The Impact Summary header row matches:
-   `Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence`.
-3. Each `### P<N>:` block under `## Recommendations` contains `**Insight**`,
-   `**Action**`, and `**Impact**`.
+Where `<tier>` is `compute` or `system` and `<subdir>` is `category_findings`
+or `system_findings` respectively.
 
-**System tier:**
+**If validation fails (exit code 1):**
 
-1. `## Recommendations` and `## Detailed Analysis` are present, in that order,
-   at the end of the findings file.
-2. Each `### P<N>:` block under `## Recommendations` contains `**Insight**` and
-   `**Action**`.
+1. Read the FAIL output to identify structural issues
+2. Fix the findings file — add missing sections, correct P-item labels, etc.
+3. Re-run validation
+4. Maximum 2 retry attempts. If still failing, return with a warning

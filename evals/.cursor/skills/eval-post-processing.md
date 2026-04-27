@@ -39,13 +39,14 @@ RESULTS_ROOT=<results_root> OUTPUT_DIR=<report_dir>/aggregates \
   python3 evals/eval_utils/aggregate_repeatability.py
 ```
 
-This produces three files in `<report_dir>/aggregates/`:
+This produces four files in `<report_dir>/aggregates/`:
 
-- `aggregated_results.csv` — columns: `trace_id,run_id,eval_index,eval_category,issue_summary,result,details`
+- `aggregated_results.csv` — columns: `trace_id,run_id,eval_index,eval_category,issue_summary,result,details,root_cause,recommended_fix`
 - `pass_rate_summary.csv` — columns: `trace_id,<eval_index>,...,overall_pass_rate` (values like `13/15` or `N/A`)
+- `stability_summary.csv` — columns: `trace_id,<eval_index>,...` (values: `STABLE_PASS`, `FLAKY_PASS`, `FLAKY_FAIL`, `STABLE_FAIL`, or `N/A`)
 - `stream_diagnostics.csv` — columns: `trace_id,run_id,outcome,duration_ms,input_tokens,output_tokens,cache_read_tokens,turns,tool_calls,report_written,report_headers,last_step_reached`
 
-Verify the script exits 0 and all three files exist before proceeding.
+Verify the script exits 0 and all four files exist before proceeding.
 
 ## Step 5 — Read and Classify
 
@@ -53,9 +54,12 @@ Read these files:
 
 1. `<report_dir>/aggregates/aggregated_results.csv`
 2. `<report_dir>/aggregates/pass_rate_summary.csv`
-3. `<report_dir>/aggregates/stream_diagnostics.csv`
-4. `evals/eval_utils/report_section_rules.yaml` — classification guide (YAML format, load with `yaml.safe_load()`)
-5. `<test_traces_csv>` — for trace metadata (id, sub_category, platform, trace_path)
+3. `<report_dir>/aggregates/stability_summary.csv`
+4. `<report_dir>/aggregates/stream_diagnostics.csv`
+5. `evals/eval_utils/report_section_rules.yaml` — classification guide (YAML format, load with `yaml.safe_load()`)
+6. `<test_traces_csv>` — for trace metadata (id, sub_category, platform, trace_path)
+
+Note: `aggregated_results.csv` now includes `root_cause` and `recommended_fix` columns from scripted evals. Use these when available instead of re-classifying failure modes from scratch. The `stability_summary.csv` classifies each (trace, eval) pair as `STABLE_PASS`, `FLAKY_PASS`, `FLAKY_FAIL`, or `STABLE_FAIL`.
 
 ### Splitting Unit Test vs E2E Test Cases
 

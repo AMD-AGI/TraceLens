@@ -65,7 +65,7 @@ def main():
         category="gemm",
         output_dir=args.output_dir,
         config={
-            "extra_fields": ["Input Dims", "has_perf_model"],
+            "extra_fields": ["Input Dims", "Input type", "has_perf_model"],
             "operation_classifier": classify_gemm_operation,
         },
         extract_fn=extract_category_specific,
