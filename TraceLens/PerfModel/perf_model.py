@@ -5195,6 +5195,148 @@ class cross_entropy_fwd(CrossEntropy):
 
 
 # ==============================================================================
+# Expert-Parallel (EP) Communication – DeepEP token dispatch / combine
+# ==============================================================================
+
+
+class EPComm:
+    """
+    Base class for Expert-Parallel communication operations.
+
+    These all-to-all token-routing ops are used in MoE models (e.g., DeepEP /
+    Primus Turbo Deep EP).  They move token tensors between GPU ranks; there is
+    no matrix multiply, so flops() = 0 and bytes() = token-tensor volume.
+
+    Known limitations / TODOs
+    -------------------------
+    1. **Effective vs true interconnect BW** — The current TB/s is *effective*
+       throughput (bytes / total kernel time), which includes straggler
+       sync/wait time.  True interconnect BW (excluding sync overhead)
+       requires tree-perf / NCCL-analyzer integration (planned follow-up).
+
+    2. **Label as interconnect BW, not HBM** — These ops move data over the
+       interconnect, not HBM.  The report should expose an
+       "Effective Interconnect TB/s" column to distinguish from the HBM-based
+       TB/s used by compute ops.  "Effective" signals that the link isn't
+       active for the full kernel duration (straggler wait, sync overhead).
+
+    3. **bytes() may be an upper bound** — bytes() assumes every token crosses
+       the interconnect, but tokens routed to a local expert stay on-rank and
+       do not incur interconnect traffic.  Need to check what routing metadata
+       is actually available in real trace event args.
+
+    Placement note
+    --------------
+    EPComm lives in perf_model.py so that DeepEP ops surface in the TraceLens
+    perf report with a named category (EP_Communication) and a bandwidth metric
+    (TB/s) instead of disappearing into "other".  The relevant performance
+    metric for these ops is TB/s, not TFLOPS/s or roofline efficiency — callers
+    should interpret GFLOPS = 0 / TFLOPS/s = 0 as expected, not as missing
+    data.  A more natural home would be alongside NcclAnalyser (which handles
+    NCCL collectives), but DeepEP uses intra-node shared memory (not NCCL) and
+    there is no existing EP-specific comm analysis infrastructure to extend.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.num_tokens = self.param_details["num_tokens"]
+        self.hidden_dim = self.param_details["hidden_dim"]
+        self.bpe = self.param_details["bpe"]
+
+    @staticmethod
+    def get_param_details(event):
+        raise NotImplementedError
+
+    @staticmethod
+    def _parse_token_tensor(event):
+        """Parse (num_tokens, hidden_dim, bpe) from input_dims[0] / input_types[0].
+
+        Returns bpe=None when the dtype string is absent or unrecognised so that
+        bytes() propagates None rather than silently using an incorrect estimate.
+        """
+        input_dims = event["args"].get("Input Dims", [])
+        input_types = event["args"].get("Input type", [])
+        tok_shape = input_dims[0] if input_dims else []
+        num_tokens = tok_shape[0] if len(tok_shape) >= 1 else None
+        hidden_dim = tok_shape[1] if len(tok_shape) >= 2 else None
+        dtype = input_types[0] if input_types else ""
+        bpe = name2bpe(dtype) if dtype else None
+        return {"num_tokens": num_tokens, "hidden_dim": hidden_dim, "bpe": bpe}
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        if self.num_tokens is None or self.hidden_dim is None or self.bpe is None:
+            return None
+        return self.num_tokens * self.hidden_dim * self.bpe
+
+    def bytes_bwd(self, bytes_per_element=None):
+        return self.bytes()
+
+    def get_maf_type(self):
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+
+class deepep_dispatch(EPComm):
+    """
+    DeepEPDispatch (forward): routes local tokens to remote expert ranks.
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    Concrete Inputs[3] = num_experts (total), [6] = dispatch capacity.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine(EPComm):
+    """
+    DeepEPCombine (forward): collects expert outputs back to local tokens.
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_dispatch_backward(EPComm):
+    """
+    DeepEPDispatchBackward: backward of DeepEPDispatch (combines expert gradients).
+
+    Input Dims[0] = (num_tokens_dispatched, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+class deepep_combine_backward(EPComm):
+    """
+    DeepEPCombineBackward: backward of DeepEPCombine (scatters local token gradients).
+
+    Input Dims[0] = (num_tokens_local, hidden_dim).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return EPComm._parse_token_tensor(event)
+
+
+# ==============================================================================
 # MambaSSD – MambaSplitConv1dScanCombinedFn (fused SSM kernel)
 # ==============================================================================
 
