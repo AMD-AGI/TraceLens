@@ -8,12 +8,24 @@ CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
 MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
-REPO_ROOT="$(pwd)"
+REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
-TEST_TRACES_CSV="$EVALS_DIR/unit_test_traces.csv"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 STATUS_FILE="$(mktemp)"
+
+# ---------------------------------------------------------------------------
+# Auto-extract test archives if trace CSV references them
+# ---------------------------------------------------------------------------
+for archive in "$EVALS_DIR"/e2e_tests.tar.gz "$EVALS_DIR"/unit_tests.tar.gz; do
+    [ -f "$archive" ] || continue
+    target_dir="${archive%.tar.gz}"
+    if [ ! -d "$target_dir" ]; then
+        echo "Extracting $(basename "$archive")..."
+        tar -xzf "$archive" -C "$EVALS_DIR/"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -145,9 +157,11 @@ done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 wait
 
 # Tally results from status file
-generated=$(grep -c '^generated$' "$STATUS_FILE" 2>/dev/null || echo 0)
-failed=$(grep -c '^failed$' "$STATUS_FILE" 2>/dev/null || echo 0)
-total=$((generated + failed))
+generated="$(grep -c '^generated$' "$STATUS_FILE" 2>/dev/null || true)"
+failed="$(grep -c '^failed$' "$STATUS_FILE" 2>/dev/null || true)"
+generated="${generated:-0}"
+failed="${failed:-0}"
+total=$(( generated + failed ))
 
 echo ""
 echo "========================================="
