@@ -103,7 +103,9 @@ class ImpactPlot:
         self.baseline_ms = float(plot_data.get("baseline_ms", 0))
         self.recommendations = plot_data.get("recommendations", [])
         if not self.recommendations or self.baseline_ms <= 0:
-            print("No kernel tuning recommendations or invalid baseline - skipping plot")
+            print(
+                "No kernel tuning recommendations or invalid baseline - skipping plot"
+            )
             return False
 
         try:
@@ -149,7 +151,9 @@ class ImpactPlot:
             rel_lo.append(
                 round(baseline_ms / lat_worst * 100 if lat_worst > 0 else 100.0, 1)
             )
-            rel_hi.append(round(baseline_ms / lat_best * 100 if lat_best > 0 else 100.0, 1))
+            rel_hi.append(
+                round(baseline_ms / lat_best * 100 if lat_best > 0 else 100.0, 1)
+            )
 
         self.proj = {
             "steps": steps,
@@ -363,8 +367,12 @@ class ImpactPlot:
         cum_lo[0] = cum_hi[0] = cum_arr[0]
 
         ax.fill_between(x_vals, cum_lo, cum_hi, color="#2ecc71", alpha=0.15, zorder=1)
-        ax.plot(x_vals, cum_hi, "-", color="#27ae60", linewidth=1.0, alpha=0.4, zorder=2)
-        ax.plot(x_vals, cum_lo, "-", color="#27ae60", linewidth=1.0, alpha=0.4, zorder=2)
+        ax.plot(
+            x_vals, cum_hi, "-", color="#27ae60", linewidth=1.0, alpha=0.4, zorder=2
+        )
+        ax.plot(
+            x_vals, cum_lo, "-", color="#27ae60", linewidth=1.0, alpha=0.4, zorder=2
+        )
         ax.plot(
             x_vals,
             proj["rel"],
@@ -428,9 +436,7 @@ class MarkdownRehydrator:
 
     _RE_MARKER_BEGIN = re.compile(r"<!--\s*impact-begin\s+(.*?)\s*-->")
     _RE_MARKER_END = re.compile(r"<!--\s*impact-end\s*-->")
-    _RE_TOP_OPS_ROW_TRAILER = re.compile(
-        r"\s*<!--\s*top-ops-row\s+(.*?)\s*-->\s*$"
-    )
+    _RE_TOP_OPS_ROW_TRAILER = re.compile(r"\s*<!--\s*top-ops-row\s+(.*?)\s*-->\s*$")
 
     _LEGACY_HEADER_5COL = (
         "| Recommendation | Type | Estimated Savings (ms) | "
@@ -464,8 +470,14 @@ class MarkdownRehydrator:
         standalone = os.path.join(self.output_dir, "standalone_analysis.md")
         if os.path.isfile(standalone):
             targets.append(standalone)
-        targets.extend(sorted(glob.glob(os.path.join(self.output_dir, "category_findings", "*.md"))))
-        targets.extend(sorted(glob.glob(os.path.join(self.output_dir, "system_findings", "*.md"))))
+        targets.extend(
+            sorted(
+                glob.glob(os.path.join(self.output_dir, "category_findings", "*.md"))
+            )
+        )
+        targets.extend(
+            sorted(glob.glob(os.path.join(self.output_dir, "system_findings", "*.md")))
+        )
 
         results: Dict[str, str] = {}
         for path in targets:
@@ -498,11 +510,11 @@ class MarkdownRehydrator:
                 break
             attrs = self._parse_attrs(begin.group(1))
             kind = attrs.pop("kind", None) or ""
-            body = original[begin.end():end.start()].strip("\n")
+            body = original[begin.end() : end.start()].strip("\n")
             rendered = self._render_legacy(kind, attrs, body, self.baseline_ms)
             if rendered is None:
                 continue
-            out_parts.append(original[cursor:begin.start()])
+            out_parts.append(original[cursor : begin.start()])
             out_parts.append(rendered)
             cursor = end.end()
             rewrote_any = True
@@ -605,7 +617,9 @@ class MarkdownRehydrator:
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
-            if stripped.startswith("| Recommendation | Type | impact_score | Confidence |"):
+            if stripped.startswith(
+                "| Recommendation | Type | impact_score | Confidence |"
+            ):
                 out_lines.append(MarkdownRehydrator._LEGACY_HEADER_5COL)
                 i += 2
                 continue
@@ -633,8 +647,7 @@ class MarkdownRehydrator:
             lo_ms = lo * baseline_ms / 100.0
             hi_ms = hi * baseline_ms / 100.0
             opportunity = (
-                f"~{lo_ms:.1f}\u2013{hi_ms:.1f} ms "
-                f"({lo:.1f}\u2013{hi:.1f}%)"
+                f"~{lo_ms:.1f}\u2013{hi_ms:.1f} ms " f"({lo:.1f}\u2013{hi:.1f}%)"
             )
         return f"{base} {opportunity} |"
 
@@ -648,9 +661,8 @@ class MarkdownRehydrator:
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
-            if (
-                not swapped_header
-                and stripped.startswith("| Rank | Category | Time (ms) | % of Compute Time | Ops |")
+            if not swapped_header and stripped.startswith(
+                "| Rank | Category | Time (ms) | % of Compute Time | Ops |"
             ):
                 out_lines.append(MarkdownRehydrator._LEGACY_TOP_OPS_HEADER)
                 swapped_header = True
@@ -686,6 +698,7 @@ class MarkdownRehydrator:
 
 # Module-level shims preserved for external callers / tests.
 
+
 def generate_impact_savings_plot(
     output_dir: str,
     title: str,
@@ -713,7 +726,9 @@ def main():
             "(reverses the impact_score convention to pre-Phase-1 ms savings)."
         )
     )
-    parser.add_argument("--output-dir", required=True, help="Standalone analysis output directory")
+    parser.add_argument(
+        "--output-dir", required=True, help="Standalone analysis output directory"
+    )
     parser.add_argument("--title", required=True, help="Plot suptitle")
     args = parser.parse_args()
 

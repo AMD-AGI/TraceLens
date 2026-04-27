@@ -229,7 +229,7 @@ def test_compute_impact_estimates_basic():
     assert "impact_score_high" in estimates[0]
     assert "savings_ms" not in estimates[0]
     assert "e2e_pct_high" not in estimates[0]
-    assert (estimates[1]["impact_score"] == 0.88 or estimates[1]["impact_score"] == 0.87)
+    assert estimates[1]["impact_score"] == 0.88 or estimates[1]["impact_score"] == 0.87
 
 
 def test_compute_impact_estimates_excludes_anomaly():

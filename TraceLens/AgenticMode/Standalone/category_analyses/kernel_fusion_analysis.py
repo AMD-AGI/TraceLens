@@ -42,7 +42,9 @@ MAX_FUSION_KERNEL_COUNT = (
     15  # Skip candidates with more kernels than this (too complex to fuse reliably)
 )
 
-MIN_IMPACT_SCORE = 2.0  # Drop estimates whose best-case impact_score is below this threshold
+MIN_IMPACT_SCORE = (
+    2.0  # Drop estimates whose best-case impact_score is below this threshold
+)
 OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
 _MATRIX_SPECS = frozenset(

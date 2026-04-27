@@ -444,7 +444,7 @@ def compute_impact_estimates(
 
     Two-step computation:
 
-      1. Per-op roofline headroom ``gap``. 
+      1. Per-op roofline headroom ``gap``.
             gap_high = max(0, 1 - efficiency_pct / TARGET_HIGH)
             gap_low  = (TARGET_LOW / TARGET_HIGH) * gap_high
             gap_mid  = (TARGET_MID / TARGET_HIGH) * gap_high
