@@ -117,10 +117,6 @@ Write `<output_dir>/system_findings/cpu_idle_findings.md` using the command pref
 | Short Kernels (<10µs) | N (X%) |
 | Avg Kernel Time | X.X µs |
 
-## Impact Summary
-| Recommendation | Type | impact_score | Confidence |
-|----------------|------|--------------|------------|
-
 ## Recommendations
 
 [If idle > 15%, provide actionable recommendations based on the kernel analysis data.
@@ -134,7 +130,7 @@ idle time is within acceptable range and no action is needed.]
 
 **Detailed Analysis block:** Follow [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) for the full block schema.
 
-**Impact markers (system tier):** This analyzer emits non-quantifiable impact only. Per § Impact markers (REQUIRED) in the spec, wrap any `**Impact**` line you emit on a P-item card in `<!-- impact-begin kind=p_item low=null mid=null high=null -->` ... `<!-- impact-end -->`. Do not emit `kind=detail_estimate` or `kind=impact_summary` markers — system-tier findings are not quantifiable.
+**Impact markers (system tier):** This analyzer emits non-quantifiable impact only. Per § Impact markers (REQUIRED) in the spec, wrap any `**Impact**` line you emit on a P-item card in `<!-- impact-begin kind=p_item low=null mid=null high=null -->` ... `<!-- impact-end -->`. Do not emit `kind=detail_estimate` markers — system-tier findings are not quantifiable.
 
 ### Step 3.1: Write Impact Estimates to Metadata
 
@@ -170,9 +166,8 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 1. **Report factual data** - Idle percentage and kernel statistics from the metrics JSON
 2. **Provide actionable solutions** - Specific steps, not vague suggestions
-3. **Impact Summary is header-only** - System-level Impact Summary must include the table header row but zero data rows
-4. **Vendor-agnostic recommendations** - Focus on patterns and solutions
-5. **Consider trade-offs** - Some solutions have costs (memory, complexity)
+3. **Vendor-agnostic recommendations** - Focus on patterns and solutions
+4. **Consider trade-offs** - Some solutions have costs (memory, complexity)
 
 ---
 

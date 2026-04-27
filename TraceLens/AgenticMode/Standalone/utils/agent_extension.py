@@ -438,13 +438,6 @@ class MarkdownRehydrator:
     _RE_MARKER_END = re.compile(r"<!--\s*impact-end\s*-->")
     _RE_TOP_OPS_ROW_TRAILER = re.compile(r"\s*<!--\s*top-ops-row\s+(.*?)\s*-->\s*$")
 
-    _LEGACY_HEADER_5COL = (
-        "| Recommendation | Type | Estimated Savings (ms) | "
-        "Estimated Improvement (E2E %) | Confidence |\n"
-        "|---------------|------|----------------------|"
-        "-------------------------------|------------|"
-    )
-
     _LEGACY_TOP_OPS_HEADER = (
         "| Rank | Category | Time (ms) | % of Compute Time | Ops | "
         "Potential improvement (time, E2E %) |\n"
@@ -596,43 +589,6 @@ class MarkdownRehydrator:
         )
 
     @staticmethod
-    def _expand_impact_summary_row(row: str, baseline_ms: float) -> str:
-        cells = [c.strip() for c in row.strip().strip("|").split("|")]
-        if len(cells) != 4:
-            return row
-        rec, type_, score_cell, conf = cells
-        try:
-            score = float(score_cell)
-        except ValueError:
-            return row
-        savings_ms = score * baseline_ms / 100.0
-        return f"| {rec} | {type_} | {savings_ms:.2f} | {score:.2f} | {conf} |"
-
-    @staticmethod
-    def _render_impact_summary(attrs, body, baseline_ms):
-        """Replace the 4-column header+separator and expand any body rows."""
-        lines = body.split("\n")
-        out_lines: List[str] = []
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-            if stripped.startswith(
-                "| Recommendation | Type | impact_score | Confidence |"
-            ):
-                out_lines.append(MarkdownRehydrator._LEGACY_HEADER_5COL)
-                i += 2
-                continue
-            if line.startswith("|") and line.rstrip().endswith("|"):
-                out_lines.append(
-                    MarkdownRehydrator._expand_impact_summary_row(line, baseline_ms)
-                )
-            else:
-                out_lines.append(line)
-            i += 1
-        return "\n".join(out_lines)
-
-    @staticmethod
     def _render_top_ops_row(row: str, baseline_ms: float) -> str:
         trailer = MarkdownRehydrator._RE_TOP_OPS_ROW_TRAILER.search(row)
         if trailer is None:
@@ -687,7 +643,6 @@ class MarkdownRehydrator:
         renderers = {
             "p_item": MarkdownRehydrator._render_p_item,
             "detail_estimate": MarkdownRehydrator._render_detail_estimate,
-            "impact_summary": MarkdownRehydrator._render_impact_summary,
             "top_ops": MarkdownRehydrator._render_top_ops,
         }
         fn = renderers.get(kind)

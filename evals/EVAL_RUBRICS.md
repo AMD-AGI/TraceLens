@@ -153,29 +153,7 @@ overall_score = correctness × 0.50 + completeness × 0.50
 
 ---
 
-## Workflow Eval 13: Impact Summary Types
-
-**Type:** Scripted, per-category. **Root cause on fail:** `pipeline`.
-
-For each category in `category_manifest.json`, reads the corresponding findings file
-and validates the `## Impact Summary` section.
-
-| Tier | File Location | Pass Criteria | Example Sub-index |
-|------|---------------|---------------|-------------------|
-| `compute_kernel` | `category_findings/{name}_findings.md` | `## Impact Summary` exists; every data row has `Type = kernel_tuning` (zero rows is OK) | `workflow_eval_13_gemm` |
-| `system` | `system_findings/{name}_findings.md` | `## Impact Summary` exists with **zero data rows** (header-only table) | `workflow_eval_13_cpu_idle` |
-
-**Fail examples:**
-- Findings file not found
-- Missing `## Impact Summary` section
-- Compute findings with `Type = algorithmic` or `Type = system` (must be `kernel_tuning`)
-- System findings with any data rows (should be header-only)
-
-**Note:** `cpu_idle` is skipped when `idle_time_percent ≤ 15`.
-
----
-
-## Workflow Eval 14: Model Identification in Report
+## Workflow Eval 13: Model Identification in Report
 
 **Type:** Scripted, per-field. **Root cause on fail:** `template`.
 
@@ -184,10 +162,10 @@ Reads `metadata/model_info.json` and checks that each field value appears
 
 | Sub-index | JSON Field | Pass Criteria |
 |-----------|-----------|---------------|
-| `workflow_eval_14_model` | `model` | Value appears in Appendix text |
-| `workflow_eval_14_architecture` | `architecture` | Value appears in Appendix text |
-| `workflow_eval_14_scale` | `scale` | Value appears in Appendix text |
-| `workflow_eval_14_precision` | `precision` | Value appears in Appendix text |
+| `workflow_eval_13_model` | `model` | Value appears in Appendix text |
+| `workflow_eval_13_architecture` | `architecture` | Value appears in Appendix text |
+| `workflow_eval_13_scale` | `scale` | Value appears in Appendix text |
+| `workflow_eval_13_precision` | `precision` | Value appears in Appendix text |
 
 **Special case:** If a field value is empty or `"Cannot be inferred from trace"`,
 the check is **skipped (PASS)** with a note in details.

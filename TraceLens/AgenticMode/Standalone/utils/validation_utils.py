@@ -473,7 +473,7 @@ class MarkerValidator:
     KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
     ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
 
-    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "impact_summary"}
+    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops"}
     REQUIRED_ATTRS_BY_KIND = {
         "p_item": ("low", "mid", "high"),
         "detail_estimate": ("low", "high"),

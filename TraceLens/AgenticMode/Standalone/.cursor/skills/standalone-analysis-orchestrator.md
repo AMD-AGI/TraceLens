@@ -444,7 +444,7 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ## Step 10: Generate Performance Improvement Plot
 
-**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`).
 
 ### 10.1 Ensure matplotlib is available
 
