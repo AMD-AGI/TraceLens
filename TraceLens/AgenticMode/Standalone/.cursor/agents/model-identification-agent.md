@@ -22,6 +22,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
+- `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input (produced by script in Step 1):**
 - `<output_dir>/metadata/condensed_op_info.csv` — CSV with columns **name**, **Input type**, and **Input Dims** (extracted from the perf report by the script)
