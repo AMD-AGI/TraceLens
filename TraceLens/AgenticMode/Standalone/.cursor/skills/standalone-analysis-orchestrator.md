@@ -466,7 +466,7 @@ generate_priority_data(sys.argv[1])
 
 ### 10.3 Generate Plot and Base64 File (conditional)
 
-If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the perf plot here. If the file is present, **skip this step** — Step 11.5 will produce `perf_improvement.png` and Step 11.2 will embed it.
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the perf plot here. If the file is present, **skip this step** — Step 11.2 will produce `perf_improvement.png` and Step 11.3 will embed it.
 
 ```bash
 EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
@@ -486,7 +486,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 ## Step 11: Generate Final Report (<output_dir>/standalone_analysis.md)
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.2 will use to read and modify it.
+2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 will use to read and modify it.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
@@ -541,7 +541,7 @@ f. For Args cell mismatches: copy the matching `operations[].args` value verbati
 
 ---
 
-### 11.5 Optional extension (auto-detected)
+### 11.2 Optional extension (auto-detected)
 
 If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
 
@@ -558,9 +558,9 @@ This step is a hook for an optional extension; if `agent_extension.py` is not pr
 
 ---
 
-### 11.2 Embed Performance Improvement Plot
+### 11.3 Embed Performance Improvement Plot
 
-The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Step 11.5 (whichever ran). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
+The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Step 11.2 (whichever ran). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
 
 ```bash
 <prefix> python3 -c \"
