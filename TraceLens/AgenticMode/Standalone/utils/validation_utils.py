@@ -10,19 +10,18 @@ Three validation levels, each at the boundary where issues are still fixable:
 
 Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
     Structural check on a single findings file, including marker structure
-    (pairing, kind attributes, per-kind required attrs, mandatory p_item).
-    Sub-agent retries on failure.
+    via MarkerValidator (pairing, kind attributes, per-kind required attrs,
+    mandatory p_item). Sub-agent retries on failure.
 
 Level 2 — validate_subagent_outputs (Step 8, batch)
     Cross-cutting checks that need all files: time sanity, coverage, priority.
 
 Level 3 — validate_report (Step 11.1, after report assembly)
     Final standalone_analysis.md structure: headers, metrics table, placeholders,
-    and report-level marker structure (pairing, kind attributes, mandatory
-    top_ops).
+    and report-level marker structure via MarkerValidator (pairing, kind
+    attributes, mandatory top_ops).
 """
 
-import json
 import json
 import os
 import re
@@ -73,22 +72,6 @@ _KNOWN_REPORT_PLACEHOLDERS = {
     "<scale>",
     "<precision>",
 }
-
-# Marker structure (used by validate_findings_file and validate_report)
-_MARKER_BEGIN_RE = re.compile(
-    r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL
-)
-_MARKER_END_RE = re.compile(r"<!--\s*impact-end\s*-->")
-_KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
-_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
-_KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "impact_summary"}
-_REQUIRED_ATTRS_BY_KIND = {
-    "p_item": ("low", "mid", "high"),
-    "detail_estimate": ("low", "high"),
-}
-# Compute findings files that do NOT need a p_item marker.
-_COMPUTE_NO_P_ITEM = {"triton_findings.md"}
-
 
 # ---------------------------------------------------------------------------
 # Level 1: per-file findings validation (called within each sub-agent)
@@ -183,7 +166,7 @@ def validate_findings_file(filepath, tier):
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
-    errors.extend(_per_file_marker_errors(filepath, file_class))
+    errors.extend(MarkerValidator.check_findings_file(filepath, file_class))
 
     passed = len(errors) == 0
     if passed:
@@ -436,9 +419,8 @@ def validate_report(output_dir):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
-    # Report-level marker structure (folded in from the former Level-4
-    # validate_markers).
-    missing.extend(_report_marker_errors(report_path))
+    # Report-level marker structure
+    missing.extend(MarkerValidator.check_report(report_path))
 
     return len(missing) == 0, missing
 
@@ -471,88 +453,109 @@ def _validate_report_args_column(content, output_dir):
 
 
 # ---------------------------------------------------------------------------
-# Marker validation helpers
+# MarkerValidator
 #
-# Used by validate_findings_file (per-file findings markers) and
-# validate_report (report markers). Previously a standalone Level-4
-# validate_markers walked all files; that has been folded in here.
+# Owns all `<!-- impact-begin ... -->` / `<!-- impact-end -->` marker config
+# and checks. Used by validate_findings_file (per-file findings markers) and
+# validate_report (report markers). .
 # ---------------------------------------------------------------------------
 
 
-def _scan_markers(text, rel):
-    """Common per-file marker scan.
+class MarkerValidator:
+    """All marker (`<!-- impact-begin ... -->` / `<!-- impact-end -->`) checks.
 
-    Checks marker pairing, presence of kind= attribute, kind ∈ _KNOWN_KINDS,
-    per-kind required attrs, and no mixed null/numeric values in
-    low/mid/high. Returns (errors, seen_kinds).
+    Stateless: regexes and kind tables are class-level constants and the
+    entry points are classmethods.
     """
-    errors = []
-    begins = _MARKER_BEGIN_RE.findall(text)
-    n_end = len(_MARKER_END_RE.findall(text))
-    if len(begins) != n_end:
-        errors.append(
-            f"{rel}: marker pairing mismatch ({len(begins)} begin vs {n_end} end)"
-        )
 
-    seen_kinds = set()
-    for inner in begins:
-        kind_m = _KIND_ATTR_RE.search(inner)
-        if not kind_m:
+    BEGIN_RE = re.compile(r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL)
+    END_RE = re.compile(r"<!--\s*impact-end\s*-->")
+    KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
+    ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+
+    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "impact_summary"}
+    REQUIRED_ATTRS_BY_KIND = {
+        "p_item": ("low", "mid", "high"),
+        "detail_estimate": ("low", "high"),
+    }
+    # Compute findings files that do NOT need a p_item marker.
+    COMPUTE_NO_P_ITEM = {"triton_findings.md"}
+
+    @classmethod
+    def scan(cls, text, rel):
+        """Common per-file marker scan.
+
+        Checks marker pairing, presence of kind= attribute, kind ∈
+        KNOWN_KINDS, per-kind required attrs, and no mixed null/numeric
+        values in low/mid/high. Returns (errors, seen_kinds).
+        """
+        errors = []
+        begins = cls.BEGIN_RE.findall(text)
+        n_end = len(cls.END_RE.findall(text))
+        if len(begins) != n_end:
             errors.append(
-                f"{rel}: impact-begin missing kind= attribute: {inner.strip()}"
+                f"{rel}: marker pairing mismatch ({len(begins)} begin vs {n_end} end)"
             )
-            continue
-        kind = kind_m.group(1)
-        seen_kinds.add(kind)
-        if kind not in _KNOWN_KINDS:
-            errors.append(f"{rel}: unknown kind={kind}")
-            continue
-        attrs = dict(_ATTR_RE.findall(inner))
-        for required in _REQUIRED_ATTRS_BY_KIND.get(kind, ()):
-            if required not in attrs:
+
+        seen_kinds = set()
+        for inner in begins:
+            kind_m = cls.KIND_ATTR_RE.search(inner)
+            if not kind_m:
                 errors.append(
-                    f"{rel}: kind={kind} missing required attr {required}"
+                    f"{rel}: impact-begin missing kind= attribute: {inner.strip()}"
                 )
-        nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
-        if nums:
-            null_ct = sum(1 for v in nums if v == "null")
-            if 0 < null_ct < len(nums):
-                errors.append(
-                    f"{rel}: kind={kind} mixes null and numeric values "
-                    f"in low/mid/high"
-                )
+                continue
+            kind = kind_m.group(1)
+            seen_kinds.add(kind)
+            if kind not in cls.KNOWN_KINDS:
+                errors.append(f"{rel}: unknown kind={kind}")
+                continue
+            attrs = dict(cls.ATTR_RE.findall(inner))
+            for required in cls.REQUIRED_ATTRS_BY_KIND.get(kind, ()):
+                if required not in attrs:
+                    errors.append(
+                        f"{rel}: kind={kind} missing required attr {required}"
+                    )
+            nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
+            if nums:
+                null_ct = sum(1 for v in nums if v == "null")
+                if 0 < null_ct < len(nums):
+                    errors.append(
+                        f"{rel}: kind={kind} mixes null and numeric values "
+                        f"in low/mid/high"
+                    )
 
-    return errors, seen_kinds
+        return errors, seen_kinds
 
+    @classmethod
+    def check_findings_file(cls, path, file_class):
+        """Marker checks for a sub-agent findings file.
 
-def _per_file_marker_errors(path, file_class):
-    """Marker checks for a sub-agent findings file.
-
-    file_class must be "category_findings" or "system_findings". Adds the
-    per-tier "p_item required" check on top of _scan_markers, with the
-    triton exemption for category findings.
-    """
-    rel = os.path.basename(path)
-    with open(path) as f:
-        text = f.read()
-    errors, seen_kinds = _scan_markers(text, rel)
-    if file_class == "category_findings" and rel not in _COMPUTE_NO_P_ITEM:
-        if "p_item" not in seen_kinds:
+        file_class must be "category_findings" or "system_findings". Adds
+        the per-tier "p_item required" check on top of `scan`, with the
+        triton exemption for category findings.
+        """
+        rel = os.path.basename(path)
+        with open(path) as f:
+            text = f.read()
+        errors, seen_kinds = cls.scan(text, rel)
+        if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
+            if "p_item" not in seen_kinds:
+                errors.append(f"{rel}: missing required kind=p_item")
+        if file_class == "system_findings" and "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")
-    if file_class == "system_findings" and "p_item" not in seen_kinds:
-        errors.append(f"{rel}: missing required kind=p_item")
-    return errors
+        return errors
 
+    @classmethod
+    def check_report(cls, path):
+        """Marker checks for the assembled standalone_analysis.md.
 
-def _report_marker_errors(path):
-    """Marker checks for the assembled standalone_analysis.md.
-
-    Adds the report-only "top_ops required" check on top of _scan_markers.
-    """
-    rel = os.path.basename(path)
-    with open(path) as f:
-        text = f.read()
-    errors, seen_kinds = _scan_markers(text, rel)
-    if "top_ops" not in seen_kinds:
-        errors.append(f"{rel}: missing required kind=top_ops")
-    return errors
+        Adds the report-only "top_ops required" check on top of `scan`.
+        """
+        rel = os.path.basename(path)
+        with open(path) as f:
+            text = f.read()
+        errors, seen_kinds = cls.scan(text, rel)
+        if "top_ops" not in seen_kinds:
+            errors.append(f"{rel}: missing required kind=top_ops")
+        return errors
