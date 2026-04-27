@@ -146,11 +146,52 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 > **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
-<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
+<!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
-<!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
+<!-- Icon mapping by CONFIDENCE (not priority number): 🔴 high → 🟡 medium → 🟢 low. -->
+<!-- If no findings or kernel_fusion category not in manifest, replace the cards below with: "No kernel fusion opportunities detected." -->
 
-No kernel fusion opportunities detected.
+### 🔴 P1: <Candidate Name>
+
+**Insight**: [1 sentence - what fusion pattern was detected]
+
+**Action**: [1-2 sentences - which kernels to fuse and how]
+
+**Impact**: [~X.X ms savings (X.X% of E2E) at 75–100% of roofline, perf-model coverage Y/Z kernels]
+
+**Confidence**: [high / medium / low - fusion pattern quality]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P1](#detailed-analysis-fusion-P1) for details*
+
+---
+
+### 🟡 P2: <Candidate Name>
+
+**Insight**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [~X.X ms savings (X.X% of E2E) at 75–100% of roofline, perf-model coverage Y/Z kernels]
+
+**Confidence**: [high / medium / low]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P2](#detailed-analysis-fusion-P2) for details*
+
+---
+
+### 🟢 P3: <Candidate Name>
+
+**Insight**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [~X.X ms savings (X.X% of E2E) at 75–100% of roofline, perf-model coverage Y/Z kernels]
+
+**Confidence**: [high / medium / low]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P3](#detailed-analysis-fusion-P3) for details*
+
+<!-- All additional fusion P-items (P4, P5, ...) follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Kernel fusion insights > PN](#detailed-analysis-fusion-PN) for details* -->
 
 ---
 
