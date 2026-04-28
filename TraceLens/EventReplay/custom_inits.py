@@ -24,6 +24,7 @@ To add a custom initializer for a new op family:
 from __future__ import annotations
 
 import re
+import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -116,7 +117,7 @@ class CustomInit(ABC):
 
     def applies_to(self, replayer: Any) -> bool:
         op_name = replayer.event.get("name", "")
-        return any(pat in op_name for pat in self.op_patterns)
+        return op_name in self.op_patterns
 
     @abstractmethod
     def initialize(self, replayer: Any, **kwargs) -> Optional[str]:
@@ -138,7 +139,7 @@ class PagedAttentionInit(CustomInit):
       - Block table entries drawn from a random permutation of the pool.
     """
 
-    op_patterns = ["paged_attention"]
+    op_patterns = ["_rocm_C::paged_attention"]
 
     def initialize(self, replayer: Any, **kwargs) -> Optional[str]:
         try:
@@ -277,7 +278,7 @@ class MoeRoutingInit(CustomInit):
       [11] block_m        (scalar)
     """
 
-    op_patterns = ["ck_moe_stage1", "ck_moe_stage2"]
+    op_patterns = ["aiter::ck_moe_stage1", "aiter::ck_moe_stage2"]
 
     def initialize(self, replayer: Any, **kwargs) -> Optional[str]:
         try:
