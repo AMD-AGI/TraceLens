@@ -68,8 +68,8 @@ run_single_job() {
         agent_attempts=$((agent_attempts + 1))
         (
             cd "$STANDALONE_DIR"
-            timeout 1200 agent --print --force --trust --output-format stream-json \
-                "Run standalone analysis on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+            timeout 1200 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_RESULTS/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
@@ -100,7 +100,7 @@ run_single_job() {
 
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust --output-format stream-json \
+        agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
             "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id. Write results to $CASE_RESULTS/workflow_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/workflow_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
@@ -113,7 +113,7 @@ run_single_job() {
 
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust --output-format stream-json \
+        agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
             "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id. Write results to $CASE_RESULTS/quality_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/quality_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
@@ -215,7 +215,7 @@ else
 
     (
         cd "$EVALS_DIR"
-        agent --print --force --trust --output-format stream-json \
+        agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
             "Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER"
     ) < /dev/null > "$REPORT_DIR/post_processing.ndjson" 2>&1
 

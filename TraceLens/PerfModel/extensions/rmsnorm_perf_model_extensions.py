@@ -52,6 +52,51 @@ class aiter_rms_norm(RMSNorm):
         }
 
 
+class aiter_rmsnorm(RMSNorm):
+    """
+    Performance model for aiter::rmsnorm.
+
+    Same roofline as aiter_rms_norm and RMSNorm, but a different bound op and profiler layout:
+    explicit out tensor first (see aiter_rms_norm for aiter::rms_norm).
+
+    RMSNorm with separate output tensor.
+
+    Signature: rmsnorm(out, input, weight, epsilon)
+        out      — shape [M, N], dtype BFloat16
+        input    — shape [M, N], dtype BFloat16
+        weight   — shape [N],    dtype BFloat16 (affine scale)
+        epsilon  — float scalar
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape, weight_shape, eps_scalar]
+        e.g. [(4, 7168), (4, 7168), (7168,), ()]
+
+    Expected Input type from trace:
+        [dtype_out, dtype_input, dtype_weight, 'Scalar']
+
+    flops/bytes are inherited from RMSNorm (affine=True, training=False).
+
+    get_param_details uses input at index [1] and weight length at [2][0].
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        num_channels = event["args"]["Input Dims"][2][0]  # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+
 class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
     """
     Performance model for aiter::rmsnorm2d_fwd_with_dynamicquant_ck.
@@ -213,6 +258,33 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
         return bytes_read + bytes_write
 
 
+class aiter_add_rmsnorm(aiter_rmsnorm2d_fwd_with_add_ck):
+    """
+    Performance model for aiter::add_rmsnorm.
+
+    Fused residual-add + RMSNorm (HIP add_rmsnorm).
+
+    Signature: add_rmsnorm(out, input, residual_in, residual_out, weight, epsilon)
+        out           — shape [M, N], dtype BFloat16 (RMSNorm output)
+        input         — shape [M, N], dtype BFloat16
+        residual_in   — shape [M, N], dtype BFloat16
+        residual_out  — shape [M, N], dtype BFloat16 (input + residual_in)
+        weight        — shape [N],    dtype BFloat16 (affine scale)
+        epsilon       — float scalar
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape, residual_in_shape, residual_out_shape, weight_shape, eps_scalar]
+        e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), ()]
+
+    FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
+    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+
+    get_param_details, flops, and bytes are inherited from aiter_rmsnorm2d_fwd_with_add_ck.
+    """
+
+    pass
+
+
 class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
     """
     Performance model for vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant.
@@ -280,3 +352,82 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
             + bytes_write_res
             + bytes_write_scales
         )
+
+
+class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
+    """
+    Performance model for vllm::rocm_aiter_triton_add_rmsnorm_pad.
+
+    Fused residual-add + RMSNorm + zero-pad on hidden dim. The compiler fusion
+    pass replaces separate add + RMSNorm + pad nodes with this single Triton kernel.
+    Padding aligns hidden_dim to a multiple of x_pad_to_multiple for downstream
+    AITER MoE GEMMs.
+
+    Signature: rocm_aiter_triton_add_rmsnorm_pad(x, weight, variance_epsilon,
+               residual, x_pad_to_multiple) -> (out, residual_out)
+        x                  — shape [M, N],     dtype BFloat16
+        weight             — shape [N],        dtype BFloat16  (affine RMSNorm scale)
+        variance_epsilon   — float scalar      (e.g. 1e-5)
+        residual           — shape [M, N],     dtype BFloat16
+        x_pad_to_multiple  — int scalar        (e.g. 256)
+        out                — shape [M, N_out], dtype BFloat16  (N_out = ceil(N / pad) * pad)
+        residual_out       — shape [M, N],     dtype BFloat16  (x + residual, pre-norm)
+
+    Expected Input Dims from trace:
+        [x_shape, weight_shape, eps_scalar, residual_shape, pad_scalar]
+        e.g. [(64, 2880), (2880,), (), (64, 2880), ()]
+
+    Expected Input type from trace:
+        ['c10::BFloat16', 'c10::BFloat16', 'Scalar', 'c10::BFloat16', 'Scalar']
+
+    Concrete Inputs[2] = variance_epsilon (e.g. '1e-05')
+    Concrete Inputs[4] = x_pad_to_multiple (e.g. '256')
+
+    Roofline -- FLOPs:
+        residual_add + rmsnorm (inherited from RMSNorm.flops() + num_elems for add).
+
+    Roofline -- bytes moved:
+        Read x + residual + weight; write padded output + updated residual.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.x_pad_to_multiple = int(event["args"]["Concrete Inputs"][4])
+        super().__init__(event, arch, python_path)
+
+        N = self.num_channels
+        if self.x_pad_to_multiple > 0:
+            self.n_out = (
+                (N + self.x_pad_to_multiple - 1)
+                // self.x_pad_to_multiple
+                * self.x_pad_to_multiple
+            )
+        else:
+            self.n_out = N
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][1][0]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        return self.num_elems + super().flops()
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        bytes_read = 2 * self.num_elems * self.bpe_in + N * self.bpe_in
+        bytes_write_out = M * self.n_out * self.bpe_in
+        bytes_write_res = M * N * self.bpe_in
+        return bytes_read + bytes_write_out + bytes_write_res

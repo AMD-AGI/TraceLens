@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from TraceLens.PerfModel.utils import torch_dtype_map
+
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
 TARGET_MID = 87.5
@@ -431,8 +433,9 @@ def build_operation_metrics(
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
     fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
+    e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
-    # Calculate total time for percentage calculations
+    # Calculate category total for % of category (kept for analyzer screening)
     total_time_ms = 0
     if "Kernel Time (µs)_sum" in ops_df.columns:
         total_time_ms = ops_df["Kernel Time (µs)_sum"].sum() / 1000
@@ -450,7 +453,10 @@ def build_operation_metrics(
         count = int(row.get("count", row.get("operation_count", 1)))
         time_ms = row.get("Kernel Time (µs)_sum", 0) / 1000
         percent_of_category = (
-            (time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
+            round(time_ms / total_time_ms * 100, 2) if total_time_ms > 0 else 0
+        )
+        percent_of_total = (
+            round(time_ms / e2e_ms_total * 100, 2) if e2e_ms_total > 0 else None
         )
 
         efficiency = calculate_efficiency(
@@ -461,7 +467,8 @@ def build_operation_metrics(
             "name": op_name,
             "count": count,
             "time_ms": round(time_ms, 3),
-            "percent_of_category": round(percent_of_category, 2),
+            "percent_of_category": percent_of_category,
+            "percent_of_total": percent_of_total,
             "efficiency": efficiency,
         }
 
@@ -475,8 +482,16 @@ def build_operation_metrics(
             if field in row and not pd.isna(row[field]):
                 op_metric[field] = row[field]
 
+        # Pre-rendered Args column (shape + dtype, with empty/Scalar slots dropped)
+        args_str = format_args(
+            row.get("Input Dims") if "Input Dims" in row else None,
+            row.get("Input type") if "Input type" in row else None,
+        )
+        if args_str:
+            op_metric["args"] = args_str
+
         # Kernel time variance detection (require 10+ samples, >= 5% of E2E)
-        e2e_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+        e2e_ms = e2e_ms_total
         e2e_frac = time_ms / e2e_ms if e2e_ms > 0 else 1.0
         if count > 10 and e2e_frac >= 0.05:
             std_val = row.get("Kernel Time (µs)_std")
@@ -605,6 +620,38 @@ def parse_first_shape(dims_str):
         return None
 
 
+def format_args(input_dims_str, input_type_str) -> Optional[str]:
+    """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
+
+    Drops empty/Scalar placeholder slots, normalizes dtypes via torch_dtype_map
+    (unmapped tokens fall through). Args are joined with <br> so each entry
+    renders on its own line inside a markdown table cell, keeping the column
+    narrow even for many-input ops. Returns None on missing or unparseable input.
+    """
+    if pd.isna(input_dims_str) or pd.isna(input_type_str):
+        return None
+    try:
+        pairs = list(
+            zip(
+                ast.literal_eval(str(input_dims_str)),
+                ast.literal_eval(str(input_type_str)),
+            )
+        )
+    except Exception:
+        return None
+
+    parts = []
+    for dim, dtype in pairs:
+        shape = tuple(dim) if isinstance(dim, (list, tuple)) else ()
+        kind = (torch_dtype_map(str(dtype)) or str(dtype)) if dtype else ""
+        if not shape and kind in ("", "Scalar"):
+            continue
+        # Trailing comma keeps tuple syntax for 1-element shapes ((128,) not (128))
+        body = ",".join(map(str, shape)) + ("," if len(shape) == 1 else "")
+        parts.append(f"({body}) {kind}".rstrip())
+    return "<br>".join(parts) or None
+
+
 def shape_aware_lookup(table, kname, input_dims=None):
     """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name.
 
@@ -619,52 +666,6 @@ def shape_aware_lookup(table, kname, input_dims=None):
                 break
     shape_key = parse_first_shape(input_dims) if input_dims else None
     return shapes.get(shape_key) or next(iter(shapes.values()), {})
-
-
-REQUIRED_REPORT_HEADERS = [
-    "Executive Summary",
-    "Compute Kernel Optimizations",
-    "Kernel Fusion Opportunities (Experimental)",
-    "System-Level Optimizations",
-    "Detailed Analysis",
-    "Appendix",
-]
-
-
-def validate_report(
-    output_dir: str,
-    report_filename: str = "standalone_analysis.md",
-) -> Tuple[bool, List[str]]:
-    """
-    Validate that the report file contains all required ## section headers.
-
-    Args:
-        output_dir: Base output directory containing the report
-        report_filename: Report filename (default: standalone_analysis.md;
-            use comparative_analysis.md for comparative mode)
-
-    Returns:
-        Tuple of (passed: bool, missing: list of error/missing-section strings)
-    """
-    report_path = os.path.join(output_dir, report_filename)
-    if not os.path.exists(report_path):
-        return False, ["<file not found>"]
-
-    with open(report_path, "r") as f:
-        content = f.read()
-
-    if len(content.strip()) < 100:
-        return False, ["<report is empty or too short>"]
-
-    missing: List[str] = []
-
-    missing.extend(
-        f"Missing section: {h}"
-        for h in REQUIRED_REPORT_HEADERS
-        if f"## {h}" not in content
-    )
-
-    return len(missing) == 0, missing
 
 
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:

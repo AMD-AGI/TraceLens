@@ -6,8 +6,8 @@ See LICENSE for license information.
 
 ---
 name: generic-op-analyzer
-description: Analyze uncategorized GPU operations and GPU graph overhead. Use when orchestrator needs other category analysis.
-model: inherit
+description: Analyze uncategorized GPU operations. Use when orchestrator needs other category analysis.
+model: claude-opus-4-7-high
 ---
 
 # Uncategorized Operations Analysis Subagent
@@ -26,14 +26,15 @@ When invoked by the orchestrator, you will receive the following context:
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - `comparison_scope`: `standalone` (default) or `comparative`
+- `<cat>`: Category name (e.g., `other`, `inferenceattention`, `rmsnorm`, `multi_tensor_apply`). Substitute it everywhere below before executing.
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/other_ops.csv` - Filtered uncategorized operations
-2. `<output_dir>/metadata/other_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/other_tree_data.json` - Pre-computed parent chains and subtrees
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered uncategorized operations
+2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
+3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains and subtrees
 
 **Output file you must write:**
-- `<output_dir>/category_findings/other_findings.md`
+- `<output_dir>/category_findings/<cat>_findings.md`
 
 ---
 
@@ -69,7 +70,8 @@ Execute the analysis script using the command prefix:
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/other_analysis.py \
   --output-dir <output_dir> \
-  --comparison_scope <comparison_scope>
+  --comparison_scope <comparison_scope> \
+  --category <cat>
 ```
 
 ### Step 2: Read Metrics
@@ -77,7 +79,7 @@ Execute the analysis script using the command prefix:
 After the script completes, read the JSON metrics file:
 
 ```bash
-cat <output_dir>/category_data/other_metrics.json
+cat <output_dir>/category_data/<cat>_metrics.json
 ```
 
 Check `metrics['category_specific']` for sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`).
@@ -89,7 +91,7 @@ Check `metrics['category_specific']` for sub-category counts (`communication_cou
 Read the tree data to understand where each operation sits in the call hierarchy:
 
 ```bash
-cat <output_dir>/category_data/other_tree_data.json
+cat <output_dir>/category_data/<cat>_tree_data.json
 ```
 
 Parent chains reveal the module/layer each op belongs to (e.g., attention, MLP, embedding, loss).
@@ -134,28 +136,41 @@ For each validated bottleneck, provide recommendations in both categories:
 
 ### Step 7: Write Category Findings
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/other_findings.md` using the output format defined there, with `<category>` = `other`. Extend the operations table with a `Sub-Category` column mapped from `operations[i].classification` (e.g., `communication`, `graph`, `miscellaneous`).
+**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/<cat>_findings.md` using the output format defined there, substituting `<cat>` for the spec's `<category>` placeholder. Extend the operations table with a `Sub-Category` column mapped from `operations[i].classification`.
 
 Synthesize **Insight** from the Key Findings analysis, **Action** from merged **Algorithmic** + **Kernel** from Key Findings.
 
-### Step 7.5: Write Impact Estimates to Metadata
+### Step 7.1: Write Impact Estimates to Metadata
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
 
 ```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'other', 'compute')"
+<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', '<cat>', 'compute')"
 ```
+
+### Step 7.2: Validate Findings
+
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.
 
 ---
 
 ## Common Patterns for Uncategorized Operations
-
-### GPU Graph Operations
-- **Symptoms:** Graph capture, graph launch kernels in the trace
-- **Purpose:** Reduce kernel launch overhead by capturing and replaying kernel sequences
-- **Check:** Graph capture overhead should be amortized over many replays
-- **Algorithmic:** Validate graph is captured and replayed correctly
-- **Kernel:** Check for graph-related inefficiencies in launch overhead
 
 ### Uncategorized High-Time Operations
 - **Symptoms:** An operation consuming significant time that doesn't fit GEMM/SDPA/Elementwise/Reduce/etc.
@@ -196,6 +211,5 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estima
 |----------------|---------------------|-------|
 | Memory-bound (embedding, index, scatter) | >70% of peak HBM BW | Standard memory-bound expectation |
 | Compute-bound (custom kernels) | >70% of peak TFLOPS | Varies widely for custom ops |
-| Graph launch | N/A | Measure overhead vs benefit |
 
 **Note:** Efficiency expectations for uncategorized ops vary widely. Use the operation's FLOPS/Byte ratio to determine if it's compute-bound or memory-bound, then compare to the appropriate peak.

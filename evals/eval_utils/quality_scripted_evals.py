@@ -18,10 +18,19 @@ import sys
 
 import pandas as pd
 
-CSV_COLUMNS = ["index", "category", "issue_summary", "result", "details"]
+CSV_COLUMNS = [
+    "index",
+    "category",
+    "issue_summary",
+    "result",
+    "details",
+    "root_cause",
+    "recommended_fix",
+]
 NUMERIC_TOLERANCE = 0.01
 ABS_TOLERANCE = 0.05
 OPTIONAL_COLUMN_PREFIXES = ("Pct Roofline", "Roofline Time")
+OPTIONAL_COLUMNS = {"num_kernels"}
 
 _NUMPY_TYPE_RE = re.compile(r"np\.\w+\(([^)]+)\)")
 
@@ -58,6 +67,7 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
             c
             for c in missing_cols
             if not any(c.startswith(p) for p in OPTIONAL_COLUMN_PREFIXES)
+            and c not in OPTIONAL_COLUMNS
         }
         if missing_cols:
             mismatches.append(f"{fname}: missing required columns: {missing_cols}")
@@ -96,13 +106,54 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
 
 
 EVAL_REGISTRY = [
-    ("TraceLens Perf report CSVs alignment", _check_csv_alignment),
+    (
+        "TraceLens Perf report CSVs alignment",
+        _check_csv_alignment,
+        "data",
+        "Regenerate golden refs with current TraceLens version",
+    ),
 ]
+
+
+def _pre_check_gates(output_dir: str, reference_dir: str) -> str | None:
+    """Return a failure reason if a hard pre-check gate trips, else None."""
+    if not os.path.isdir(output_dir):
+        return "generated output directory does not exist"
+    if not os.path.isdir(reference_dir):
+        return "reference directory does not exist"
+    gen_csv_dir = os.path.join(output_dir, "perf_report_csvs")
+    ref_csv_dir = os.path.join(reference_dir, "perf_report_csvs")
+    if not os.path.isdir(gen_csv_dir):
+        return "generated perf_report_csvs/ directory not found"
+    if not os.path.isdir(ref_csv_dir):
+        return "reference perf_report_csvs/ directory not found"
+    return None
 
 
 def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
     rows = []
-    for i, (summary, func) in enumerate(EVAL_REGISTRY, start=1):
+
+    gate_fail = _pre_check_gates(output_dir, reference_dir)
+    if gate_fail is not None:
+        for i, (summary, _func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
+            rows.append(
+                {
+                    "index": f"quality_eval_{i}",
+                    "category": "Quality",
+                    "issue_summary": summary,
+                    "result": "FAIL",
+                    "details": f"Pre-check gate: {gate_fail}",
+                    "root_cause": "pipeline",
+                    "recommended_fix": "Fix pre-check gate failure before running evals",
+                }
+            )
+        with open(results_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        return rows
+
+    for i, (summary, func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
         result, details = func(output_dir, reference_dir)
         rows.append(
             {
@@ -111,6 +162,8 @@ def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
                 "issue_summary": summary,
                 "result": result,
                 "details": details,
+                "root_cause": rc if result == "FAIL" else "",
+                "recommended_fix": fix if result == "FAIL" else "",
             }
         )
     with open(results_path, "w", newline="") as f:

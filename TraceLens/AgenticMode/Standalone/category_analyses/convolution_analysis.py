@@ -67,7 +67,7 @@ def main():
     run_category_analysis(
         category="convolution",
         output_dir=args.output_dir,
-        config={"extra_fields": []},
+        config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,
         comparison_scope=args.comparison_scope,
     )

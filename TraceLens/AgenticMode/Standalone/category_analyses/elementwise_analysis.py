@@ -42,7 +42,7 @@ def main():
     run_category_analysis(
         category="elementwise",
         output_dir=args.output_dir,
-        config={"extra_fields": ["FLOPS/Byte"]},
+        config={"extra_fields": ["Input Dims", "Input type", "FLOPS/Byte"]},
         extract_fn=extract_category_specific,
         comparison_scope=args.comparison_scope,
     )

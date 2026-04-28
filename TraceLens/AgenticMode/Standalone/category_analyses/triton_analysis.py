@@ -67,7 +67,7 @@ def main():
         category="triton",
         output_dir=args.output_dir,
         config={
-            "extra_fields": [],
+            "extra_fields": ["Input Dims", "Input type"],
             "operation_classifier": classify_triton_operation,
         },
         extract_fn=extract_category_specific,

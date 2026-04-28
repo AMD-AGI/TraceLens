@@ -314,9 +314,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Identification:**
 **Data:**
 
-| Operation | Kernel time (ms) | % of category | Count | FLOPS/Byte | Efficiency | Bound |
-|-----------|-----------------|---------------|-------|------------|------------|-------|
-| ...       | ...             | ...           | ...   | ...        | ...        | ...   |
+| Operation | Args | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|-----------|------|-----------|------|-------|------------|------------|-------|
+| ...       | ...  | ...       | ...  | ...   | ...        | ...        | ...   |
 
 **Reasoning for Slowdown:**
 **Resolution:**
