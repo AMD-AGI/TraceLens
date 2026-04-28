@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Tensor Shape Metadata in PyTorch Profiler Traces
 
 A practical guide to understanding when tensor shapes are available in profiler traces and how to get them when they're missing.
