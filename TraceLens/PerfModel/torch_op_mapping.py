@@ -83,6 +83,10 @@ unary_elemwise_ops = [
     "aten::clamp_max",
     "aten::clamp_max_",
     "aten::sigmoid",
+    "aten::rsqrt",
+    "aten::silu",
+    "aten::neg",
+    "aten::pow",
 ]
 
 binary_elemwise_ops = [
@@ -220,8 +224,8 @@ def categorize_torch_op(row):
              'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
              'record_param_comms', or 'other'.
 
-    Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
-    are categorization-only (timing without GFLOPS or TB/s).
+        Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
+        are categorization-only (timing without GFLOPS or TB/s).
     """
 
     debug = False
@@ -305,8 +309,52 @@ def categorize_torch_op(row):
         return "reduce"
     elif row["name"].startswith("triton"):
         return "triton"
+    elif row["name"] in [
+        "aiter::moe_sorting_fwd",
+        "aiter::moe_sorting_opus_fwd",
+        "aiter::moe_align_block_size",
+        "_moe_C::moe_align_block_size",
+        "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)",
+    ]:
+        return "MoE_aux"
+    elif row["name"] in [
+        "aiter::moe_sum",
+    ]:
+        return "MoE_aux"
+    elif row["name"] in [
+        "aiter::topk_softmax",
+        "aiter::topk_softmax_asm",
+        "aiter::topk_sigmoid",
+        "aiter::biased_grouped_topk_hip",
+        "aiter::grouped_topk",
+        "aiter::moe_fused_gate",
+    ]:
+        return "MoE_aux"
+    elif row["name"] in [
+        "_C_cache_ops::reshape_and_cache_flash",
+        "_C_cache_ops::concat_and_cache_mla",
+    ]:
+        return "InferenceAttention"
     elif row["name"].startswith("record_param_comms"):
         return "record_param_comms"
+    elif row["name"] in dict_cat2names.get("MoE_fused", []):
+        return "MoE_fused"
+    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
+        return "MoE_unfused"
+    elif row["name"] in dict_cat2names.get("InferenceAttention", []):
+        return "InferenceAttention"
+    elif row["name"] in dict_cat2names.get("RMSNorm", []):
+        return "RMSNorm"
+    elif row["name"] in dict_cat2names.get("CustomCollective", []):
+        return "CustomCollective"
+    elif row["name"] in dict_cat2names.get("GroupQuant", []):
+        return "GroupQuant"
+    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
+        return "elementwise"
+    elif row["name"] in dict_cat2names.get("UnaryElementwise", []):
+        return "elementwise"
+    elif row["name"] in dict_cat2names.get("Reduce", []):
+        return "reduce"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
         # else:

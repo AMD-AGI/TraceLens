@@ -93,6 +93,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch   --trace_dir /path/to/t
 | `nccl_summary_all2allv` | Aggregated all2allv metrics by (Process Group, dtype). Includes throughput, wall time, size imbalance, and timing skew. Unlike implicit-sync collectives, all2allv uses aggregate throughput rather than algo/bus bandwidth since per-rank data sizes vary. |
 | `nccl_all2allv` | Detailed All2AllV analysis: variable send/recv sizes and splits per rank, with timing and skew columns per rank. |
 | `nccl_all2allv_heatmap` | *(when `--all2allv_heatmap` is set)* Per rank-pair total send volumes across all all2allv invocations. Useful for identifying hot pairs in MoE/expert-parallel routing. |
+| `straggler_summary` | One row per rank with aggregated straggler metrics: total/mean wait time, how often the rank arrived last or first, and total NCCL duration. Sorted ascending by wait time so the straggler (lowest wait time) is at the top. See [Identifying Straggler Ranks](#-identifying-straggler-ranks). |
 
 _Notes:_
 - Summary sheets (`nccl_summary_*`, `nccl_summary_all2allv`) are **always** produced when the corresponding collective type exists in the trace; detailed per-event sheets (`nccl_long`, `nccl_implicit_sync`, `nccl_all2allv`) appear when `--detailed_analysis` is set.
@@ -111,6 +112,47 @@ _Notes:_
 
 **Lowest Common Directory (pattern mode)**  
 When using `--trace_pattern`, the tool expands the pattern by replacing `*` with `0..world_size-1`, then computes the **lowest common ancestor directory** of those paths to pick a default output location.
+
+---
+
+## 🔍 Identifying Straggler Ranks
+
+A **straggler** is the rank that consistently arrives last at collectives, forcing all other ranks to wait in implicit synchronization.
+
+### Quick answer: open `straggler_summary`
+
+The `straggler_summary` sheet is sorted so **the straggler is in the first row** (lowest total wait time). Example from an 8-rank Llama 70B FSDP run:
+
+| rank | total_wait_time_us | mean_wait_time_us | times_arrived_last | times_arrived_first | pct_arrived_last | num_collectives | total_nccl_dur_us |
+|------|-------------------|-------------------|-------------------|--------------------|-----------------:|----------------:|------------------:|
+| 4 | 27,195 | 55.7 | 420 | 6 | 86.1% | 488 | 3,910,753 |
+| 5 | 4,660,353 | 9,549.9 | 39 | 10 | 8.0% | 488 | 8,463,896 |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+| 0 | 13,358,753 | 27,374.5 | 3 | 320 | 0.6% | 488 | 17,203,432 |
+
+**How to read it:**
+
+| Column | What it tells you |
+|--------|-------------------|
+| `total_wait_time_us` | Sum of this rank's wait time across all collectives. The straggler has the **lowest** value — it arrives last, so it rarely waits. |
+| `times_arrived_last` | Number of collectives where this rank was the last to arrive. The straggler dominates this column. |
+| `times_arrived_first` | Number of collectives where this rank arrived first. The rank that appears here most often pays the biggest sync penalty. |
+| `pct_arrived_last` | `times_arrived_last / num_collectives`. A rank at 86% is a persistent straggler. |
+| `total_nccl_dur_us` | Total time inside NCCL kernels. The straggler typically has the **lowest** value — other ranks' durations are inflated by implicit-sync wait time. |
+
+### Next step: visualize with TraceFusion
+
+Once you know the straggler rank, use [TraceFusion](TraceFusion.md) to merge the straggler's trace with a fast rank (e.g. the one with the highest `times_arrived_first`) into a single file and open it in Perfetto UI. Viewing both timelines side-by-side makes it straightforward to see what compute or memory work is delaying the straggler before each collective.
+
+```python
+from TraceLens import TraceFuse
+
+fuser = TraceFuse(
+    trace_files=["rank4_trace.json.gz", "rank0_trace.json.gz"],
+    output_file="straggler_vs_fast.json.gz",
+)
+fuser.fuse()
+```
 
 ---
 

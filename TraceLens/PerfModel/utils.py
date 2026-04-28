@@ -52,7 +52,7 @@ def name2bpe(name):
     """
     dict_bpe2dtype = {
         8: ["double", "long int"],
-        4: ["float", "scalar"],
+        4: ["float", "scalar", "int"],
         2: ["c10::half", "c10::bfloat16"],
         1: [
             "c10::float8_e4m3fnuz",
@@ -103,5 +103,9 @@ def torch_dtype_map(dtype):
         "c10::float8_e4m3fnuz": "fp8",
         "unsigned char": "fp8",
         "fp8": "fp8",
+        "fp4": "fp4",
+        "mxfp4": "fp4",
+        "c10::float4_e2m1fn_x2": "fp4",
+        "c10::float8_e4m3fn": "fp8",
     }
     return dict_dtype2simulation.get(dtype.lower(), None)
