@@ -117,9 +117,14 @@ class TraceFuse:
             ),
             None,
         )
-        self.linking_key = (
-            "correlation" if "correlation" in launch_event["args"] else "External id"
-        )
+        if launch_event is None:
+            self.linking_key = "External id"
+        else:
+            self.linking_key = (
+                "correlation"
+                if "correlation" in launch_event["args"]
+                else "External id"
+            )
 
     def _set_offset_multiplier(self, events):
         """Calculate offset multipliers for each field."""
@@ -133,7 +138,7 @@ class TraceFuse:
                 if isinstance(value, int):
                     max_values[field] = max(max_values[field], value)
         self.offset_multiplier = {
-            field: 10 ** (math.ceil(math.log10(max_value)) + 1)
+            field: 10 ** (math.ceil(math.log10(max(max_value, 1))) + 1)
             for field, max_value in max_values.items()
         }
 
