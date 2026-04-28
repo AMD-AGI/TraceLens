@@ -25,8 +25,7 @@ with the right op libraries installed.
 [Architecture](#architecture) |
 [Custom Initializers](#custom-initializers) |
 [Auto-Import](#auto-import-for-custom-ops) |
-[Batch Context](#batch-context-vllm-traces) |
-[Validation](#validation) |
+[Iteration Annotations](#iteration-annotations-vllm-traces) |
 [Limitations](#known-limitations) |
 [Use Cases](#use-cases)
 
@@ -173,10 +172,13 @@ with open('event_replay_ir.json', 'w') as f:
 ```
 
 ```bash
-python batched_replay.py event_replay_ir.json
+python batched_replay.py event_replay_ir.json            # default (timing only)
+python batched_replay.py -v event_replay_ir.json         # verbose (shows args)
+python batched_replay.py --op-filter aten::mm event_replay_ir.json  # filter by name
+python batched_replay.py --op-limit 5 event_replay_ir.json          # first 5 ops
 ```
 
-#### Example Output
+#### Example Output (`-v`)
 
 ```
 [7/11] Replaying: aten::convolution
@@ -192,7 +194,7 @@ python batched_replay.py event_replay_ir.json
   output_padding SymInt[]: [0, 0]
   groups SymInt: 1
   Keyword Args:
-  Average time taken: 100.38 microseconds
+  Average time taken: 100.38 us  (median: 98.21 us)
   Successfully executed aten::convolution.
   Result: Tensor(shape=torch.Size([20, 256, 14, 14]), dtype=torch.bfloat16, device=cuda:0)
 ...
@@ -233,8 +235,28 @@ Event Replay operates in two distinct phases:
 
 ### Phase 1: IR Extraction (deterministic)
 
-When an `EventReplayer` is constructed from a profiler event, it resolves the
-op's registered schema and extracts a complete Intermediate Representation:
+The profiler captures tensor dimensions and types but not argument names:
+
+```
+Input Dims:  [[2, 2048], [60, 2816, 2048], [60, 2048, 1408], [1924], [61], [2], ...]
+Input type:  [BFloat16, BFloat16, BFloat16, Int, Int, Int, ...]
+```
+
+EventReplayer looks up the op's **registered schema** from the PyTorch dispatcher
+(via `torch._C._jit_get_all_schemas()` or `torch.ops`). For example, querying
+the registry for `aiter::ck_moe_stage1` returns:
+
+```
+aiter::ck_moe_stage1(Tensor(a0!) hidden_states, Tensor(a1!) w1, Tensor(a2!) w2,
+    Tensor(a3!) sorted_token_ids, Tensor(a4!) sorted_expert_ids,
+    Tensor(a5!) num_valid_ids, Tensor(a6!) out, SymInt topk,
+    str? kernelName="", Tensor(a9!)? w1_scale=None,
+    Tensor(a10!)? a1_scale=None, SymInt? block_m=None, ...) -> ()
+```
+
+This schema provides argument names, types, and defaults. EventReplayer zips the
+schema with the profiler's `Input Dims` / `Input type` arrays to produce the
+named, typed IR:
 
 - **Op name** — the fully qualified operator name (e.g., `aten::mm`, `_rocm_C::paged_attention`)
 - **Argument metadata** — for each positional and keyword argument:
@@ -248,12 +270,11 @@ IR. The output is a portable JSON dictionary.
 
 **Prerequisite — ops must be registered with the PyTorch dispatcher.** If an op
 is called as a plain Python function (e.g., a Triton kernel launched directly),
-there is no schema for the profiler to capture and no IR can be extracted. The
-op must go through `torch.ops`, `torch.library`, or the JIT registry. This is
-why aiter's CK-based ops (`aiter::ck_moe_stage1`) produce full IR while direct
-Triton kernel calls do not. See
-[Shape Metadata Guide](conceptual/shape_metadata_guide.md) for details on
-registering ops that lack schemas.
+there is no schema to query and no IR can be extracted. The op must go through
+`torch.ops`, `torch.library`, or the JIT registry. This is why aiter's CK-based
+ops (`aiter::ck_moe_stage1`) produce full IR while direct Triton kernel calls do
+not. The fix is wrapping such kernels in `torch.library.custom_op` so the
+dispatcher has a schema to query.
 
 ### Phase 2: Init & Replay (requires judgment)
 
@@ -293,17 +314,17 @@ They are applied automatically when `auto_init=True` (the default).
 These ship with TraceLens and require no setup — they activate automatically
 when the op name matches:
 
-**`PagedAttentionInit`** — matches `paged_attention`
+**`PagedAttentionInit`** — matches `_rocm_C::paged_attention`
 
 Initializes the KV cache metadata so the attention kernel does real work:
 - `block_tables` — random permutation of the physical block pool (simulates
   realistic scattered memory allocation)
 - `seq_lens` — all sequences set to `max_seq_len`
 - `query_start_loc` — CSR indptr encoding per-sequence query token counts.
-  When batch context is available (see [Batch Context](#batch-context-vllm-traces)),
+  When iteration annotations are available (see [Iteration Annotations](#iteration-annotations-vllm-traces)),
   uses the exact prefill/decode split; otherwise falls back to heuristics
 
-**`MoeRoutingInit`** — matches `ck_moe_stage1`, `ck_moe_stage2`
+**`MoeRoutingInit`** — matches `aiter::ck_moe_stage1`, `aiter::ck_moe_stage2`
 
 Constructs a complete token-to-expert routing table:
 - `sorted_token_ids` — padded to `block_m` boundaries per expert
@@ -321,54 +342,38 @@ replayer = EventReplayer(event, device='cuda',
                          init_kwargs={"moe_distribution": "zipf", "moe_zipf_s": 1.5})
 ```
 
-### Disabling Built-in Inits
+### Writing Your Own Initializer
+
+If you're replaying an op that needs realistic tensor content but isn't
+covered by the built-ins, you can write your own custom initializer in
+three steps. For real-world examples, see `PagedAttentionInit` and
+`MoeRoutingInit` in `TraceLens/EventReplay/custom_inits.py`.
+
+**Step 1 — Subclass `CustomInit`.** Set `op_patterns` to the exact op name(s)
+you want to target. This is an exact match against the profiler event name
+(e.g., `"aten::index_add_"`, not `"index_add"`):
 
 ```python
-replayer = EventReplayer(event, device='cuda', auto_init=False)
-replayer.replay()
+from TraceLens.EventReplay import EventReplayer, CustomInit
+
+class IndexAddInit(CustomInit):
+    op_patterns = ["aten::index_add_"]
 ```
 
-### Adding Your Own Initializer
-
-For ops not covered by the built-ins, you can write and register your own.
-
-When `replay()` runs with `auto_init=True`, it iterates over registered
-initializers and calls `initialize()` on the first one whose `op_patterns`
-match the op name. The initializer mutates `replayer.args` / `replayer.kwargs`
-**in-place** before the op is called.
-
-The initializer can access:
+**Step 2 — Implement `initialize()`.** This method receives the `replayer`
+object and mutates its tensors **in-place** before the op executes. You have
+access to:
 
 - `replayer.args` — list of allocated tensors/scalars (in schema order)
 - `replayer.kwargs` — dict of keyword arguments
 - `replayer.event` — the raw profiler event dict
 - `replayer.event_replay_IR` — the extracted IR with named argument metadata
 
-Arguments should be looked up **by name** from the IR rather than hardcoded
-positions, making initializers robust to schema changes across library versions:
+Look up arguments **by name** from the IR rather than hardcoding positional
+indices — this keeps your initializer robust to schema changes across library
+versions:
 
 ```python
-ir = replayer.event_replay_IR
-arg_names = [a["arg_name"] for a in ir["list_pos_args"]]
-
-def _by_name(name, fallback_pos):
-    if name in arg_names:
-        return replayer.args[arg_names.index(name)]
-    return replayer.args[fallback_pos]
-```
-
-**Real example — `aten::index_add_`:** This op was found as a bottleneck in
-gsplat (Gaussian Splatting) on MI325X. The `index` tensor (5M elements) must
-contain valid row indices into `self`; the default zero-init makes every source
-row accumulate into row 0, which is not representative of the real scatter
-pattern:
-
-```python
-from TraceLens.EventReplay import EventReplayer, CustomInit
-
-class IndexAddInit(CustomInit):
-    op_patterns = ["index_add"]
-
     def initialize(self, replayer, **kwargs):
         import torch
 
@@ -385,14 +390,24 @@ class IndexAddInit(CustomInit):
 
         return (f"[custom init] index_add — index randint(0, {dim_size}), "
                 f"shape={list(index.shape)}")
+```
 
-# Register — all future replays of index_add ops will use this
+In this example, `aten::index_add_` accumulates source rows into `self` at
+positions given by `index`. The default zero-init makes every row land on
+row 0 — not representative of the real scatter pattern. The initializer
+fills `index` with random valid indices so the kernel exercises realistic
+memory access.
+
+**Step 3 — Register it.** Once registered, the initializer fires automatically
+on every future replay of matching ops:
+
+```python
 EventReplayer.register_custom_init(IndexAddInit())
 ```
 
-After `register_custom_init`, every subsequent `EventReplayer` will
-automatically apply `IndexAddInit` when replaying any op whose name contains
-`"index_add"`.
+When `replay()` runs with `auto_init=True`, it iterates over registered
+initializers and applies the **first match** (built-ins are checked first,
+then user-registered ones in order).
 
 To see what's currently registered:
 
@@ -426,48 +441,83 @@ EventReplayer.register_namespace("my_lib", ["my_lib.ops"])
 
 ---
 
-## Batch Context (vLLM traces)
+## Iteration Annotations (vLLM traces)
 
-vLLM annotates each forward step with `user_annotation` events that encode
-the exact prefill/decode batch composition (e.g.,
-`execute_context_1(21)_generation_5(5)`). `extract_batch_context` parses these
-annotations and attaches the breakdown to each paged attention event, so
-`PagedAttentionInit` can construct an accurate `query_start_loc`.
+### The problem
 
-```python
-from TraceLens.EventReplay import extract_batch_context
+Paged attention's `query_start_loc` is a CSR indptr array that encodes how
+many query tokens each sequence contributes. In a mixed batch (common in
+vLLM's continuous batching), some sequences are **prefill** (many query tokens)
+and others are **decode** (1 token each). The profiler captures the tensor shape
+but not the per-sequence breakdown, so without additional information the
+custom initializer has to guess — and guessing wrong changes the compute
+pattern significantly (prefill is quadratic in sequence length, decode is
+linear).
 
-num_annotated = extract_batch_context(perf_analyzer)
-print(f"Annotated {num_annotated} paged_attention events with batch context")
+### How vLLM exposes this
+
+vLLM emits a `user_annotation` event for each `execute_model` iteration
+with the exact prefill/decode composition encoded in the name:
+
+```
+execute_context_2(18)_generation_5(5)
 ```
 
-Without batch context, the initializer falls back to a heuristic (uniform
-token distribution for prefill, 1 token/seq for decode).
+This is an **iteration annotation** — it describes one forward pass. Here it
+means: **2 prefill sequences** with **18 total query tokens**, and **5 decode
+sequences** with **5 tokens** (1 each).
 
----
+### Extracting batch context from iteration annotations
 
-## Validation
-
-Tested on Qwen1.5-MoE-A2.7B (aiter backend, MI300X) — 30 unique op configs:
-
-| Metric | Result |
-|--------|--------|
-| Kernel name match | 27/30 (3 `aten::copy_` mismatches — runtime DMA path selection, expected) |
-| GPU busy time delta (median, warm cache) | -17% (replay faster — isolation effect) |
-| GPU busy time delta range | -32% (large mem-bound GEMMs) to +5% (latency-bound ops) |
-
-Also validated on Qwen2.5-3B (dense, no MoE): 26/30 match, similar timing profile.
-
-Replay is systematically faster because isolated single-op execution has no
-inter-op cache contention. This is a fundamental property of micro-benchmarks,
-not a bug.
+`extract_batch_context` parses these iteration annotations by timestamp and
+attaches a `batch_context` dict to each paged attention event that falls
+within the annotation's time range:
 
 ```python
-from TraceLens.EventReplay import benchmark_func
+from TraceLens import TreePerfAnalyzer
+from TraceLens.EventReplay import EventReplayer, extract_batch_context
 
-metrics = benchmark_func(replayer.replay, warmup=5, repeat=20)
-print(f"Median: {metrics['median_ms']:.3f} ms")
+analyzer = TreePerfAnalyzer.from_file("vllm_trace.json")
+
+# Annotate paged attention events with prefill/decode split
+num_annotated = extract_batch_context(analyzer)
+print(f"Annotated {num_annotated} paged_attention events")
+
+# Now replay — PagedAttentionInit reads event["batch_context"] automatically
+event = analyzer.tree.get_UID2event(some_uid)
+replayer = EventReplayer(event, device='cuda')
+replayer.replay()  # query_start_loc reflects the real prefill/decode split
 ```
+
+After `extract_batch_context`, each annotated event carries:
+
+```python
+event["batch_context"] = {
+    "n_prefill": 2,       # number of prefill sequences
+    "prefill_tokens": 18,  # total query tokens across prefill sequences
+    "n_decode": 5,         # number of decode sequences
+    "decode_tokens": 5,    # total query tokens across decode sequences (1 each)
+}
+```
+
+`PagedAttentionInit` uses this to build `query_start_loc` accurately:
+prefill sequences get `prefill_tokens / n_prefill` tokens each, decode
+sequences get 1 token each.
+
+### Without iteration annotations
+
+`PagedAttentionInit` still runs — it always initializes `block_tables`
+(random permutation of the physical block pool) and `seq_lens` (set to
+`max_seq_len`). The only difference is how `query_start_loc` is built.
+Without annotations, it falls back to heuristics:
+
+- `query_tokens == num_seqs` → assumes pure decode (1 token/seq)
+- `query_tokens > num_seqs` → assumes pure prefill (tokens distributed
+  uniformly)
+
+This is a reasonable approximation for homogeneous batches but inaccurate
+for mixed prefill+decode batches, where the iteration annotation provides
+the exact split.
 
 ---
 
@@ -476,8 +526,7 @@ print(f"Median: {metrics['median_ms']:.3f} ms")
 - **Unregistered ops are invisible.** Triton kernels called directly from Python
   (e.g., aiter's Triton attention path) have no schema in the profiler. The fix
   is wrapping them in `torch.library.custom_op` — a one-time registration effort
-  in the upstream library. See
-  [Shape Metadata Guide](conceptual/shape_metadata_guide.md).
+  in the upstream library.
 
 - **Single-op isolation vs. real workload.** Replay runs each op in isolation
   with no surrounding memory traffic. Timings are a lower bound on in-model

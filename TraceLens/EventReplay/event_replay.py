@@ -305,21 +305,22 @@ class EventReplayer:
     def replay(self):
         """
         Replay the event using the matched schema and event replay IR.
+
+        Returns:
+            The result of the PyTorch operation.
         """
         if self.lazy:
-            args, kwargs = EventReplayer._get_args_kwargs(
+            self.args, self.kwargs = EventReplayer._get_args_kwargs(
                 self.event_replay_IR, device=self.device
             )
-        else:
-            args, kwargs = self.args, self.kwargs
 
         if not self._inits_applied and self._auto_init:
             self._apply_custom_inits()
 
-        self._func(*args, **kwargs)
+        return self._func(*self.args, **self.kwargs)
 
     def _apply_custom_inits(self):
-        """Run all applicable custom initializers on this replayer's tensors."""
+        """Apply the first matching custom initializer to this replayer's tensors."""
         for custom_init in self._custom_init_registry:
             if custom_init.applies_to(self):
                 try:
@@ -330,6 +331,7 @@ class EventReplayer:
                     warnings.warn(
                         f"[custom init] {type(custom_init).__name__} failed: {e}"
                     )
+                break
         self._inits_applied = True
 
     @staticmethod
@@ -761,22 +763,21 @@ class EventReplayer:
     def get_repro_info(self) -> Dict[str, Any]:
         """
         Extracts the minimal, serializable information needed to reproduce the event call.
+
+        Safe to call multiple times — does not mutate self.event_replay_IR.
         """
-        dict_repro_info = {}
-        dict_repro_info["op_name"] = self.event["name"]
-        list_pos_args, list_kwargs = (
-            self.event_replay_IR["list_pos_args"],
-            self.event_replay_IR["list_kwargs"],
-        )
-        list_pos_args_copy, list_kwargs_copy = list_pos_args.copy(), list_kwargs.copy()
-        for idx, val in enumerate(list_pos_args_copy):
-            if isinstance(val["value"], TensorCfg):
-                list_pos_args_copy[idx]["value"] = val["value"].__dict__
-        for idx, val in enumerate(list_kwargs_copy):
-            if isinstance(val["value"], TensorCfg):
-                list_kwargs_copy[idx]["value"] = val["value"].__dict__
-        dict_repro_info["replay_ir"] = {
-            "list_pos_args": list_pos_args_copy,
-            "list_kwargs": list_kwargs_copy,
+        def _serialize_arg(arg: Dict[str, Any]) -> Dict[str, Any]:
+            val = arg["value"]
+            return {
+                **arg,
+                "value": val.__dict__.copy() if isinstance(val, TensorCfg) else val,
+            }
+
+        ir = self.event_replay_IR
+        return {
+            "op_name": self.event["name"],
+            "replay_ir": {
+                "list_pos_args": [_serialize_arg(a) for a in ir["list_pos_args"]],
+                "list_kwargs": [_serialize_arg(a) for a in ir["list_kwargs"]],
+            },
         }
-        return dict_repro_info
