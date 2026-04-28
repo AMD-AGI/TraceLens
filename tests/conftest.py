@@ -37,6 +37,13 @@ def update_references(request):
     """Return True when reference traces should be overwritten with new outputs.
 
     Enabled by the ``--update-references`` CLI flag.
+
+    .. note::
+        When you use this flag to regenerate reference reports as
+        part of a PR, explicitly note in the PR description which
+        references were updated and why. Do not use this flag to paper over
+        unexpected differences. Investigate any unexpected diffs first and
+        only update references when the new output is correct.
     """
     return request.config.getoption("--update-references", default=False)
 
