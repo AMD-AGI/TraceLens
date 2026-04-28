@@ -6,49 +6,167 @@ See LICENSE for license information.
 
 # Event Replay
 
-Optimizing GPU performance in deep learning requires isolating and benchmarking individual operations to identify bottlenecks. However, reproducing operations directly from complex model code or large profiles can be cumbersome.
+Optimizing GPU performance in deep learning requires isolating and benchmarking
+individual operations to identify bottlenecks. However, reproducing operations
+directly from complex model code or large profiles can be cumbersome — the
+profiler captures tensor dimensions and types but strips argument names, semantic
+context, and the relationship between arguments.
 
-Event Replay is a Python-based tool within TraceLens that extracts and replays almost arbitrary PyTorch operations using minimal, portable Intermediate Representation (IR). It enables users to easily reproduce, analyze, and benchmark specific operators independently from the original model execution, streamlining performance optimization workflows.
+Event Replay is a Python-based tool within TraceLens that extracts and replays
+almost arbitrary PyTorch operations using minimal, portable Intermediate
+Representation (IR). It translates the opaque profiler output into human-readable
+JSON — named arguments, tensor shapes, dtypes, strides, and scalar values —
+making profiler traces interpretable, shareable, and replayable on any machine
+with the right op libraries installed.
+
+**Contents:**
+[Quick Start](#quick-start) |
+[Batch Replay](#batch-replay) |
+[Architecture](#architecture) |
+[Custom Initializers](#custom-initializers) |
+[Auto-Import](#auto-import-for-custom-ops) |
+[Batch Context](#batch-context-vllm-traces) |
+[Validation](#validation) |
+[Limitations](#known-limitations) |
+[Use Cases](#use-cases)
 
 ---
-
-## Key Features
-
-- **Generic Operator Replay**: Reconstructs and benchmarks any PyTorch operator from profile data, including convolutions, GEMMs, reductions, element-wise operations, and more.
-- **Minimalistic IR**: Extracts essential operator attributes (tensor shapes, strides, dtypes, and other arguments) into a lightweight, portable JSON-based IR.
-- **Portable Artifacts**: Enables sharing standalone artifacts (JSON IR and scripts) with teammates or upstream repositories without requiring access to the model or TraceLens.
-
----
-
 
 ## Quick Start
 
-### Example: Replay a Single Event
+### Replay a Single Event
 
 ```python
-from TraceLens import TreePerfAnalyzer, EventReplayer
+from TraceLens import TreePerfAnalyzer
+from TraceLens.EventReplay import EventReplayer
 
-# Load profile and get event
 perf_analyzer = TreePerfAnalyzer.from_file('/path/to/profile.json')
-uid = 12345  # Replace with actual UID of interest
+uid = 12345
 event = perf_analyzer.tree.get_UID2event(uid)
 
-# Initialize and replay
 replayer = EventReplayer(event, device='cuda')
 replayer.replay()
 ```
 
+### Inspect the IR (without replaying)
+
+Even without a GPU, the extracted IR is valuable for understanding what a
+profiled op actually does. The profiler's native format stores arguments as
+unlabeled dimension lists with no argument names or semantic context:
+
+```json
+{
+  "cat": "cpu_op", "name": "aten::mm",
+  "args": {
+    "Input Dims": [[20, 2048], [2048, 11264]],
+    "Input type": ["BFloat16", "BFloat16"]
+  }
+}
+```
+
+What are these two tensors? Which is the activation, which is the weight? Is
+`mat2` transposed? You can't tell from `Input Dims` alone. Event Replay resolves
+the op's registered schema and produces named, typed JSON:
+
+```python
+replayer = EventReplayer(event, lazy=True)
+ir = replayer.get_repro_info()
+```
+
+**After — Event Replay IR for `aten::mm`:**
+
+```json
+{
+  "op_name": "aten::mm",
+  "replay_ir": {
+    "list_pos_args": [
+      {
+        "arg_name": "self",
+        "arg_type": "Tensor",
+        "value": { "shape": [20, 2048], "dtype": "c10::BFloat16",
+                   "strides": [2048, 1], "init": "normal" }
+      },
+      {
+        "arg_name": "mat2",
+        "arg_type": "Tensor",
+        "value": { "shape": [2048, 11264], "dtype": "c10::BFloat16",
+                   "strides": [1, 2048], "init": "normal" }
+      }
+    ]
+  }
+}
+```
+
+Now you can immediately read: BF16 GEMM, M=20, K=2048, N=11264, `mat2`
+is column-major (stride pattern `[1, K]`).
+
+The contrast is sharper for complex ops. Here's what the profiler gives you
+for a MoE fused expert call:
+
+**Raw profiler — `aiter::ck_moe_stage1`:**
+
+```json
+{
+  "cat": "cpu_op", "name": "aiter::ck_moe_stage1",
+  "args": {
+    "Input Dims": [[2, 2048], [60, 2816, 2048], [60, 2048, 1408],
+                   [1924], [61], [2], [2, 4, 1408], [], [], [], [], [], [], [], [], [], [], []],
+    "Input type": ["BFloat16", "BFloat16", "BFloat16",
+                   "Int", "Int", "Int", "BFloat16",
+                   "Scalar", "Scalar", "Scalar", "Scalar", "Scalar", "Scalar",
+                   "Scalar", "Scalar", "Scalar", "Scalar", "Scalar"]
+  }
+}
+```
+
+18 arguments, most labeled just "Scalar" — which one is `topk`? Which is
+`block_m`? What does `[1924]` represent? Uninterpretable without reading the
+source code.
+
+**After — Event Replay IR:**
+
+```json
+{
+  "op_name": "aiter::ck_moe_stage1",
+  "replay_ir": {
+    "list_pos_args": [
+      { "arg_name": "hidden_states", "arg_type": "Tensor",
+        "value": { "shape": [2, 2048], "dtype": "c10::BFloat16" } },
+      { "arg_name": "w1", "arg_type": "Tensor",
+        "value": { "shape": [60, 2816, 2048], "dtype": "c10::BFloat16" } },
+      { "arg_name": "w2", "arg_type": "Tensor",
+        "value": { "shape": [60, 2048, 1408], "dtype": "c10::BFloat16" } },
+      { "arg_name": "sorted_token_ids", "arg_type": "Tensor",
+        "value": { "shape": [1924], "dtype": "int", "init": "zeros" } },
+      { "arg_name": "sorted_expert_ids", "arg_type": "Tensor",
+        "value": { "shape": [61], "dtype": "int", "init": "zeros" } },
+      { "arg_name": "num_valid_ids", "arg_type": "Tensor",
+        "value": { "shape": [2], "dtype": "int", "init": "zeros" } },
+      { "arg_name": "out", "arg_type": "Tensor",
+        "value": { "shape": [2, 4, 1408], "dtype": "c10::BFloat16", "init": null } },
+      { "arg_name": "topk", "arg_type": "SymInt", "value": 4 },
+      { "arg_name": "block_m", "arg_type": "SymInt?", "value": 32 },
+      { "arg_name": "use_non_temporal_load", "arg_type": "bool", "value": true }
+    ]
+  }
+}
+```
+
+Now you can read: 2 tokens routed to top-4 of 60 experts, gate hidden dim 2048,
+up-projection to 2816, down-projection through 1408, `[1924]` is
+`sorted_token_ids` (the routing table), block tile size 32, NTL enabled.
+
 ---
 
-## Batch Replay and Benchmark
+## Batch Replay
 
-### Extract Operator IR from TraceLens Profiles
+### Extract IR for Multiple Events
 
 ```python
 import json
 
-# Extract replay IR for events of interest
-repro_data = [EventReplayer(event, lazy=True).get_repro_info() for event in events_of_interest]
+repro_data = [EventReplayer(event, lazy=True).get_repro_info()
+              for event in events_of_interest]
 
 with open('event_replay_ir.json', 'w') as f:
     json.dump(repro_data, f, indent=4)
@@ -77,47 +195,21 @@ python batched_replay.py event_replay_ir.json
   Average time taken: 100.38 microseconds
   Successfully executed aten::convolution.
   Result: Tensor(shape=torch.Size([20, 256, 14, 14]), dtype=torch.bfloat16, device=cuda:0)
-
-[8/11] Replaying: aten::convolution
-  Reconstructing arguments for 'aten::convolution'...
-  Positional Args:
-  input Tensor: {'shape': [20, 256, 14, 14], 'dtype': 'c10::BFloat16', 'strides': [50176, 196, 14, 1]}
-  weight Tensor: {'shape': [512, 256, 3, 3], 'dtype': 'c10::BFloat16', 'strides': [2304, 9, 3, 1]}
-  bias Tensor?: None
-  stride SymInt[]: [2, 2]
-  padding SymInt[]: [1, 1]
-  dilation SymInt[]: [1, 1]
-  transposed bool: False
-  output_padding SymInt[]: [0, 0]
-  groups SymInt: 1
-  Keyword Args:
-  Average time taken: 92.83 microseconds
-  Successfully executed aten::convolution.
-  Result: Tensor(shape=torch.Size([20, 512, 7, 7]), dtype=torch.bfloat16, device=cuda:0)
 ...
 --- Replay Summary ---
 Total operations in file: 11
 Attempted replays: 11
 Successful replays: 11
 Errors encountered: 0
-
 ```
--------------------
+
 ### Creating Standalone Replay Artifacts
 
-You can optionally package the extracted replay IR and scripts into a standalone zip file for easy sharing and reproduction, independent of the original model code or TraceLens repository.
-
-Artifacts included:
-- `event_replay_ir.json`: Serialized operator replay instructions.
-- `utils.py`: Tensor creation and helper utilities.
-- `batched_replay.py`: Script to batch replay and benchmark operations.
-- `batched_replay_readme.md`: Instructions for running the replay.
-
-Example packaging code:
+Package the IR and scripts into a standalone zip for sharing and reproduction,
+independent of the original model code or TraceLens:
 
 ```python
-import zipfile
-import os
+import zipfile, os
 from TraceLens.EventReplay import utils as tl_utils
 from TraceLens.EventReplay import batched_replay
 
@@ -128,25 +220,282 @@ files = [
     batched_replay.__file__.replace('batched_replay.py', 'batched_replay_readme.md')
 ]
 
-zip_file_path = '/path/to/replay_code.zip'
-with zipfile.ZipFile(zip_file_path, 'w') as zipf:
+with zipfile.ZipFile('/path/to/replay_code.zip', 'w') as zipf:
     for file in files:
         zipf.write(file, arcname=os.path.basename(file))
-
-print(f"Created zip file: {zip_file_path}")
 ```
+
+---
+
+## Architecture
+
+Event Replay operates in two distinct phases:
+
+### Phase 1: IR Extraction (deterministic)
+
+When an `EventReplayer` is constructed from a profiler event, it resolves the
+op's registered schema and extracts a complete Intermediate Representation:
+
+- **Op name** — the fully qualified operator name (e.g., `aten::mm`, `_rocm_C::paged_attention`)
+- **Argument metadata** — for each positional and keyword argument:
+  - Tensors: shape, dtype, strides, initialization hint
+  - Scalars: concrete value (int, float, bool, str)
+  - Lists: element values
+  - Optionals: `null` when not provided
+
+This phase is purely mechanical: the same profiler event always produces the same
+IR. The output is a portable JSON dictionary.
+
+**Prerequisite — ops must be registered with the PyTorch dispatcher.** If an op
+is called as a plain Python function (e.g., a Triton kernel launched directly),
+there is no schema for the profiler to capture and no IR can be extracted. The
+op must go through `torch.ops`, `torch.library`, or the JIT registry. This is
+why aiter's CK-based ops (`aiter::ck_moe_stage1`) produce full IR while direct
+Triton kernel calls do not. See
+[Shape Metadata Guide](conceptual/shape_metadata_guide.md) for details on
+registering ops that lack schemas.
+
+### Phase 2: Init & Replay (requires judgment)
+
+Given an IR, Event Replay:
+
+1. **Allocates tensors** matching the recorded shapes, dtypes, and strides
+2. **Initializes values** — `randn` for floating-point tensors, `zeros` for
+   integer/bool tensors, `None` for optional arguments
+3. **Resolves the op** to a callable function (via JIT registry, `torch.ops`,
+   or direct module import)
+4. **Calls the op** and optionally benchmarks it
+
+The default initialization works well for compute-bound ops like GEMMs and
+convolutions, where kernel performance is independent of input values. However,
+**control and index tensors require realistic values** — zeroed-out metadata
+produces behavior that is not representative of the true workload:
+
+| Op family | Affected tensors | Effect of zeros |
+|-----------|-----------------|-----------------|
+| Paged Attention | `block_tables`, `seq_lens`, `query_start_loc` | Kernel sees 0 context length — does no real work |
+| MoE Routing | `sorted_token_ids`, `sorted_expert_ids`, `num_valid_ids` | Kernel sees 0 valid tokens — skips all computation |
+
+A true reproduction would require the exact tensor values from the original
+execution, but the profiler doesn't capture tensor contents — only shapes and
+dtypes. **Custom Initializers** bridge this gap by constructing plausible values
+from shapes and metadata already in the IR, without additional instrumentation.
+
+---
+
+## Custom Initializers
+
+Custom initializers fill metadata tensors with realistic values before replay.
+They are applied automatically when `auto_init=True` (the default).
+
+### Built-in Initializers
+
+These ship with TraceLens and require no setup — they activate automatically
+when the op name matches:
+
+**`PagedAttentionInit`** — matches `paged_attention`
+
+Initializes the KV cache metadata so the attention kernel does real work:
+- `block_tables` — random permutation of the physical block pool (simulates
+  realistic scattered memory allocation)
+- `seq_lens` — all sequences set to `max_seq_len`
+- `query_start_loc` — CSR indptr encoding per-sequence query token counts.
+  When batch context is available (see [Batch Context](#batch-context-vllm-traces)),
+  uses the exact prefill/decode split; otherwise falls back to heuristics
+
+**`MoeRoutingInit`** — matches `ck_moe_stage1`, `ck_moe_stage2`
+
+Constructs a complete token-to-expert routing table:
+- `sorted_token_ids` — padded to `block_m` boundaries per expert
+- `sorted_expert_ids` — block-level expert assignment
+- `num_valid_ids` — total valid (non-padding) token slots
+
+Supports configurable token distribution via `init_kwargs`:
+
+```python
+# Default: uniform random assignment across experts
+replayer = EventReplayer(event, device='cuda')
+
+# Zipf: skewed distribution (few experts get most tokens, closer to real routing)
+replayer = EventReplayer(event, device='cuda',
+                         init_kwargs={"moe_distribution": "zipf", "moe_zipf_s": 1.5})
+```
+
+### Disabling Built-in Inits
+
+```python
+replayer = EventReplayer(event, device='cuda', auto_init=False)
+replayer.replay()
+```
+
+### Adding Your Own Initializer
+
+For ops not covered by the built-ins, you can write and register your own.
+
+When `replay()` runs with `auto_init=True`, it iterates over registered
+initializers and calls `initialize()` on the first one whose `op_patterns`
+match the op name. The initializer mutates `replayer.args` / `replayer.kwargs`
+**in-place** before the op is called.
+
+The initializer can access:
+
+- `replayer.args` — list of allocated tensors/scalars (in schema order)
+- `replayer.kwargs` — dict of keyword arguments
+- `replayer.event` — the raw profiler event dict
+- `replayer.event_replay_IR` — the extracted IR with named argument metadata
+
+Arguments should be looked up **by name** from the IR rather than hardcoded
+positions, making initializers robust to schema changes across library versions:
+
+```python
+ir = replayer.event_replay_IR
+arg_names = [a["arg_name"] for a in ir["list_pos_args"]]
+
+def _by_name(name, fallback_pos):
+    if name in arg_names:
+        return replayer.args[arg_names.index(name)]
+    return replayer.args[fallback_pos]
+```
+
+**Real example — `aten::index_add_`:** This op was found as a bottleneck in
+gsplat (Gaussian Splatting) on MI325X. The `index` tensor (5M elements) must
+contain valid row indices into `self`; the default zero-init makes every source
+row accumulate into row 0, which is not representative of the real scatter
+pattern:
+
+```python
+from TraceLens.EventReplay import EventReplayer, CustomInit
+
+class IndexAddInit(CustomInit):
+    op_patterns = ["index_add"]
+
+    def initialize(self, replayer, **kwargs):
+        import torch
+
+        ir = replayer.event_replay_IR
+        arg_names = [a["arg_name"] for a in ir["list_pos_args"]]
+
+        self_tensor = replayer.args[arg_names.index("self")]
+        dim = replayer.args[arg_names.index("dim")]
+        index = replayer.args[arg_names.index("index")]
+
+        dim_size = self_tensor.shape[dim]
+        index.copy_(torch.randint(0, dim_size, index.shape,
+                                  device=index.device))
+
+        return (f"[custom init] index_add — index randint(0, {dim_size}), "
+                f"shape={list(index.shape)}")
+
+# Register — all future replays of index_add ops will use this
+EventReplayer.register_custom_init(IndexAddInit())
+```
+
+After `register_custom_init`, every subsequent `EventReplayer` will
+automatically apply `IndexAddInit` when replaying any op whose name contains
+`"index_add"`.
+
+To see what's currently registered:
+
+```python
+EventReplayer.list_custom_inits()
+```
+
+---
+
+## Auto-Import for Custom Ops
+
+When EventReplayer encounters an op from a non-`aten` namespace (e.g.,
+`_rocm_C::paged_attention`, `aiter::ck_moe_stage1`), it automatically attempts
+to import the library that registers the op's schema. The import is conditional
+— it only fires if the namespace is recognized and hasn't been attempted yet.
+
+Built-in namespace mappings:
+
+| Namespace | Imported modules |
+|-----------|-----------------|
+| `aiter` | `aiter` |
+| `_rocm_C` | `vllm._rocm_C` |
+| `_C` | `vllm._C` |
+| `vllm` | `vllm._C`, `vllm._rocm_C` |
+
+Register additional namespaces:
+
+```python
+EventReplayer.register_namespace("my_lib", ["my_lib.ops"])
+```
+
+---
+
+## Batch Context (vLLM traces)
+
+vLLM annotates each forward step with `user_annotation` events that encode
+the exact prefill/decode batch composition (e.g.,
+`execute_context_1(21)_generation_5(5)`). `extract_batch_context` parses these
+annotations and attaches the breakdown to each paged attention event, so
+`PagedAttentionInit` can construct an accurate `query_start_loc`.
+
+```python
+from TraceLens.EventReplay import extract_batch_context
+
+num_annotated = extract_batch_context(perf_analyzer)
+print(f"Annotated {num_annotated} paged_attention events with batch context")
+```
+
+Without batch context, the initializer falls back to a heuristic (uniform
+token distribution for prefill, 1 token/seq for decode).
+
+---
+
+## Validation
+
+Tested on Qwen1.5-MoE-A2.7B (aiter backend, MI300X) — 30 unique op configs:
+
+| Metric | Result |
+|--------|--------|
+| Kernel name match | 27/30 (3 `aten::copy_` mismatches — runtime DMA path selection, expected) |
+| GPU busy time delta (median, warm cache) | -17% (replay faster — isolation effect) |
+| GPU busy time delta range | -32% (large mem-bound GEMMs) to +5% (latency-bound ops) |
+
+Also validated on Qwen2.5-3B (dense, no MoE): 26/30 match, similar timing profile.
+
+Replay is systematically faster because isolated single-op execution has no
+inter-op cache contention. This is a fundamental property of micro-benchmarks,
+not a bug.
+
+```python
+from TraceLens.EventReplay import benchmark_func
+
+metrics = benchmark_func(replayer.replay, warmup=5, repeat=20)
+print(f"Median: {metrics['median_ms']:.3f} ms")
+```
+
+---
+
+## Known Limitations
+
+- **Unregistered ops are invisible.** Triton kernels called directly from Python
+  (e.g., aiter's Triton attention path) have no schema in the profiler. The fix
+  is wrapping them in `torch.library.custom_op` — a one-time registration effort
+  in the upstream library. See
+  [Shape Metadata Guide](conceptual/shape_metadata_guide.md).
+
+- **Single-op isolation vs. real workload.** Replay runs each op in isolation
+  with no surrounding memory traffic. Timings are a lower bound on in-model
+  performance. Sequence replay (ops in trace order to reproduce natural cache
+  pollution) is a planned enhancement.
+
+- **Data-dependent kernels.** Custom initializers provide plausible but not exact
+  values from the original execution (the profiler doesn't capture tensor
+  contents). For most ops this doesn't matter; for ops with data-dependent
+  control flow (e.g., sparse attention with variable sequence lengths), timing
+  may vary.
+
 ---
 
 ## Use Cases
 
-- **Performance Debugging**: Quickly isolate and reproduce performance issues from large models.
+- **Trace Interpretation**: Translate opaque profiler arguments into named, typed JSON for understanding what each op actually computes.
+- **Performance Debugging**: Isolate and reproduce performance issues from large models without running the model.
 - **Regression Testing**: Automate benchmarks to detect performance regressions at the operator level.
 - **Kernel Development**: Extract minimal reproducers for GPU kernel optimization and debugging.
-- **Numerical Validation**: Evaluate numerical correctness and stability of isolated operations across hardware.
-- **Hardware Counter Profiling**: Use with hardware counters to analyze performance bottlenecks in specific operations.
-
----
-
-## Notes
-
-- Event Replay uses randomized data based on extracted tensor shapes; thus, replay timings approximate real-world performance.
+- **Portable Sharing**: Package IR + replay scripts as standalone zip artifacts for teammates or upstream repos.

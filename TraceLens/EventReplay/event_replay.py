@@ -20,27 +20,55 @@ from .utils import (
     build_tensor,
     list_profile_tensor_types,
 )
+from .custom_inits import CustomInit, PagedAttentionInit, MoeRoutingInit
 
 logger = logging.getLogger(__name__)
 
-# ── Known defaults for string arguments the profiler drops ──────────────
-# The PyTorch profiler records `str` arguments as empty strings.  When we
-# know the only sensible default we fill it in automatically and warn.
-# Key = argument name, Value = default string value.
+# -- Known defaults for string arguments the profiler drops ----------------
 _STR_ARG_DEFAULTS: Dict[str, str] = {
     "kv_cache_dtype": "auto",
 }
 
-# ── Op-name aliases ─────────────────────────────────────────────────────
-# Some frameworks profile an op under one namespace but register the
-# actual callable under a different one.
-# Key = name as it appears in the trace, Value = list of candidates to try.
-# NOTE: aiter::paged_attention_v1/v2 are NOT aliasable — the aiter JIT
-# wrapper records a different arg layout than the underlying _C:: / _rocm_C::
-# schemas, so arg mapping would fail even if resolution succeeds.
+# -- Op-name aliases -------------------------------------------------------
 _OP_NAME_ALIASES: Dict[str, List[str]] = {
     "_rocm_C::wvSplitK": ["_rocm_C::wvSpltK"],
 }
+
+# -- Auto-import registry --------------------------------------------------
+_NAMESPACE_IMPORTS: Dict[str, List[str]] = {
+    "aiter": ["aiter"],
+    "_rocm_C": ["vllm._rocm_C"],
+    "_C": ["vllm._C"],
+    "_C_cache_ops": ["vllm._C"],
+    "vllm": ["vllm._C", "vllm._rocm_C"],
+}
+
+_auto_import_attempted: set = set()
+
+
+def _try_auto_import(op_name: str, verbose: bool = False) -> bool:
+    """Try to import the library that registers a custom op's schema.
+
+    Returns True if at least one new module was successfully imported.
+    """
+    namespace = op_name.split("::")[0] if "::" in op_name else ""
+    if not namespace or namespace == "aten":
+        return False
+    if namespace in _auto_import_attempted:
+        return False
+    _auto_import_attempted.add(namespace)
+
+    modules = _NAMESPACE_IMPORTS.get(namespace, [namespace])
+    imported_any = False
+    for mod in modules:
+        try:
+            __import__(mod)
+            print(f"[EventReplayer] Auto-imported '{mod}' for op '{op_name}'")
+            imported_any = True
+        except ImportError:
+            if verbose:
+                print(f"[EventReplayer] Could not import '{mod}' for namespace '{namespace}'")
+    return imported_any
 
 
 def _try_resolve(op_name: str):
@@ -50,7 +78,7 @@ def _try_resolve(op_name: str):
     torch = _get_torch_or_raise()
     import importlib
 
-    # 1. JIT registry — preserves dispatch behaviour for aten ops.
+    # 1. JIT registry
     try:
         func, _ = torch._C._jit_get_operation(op_name)
         if func is not None:
@@ -61,16 +89,14 @@ def _try_resolve(op_name: str):
     if "::" in op_name:
         ns, func_name = op_name.split("::", 1)
 
-        # 2. torch.ops namespace — custom ops registered via torch.library.
+        # 2. torch.ops namespace
         ns_obj = getattr(torch.ops, ns, None)
         if ns_obj is not None:
             func_obj = getattr(ns_obj, func_name, None)
             if callable(func_obj):
                 return func_obj, "torch.ops"
 
-        # 3. Direct Python module lookup — handles JIT-compiled ops (e.g.
-        #    aiter) that exist as Python callables but aren't registered in
-        #    the torch op registry.
+        # 3. Direct Python module lookup
         try:
             mod = importlib.import_module(ns)
             func_obj = getattr(mod, func_name, None)
@@ -82,82 +108,92 @@ def _try_resolve(op_name: str):
     return None, None
 
 
-def _resolve_op_func(op_name: str):
-    """
-    Resolve an op name (e.g. 'aten::mm', 'vllm::rocm_unquantized_gemm') to a
-    callable.  Tries multiple resolution strategies:
+def _resolve_op_func(op_name: str, verbose: bool = False):
+    """Resolve an op name to a callable, with auto-import on failure.
 
-    1. JIT registry (preserves original dispatch behaviour).
-    2. torch.ops namespace (custom ops registered via torch.library / pybind).
-    3. Known aliases from _OP_NAME_ALIASES (handles trace-name mismatches).
-
+    Tries: JIT registry -> torch.ops -> module import -> auto-import -> aliases.
     Returns (func, source_str, resolved_name) or raises RuntimeError.
     """
-    func, source = _try_resolve(op_name)
-    if func is not None:
-        return func, source, op_name
-
-    for alias in _OP_NAME_ALIASES.get(op_name, []):
-        func, source = _try_resolve(alias)
+    for attempt in range(2):
+        func, source = _try_resolve(op_name)
         if func is not None:
-            logger.warning(
-                "Op '%s' resolved via alias '%s' (%s). "
-                "The trace recorded a different namespace than the runtime registration.",
-                op_name, alias, source,
-            )
-            return func, source, alias
+            return func, source, op_name
+
+        for alias in _OP_NAME_ALIASES.get(op_name, []):
+            func, source = _try_resolve(alias)
+            if func is not None:
+                logger.warning(
+                    "Op '%s' resolved via alias '%s' (%s).",
+                    op_name, alias, source,
+                )
+                return func, source, alias
+
+        if attempt == 0 and _try_auto_import(op_name, verbose):
+            continue
+        break
+
+    ns = op_name.split("::")[0] if "::" in op_name else ""
+    hint = ""
+    if ns and ns != "aten":
+        known = _NAMESPACE_IMPORTS.get(ns)
+        if known:
+            hint = f" Try: {', '.join(f'import {m}' for m in known)}"
+        else:
+            hint = (f" The namespace '{ns}' is not in the auto-import registry."
+                    f" Use EventReplayer.register_namespace('{ns}', ['your.module'])"
+                    f" to add it.")
 
     raise RuntimeError(
-        f"Cannot resolve op '{op_name}'. Ensure the library that defines it "
-        f"is imported (e.g. 'import vllm', 'import aiter')."
+        f"Cannot resolve op '{op_name}'.{hint} "
+        f"Ensure the library that defines it is imported."
     )
 
 
 def _search_schemas(op_name: str, verbose: bool = False):
-    """
-    Return all registered FunctionSchemas for *op_name*.
-
-    Searches both the JIT schema registry and the torch.ops namespace, which
-    covers aten ops, custom C++ ops, and Python-defined torch.library ops.
+    """Return all registered FunctionSchemas for *op_name*,
+    with auto-import on empty results.
     """
     torch = _get_torch_or_raise()
-    schemas: list = []
-    seen_strs: set = set()
 
-    # JIT registry
-    for s in torch._C._jit_get_all_schemas():
-        if s.name == op_name:
-            s_str = str(s)
-            if s_str not in seen_strs:
-                schemas.append(s)
-                seen_strs.add(s_str)
+    for attempt in range(2):
+        schemas: list = []
+        seen_strs: set = set()
 
-    # torch.ops namespace (catches custom ops not in the JIT list)
-    if "::" in op_name:
-        ns, func_name = op_name.split("::", 1)
-        ns_obj = getattr(torch.ops, ns, None)
-        if ns_obj is not None:
-            op_obj = getattr(ns_obj, func_name, None)
-            if op_obj is not None:
-                # OpOverloadPacket exposes overloads
-                try:
-                    for overload_name in op_obj.overloads():
-                        overload = getattr(op_obj, overload_name)
-                        s = overload._schema
-                        s_str = str(s)
-                        if s_str not in seen_strs:
-                            schemas.append(s)
-                            seen_strs.add(s_str)
-                except Exception:
-                    # Fallback: try .default directly
+        for s in torch._C._jit_get_all_schemas():
+            if s.name == op_name:
+                s_str = str(s)
+                if s_str not in seen_strs:
+                    schemas.append(s)
+                    seen_strs.add(s_str)
+
+        if "::" in op_name:
+            ns, func_name = op_name.split("::", 1)
+            ns_obj = getattr(torch.ops, ns, None)
+            if ns_obj is not None:
+                op_obj = getattr(ns_obj, func_name, None)
+                if op_obj is not None:
                     try:
-                        s = op_obj.default._schema
-                        s_str = str(s)
-                        if s_str not in seen_strs:
-                            schemas.append(s)
-                            seen_strs.add(s_str)
+                        for overload_name in op_obj.overloads():
+                            overload = getattr(op_obj, overload_name)
+                            s = overload._schema
+                            s_str = str(s)
+                            if s_str not in seen_strs:
+                                schemas.append(s)
+                                seen_strs.add(s_str)
                     except Exception:
-                        pass
+                        try:
+                            s = op_obj.default._schema
+                            s_str = str(s)
+                            if s_str not in seen_strs:
+                                schemas.append(s)
+                                seen_strs.add(s_str)
+                        except Exception:
+                            pass
+
+        if schemas or attempt > 0:
+            break
+        if not _try_auto_import(op_name, verbose):
+            break
 
     if verbose:
         print(f"Found {len(schemas)} schemas for {op_name}:")
@@ -169,12 +205,34 @@ def _search_schemas(op_name: str, verbose: bool = False):
 
 
 class EventReplayer:
+    _custom_init_registry: List[CustomInit] = [
+        PagedAttentionInit(),
+        MoeRoutingInit(),
+    ]
+
+    @classmethod
+    def register_custom_init(cls, init: CustomInit):
+        """Add a custom initializer to the registry."""
+        cls._custom_init_registry.append(init)
+
+    @classmethod
+    def register_namespace(cls, namespace: str, modules: List[str]):
+        """Register a namespace-to-module mapping for auto-import."""
+        _NAMESPACE_IMPORTS[namespace] = modules
+
+    @classmethod
+    def list_custom_inits(cls) -> List[Tuple[str, List[str]]]:
+        """List all registered custom initializers and their op patterns."""
+        return [(type(i).__name__, i.op_patterns) for i in cls._custom_init_registry]
+
     def __init__(
         self,
         event: Dict[str, Any],
         device: str = "cuda",
         lazy: bool = False,
         verbose: bool = False,
+        auto_init: bool = True,
+        init_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the EventReplayer with the event data and device type.
@@ -182,12 +240,21 @@ class EventReplayer:
         Args:
             event (Dict[str, Any]): From the pytorch profile json data['traceEvents']
             device (str): The device type ('cuda' or 'cpu').
+            lazy (bool): If True, defer tensor creation until replay().
             verbose (bool): Flag to enable verbose output.
+            auto_init (bool): If True, automatically apply custom initializers
+                for ops that need realistic tensor content (e.g., paged attention
+                block tables, MoE routing tensors).
+            init_kwargs (Dict[str, Any]): Parameters passed to custom initializers
+                (e.g., {"moe_distribution": "zipf", "moe_zipf_s": 1.5}).
         """
         self.event = event
         self.device = device
         self.lazy = lazy
         self.verbose = verbose
+        self._auto_init = auto_init
+        self._init_kwargs = init_kwargs or {}
+        self._inits_applied = False
         self._func = None
         self._setup()
 
@@ -199,7 +266,7 @@ class EventReplayer:
             print(f"Preparing {self.event['name']} event for replay")
 
         self._func, self._func_source, self._resolved_name = _resolve_op_func(
-            self.event["name"]
+            self.event["name"], verbose=self.verbose
         )
         if self.verbose:
             print(f"Resolved op via {self._func_source}")
@@ -246,7 +313,24 @@ class EventReplayer:
         else:
             args, kwargs = self.args, self.kwargs
 
+        if not self._inits_applied and self._auto_init:
+            self._apply_custom_inits()
+
         self._func(*args, **kwargs)
+
+    def _apply_custom_inits(self):
+        """Run all applicable custom initializers on this replayer's tensors."""
+        for custom_init in self._custom_init_registry:
+            if custom_init.applies_to(self):
+                try:
+                    summary = custom_init.initialize(self, **self._init_kwargs)
+                    if summary:
+                        print(summary)
+                except Exception as e:
+                    warnings.warn(
+                        f"[custom init] {type(custom_init).__name__} failed: {e}"
+                    )
+        self._inits_applied = True
 
     @staticmethod
     def _search_schema(
@@ -297,7 +381,6 @@ class EventReplayer:
                 print(f"\tProfiled type: {profiled_type}")
 
             is_match = True
-            # Optional types: schema ends with '?' => profiled type can be blank
             if schema_type.endswith("?"):
                 schema_type = schema_type[:-1]
                 if profiled_type == "":
@@ -312,7 +395,7 @@ class EventReplayer:
                     is_match = False
             elif schema_type == "bool":
                 profiled_value = event["args"]["Concrete Inputs"][idx]
-                if profiled_value.lower() not in ["true", "false"]:
+                if profiled_value.lower() not in ("true", "false"):
                     is_match = False
             elif schema_type in ("int", "SymInt"):
                 if profiled_type != "Scalar":
@@ -383,27 +466,17 @@ class EventReplayer:
         """Check if a schema type string represents a Tensor argument."""
         if schema_type in ("Tensor", "Tensor?"):
             return True
-        # Handles annotated variants like Tensor(a!), Tensor(a), Tensor(b!)
         if schema_type.startswith("Tensor("):
             return True
         return False
 
     @staticmethod
     def _should_skip_tensor_init(evt_name: str, arg_name: str, arg_idx: int) -> bool:
-        """
-        Determine whether a tensor argument is an output-only buffer that
-        does not need random initialization.
-
-        Generalizes the old aten::fill_ / aten::copy_ special-cases to
-        any in-place or out-of-place output tensor.
-        """
-        # In-place ops (name ends with '_'): first tensor is the mutated output
+        """Determine whether a tensor argument is an output-only buffer."""
         if evt_name.endswith("_") and arg_idx == 0:
             return True
-        # Explicit 'out' arguments in .out variants
         if arg_name == "out":
             return True
-        # aten::copy_ destination
         if evt_name == "aten::copy_" and arg_name != "src":
             return True
         return False
@@ -412,9 +485,7 @@ class EventReplayer:
     def _get_event_replay_IR(
         event: Dict[str, Any], schema: "torch._C.FunctionSchema", verbose: bool = False
     ) -> Dict[str, Any]:
-        """
-        Get the event replay IR from the event and schema.
-        """
+        """Get the event replay IR from the event and schema."""
         evt_name = event["name"]
         op_name, pos_args_schema, kwargs_schema, return_type = (
             EventReplayer.parse_schema_string(schema)
@@ -457,7 +528,6 @@ class EventReplayer:
                     if EventReplayer._should_skip_tensor_init(evt_name, arg_name, idx):
                         init = None
                     profiled_dtype = event["args"]["Input type"][idx]
-                    # Non-floating-point tensors cannot use 'normal' init
                     if profiled_dtype in ("long", "long int", "int", "bool", "unsigned char"):
                         init = "zeros" if init == "normal" else init
                     value = TensorCfg(
@@ -534,17 +604,7 @@ class EventReplayer:
         verbose: bool = False,
         resolved_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Build a replay IR without a schema by inferring types directly from the
-        profiled data.  All arguments are treated as positional.
-
-        Heuristics:
-          - If Input type is a known tensor dtype -> TensorCfg
-          - If Input type is 'Scalar' and Concrete Inputs looks like int -> int
-          - If Input type is 'Scalar' and Concrete Inputs looks like float -> float
-          - If Input type is 'Scalar' and Concrete Inputs is true/false -> bool
-          - If Input type is '' and Concrete Inputs is '' -> check _STR_ARG_DEFAULTS
-        """
+        """Build a replay IR without a schema by inferring types from profile data."""
         evt_name = event["name"]
         schema_arg_names = EventReplayer._get_schema_arg_names(
             resolved_name or evt_name
@@ -592,7 +652,6 @@ class EventReplayer:
                         value = concrete
                         arg_type = "str"
             elif profiled_type == "" and concrete == "":
-                # Likely a dropped str arg — check known defaults
                 hint_name = (
                     schema_arg_names[idx] if idx < len(schema_arg_names) else None
                 )
@@ -637,9 +696,7 @@ class EventReplayer:
     def _get_args_kwargs(
         event_replay_IR: Dict[str, Any], device: str = "cuda"
     ) -> tuple[List["torch.Tensor"], Dict[str, Any]]:
-        """
-        Get the arguments and keyword arguments from the event replay IR.
-        """
+        """Get the arguments and keyword arguments from the event replay IR."""
         pos_args = []
         for arg in event_replay_IR["list_pos_args"]:
             value = arg["value"]
@@ -670,7 +727,6 @@ class EventReplayer:
         kwarg_part = parts[1].lstrip(",").strip() if len(parts) > 1 else ""
 
         def _parse_arg(raw_arg: str) -> Tuple[str, str, Optional[str], bool]:
-            # Match type (may contain spaces, e.g. "Tensor($0! -> )") then name[=default].
             # Greedy (.+) consumes everything up to the last whitespace before
             # a valid identifier, so "Tensor($0! -> ) key_cache" parses correctly.
             m = re.match(
@@ -705,10 +761,6 @@ class EventReplayer:
     def get_repro_info(self) -> Dict[str, Any]:
         """
         Extracts the minimal, serializable information needed to reproduce the event call.
-
-        Returns:
-            Dict[str, Any]: A dictionary containing the operator name and the replay IR.
-                            Suitable for JSON serialization using the custom encoder.
         """
         dict_repro_info = {}
         dict_repro_info["op_name"] = self.event["name"]
