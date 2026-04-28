@@ -160,7 +160,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
-**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
+**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Not quantifiable from trace data"]
 
 → *See [Detailed Analysis: Compute kernel insights > P1](#detailed-analysis-compute-p1) for details*
 
@@ -174,7 +174,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
-**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
+**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Not quantifiable from trace data"]
 
 → *See [Detailed Analysis: Compute kernel insights > P2](#detailed-analysis-compute-p2) for details*
 
@@ -188,7 +188,7 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- Standalone Impact -->
 **Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
 <!-- Comparative Impact -->
-**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Gap not quantifiable from trace data"]
+**Impact**: [~X.X ms gap to target (Y.Y% of E2E), OR "Not quantifiable from trace data"]
 
 → *See [Detailed Analysis: Compute kernel insights > P3](#detailed-analysis-compute-p3) for details*
 
