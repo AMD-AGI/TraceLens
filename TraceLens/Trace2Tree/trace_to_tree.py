@@ -318,8 +318,7 @@ class JaxTraceToTree(BaseTraceToTree):
         self.hlo_ops = defaultdict(list)
         self.metadata = dict
 
-    @staticmethod
-    def default_categorizer(event: dict) -> str:
+    def default_categorizer(self):
         """
         Returns the category of the given event dictionary using the TraceEventUtils.prepare_event_categorizer method.
 
@@ -329,7 +328,7 @@ class JaxTraceToTree(BaseTraceToTree):
         Returns:
             str: The category assigned to the event.
         """
-        return TraceEventUtils.prepare_event_categorizer(event)
+        return TraceEventUtils.prepare_event_categorizer
 
     def _set_linking_key(self) -> None:
         """
