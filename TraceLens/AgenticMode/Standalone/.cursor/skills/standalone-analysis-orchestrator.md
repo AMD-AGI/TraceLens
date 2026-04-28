@@ -536,6 +536,7 @@ c. For "Missing metrics row" errors: add the row to the Executive Summary table 
 d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary metrics table: replace each with the actual value from `category_manifest.json` -> `gpu_utilization`.
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
+g. For marker errors (pairing, missing/unknown `kind=`, missing required attrs, mixed null/numeric, missing `kind=top_ops`, P-item count mismatch, missing `kind=detail_estimate` marker or sentinel): restore the missing or broken marker in place — never delete the card or block to silence the error. Source `low`/`mid`/`high` from `priority_data.json::priorities[]` (compute P-items) or the corresponding `category_data/<cat>_metrics.json::impact_estimates[]` / `category_data/kernel_fusion_metrics.json::impact_estimates[]` (kernel fusion). Use all three as `null` for non-quantifiable items, OR substitute the literal "not quantifiable from trace data" sentinel in place of a `kind=detail_estimate` marker. Do NOT add markers to `## System-Level Optimizations` cards — system P-items are intentionally markerless per template.
 2. Run validation again.
 3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
@@ -555,6 +556,8 @@ fi
 ```
 
 This step is a hook for an optional extension; if `agent_extension.py` is not present, skip it.
+
+**Do NOT re-run `validate_report` (Step 11.1) after this step.** The marker requirement in `validate_report` is intentionally a pre-extension check; re-validating post-extension would always fail by design.
 
 ---
 
