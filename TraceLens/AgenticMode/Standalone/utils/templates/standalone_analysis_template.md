@@ -200,14 +200,42 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 <!-- === STANDALONE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
 <!-- === COMPARATIVE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. In comparative mode, fusion candidates are identified from Trace 1 only. Cross-trace fusion mapping is not yet supported. Savings estimates use a roofline model.
+> **Note:** Kernel fusion analysis is experimental.
 
 <!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
-<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
+<!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
 <!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
 
 No kernel fusion opportunities detected.
+
+### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
+
+**Insight**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) or "Not quantifiable from trace data"]
+
+**Confidence**: [High/Medium/Low — brief justification]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P1](#detailed-analysis-fusion-P1) for details*
+
+---
+
+### 🔴/🟡/🟢 P2: <Candidate Name> (<time_ms> ms, <instance_count> instances)
+
+**Insight**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) or "Not quantifiable from trace data"]
+
+**Confidence**: [High/Medium/Low — brief justification]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P2](#detailed-analysis-fusion-P2) for details*
+
+<!-- All additional Kernel Fusion P-items follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Kernel fusion insights > PN](#detailed-analysis-fusion-PN) for details* -->
 
 ---
 

@@ -23,9 +23,10 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/fusion_candidates.json` - Module-level candidate summaries with kernel details
+1. `<output_dir>/category_data/fusion_candidates.json` - Candidate summaries with kernel details
 2. `<output_dir>/category_data/kernel_fusion_metrics.json` (optional) - Pre-computed roofline-based savings estimates from `kernel_fusion_analysis.py`
 
 **Output file you must write:**
@@ -38,6 +39,11 @@ When invoked by the orchestrator, you will receive the following context:
 **If fusion_candidates.json is missing or empty:**
 1. Write a findings file noting: "No kernel fusion opportunities detected."
 2. Return gracefully
+
+**If fusion_candidates.json has candidates but kernel_fusion_metrics.json has no impact estimates (all suppressed by the 2% E2E gate):**
+1. Still write a findings file with a finding per candidate.
+2. Set **Impact** to: "Not quantifiable — savings below 2% E2E threshold."
+3. Do NOT write "No kernel fusion opportunities detected" — the opportunity exists, only the impact estimate is suppressed.
 
 ---
 
@@ -61,11 +67,13 @@ Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.j
 
 ```bash
 <prefix> python TraceLens/AgenticMode/Standalone/category_analyses/kernel_fusion_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --comparison-scope <comparison_scope>
 ```
 
-Then read `<output_dir>/category_data/fusion_candidates.json`. Each entry contains:
+Then read `<output_dir>/category_data/fusion_candidates.json`. The schema differs by scope:
 
+**Standalone candidates** (`comparison_scope`: `"standalone"`):
 - `module_name`: Module or function name from the trace
 - `base_name`: Module type without instance index
 - `parent_chain`: Ancestor modules in the call stack
@@ -76,10 +84,21 @@ Then read `<output_dir>/category_data/fusion_candidates.json`. Each entry contai
 - `has_fused_kernel`: Whether subtree contains a fused kernel
 - `total_kernel_time_us`: Total GPU time across all instances
 
+**Comparative candidates** (`comparison_scope`: `"comparative"`):
+- `module_name`: Module or function name from the trace
+- `base_name`: Module type without instance index
+- `parent_chain`: Ancestor modules in the call stack
+- `kernel_count_trace1`, `kernel_count_trace2`, `delta`: kernel counts per instance and difference in kernel counts between traces
+- `kernels_trace1`: kernels from trace1
+- `kernels_trace2`: kernels from trace2
+- `instance_count`: How many times this module type repeats
+- `total_kernel_time_us_trace1`: Total GPU time of trace1 across all instances
+- `total_kernel_time_us_trace2`: Total GPU time of trace2 across all instances
+
 Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. This contains pre-computed `impact_estimates` with roofline-based savings for each candidate. Each estimate has:
 
 - `operation`: Matches `base_name` in fusion_candidates
-- `savings_ms`, `savings_ms_low`, `savings_ms_high`: Savings range (75-100% of roofline)
+- `savings_ms`, `savings_ms_low`, `savings_ms_high`: Savings range (75-100% of roofline for standalone; 75-100% of trace1-vs-trace2 gap for comparative)
 - `bound_type`: "compute" or "memory"
 - `fusion_type`: "matrix_compute" or "memory_bound"
 - `confidence`: "high" or "medium"
@@ -93,6 +112,7 @@ Use these estimates to populate the **Impact** field in each finding. Match by `
 For each candidate, make three decisions:
 
 **Decision 1 -- Is this a fusion opportunity?** Reject candidates where:
+**Standalone only**:
 - The kernels are genuinely independent operations (e.g., separate projection GEMMs reading different weight matrices)
 - The module is a container (Sequential, ModuleList, full decoder/encoder layer)
 - All kernels are GEMMs
@@ -123,6 +143,8 @@ Then look for novel patterns:
 
 ### Step 3: Assign Confidence
 
+Use the `confidence` from `kernel_fusion_metrics.json` when available. Otherwise:
+
 - **high**: Module name matches a known pattern AND kernel composition confirms it
 - **medium**: Module name OR kernel composition suggests a pattern, but not both
 - **low**: Speculative - structural analysis suggests fusion is possible
@@ -143,51 +165,79 @@ Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`
 
 **Title format:** `### <icon> P<N>: <Pattern Name>`
 
+**Template** (follow the `[standalone]` / `[comparative]` markers):
+
 ```markdown
 # Kernel Fusion Analysis Summary (Experimental)
 
 ## Overview
 Found N kernel fusion opportunities across M module types.
 
+<!-- [standalone] Use this methodology block: -->
 > **Methodology:** Savings projections use a roofline model with 85% memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual savings may vary with workload and hardware.
+
+<!-- [comparative] Use this methodology block instead: -->
+> **Methodology:** Savings are measured as the total GPU time difference between trace1 and trace2, accumulated across all instances. No roofline projection is used.
 
 ## Findings
 
 ### 🔴 P1: <Pattern Name> (<time_ms> ms, <instance_count> instances)
 
 **Insight:** <Module name, what it launches, how many instances, why it's fusable>
+<!-- [comparative] Also state: how many kernels in trace1 vs trace2. -->
 
 **Action:** <Specific recommendation>
 
-**Impact:** ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) with all N kernels modelled
+**Impact:**
+<!-- [standalone] ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) with all N kernels modelled -->
+<!-- [comparative] ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) -->
 
-**Confidence:** High -- <brief reason from fusion pattern classification>
+**Confidence:** High/Medium/Low -- <brief reason>
 
 ## Detailed Analysis
 
 <!-- reasoning-candidate tier=system rank=1 -->
 #### <Pattern Name> (<time_ms> ms, <instance_count> instances)
 
-**Identification:** <1-2 sentences: how this fusion candidate was surfaced — module name,
-kernel pattern, instance count, has_fused_kernel status. Must end with
-(source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`)>
+**Identification:** <1-2 sentences: how this fusion candidate was surfaced>
+<!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`) -->
+<!-- [comparative] (source: `fusion_candidates.json` → `module_name`, `kernel_count_trace1`, `kernel_count_trace2`, `kernels_trace1[]`, `kernels_trace2[]`) -->
 
+<!-- [standalone] Single kernel table: -->
 **Data:**
 
 | Kernel | Type | Duration (us) | Perf model |
 |--------|------|--------------|------------|
 | <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
 
-**Impact estimate:**
+<!-- [comparative] Two kernel tables — you MUST include BOTH: -->
+**Trace1 kernels:**
 
+| Kernel | Type | Duration (us) |
+|--------|------|--------------|
+| <kernel name (truncated to ~60 chars)> | <type> | X.X |
+
+**Trace2 kernels:**
+
+| Kernel | Type | Duration (us) |
+|--------|------|--------------|
+| <kernel name (truncated to ~60 chars)> | <type> | X.X |
+
+**Impact estimate:**
+<!-- [standalone] -->
 - Low end (75% roofline): X.XXX ms savings (X.XX% E2E)
 - High end (100% roofline): X.XXX ms savings (X.XX% E2E)
 - Coverage: M of N kernels modelled
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
 - Confidence: High/Medium/Low — <brief reason>
-
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 <!-- When not quantifiable: **Impact estimate:** Impact estimate is not quantifiable from trace data. -->
+
+<!-- [comparative] -->
+- Low end (75% gap target): X.XXX ms savings (X.XX% E2E)
+- High end (100% gap target): X.XXX ms savings (X.XX% E2E)
+- Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
+- Confidence: High/Medium/Low — <brief reason>
 
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
@@ -209,7 +259,7 @@ No kernel fusion opportunities detected.
 
 ## Key Principles
 
-1. **Include pre-computed savings** from `kernel_fusion_metrics.json` when available -- do NOT re-derive savings yourself, use the values from the metrics JSON
+1. **Include pre-computed savings** -- **Impact estimate** should explictly come from `kernel_fusion_metrics.json` when available -- do NOT re-derive savings yourself, use the values from the metrics JSON. 
 2. **Let the data speak** -- classify based on module names AND kernel composition, not just one signal
 3. **Reject confidently** -- not every multi-kernel module is a fusion opportunity; independent operations under a container module are not fusable
 4. **Explain reasoning** -- especially for novel patterns, state why you believe the kernels are fusable
@@ -222,12 +272,12 @@ No kernel fusion opportunities detected.
 | Observable | Source |
 |------------|--------|
 | Module names | `module_name`, `base_name` fields |
-| Kernel names and types | `kernels[].name`, `kernels[].type` |
-| Kernel durations | `kernels[].dur_us` |
+| Kernel names, types, durations | `kernels[]` (standalone) or `kernels_trace1[]`/`kernels_trace2[]` (comparative) |
 | Instance count | `instance_count` field |
 | Architecture context | `parent_chain` field |
 | Already-fused status | `has_fused_kernel` field |
 | Savings estimates | `kernel_fusion_metrics.json` `impact_estimates[]` (when available) |
+| Kernel count delta | `kernel_count_trace1`, `kernel_count_trace2`, `delta` (comparative) |
 
 ## What You CANNOT Infer
 
@@ -236,4 +286,4 @@ No kernel fusion opportunities detected.
 | Tensor shapes | Not in candidate JSON | "Cannot assess data flow from candidate data" |
 | Whether kernels share intermediate tensors | Would need data flow analysis | "Likely fusable based on module structure" |
 | Root cause of decomposition | Could be framework, compiler, or intentional | "Module launches N separate kernels that may be fusable" |
-
+| Why trace2 is fused | Architectural difference could be compile flags, library version, etc. | "Trace2 demonstrates a fused path exists; trace1 can adopt the same approach" |
