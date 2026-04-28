@@ -72,11 +72,6 @@ class GPUEventAnalyser:
     gpu_event_keys = [all_gpu_key, computation_key, communication_key, memcpy_key]
     cpu_event_keys = [all_cpu_key]
 
-    @classmethod
-    @property
-    def all_event_keys(cls):
-        return itertools.chain(cls.gpu_event_keys, cls.cpu_event_keys)
-
     def get_gpu_event_lists(self):
         """
         Return a dictionary of lists of events, categorized by event types
