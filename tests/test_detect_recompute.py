@@ -28,6 +28,7 @@ from conftest import (
     list_perf_report_csv_sheets,
     perf_report_csv_dirname,
     read_perf_report_csv,
+    update_reference_csvs,
 )
 
 TRACE_DIR = os.path.join(os.path.dirname(__file__), "traces", "mi300")
@@ -64,12 +65,15 @@ COLS_IGNORE = [
 ]
 
 
-def test_detect_recompute_e2e(tmp_path):
-    """Generate perf report with detect_recompute=True and compare to reference CSVs."""
+def test_detect_recompute_e2e(tmp_path, update_references):
+    """Generate perf report with detect_recompute=True and compare to reference CSVs.
+
+    When ``--update-references`` is passed,
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
+    """
     if not os.path.exists(TRACE_PATH):
         pytest.skip(f"Test trace not found: {TRACE_PATH}")
-    if not os.path.isdir(REF_CSV_DIR):
-        pytest.skip(f"Reference CSV directory not found: {REF_CSV_DIR}")
 
     fn_csv_dir = str(tmp_path / "recompute_perf_report_csvs")
 
@@ -81,6 +85,14 @@ def test_detect_recompute_e2e(tmp_path):
     )
 
     assert os.path.isdir(fn_csv_dir), "Generated report directory not created"
+
+    if update_references:
+        update_reference_csvs(fn_csv_dir, REF_CSV_DIR)
+        pytest.skip(f"Updated reference: {REF_CSV_DIR}")
+        return
+
+    if not os.path.isdir(REF_CSV_DIR):
+        pytest.skip(f"Reference CSV directory not found: {REF_CSV_DIR}")
 
     sheets = list_perf_report_csv_sheets(REF_CSV_DIR)
     for sheet in sheets:

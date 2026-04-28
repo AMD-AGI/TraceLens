@@ -26,6 +26,7 @@ from conftest import (
     list_perf_report_csv_sheets,
     perf_report_csv_dirname,
     read_perf_report_csv,
+    update_reference_csvs,
 )
 
 
@@ -58,9 +59,15 @@ COLS_IGNORE = [
 @pytest.mark.parametrize(
     "dirpath,gz,report_csv_dirname", find_test_cases("tests/traces")
 )
-def test_perf_report_regression(dirpath, gz, report_csv_dirname, tmp_path, tol=1e-6):
+def test_perf_report_regression(
+    dirpath, gz, report_csv_dirname, tmp_path, update_references, tol=1e-6
+):
     """
     For each .gz / *_perf_report_csvs/ pair, generate a report and compare to reference CSVs.
+
+    When ``--update-references`` is passed,
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
     """
     profile_path = os.path.join(dirpath, gz)
     ref_csv_dir = os.path.join(dirpath, report_csv_dirname)
@@ -73,6 +80,11 @@ def test_perf_report_regression(dirpath, gz, report_csv_dirname, tmp_path, tol=1
         kernel_summary=True,
         short_kernel_study=True,
     )
+
+    if update_references:
+        update_reference_csvs(fn_csv_dir, ref_csv_dir)
+        pytest.skip(f"Updated reference: {ref_csv_dir}")
+        return
 
     sheets = list_perf_report_csv_sheets(ref_csv_dir)
     for sheet in sheets:
