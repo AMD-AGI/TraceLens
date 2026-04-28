@@ -55,6 +55,7 @@ After modifying Trace2Tree:
 
 ## User Extension System
 
+
 Pass `--extension_file my_ext.py` to any report generator CLI. The file may define:
 - `tree_postprocess_extension(trace_to_tree)` — modify the tree after build
 - `perf_model_extension = {"op_name": PerfModelClass, ...}` — add/override op mappings
