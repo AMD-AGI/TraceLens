@@ -151,6 +151,18 @@ def apply_extension(perf_analyzer, extension_path):
             if not isinstance(names, list):
                 raise ValueError(f"Expected names to be a list, got {type(names)}")
             perf_analyzer.dict_cat2names[cat].extend(names)
+    if hasattr(extension, "categorize_extension"):
+        print(f"Applying categorize extension from {extension_path}")
+        original_categorizer = perf_analyzer.op_categorizer
+        ext_categorizer = extension.categorize_extension
+
+        def combined_categorizer(row):
+            result = ext_categorizer(row, None)
+            if result is not None:
+                return result
+            return original_categorizer(row)
+
+        perf_analyzer.op_categorizer = combined_categorizer
 
 
 def trunc_kernel_details(row, kernel_detail_col, trunc_length=64):

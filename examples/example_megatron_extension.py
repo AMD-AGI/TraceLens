@@ -407,6 +407,10 @@ def categorize_extension(row, plugin):
         return "SDPA_fwd"
     if row["name"] == "FusedAttnFuncBackward":
         return "SDPA_bwd"
+    if row["name"] == "GroupedGemm":
+        return "GroupedGEMM_fwd"
+    if row["name"] == "GroupedGemmBackward":
+        return "GroupedGEMM_bwd"
     return None
 
 
