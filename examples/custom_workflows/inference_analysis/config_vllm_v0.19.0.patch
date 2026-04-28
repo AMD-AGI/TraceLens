@@ -1,0 +1,246 @@
+diff --git a/vllm/config/profiler.py b/vllm/config/profiler.py
+index 68fa78854..ea2f98225 100644
+--- a/vllm/config/profiler.py
++++ b/vllm/config/profiler.py
+@@ -66,6 +66,17 @@ class ProfilerConfig:
+     """If `True`, enables memory profiling in the torch profiler.
+     Disabled by default."""
+ 
++    capture_torch_profiler_dir: str = ""
++    """Directory to save profiler traces captured during CUDA graph capture.
++    If set and non-empty, a torch profiler will be enabled during graph capture
++    on rank 0. Must be an absolute path."""
++
++    detailed_trace_annotation: bool = False
++    """If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
++    sqsk) in profiler trace events. If `False`, uses simple annotations with
++    only context/generation request counts and token counts.
++    Disabled by default."""
++
+     ignore_frontend: bool = False
+     """If `True`, disables the front-end profiling of AsyncLLM when using the
+     'torch' profiler. This is needed to reduce overhead when using delay/limit options,
+@@ -143,5 +154,15 @@ class ProfilerConfig:
+         # These paths should not be converted to absolute paths
+         if profiler_dir and not _is_uri_path(profiler_dir):
+             self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
++        
++        capture_dir = self.capture_torch_profiler_dir
++        if capture_dir and self.profiler != "torch":
++            raise ValueError(
++                "capture_torch_profiler_dir is only applicable when profiler is set to 'torch'"
++            )
++        if capture_dir and not _is_uri_path(capture_dir):
++            self.capture_torch_profiler_dir = os.path.abspath(
++                os.path.expanduser(capture_dir)
++            )
+ 
+         return self
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 2e62206da..3194ea16f 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -8,7 +8,7 @@ import threading
+ import time
+ from collections import defaultdict
+ from collections.abc import Callable, Iterable, Iterator, Sequence
+-from contextlib import contextmanager
++from contextlib import contextmanager, nullcontext
+ from copy import copy, deepcopy
+ from dataclasses import dataclass, replace
+ from functools import reduce
+@@ -6003,6 +6003,30 @@ class GPUModelRunner(
+         # Capture the large shapes first so that the smaller shapes
+         # can reuse the memory pool allocated for the large shapes.
+         set_cudagraph_capturing_enabled(True)
++        
++        # Setup torch profiler for graph capture traces (conditional)
++        from vllm.distributed.parallel_state import get_world_group
++        local_rank = get_world_group().local_rank
++        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler_dir
++        if enable_profiler:
++            trace_dir = self.vllm_config.profiler_config.capture_torch_profiler_dir
++            profiler = torch.profiler.profile(
++                activities=[
++                    torch.profiler.ProfilerActivity.CPU,
++                    torch.profiler.ProfilerActivity.CUDA,
++                ],
++                record_shapes=True,
++                profile_memory=True,
++                with_stack=True,
++                on_trace_ready=torch.profiler.tensorboard_trace_handler(
++                    trace_dir, worker_name=f"graph_capture_rank_{local_rank}",use_gzip=True
++                ),
++            )
++            logger.info("Rank %d: Torch profiler enabled for CUDA graph capture, traces will be saved to: %s", local_rank, trace_dir)
++        else:
++            profiler = nullcontext()
++            logger.info("Rank %d: Torch profiler disabled for CUDA graph capture", local_rank)
++            
+         with self._freeze_gc(), graph_capture(device=self.device):
+             torch.accelerator.synchronize()
+             torch.accelerator.empty_cache()
+@@ -6015,6 +6039,7 @@ class GPUModelRunner(
+                 self._capture_cudagraphs(
+                     batch_descriptors=batch_descs,
+                     cudagraph_runtime_mode=runtime_mode,
++                    profiler=profiler,
+                 )
+                 torch.accelerator.synchronize()
+ 
+@@ -6058,6 +6083,7 @@ class GPUModelRunner(
+         profile_seq_lens: int | None = None,
+         allow_microbatching: bool = False,
+         num_warmups: int | None = None,
++        profiler: "ContextManager[Any]"  = nullcontext(),
+     ):
+         if num_warmups is None:
+             num_warmups = self.compilation_config.cudagraph_num_of_warmups
+@@ -6073,22 +6099,27 @@ class GPUModelRunner(
+                 remove_lora=False,
+                 num_active_loras=desc.num_active_loras,
+             )
+-        self._dummy_run(
+-            desc.num_tokens,
+-            cudagraph_runtime_mode=cudagraph_runtime_mode,
+-            uniform_decode=desc.uniform,
+-            allow_microbatching=allow_microbatching,
+-            skip_eplb=True,
+-            remove_lora=False,
+-            num_active_loras=desc.num_active_loras,
+-            is_graph_capturing=True,
+-            profile_seq_lens=profile_seq_lens,
+-        )
++        with profiler:
++            with torch.profiler.record_function(
++                f"capture_{desc.num_tokens}_{cudagraph_runtime_mode.name}"
++            ):
++                self._dummy_run(
++                    desc.num_tokens,
++                    cudagraph_runtime_mode=cudagraph_runtime_mode,
++                    uniform_decode=desc.uniform,
++                    allow_microbatching=allow_microbatching,
++                    skip_eplb=True,
++                    remove_lora=False,
++                    num_active_loras=desc.num_active_loras,
++                    is_graph_capturing=True,
++                    profile_seq_lens=profile_seq_lens,
++                )
+ 
+     def _capture_cudagraphs(
+         self,
+         batch_descriptors: list[BatchDescriptor],
+         cudagraph_runtime_mode: CUDAGraphMode,
++        profiler: "ContextManager[Any]"  = nullcontext(),
+     ):
+         assert (
+             cudagraph_runtime_mode != CUDAGraphMode.NONE
+@@ -6131,6 +6162,7 @@ class GPUModelRunner(
+                 batch_desc,
+                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                 allow_microbatching=allow_microbatching,
++                profiler=profiler,
+             )
+             torch.accelerator.synchronize()
+         self.maybe_remove_all_loras(self.lora_config)
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 91dcdc2b9..42455389a 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -718,19 +718,87 @@ class Worker(WorkerBase):
+ 
+         iteration_details = compute_iteration_details(scheduler_output)
+ 
+-        annotation = "".join(
+-            [
+-                "execute_context_",
++        if self.vllm_config.profiler_config.detailed_trace_annotation:
++            # Compute roofline-model metrics per request, split by phase
++            # (context vs generation). These help estimate compute and
++            # memory intensity from the trace.
++            #
++            # Per-request quantities:
++            #   sq = number of scheduled (new) tokens for this request
++            #   sk = total sequence length (computed + scheduled tokens)
++            #
++            # Aggregated across requests in each phase (c_=context, g_=gen):
++            #   sk   = sum of sk        (total KV length)
++            #   sqsq = sum of sq*sq     (proxy for QK^T compute cost)
++            #   sqsk = sum of sq*sk     (proxy for QK^T compute cost for decode and chunked prefill)
++            #   bs   = total scheduled tokens across all requests
++            c_sk = 0
++            c_sqsq = 0
++            c_sqsk = 0
++            g_sk = 0
++            g_sqsq = 0
++            g_sqsk = 0
++            bs = 0
++
++            # Build a map of req_id -> num_computed_tokens for all requests
++            new_req_ids = {
++                new_req.req_id
++                for new_req in scheduler_output.scheduled_new_reqs
++            }
++            num_computed_tokens_ids = {
++                new_req.req_id: new_req.num_computed_tokens
++                for new_req in scheduler_output.scheduled_new_reqs
++            }
++            for req_id, num_computed_tokens in zip(
++                scheduler_output.scheduled_cached_reqs.req_ids,
++                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
++            ):
++                num_computed_tokens_ids[req_id] = num_computed_tokens
++
++            # Accumulate per-phase metrics
++            for req_id, num_tokens in (
++                scheduler_output.num_scheduled_tokens.items()
++            ):
++                sq = num_tokens
++                bs += sq
++                sk = num_computed_tokens_ids.get(req_id, 0) + sq
++                if (
++                    scheduler_output.scheduled_cached_reqs.is_context_phase(
++                        req_id
++                    )
++                    or req_id in new_req_ids
++                ):
++                    c_sk += sk
++                    c_sqsq += sq * sq
++                    c_sqsk += sq * sk
++                else:
++                    g_sk += sk
++                    g_sqsq += sq * sq
++                    g_sqsk += sq * sk
++            annotation = "".join([
++                "execute_", str(bs), "_context_",
+                 str(iteration_details.num_ctx_requests),
+-                "(",
+-                str(iteration_details.num_ctx_tokens),
++                "(sq", str(iteration_details.num_ctx_tokens),
++                "sk", str(c_sk),
++                "sqsq", str(c_sqsq),
++                "sqsk", str(c_sqsk),
+                 ")_generation_",
+                 str(iteration_details.num_generation_requests),
+-                "(",
+-                str(iteration_details.num_generation_tokens),
++                "(sq", str(iteration_details.num_generation_tokens),
++                "sk", str(g_sk),
++                "sqsq", str(g_sqsq),
++                "sqsk", str(g_sqsk),
+                 ")",
+-            ]
+-        )
++            ])
++        else:
++            annotation = "".join([
++                "execute_context_",
++                str(iteration_details.num_ctx_requests),
++                "(", str(iteration_details.num_ctx_tokens), ")",
++                "_generation_",
++                str(iteration_details.num_generation_requests),
++                "(", str(iteration_details.num_generation_tokens), ")",
++            ])
+         return self.profiler.annotate_context_manager(annotation)
+ 
+     @torch.inference_mode()

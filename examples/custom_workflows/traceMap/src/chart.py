@@ -169,8 +169,7 @@ class CallbackManager:
         """Create callback for window size changes."""
         return CustomJS(
             args=dict(**sources, **controls, **gpu_names),
-            code=CallbackManager.create_sorted_data_js()
-            + """
+            code=CallbackManager.create_sorted_data_js() + """
             const window_size = spinner.value;
             
             // Update slider properties
@@ -218,8 +217,7 @@ class CallbackManager:
         """Create callback for slider changes."""
         return CustomJS(
             args=dict(**sources, **controls),
-            code=CallbackManager.create_sorted_data_js()
-            + """
+            code=CallbackManager.create_sorted_data_js() + """
             const start = slider.value;
             const window_size = spinner.value;
             const end = Math.min(start + window_size, source.data['Kernel Index'].length);

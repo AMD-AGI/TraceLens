@@ -437,7 +437,7 @@ class JaxTraceToTree(BaseTraceToTree):
                 continue
             if event.get("cat") != "kernel":
                 continue
-            name = event.get("name") or ""
+            name = event.get("name", "")
             gpu_kernel_op_cat_not_found = True
 
             for (
