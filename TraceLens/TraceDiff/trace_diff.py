@@ -229,7 +229,8 @@ class TraceDiff:
                     children = current.get("children", [])
                     if len(children) == 1:
                         child = tree.get_UID2event(children[0])
-                        if (child.get("cat") or child.get("category")) == "cpu_op":
+                        child_cat = child.get("cat") or child.get("category")
+                        if child_cat in ("cpu_op", "cuda_runtime"):
                             break
                         current = child
                     else:
@@ -1293,6 +1294,12 @@ class TraceDiff:
         df = pd.DataFrame(rows)
         if not df.empty and "busy_time" in df.columns:
             df["busy_time"] = df["busy_time"].round(3)
+
+        if df.empty:
+            print("[TraceDiff] No GPU events found in either trace")
+            self.identical_traces = True
+            self.diff_stats_df = df
+            return df
 
         if df.empty:
             print("[TraceDiff] No GPU events found in either trace")

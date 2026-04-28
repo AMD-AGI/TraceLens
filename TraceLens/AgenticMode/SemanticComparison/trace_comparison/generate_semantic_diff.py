@@ -45,6 +45,9 @@ from collections import OrderedDict
 
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _helpers import load_labels, load_shapes
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trace_breakdown"))
 from category_mappings import (
     get_group,
@@ -52,23 +55,6 @@ from category_mappings import (
     group_from_perf_category,
     format_input_dims,
 )
-
-# ---------------------------------------------------------------------------
-# Loading helpers
-# ---------------------------------------------------------------------------
-
-
-def load_labels(path):
-    with open(path) as f:
-        return json.load(f)
-
-
-def load_shapes(path):
-    """Load derived_shapes.json and index blocks by semantic_block name."""
-    with open(path) as f:
-        data = json.load(f)
-    return {b["semantic_block"]: b for b in data.get("blocks", [])}
-
 
 # ---------------------------------------------------------------------------
 # diff_stats.csv generation

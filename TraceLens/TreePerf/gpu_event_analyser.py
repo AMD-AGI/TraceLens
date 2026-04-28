@@ -7,6 +7,7 @@
 import pandas as pd
 import itertools
 import tqdm
+from TraceLens.util import TraceEventUtils
 
 
 class GPUEventAnalyser:
@@ -78,7 +79,7 @@ class GPUEventAnalyser:
             GPUEventAnalyser.gpu_event_keys, GPUEventAnalyser.cpu_event_keys
         )
 
-    def get_gpu_event_lists(self, compute_overlapping_uids=False):
+    def get_gpu_event_lists(self):
         """
         Return a dictionary of lists of events, categorized by event types
         Event types are all gpu events, computation, communication, and memcpy.
@@ -94,9 +95,9 @@ class GPUEventAnalyser:
         comp_events = []
         comm_events = []
         memcpy_events = []
+        compute_overlapping_uids = False
 
         points = []
-        compute_overlapping_uids = False
         for event in self.events:
 
             # TODO: ideally we want to get gpu events based on process id
@@ -109,16 +110,16 @@ class GPUEventAnalyser:
                 if "overlapping_uids" not in event:
                     compute_overlapping_uids = True
                     points.append(
-                        (event["ts"], 0, event["UID"])
-                    )  # 0 for start, 1 for end
-                    points.append((event["t_end"], 1, event["UID"]))
+                        (event["ts"], 1, event["UID"])
+                    )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
+                    points.append((event["t_end"], 0, event["UID"]))
                     event["overlapping_uids"] = set()
                 gpu_events.append(event)
 
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if "nccl" in event.get("name"):
+                    if TraceEventUtils.is_communication_string(event.get("name")):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)
@@ -126,30 +127,61 @@ class GPUEventAnalyser:
                     raise ValueError(f"Unknown event category: {category}")
         if compute_overlapping_uids:
             points.sort(key=lambda x: (x[0], x[1]))
-            active_uids = set()  # Store UIDs instead of events
-            event_map = {
-                event["UID"]: event for event in gpu_events
-            }  # Map UIDs to events
+            active_uids = set()
+            event_map = {event["UID"]: event for event in gpu_events}
+
+            all_events_by_uid = {
+                event["UID"]: event for event in self.events if "UID" in event
+            }
+
+            def _get_cpu_op_uid(event):
+                """Walk up parent chain to find the nearest cpu_op ancestor UID."""
+                current_uid = event.get("parent")
+                while current_uid is not None:
+                    parent = all_events_by_uid.get(current_uid)
+                    if parent is None:
+                        return None
+                    if parent.get("cat") == "cpu_op":
+                        return current_uid
+                    current_uid = parent.get("parent")
+                return None
+
+            uid_to_cpu_op = {
+                event["UID"]: _get_cpu_op_uid(event) for event in gpu_events
+            }
 
             for _, point_type, uid in points:
                 if point_type == 0:
-                    # When an event starts, all currently active events overlap with it
+                    active_uids.remove(uid)
+                else:
                     event = event_map[uid]
+                    my_cpu_op = uid_to_cpu_op[uid]
                     if active_uids:
-                        if "overlapping_uids" not in event:
-                            event["overlapping_uids"] = set()
-                        event["overlapping_uids"].update(active_uids)
-
-                        # Also add this event's UID to all active events' overlapping_uids
+                        my_stream = event.get("args", {}).get("stream")
                         for active_uid in active_uids:
                             active_event = event_map[active_uid]
-                            if "overlapping_uids" not in active_event:
-                                active_event["overlapping_uids"] = set()
-                            active_event["overlapping_uids"].add(uid)
+                            active_stream = active_event.get("args", {}).get("stream")
+                            if (
+                                my_stream is not None
+                                and active_stream is not None
+                                and my_stream == active_stream
+                            ):
+                                continue
+                            active_cpu_op = uid_to_cpu_op[active_uid]
+                            if (
+                                my_cpu_op is not None
+                                and active_cpu_op is not None
+                                and my_cpu_op == active_cpu_op
+                            ):
+                                continue
+                            ov_start = max(event["ts"], event_map[active_uid]["ts"])
+                            ov_end = min(event["t_end"], event_map[active_uid]["t_end"])
+                            if (ov_end - ov_start) < 1.0:  # skip sub-microsecond noise
+                                continue
+                            event["overlapping_uids"].add(active_uid)
+                            event_map[active_uid]["overlapping_uids"].add(uid)
 
                     active_uids.add(uid)
-                else:
-                    active_uids.remove(uid)
 
         return {
             GPUEventAnalyser.all_gpu_key: gpu_events,
@@ -276,9 +308,7 @@ class GPUEventAnalyser:
                 "total_memcpy_time": total_memcpy_time,
             }
 
-    def compute_metrics(
-        self, micro_idle_thresh_us=None, compute_overlapping_uids=False
-    ):
+    def compute_metrics(self, micro_idle_thresh_us=None):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -289,9 +319,7 @@ class GPUEventAnalyser:
         """
 
         # Categorize events.
-        dict_gpu_event_lists = self.get_gpu_event_lists(
-            compute_overlapping_uids=compute_overlapping_uids
-        )
+        dict_gpu_event_lists = self.get_gpu_event_lists()
         GPUEventAnalyser.verify_dict_gpu_event_lists(dict_gpu_event_lists)
 
         return GPUEventAnalyser.compute_metrics_dict(
@@ -321,11 +349,18 @@ class PytorchGPUEventAnalyser(GPUEventAnalyser):
 
 # Jax GPU event analyser
 class JaxGPUEventAnalyser(GPUEventAnalyser):
+    @staticmethod
+    def _is_gpu_event(event: dict) -> bool:
+        """Return True if event's process_name contains /device:GPU."""
+        proc = event.get("process")
+        if isinstance(proc, dict):
+            return "/device:GPU" in proc.get("process_name", "")
+        return "/device:GPU" in str(proc or "")
 
     def __init__(self, events):
         super().__init__(events)  # Call the parent's __init__
         self.gpu_pids = list(
-            set([event["pid"] for event in events if event["pid"] < 100])
+            {event["pid"] for event in events if self._is_gpu_event(event)}
         )
 
     def get_gpu_event_lists(self, gpu_pid=None, event_filter=None):
@@ -348,36 +383,36 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             if event_filter is not None and not event_filter(event):
                 continue
             pid = event.get("pid")
-            # jax uses pid > 100 for CPU evens
             # skip some dictionary setup events that do not have ts
-            if "ts" in event:
-                if pid < 100:
-                    cur_dict = return_dict.get(pid)
-                    if cur_dict is None:
-                        cur_dict = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
-                        return_dict[pid] = cur_dict
-                    if "t_end" not in event:
-                        event["t_end"] = event["ts"] + event["dur"]
-                    cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
-                    name = event.get("name")
-                    if any(
-                        name.lower().startswith(x) for x in ["copy", "memcpy", "memset"]
-                    ):
-                        cur_dict[GPUEventAnalyser.memcpy_key].append(event)
-                    elif name.startswith("nccl"):
-                        cur_dict[GPUEventAnalyser.communication_key].append(event)
-                    else:
-                        cur_dict[GPUEventAnalyser.computation_key].append(event)
+            if "ts" not in event:
+                continue
+            is_gpu = pid in self.gpu_pids
+            if is_gpu:
+                cur_dict = return_dict.get(pid)
+                if cur_dict is None:
+                    cur_dict = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
+                    return_dict[pid] = cur_dict
+                if "t_end" not in event:
+                    event["t_end"] = event["ts"] + event["dur"]
+                cur_dict[GPUEventAnalyser.all_gpu_key].append(event)
+                name = event.get("name", "")
+                if any(
+                    name.lower().startswith(x) for x in ["copy", "memcpy", "memset"]
+                ):
+                    cur_dict[GPUEventAnalyser.memcpy_key].append(event)
+                elif TraceEventUtils.is_communication_string(name):
+                    cur_dict[GPUEventAnalyser.communication_key].append(event)
                 else:
-                    cur_dict = return_dict.get(pid)
-                    if cur_dict is None:
-                        cur_dict = {key: [] for key in GPUEventAnalyser.cpu_event_keys}
-                        return_dict[pid] = cur_dict
-                    cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
+                    cur_dict[GPUEventAnalyser.computation_key].append(event)
+            else:
+                cur_dict = return_dict.get(pid)
+                if cur_dict is None:
+                    cur_dict = {key: [] for key in GPUEventAnalyser.cpu_event_keys}
+                    return_dict[pid] = cur_dict
+                cur_dict[GPUEventAnalyser.all_cpu_key].append(event)
         if gpu_pid is None:
             return return_dict
-        else:
-            return return_dict.get(gpu_pid, {})
+        return return_dict.get(gpu_pid, {})
 
     def compute_metrics(self, gpu_pid=1, event_filter=None):
         # Default: use GPU0 (PID 1) for Jax
@@ -391,12 +426,13 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
         dict_gpu_event_lists = self.get_gpu_event_lists(event_filter=event_filter)
         gpu_frames = {}
         print("Processing events by GPU")
-        for gpu_id, cur_events in tqdm.tqdm(
-            filter(lambda x: x[0] < 100, dict_gpu_event_lists.items())
-        ):
+        for frame_idx, gpu_id in enumerate(tqdm.tqdm(sorted(self.gpu_pids))):
+            cur_events = dict_gpu_event_lists.get(gpu_id)
+            if cur_events is None:
+                continue
             GPUEventAnalyser.verify_dict_gpu_event_lists(cur_events)
             cur_metrics = GPUEventAnalyser.compute_metrics_dict(cur_events)
-            gpu_frames[gpu_id - 1] = GPUEventAnalyser.get_breakdown_df_from_dict(
+            gpu_frames[frame_idx] = GPUEventAnalyser.get_breakdown_df_from_dict(
                 cur_metrics
             )
         return gpu_frames

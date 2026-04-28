@@ -155,9 +155,6 @@ class LoopStructures:
     def operation_name_to_idx(self) -> Dict[str, int]:
         return self._patterns_obj.operation_name_to_idx
 
-    def _get_pattern_name(self, pattern_idx: int) -> str:
-        return self._patterns_obj.get_pattern_name(pattern_idx)
-
     def get_pattern_name(self, pattern_idx: int) -> str:
         return self._patterns_obj.get_pattern_name(pattern_idx)
 
