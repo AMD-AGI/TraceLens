@@ -40,11 +40,6 @@ When invoked by the orchestrator, you will receive the following context:
 1. Write a findings file noting: "No kernel fusion opportunities detected."
 2. Return gracefully
 
-**If fusion_candidates.json has candidates but kernel_fusion_metrics.json has no impact estimates (all suppressed by the 2% E2E gate):**
-1. Still write a findings file with a finding per candidate.
-2. Set **Impact** to: "Not quantifiable — savings below 2% E2E threshold."
-3. Do NOT write "No kernel fusion opportunities detected" — the opportunity exists, only the impact estimate is suppressed.
-
 ---
 
 ## Language Guidelines
