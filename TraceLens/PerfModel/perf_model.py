@@ -136,14 +136,20 @@ class GEMM:
             N=self.K,
             K=self.N,
             bias=False,
-            bytes_per_element=bytes_per_element,
+            bpe_mat1=bytes_per_element,
+            bpe_mat2=bytes_per_element,
+            bpe_bias=bytes_per_element,
+            bpe_output=bytes_per_element,
         )
         bytes_weight_grad = self.bytes_func(
             M=self.N,
             N=self.K,
             K=self.M,
             bias=False,
-            bytes_per_element=bytes_per_element,
+            bpe_mat1=bytes_per_element,
+            bpe_mat2=bytes_per_element,
+            bpe_bias=bytes_per_element,
+            bpe_output=bytes_per_element,
         )
         bytes_bias_grad = self.M * self.N if self.bias else 0
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
