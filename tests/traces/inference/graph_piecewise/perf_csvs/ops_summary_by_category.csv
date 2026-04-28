@@ -1,0 +1,9 @@
+op category,parent_module,Count,call_stack_first,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
+other, nn.Module: GraphModule ,96,_C::rotary_embedding => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,127.165064453125,81.47120026774118,81.47120026774118
+GEMM, nn.Module: GraphModule ,72,aten::addmm => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,17.3018173828125,11.084804109155334,92.55600437689651
+InferenceAttention, nn.Module: GraphModule ,48,_C_cache_ops::reshape_and_cache_flash => nn.Module: GraphModule_0 => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,5.7332783203125,3.6731555811624483,96.22915995805896
+RMSNorm, nn.Module: GraphModule ,49,aiter::rms_norm => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,3.4074169921875,2.1830394484527793,98.41219940651173
+triton, nn.Module: GraphModule ,48,triton_poi_fused_0 => nn.Module: GraphModule_0 => nn.Module: GptOssForCausalLM_0,2.0454619140625,1.3104718497748373,99.72267125628657
+GEMM, nn.Module: LogitsProcessor,1,aten::mm => nn.Module: LogitsProcessor_0,0.34663671875,0.2220807236239318,99.9447519799105
+elementwise,NA,12,aten::copy_,0.082595703125,0.052916821923463475,99.99766880183397
+other,NA,1,aten::index,0.003638671875,0.002331198166034015,100.0

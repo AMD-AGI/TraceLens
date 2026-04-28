@@ -15,6 +15,7 @@ import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..util import DataLoader
+from ..util import TraceEventUtils
 
 
 def list_to_tuple(obj):
@@ -54,7 +55,7 @@ DEFAULT_CUSTOM_COLLECTIVE_PATTERNS = [
     (r"cross_device_reduce", "allreduce"),
 ]
 
-_DEFAULT_FILTER_PATTERNS = [re.compile(r"nccl", re.IGNORECASE)] + [
+_DEFAULT_FILTER_PATTERNS = TraceEventUtils.get_communication_regexes() + [
     re.compile(p, re.IGNORECASE) for p, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
 ]
 
@@ -66,7 +67,7 @@ _DEFAULT_INFERENCE_RULES = [
 
 def _build_filter_and_inference_rules(custom_patterns):
     """Build compiled regex lists from user-provided (pattern, collective) tuples."""
-    filter_patterns = [re.compile(r"nccl", re.IGNORECASE)]
+    filter_patterns = TraceEventUtils.get_communication_regexes()
     inference_rules = []
     for pattern, collective in custom_patterns:
         compiled = re.compile(pattern, re.IGNORECASE)
@@ -154,9 +155,10 @@ class NcclAnalyser:
             if custom_collective_patterns is not None
             else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
         )
-        self._filter_patterns, self._inference_rules = (
-            _build_filter_and_inference_rules(patterns)
-        )
+        (
+            self._filter_patterns,
+            self._inference_rules,
+        ) = _build_filter_and_inference_rules(patterns)
 
         # Byte sizes per dtype
         self.dtype2bytes = {
@@ -709,6 +711,85 @@ class NcclAnalyser:
         columns_order.extend(["count", "Total comm latency (ms)"])
         summary_df = summary_df[[c for c in columns_order if c in summary_df.columns]]
         return summary_df
+
+    def build_df_straggler_summary(self, strict_metadata_check=True):
+        """Build a per-rank straggler summary from implicit-sync data.
+
+        Returns a DataFrame with one row per rank showing:
+        - total_wait_time_us: sum of wait time across all collectives
+        - mean_wait_time_us: average wait time per collective
+        - times_arrived_last: how often this rank was the straggler
+        - times_arrived_first: how often this rank arrived earliest
+        - pct_arrived_last: percentage of collectives where this rank was last
+        - total_nccl_dur_us: total NCCL kernel duration for this rank
+
+        The rank with the lowest total_wait_time (and highest times_arrived_last)
+        is the straggler.
+        """
+        import pandas as pd
+
+        if hasattr(self, "df_implicit_sync_cat_detailed"):
+            df_isync = self.df_implicit_sync_cat_detailed
+        else:
+            df_isync = self.build_df_nccl_implicit_sync_cat(
+                detailed=True, strict_metadata_check=strict_metadata_check
+            )
+        if df_isync.empty:
+            return pd.DataFrame()
+
+        wait_cols = [
+            c
+            for c in df_isync.columns
+            if c.startswith("rank_") and c.endswith("_wait_time")
+        ]
+        if not wait_cols:
+            return pd.DataFrame()
+
+        ranks = sorted(
+            int(c.replace("rank_", "").replace("_wait_time", "")) for c in wait_cols
+        )
+        num_collectives = len(df_isync)
+
+        straggler_rank_per_row = df_isync[wait_cols].idxmin(axis=1)
+
+        rows = []
+        for r in ranks:
+            wc = f"rank_{r}_wait_time"
+            total_wait = df_isync[wc].sum()
+            mean_wait = df_isync[wc].mean()
+            times_last = (straggler_rank_per_row == wc).sum()
+            times_first = (df_isync["earliest arrival rank"] == r).sum()
+            rows.append(
+                {
+                    "rank": r,
+                    "total_wait_time_us": round(total_wait, 1),
+                    "mean_wait_time_us": round(mean_wait, 1),
+                    "times_arrived_last": int(times_last),
+                    "times_arrived_first": int(times_first),
+                    "pct_arrived_last": round(100.0 * times_last / num_collectives, 1),
+                    "num_collectives": num_collectives,
+                }
+            )
+
+        df_straggler = pd.DataFrame(rows)
+
+        if hasattr(self, "df_per_rank_coll") and not self.df_per_rank_coll.empty:
+            dur_by_rank = (
+                self.df_per_rank_coll.groupby("rank")["dur"]
+                .sum()
+                .reset_index()
+                .rename(columns={"dur": "total_nccl_dur_us"})
+            )
+            df_straggler = df_straggler.merge(dur_by_rank, on="rank", how="left")
+            df_straggler["total_nccl_dur_us"] = df_straggler["total_nccl_dur_us"].round(
+                1
+            )
+
+        df_straggler = df_straggler.sort_values(
+            "total_wait_time_us", ascending=True
+        ).reset_index(drop=True)
+
+        return df_straggler
 
     def build_df_nccl_all2allv(self, detailed=False, strict_metadata_check=True):
         """Build a per-collective-instance DataFrame for all_to_allv.

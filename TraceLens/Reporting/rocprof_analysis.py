@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from ..util import TraceEventUtils
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
@@ -40,7 +41,7 @@ def _categorize_kernel(name: str) -> str:
         return "Attention"
     elif any(x in name_lower for x in ["copy", "memcpy"]):
         return "Memory"
-    elif any(x in name_lower for x in ["nccl", "rccl"]):
+    elif TraceEventUtils.is_communication_string(name_lower):
         return "COMM"
     else:
         return "Other"
