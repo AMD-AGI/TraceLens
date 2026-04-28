@@ -1,0 +1,1352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TraceLens Documentation</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22253a;
+    --border: #2e3250;
+    --accent: #7c6af7;
+    --accent2: #56cfb2;
+    --accent3: #f7a35c;
+    --accent4: #e05c6a;
+    --text: #e2e4f0;
+    --text-muted: #8b90b0;
+    --code-bg: #141720;
+    --sidebar-w: 280px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 15px; line-height: 1.7; display: flex; min-height: 100vh; }
+
+  /* Sidebar */
+  #sidebar {
+    width: var(--sidebar-w); min-width: var(--sidebar-w); background: var(--surface); border-right: 1px solid var(--border);
+    position: fixed; top: 0; left: 0; height: 100vh; overflow-y: auto; z-index: 100;
+    display: flex; flex-direction: column;
+  }
+  #sidebar-logo { padding: 24px 20px 16px; border-bottom: 1px solid var(--border); }
+  #sidebar-logo .logo-title { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+  #sidebar-logo .logo-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  #sidebar nav { padding: 12px 0; flex: 1; }
+  .nav-section { padding: 10px 20px 4px; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: var(--text-muted); text-transform: uppercase; }
+  .nav-link { display: block; padding: 6px 20px; color: var(--text-muted); text-decoration: none; font-size: 13px; border-left: 3px solid transparent; transition: all .15s; }
+  .nav-link:hover, .nav-link.active { color: var(--text); background: var(--surface2); border-left-color: var(--accent); }
+  .nav-link.sub { padding-left: 34px; font-size: 12px; }
+
+  /* Main */
+  #main { margin-left: var(--sidebar-w); flex: 1; padding: 0; }
+  #hero { background: linear-gradient(135deg, #1a1d27 0%, #0f1117 50%, #1a1427 100%); border-bottom: 1px solid var(--border); padding: 64px 64px 48px; }
+  #hero h1 { font-size: 48px; font-weight: 800; background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; letter-spacing: -1px; }
+  #hero .tagline { font-size: 18px; color: var(--text-muted); margin-top: 12px; max-width: 640px; }
+  #hero .badges { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
+  .badge { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .badge-purple { background: #2d2260; color: var(--accent); border: 1px solid #4a3a9a; }
+  .badge-green { background: #1a2e2a; color: var(--accent2); border: 1px solid #2a5048; }
+  .badge-orange { background: #2e2010; color: var(--accent3); border: 1px solid #5a3a10; }
+  .badge-red { background: #2e1015; color: var(--accent4); border: 1px solid #5a1020; }
+
+  section { padding: 48px 64px; border-bottom: 1px solid var(--border); }
+  section:last-child { border-bottom: none; }
+  h2 { font-size: 30px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+  h2 .section-num { color: var(--accent); margin-right: 10px; font-size: 22px; }
+  .section-desc { color: var(--text-muted); margin-bottom: 32px; font-size: 15px; }
+  h3 { font-size: 20px; font-weight: 600; color: var(--accent2); margin: 32px 0 12px; }
+  h4 { font-size: 15px; font-weight: 600; color: var(--accent3); margin: 20px 0 8px; }
+  p { color: var(--text-muted); margin-bottom: 14px; }
+  strong { color: var(--text); }
+  ul, ol { padding-left: 24px; color: var(--text-muted); margin-bottom: 14px; }
+  li { margin-bottom: 4px; }
+  li strong { color: var(--text); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Code */
+  code { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; color: var(--accent2); }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; overflow-x: auto; margin: 16px 0; }
+  pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
+  .kw { color: #c792ea; }
+  .fn { color: #82aaff; }
+  .str { color: #c3e88d; }
+  .cm { color: #546e7a; font-style: italic; }
+  .num { color: #f78c6c; }
+  .cls { color: #ffcb6b; }
+
+  /* Cards */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin: 20px 0; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; transition: border-color .2s; }
+  .card:hover { border-color: var(--accent); }
+  .card-icon { font-size: 24px; margin-bottom: 10px; }
+  .card-title { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+  .card-body { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+  .card-tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 12px; margin-top: 10px; background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; margin: 16px 0; border-radius: 8px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; }
+  thead { background: var(--surface2); }
+  th { padding: 12px 16px; text-align: left; font-size: 12px; font-weight: 700; letter-spacing: .5px; color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 16px; font-size: 13px; color: var(--text-muted); border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface); }
+  td code { font-size: 12px; }
+  td strong { color: var(--text); }
+
+  /* Pipeline */
+  .pipeline { display: flex; align-items: center; gap: 0; margin: 24px 0; flex-wrap: wrap; }
+  .pipe-step { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; min-width: 140px; text-align: center; }
+  .pipe-step .ps-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+  .pipe-step .ps-name { font-size: 13px; font-weight: 700; color: var(--accent); }
+  .pipe-step .ps-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .pipe-arrow { color: var(--accent); font-size: 20px; padding: 0 8px; }
+
+  /* Callout */
+  .callout { border-radius: 8px; padding: 16px 20px; margin: 16px 0; border-left: 4px solid; }
+  .callout-info { background: #1a2035; border-color: var(--accent); }
+  .callout-tip { background: #1a2e2a; border-color: var(--accent2); }
+  .callout-warn { background: #2e2010; border-color: var(--accent3); }
+  .callout-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .callout-info .callout-title { color: var(--accent); }
+  .callout-tip .callout-title { color: var(--accent2); }
+  .callout-warn .callout-title { color: var(--accent3); }
+  .callout p { margin-bottom: 0; font-size: 13px; }
+
+  /* API sig */
+  .api-block { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; margin: 12px 0; overflow: hidden; }
+  .api-header { background: var(--surface2); padding: 10px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
+  .api-method { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+  .api-method.classm { background: #2d2260; color: var(--accent); }
+  .api-method.staticm { background: #1a2e2a; color: var(--accent2); }
+  .api-method.factm { background: #2e2010; color: var(--accent3); }
+  .api-name { font-family: monospace; font-size: 14px; color: var(--text); font-weight: 600; }
+  .api-body { padding: 14px 16px; font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+  .api-body ul { margin: 8px 0; }
+
+  /* Section anchors */
+  section[id] { scroll-margin-top: 20px; }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<nav id="sidebar">
+  <div id="sidebar-logo">
+    <div class="logo-title">TraceLens</div>
+    <div class="logo-sub">AMD GPU Performance Analysis</div>
+  </div>
+  <nav>
+    <div class="nav-section">Overview</div>
+    <a class="nav-link" href="#overview">Introduction</a>
+    <a class="nav-link" href="#quickstart">Quick Start</a>
+    <a class="nav-link" href="#architecture">Architecture</a>
+    <a class="nav-link" href="#pipeline">Data Pipeline</a>
+
+    <div class="nav-section">Modules</div>
+    <a class="nav-link" href="#util">util.py — Data Loading</a>
+    <a class="nav-link" href="#trace2tree">Trace2Tree</a>
+    <a class="nav-link sub" href="#pseudo-ops">↳ Pseudo-Op Extensions</a>
+    <a class="nav-link" href="#treeperf">TreePerf</a>
+    <a class="nav-link sub" href="#gpu-event">↳ GPUEventAnalyser</a>
+    <a class="nav-link" href="#perfmodel">PerfModel</a>
+    <a class="nav-link sub" href="#perfmodel-families">↳ Model Families</a>
+    <a class="nav-link sub" href="#perfmodel-extensions">↳ Extensions</a>
+    <a class="nav-link" href="#reporting">Reporting</a>
+    <a class="nav-link sub" href="#report-pytorch">↳ PyTorch Reports</a>
+    <a class="nav-link sub" href="#report-rocprof">↳ rocprofv3 Reports</a>
+    <a class="nav-link sub" href="#report-pftrace">↳ Perfetto Reports</a>
+    <a class="nav-link sub" href="#report-compare">↳ Comparison Reports</a>
+    <a class="nav-link" href="#nccl">NcclAnalyser</a>
+    <a class="nav-link" href="#tracediff">TraceDiff</a>
+    <a class="nav-link" href="#tracefusion">TraceFusion</a>
+    <a class="nav-link" href="#eventreplay">EventReplay</a>
+    <a class="nav-link" href="#traceutils">TraceUtils</a>
+    <a class="nav-link" href="#origami">Origami Integration</a>
+
+    <div class="nav-section">Reference</div>
+    <a class="nav-link" href="#cli">CLI Commands</a>
+    <a class="nav-link" href="#extensions-system">Extension System</a>
+    <a class="nav-link" href="#public-api">Public API</a>
+    <a class="nav-link" href="#testing">Testing</a>
+    <a class="nav-link" href="#file-index">File Index</a>
+  </nav>
+</nav>
+
+<!-- Main content -->
+<main id="main">
+
+<!-- Hero -->
+<div id="hero">
+  <h1>TraceLens</h1>
+  <p class="tagline">An AMD open-source library for automating GPU performance analysis from profiler trace files — turning raw traces into structured roofline analysis, kernel summaries, and communication reports.</p>
+  <div class="badges">
+    <span class="badge badge-purple">Python ≥ 3.6</span>
+    <span class="badge badge-green">PyTorch · JAX · rocprofv3 · Perfetto</span>
+    <span class="badge badge-orange">AMD ROCm</span>
+    <span class="badge badge-red">Copyright 2024–2025 AMD</span>
+  </div>
+</div>
+
+<!-- ───────────────────────────────── OVERVIEW ───────────────────────────────── -->
+<section id="overview">
+  <h2><span class="section-num">01</span>Introduction</h2>
+  <p class="section-desc">What TraceLens is, why it exists, and what problems it solves.</p>
+
+  <p>TraceLens is a Python library and CLI toolkit built by AMD for <strong>automated GPU performance analysis</strong>. It reads profiler trace files — output from PyTorch's built-in profiler, JAX's XPlane protobuf format, ROCm's <code>rocprofv3</code>, or Google's Perfetto — and produces structured Excel/CSV reports with roofline analysis, per-op performance metrics, NCCL collective analysis, and trace comparison.</p>
+
+  <p>The core insight is that raw trace files are unwieldy: they contain millions of events from CPU threads, GPU kernels, HIP runtime calls, and NCCL communication — all interleaved. TraceLens's job is to <strong>reconstruct the logical computation tree</strong>, attach GPU kernels to the CPU operations that launched them, apply analytical performance models (FLOPs, memory bytes, roofline bounds), and produce human-readable reports.</p>
+
+  <h3>What It Solves</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">🌲</div>
+      <div class="card-title">Tree reconstruction</div>
+      <div class="card-body">Converts flat timestamp-ordered events into a nested CPU call-stack tree with GPU kernels attached via correlation IDs.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📐</div>
+      <div class="card-title">Roofline analysis</div>
+      <div class="card-body">62+ performance model classes compute theoretical FLOPs and memory bytes for GEMM, SDPA, Conv, RMSNorm, MoE, and more. Compares measured vs. peak hardware throughput.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📡</div>
+      <div class="card-title">Collective analysis</div>
+      <div class="card-body">Multi-rank NCCL/RCCL collective analysis with bus bandwidth, skew metrics, and synchronization detection across all GPU ranks.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔀</div>
+      <div class="card-title">Trace comparison</div>
+      <div class="card-body">Morphological diff of two traces via tree edit distance (Wagner-Fischer), plus column-level Excel comparison of two perf reports.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧩</div>
+      <div class="card-title">Extensible system</div>
+      <div class="card-body">A three-part plugin system (tree_postprocess, perf_model, dict_cat2names) lets users inject custom ops, perf models, and categories without forking the library.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔄</div>
+      <div class="card-title">Operation replay</div>
+      <div class="card-body">EventReplayer re-executes operations from trace metadata via PyTorch JIT, enabling isolated benchmarking of individual ops.</div>
+    </div>
+  </div>
+
+  <h3>Supported Trace Formats</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Format</th><th>Source</th><th>File Type</th><th>Trace Backend</th></tr></thead>
+      <tbody>
+        <tr><td><strong>PyTorch</strong></td><td><code>torch.profiler</code></td><td><code>.json</code> / <code>.json.gz</code></td><td>CPU+GPU+NCCL events</td></tr>
+        <tr><td><strong>JAX / XPlane</strong></td><td>XProf protobuf</td><td><code>.pb</code> protobuf</td><td>HLO ops + GPU kernels</td></tr>
+        <tr><td><strong>rocprofv3</strong></td><td>ROCm profiler v3</td><td><code>.json</code></td><td>HIP API + kernel dispatch</td></tr>
+        <tr><td><strong>Perfetto (.pftrace)</strong></td><td>Google Perfetto</td><td><code>.pftrace</code> → JSON via traceconv</td><td>HIP API + GPU activity</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── QUICKSTART ───────────────────────────────── -->
+<section id="quickstart">
+  <h2><span class="section-num">02</span>Quick Start</h2>
+  <p class="section-desc">Install and generate your first report in under 5 minutes.</p>
+
+  <h3>Installation</h3>
+  <pre><code><span class="cm"># Clone and install</span>
+git clone https://github.com/amd/tracelens
+cd tracelens
+pip install -e .
+
+<span class="cm"># Optional: comparative analysis using slodels with LLM backends</span>
+pip install -e ".[comparative]"</code></pre>
+
+  <h3>Generate a PyTorch Performance Report (CLI)</h3>
+  <pre><code>TraceLens_generate_perf_report_pytorch \
+    --profile_json_path  path/to/trace.json.gz \
+    --output_xlsx_path   report.xlsx \
+    --output_csvs_dir    ./report_csvs/ \
+    --arch               mi300x</code></pre>
+
+  <h3>Generate a PyTorch Performance Report (Python API)</h3>
+  <pre><code><span class="kw">from</span> TraceLens <span class="kw">import</span> <span class="cls">TreePerfAnalyzer</span>
+
+<span class="cm"># Load trace, build tree, attach performance models</span>
+analyzer = <span class="cls">TreePerfAnalyzer</span>.<span class="fn">from_file</span>(
+    profile_filepath=<span class="str">"trace.json.gz"</span>,
+    arch=<span class="str">"mi300x"</span>,
+)
+
+<span class="cm"># GPU timeline breakdown (compute / comm / memcpy / idle)</span>
+df_timeline = analyzer.<span class="fn">get_df_gpu_timeline</span>()
+
+<span class="cm"># Full unified performance table</span>
+df_perf = analyzer.<span class="fn">build_df_unified_perf_table</span>()
+
+<span class="cm"># Summary by op category</span>
+df_summary = analyzer.<span class="fn">summarize_df_unified_perf_table</span>()
+print(df_summary)</code></pre>
+
+  <h3>Compare Two Traces</h3>
+  <pre><code>TraceLens_compare_perf_reports_pytorch \
+    --baseline_xlsx  baseline.xlsx \
+    --variant_xlsx   variant.xlsx \
+    --output_xlsx    comparison.xlsx</code></pre>
+
+  <h3>Multi-rank NCCL Analysis</h3>
+  <pre><code>TraceLens_generate_multi_rank_collective_report_pytorch \
+    --trace_dir  ./rank_traces/ \
+    --output_xlsx nccl_report.xlsx</code></pre>
+
+  <div class="callout callout-tip">
+    <div class="callout-title">Tip — Architecture JSON</div>
+    <p>The <code>--arch</code> argument selects a hardware config. TraceLens ships with presets (e.g. <code>mi300x</code>). You can also pass a path to a custom JSON file with fields: <code>name</code>, <code>freq_mhz</code>, <code>num_cus</code>, <code>mem_bw_gbps</code>, <code>l1_bw_gbps</code>, peak TFLOPS per dtype.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── ARCHITECTURE ───────────────────────────────── -->
+<section id="architecture">
+  <h2><span class="section-num">03</span>Architecture</h2>
+  <p class="section-desc">High-level package layout and how the subsystems relate.</p>
+
+  <h3>Package Layout</h3>
+  <pre><code>TraceLens/
+├── __init__.py                    <span class="cm"># 20+ public class exports</span>
+├── util.py                        <span class="cm"># DataLoader, parsers, event utilities</span>
+├── Trace2Tree/                    <span class="cm"># flat events → tree</span>
+│   ├── trace_to_tree.py
+│   ├── trace_capture_merge_experimental.py
+│   └── extensions/                <span class="cm"># pseudo-op injection plugins</span>
+├── TreePerf/                      <span class="cm"># tree → performance metrics</span>
+│   ├── tree_perf.py
+│   ├── gpu_event_analyser.py
+│   └── jax_analyses.py
+├── PerfModel/                     <span class="cm"># analytical FLOPs/bytes models</span>
+│   ├── perf_model.py              <span class="cm"># 62 model classes</span>
+│   ├── torch_op_mapping.py
+│   ├── jax_op_mapping.py
+│   ├── kernel_name_parser.py
+│   ├── origami_helper.py
+│   └── extensions/                <span class="cm"># 40+ inference-specific models</span>
+├── Reporting/                     <span class="cm"># Excel/CSV/Markdown output</span>
+│   ├── generate_perf_report_pytorch.py
+│   ├── generate_perf_report_pytorch_inference.py
+│   ├── generate_perf_report_jax.py
+│   ├── generate_perf_report_rocprof.py
+│   ├── generate_perf_report_pftrace_*.py  (×3)
+│   ├── compare_perf_reports_pytorch.py
+│   ├── compare_traces_jax_llama.py
+│   ├── generate_multi_rank_collective_report_pytorch.py
+│   ├── reporting_utils.py
+│   ├── rocprof_analysis.py
+│   ├── pftrace_*.py               (analysis + utils)
+│   └── ...
+├── NcclAnalyser/                  <span class="cm"># multi-rank collective analysis</span>
+│   ├── nccl_analyser.py
+│   ├── jax_nccl_analyser.py
+│   └── util/
+├── TraceDiff/                     <span class="cm"># tree edit distance comparison</span>
+│   └── trace_diff.py
+├── TraceFusion/                   <span class="cm"># merge multi-rank traces</span>
+│   └── trace_fuse.py
+├── EventReplay/                   <span class="cm"># replay ops via PyTorch JIT</span>
+│   ├── event_replay.py
+│   ├── utils.py
+│   └── batched_replay.py
+└── TraceUtils/                    <span class="cm"># inference trace preprocessing</span>
+    └── split_inference_trace_annotation.py</code></pre>
+
+  <h3>Subsystem Relationships</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Subsystem</th><th>Depends On</th><th>Produces</th></tr></thead>
+      <tbody>
+        <tr><td><strong>util.py</strong></td><td>orjson, xprof protobuf</td><td>Raw event dicts, parsed data</td></tr>
+        <tr><td><strong>Trace2Tree</strong></td><td>util.py</td><td>Nested event tree (CPU+GPU linked)</td></tr>
+        <tr><td><strong>PerfModel</strong></td><td>Architecture JSON</td><td>FLOPs, bytes, roofline predictions</td></tr>
+        <tr><td><strong>TreePerf</strong></td><td>Trace2Tree + PerfModel</td><td>DataFrames: unified table, timeline, kernel summary</td></tr>
+        <tr><td><strong>NcclAnalyser</strong></td><td>util.py (multi-rank)</td><td>Collective bandwidth, skew, sync analysis</td></tr>
+        <tr><td><strong>Reporting</strong></td><td>TreePerf + NcclAnalyser</td><td>Excel/CSV/Markdown reports</td></tr>
+        <tr><td><strong>TraceDiff</strong></td><td>Trace2Tree (×2)</td><td>Edit distance, diff stats DataFrame</td></tr>
+        <tr><td><strong>TraceFusion</strong></td><td>util.py (multi-rank)</td><td>Merged Perfetto-compatible JSON</td></tr>
+        <tr><td><strong>EventReplay</strong></td><td>TreePerf event metadata</td><td>Benchmarked op execution times</td></tr>
+        <tr><td><strong>TraceUtils</strong></td><td>util.py</td><td>Preprocessed / split inference traces</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── PIPELINE ───────────────────────────────── -->
+<section id="pipeline">
+  <h2><span class="section-num">04</span>Data Pipeline</h2>
+  <p class="section-desc">How data flows from a raw trace file to a finished performance report.</p>
+
+  <h3>Main PyTorch Pipeline</h3>
+  <div class="pipeline">
+    <div class="pipe-step"><div class="ps-label">Input</div><div class="ps-name">trace.json.gz</div><div class="ps-sub">torch.profiler</div></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step"><div class="ps-label">Step 1</div><div class="ps-name">DataLoader</div><div class="ps-sub">util.py</div></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step"><div class="ps-label">Step 2</div><div class="ps-name">TraceToTree</div><div class="ps-sub">Trace2Tree</div></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step"><div class="ps-label">Step 3</div><div class="ps-name">Pseudo-Ops</div><div class="ps-sub">extensions/</div></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step"><div class="ps-label">Step 4</div><div class="ps-name">TreePerfAnalyzer</div><div class="ps-sub">TreePerf</div></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step"><div class="ps-label">Step 5</div><div class="ps-name">PerfModel</div><div class="ps-sub">62+ classes</div></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step"><div class="ps-label">Output</div><div class="ps-name">report.xlsx</div><div class="ps-sub">Reporting/</div></div>
+  </div>
+
+  <h3>Step-by-step Breakdown</h3>
+  <ol>
+    <li><strong>Load</strong> — <code>DataLoader.load_data(path)</code> reads the compressed JSON using <code>orjson</code> for performance. The result is a list of raw trace event dicts.</li>
+    <li><strong>Categorize events</strong> — <code>TraceEventUtils</code> separates events by <code>ph</code> (phase) field: <code>X</code> (complete events), <code>B/E</code> (begin/end pairs), <code>M</code> (metadata), <code>s/f</code> (flow events for forward/backward linking).</li>
+    <li><strong>Build tree</strong> — <code>TraceToTree.build_host_call_stack_tree()</code> sorts CPU events by timestamp and constructs a parent-child nesting based on temporal containment. Four layers: Python frontend → PyTorch op / cpu_op → HIP/CUDA runtime → GPU kernel.</li>
+    <li><strong>Link GPU kernels</strong> — <code>add_gpu_ops_to_tree()</code> correlates each GPU kernel to its CPU launcher via the <code>correlation</code> or <code>External id</code> field in <code>args</code>.</li>
+    <li><strong>Link fwd/bwd</strong> — <code>link_all_fwd_bwd_events()</code> uses autograd flow events (<code>ph: 's'/'f'</code>) to associate forward ops with their backward counterparts.</li>
+    <li><strong>Inject pseudo-ops</strong> — <code>apply_pseudo_op_extensions(tree)</code> scans for known fused kernel patterns (MoE, MLA decode, etc.) and inserts synthetic CPU ops so individual kernels get their own roofline entries.</li>
+    <li><strong>Attach perf models</strong> — <code>TreePerfAnalyzer.compute_perf_metrics(event, arch)</code> looks up the op name in <code>op_to_perf_model_class_map</code>, instantiates the right perf model class, and calls <code>.flops()</code> / <code>.bytes()</code>.</li>
+    <li><strong>Compute timeline</strong> — <code>GPUEventAnalyser</code> merges overlapping GPU kernel intervals using interval arithmetic to compute: computation, exposed communication, exposed memcpy, busy, and idle time.</li>
+    <li><strong>Build DataFrames</strong> — <code>build_df_unified_perf_table()</code> collects all annotated tree nodes into a flat DataFrame with 50+ columns covering timing, shapes, FLOPs, bytes, kernel details, NCCL options.</li>
+    <li><strong>Write report</strong> — <code>generate_perf_report_pytorch()</code> writes multiple sheets to an <code>.xlsx</code> file and optionally per-sheet CSVs.</li>
+  </ol>
+
+  <h3>Parallel Pipelines</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Pipeline</th><th>Input</th><th>Key Difference</th></tr></thead>
+      <tbody>
+        <tr><td><strong>JAX</strong></td><td>.pb protobuf</td><td>Uses <code>JaxTraceToTree</code> + <code>JaxProfileProcessor</code> for HLO op parsing; GEMM dims from XPlane metadata</td></tr>
+        <tr><td><strong>rocprofv3</strong></td><td>.json</td><td>Uses <code>RocprofParser</code> + <code>RocprofAnalyzer</code>; no tree — flat kernel/API event analysis</td></tr>
+        <tr><td><strong>Perfetto</strong></td><td>.pftrace</td><td>Converted to JSON via <code>traceconv</code>; three specialized analyzers for HIP API, GPU activity, and memory copies</td></tr>
+        <tr><td><strong>TraceDiff</strong></td><td>Two trace files</td><td>Builds two trees, runs Wagner-Fischer edit distance, merges aligned trees</td></tr>
+        <tr><td><strong>TraceFusion</strong></td><td>N rank trace files</td><td>Merges raw events with rank metadata into a single Perfetto-compatible JSON</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── UTIL ───────────────────────────────── -->
+<section id="util">
+  <h2><span class="section-num">05</span>util.py — Data Loading &amp; Event Utilities</h2>
+  <p class="section-desc"><code>TraceLens/util.py</code> · 824 lines · Central utilities for loading trace data and classifying events.</p>
+
+  <h3>DataLoader</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">DataLoader</span></div>
+    <div class="api-body">
+      <strong>Purpose:</strong> Reads trace JSON files using <code>orjson</code> for fast deserialization.
+      <ul>
+        <li><code>load_data(path: str) → dict</code> — Reads <code>.json</code> or <code>.json.gz</code>; returns the full trace dict (with <code>traceEvents</code>, <code>displayTimeUnit</code>, etc.)</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>TraceEventUtils</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">TraceEventUtils</span></div>
+    <div class="api-body">
+      Namespace of constants and utilities for working with Chrome Trace Format events.
+      <h4>Nested Constant Classes</h4>
+      <ul>
+        <li><code>TraceKeys</code> — Field name constants: <code>ph</code>, <code>cat</code>, <code>name</code>, <code>ts</code>, <code>dur</code>, <code>pid</code>, <code>tid</code>, <code>args</code></li>
+        <li><code>TracePhases</code> — Phase values: <code>X</code> (complete), <code>B</code>/<code>E</code> (begin/end), <code>M</code> (metadata), <code>s</code>/<code>f</code> (flow start/finish)</li>
+        <li><code>MetadataFields</code> — Metadata event name constants: <code>process_name</code>, <code>thread_name</code></li>
+        <li><code>JaxOpKeys</code> — Nested: <code>GemmKeys</code>, <code>FABwdKeys</code>, <code>FAFwdKeys</code>, <code>CommunicationKeys</code></li>
+      </ul>
+      <h4>Key Functions</h4>
+      <ul>
+        <li><code>is_communication_string(name: str) → bool</code> — Returns <code>True</code> if <code>name</code> matches known NCCL/RCCL collective patterns (allreduce, allgather, reducescatter, broadcast, send, recv)</li>
+        <li><code>split_by_field(events, field) → dict</code> — Groups event list by the value of <code>field</code></li>
+        <li><code>prepare_event_categorizer() → Callable</code> — Returns a function that classifies a kernel event into category strings</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Format-Specific Parsers</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Class</th><th>Format</th><th>Key Static Methods</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>RocprofParser</code></td>
+          <td>rocprofv3 JSON</td>
+          <td><code>load_rocprof_data()</code>, <code>extract_kernel_events()</code>, <code>extract_memory_events()</code>, <code>extract_api_events()</code>, <code>get_metadata()</code></td>
+        </tr>
+        <tr>
+          <td><code>PftraceParser</code></td>
+          <td>Perfetto JSON</td>
+          <td><code>load_pftrace_data()</code>, <code>get_events()</code></td>
+        </tr>
+        <tr>
+          <td><code>JaxProfileProcessor</code></td>
+          <td>JAX XPlane protobuf</td>
+          <td>HLO parsing, GEMM extraction from XPlane metadata</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── TRACE2TREE ───────────────────────────────── -->
+<section id="trace2tree">
+  <h2><span class="section-num">06</span>Trace2Tree</h2>
+  <p class="section-desc"><code>TraceLens/Trace2Tree/trace_to_tree.py</code> · 1218 lines · Converts flat trace events into a hierarchical tree.</p>
+
+  <p>The tree structure is the foundation of TraceLens's analysis. Instead of working with millions of flat events, TraceLens reconstructs the <strong>logical call stack</strong> that was executing when each GPU kernel ran — so performance data can be attributed to the right PyTorch op, nn.Module, or user-annotated region.</p>
+
+  <h3>Tree Layer Model</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Layer</th><th>Category</th><th>Example Events</th></tr></thead>
+      <tbody>
+        <tr><td>Layer 0</td><td>Python frontend / user code</td><td><code>model.forward()</code>, custom annotations</td></tr>
+        <tr><td>Layer 1</td><td>PyTorch op / <code>cpu_op</code></td><td><code>aten::linear</code>, <code>aten::scaled_dot_product_attention</code></td></tr>
+        <tr><td>Layer 2</td><td>HIP/CUDA runtime</td><td><code>hipLaunchKernel</code>, <code>cudaLaunchKernel</code></td></tr>
+        <tr><td>Layer 3 (leaves)</td><td>GPU kernels</td><td><code>void gemm_kernel&lt;...&gt;</code>, NCCL ops</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>BaseTraceToTree (Abstract)</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">ABSTRACT CLASS</span><span class="api-name">BaseTraceToTree</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>build_host_call_stack_tree()</code> — Sorts CPU events by <code>ts</code>, then uses a stack to detect parent-child containment. A child event's <code>[ts, ts+dur]</code> interval falls within its parent's interval.</li>
+        <li><code>label_non_gpu_paths()</code> — Post-order traversal marking nodes that have no GPU kernel descendants (used to skip pure-CPU paths in reporting).</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>TraceToTree (PyTorch)</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">TraceToTree(BaseTraceToTree)</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>add_gpu_ops_to_tree()</code> — Builds a map from <code>correlation</code> / <code>External id</code> → GPU kernel. Walks the CPU tree; when a runtime call has a matching correlation ID, attaches the GPU kernel as a <code>gpu_children</code> entry on the nearest CPU op ancestor.</li>
+        <li><code>link_all_fwd_bwd_events()</code> — Reads autograd flow events (<code>ph: 's'</code> = fwd start, <code>ph: 'f'</code> = bwd finish) to link forward PyTorch ops to their corresponding backward ops. Enables attribution of backward GPU time to the originating forward operation.</li>
+        <li><code>apply_annotation(annotation_fn)</code> — Traverses the tree and calls a user function on each node to set the <code>annotation</code> field. Used by the inference analysis pipeline.</li>
+        <li><code>traverse_subtree_and_print(node, depth)</code> — Debug utility that pretty-prints the tree.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>JaxTraceToTree</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">JaxTraceToTree(BaseTraceToTree)</span></div>
+    <div class="api-body">JAX variant that uses <code>correlation_id</code> linking from the XPlane protobuf format. Integrates with <code>JaxProfileProcessor</code> for HLO-level metadata.</div>
+  </div>
+
+  <h3>Graph Capture / Replay Merging</h3>
+  <p><code>trace_capture_merge_experimental.py</code> (573 lines) handles the vLLM/SGLang graph capture pattern where CUDA/HIP graph capture and replay produce different event layouts. It detects dummy-run patterns and merges graph capture events with their replay counterparts so the analysis is coherent.</p>
+
+  <div id="pseudo-ops">
+  <h3>Pseudo-Op Extensions</h3>
+  <p><code>TraceLens/Trace2Tree/extensions/</code> — A system for injecting synthetic CPU ops ("pseudo-ops") into the tree. This is needed when a single CPU op launches multiple GPU kernels that should each have their own roofline entry — e.g. a fused MoE layer that runs separate up-projection and down-projection GEMMs.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Extension File</th><th>Pattern Detected</th><th>Pseudo-Op Created</th></tr></thead>
+      <tbody>
+        <tr><td><code>mla_decode_pseudo_ops.py</code></td><td><code>aiter/mla.py(\d+): mla_decode_fwd</code></td><td><code>pseudo_mla_decode_fwd</code></td></tr>
+        <tr><td><code>moe_aiter_pseudo_ops.py</code></td><td><code>vllm::rocm_aiter_fused_moe</code> + <code>aiter::*fmoe*</code></td><td><code>pseudo_op::moe_aiter_fused_1stage</code></td></tr>
+        <tr><td><code>moe_gptq_awq_pseudo_ops.py</code></td><td><code>vllm::outplace_fused_experts</code> + 2× <code>fused_moe_kernel_gptq_awq</code></td><td><code>pseudo_op::moe_gptq_awq_up</code> / <code>_down</code></td></tr>
+        <tr><td><code>moe_unfused_triton_pseudo_ops.py</code></td><td><code>vllm::moe_forward</code> + Triton <code>matmul_ogs</code> kernels</td><td>Per-kernel <code>pseudo_op::moe_triton_unfused_up/down</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-info">
+    <div class="callout-title">How Pseudo-Ops Work</div>
+    <p><code>inject_pseudo_op(parent, kernel, name, extra_args)</code> inserts a new synthetic node between a parent CPU op and a GPU kernel child. The synthetic node carries metadata (MoE type, topk, gated flag, etc.) that the perf model uses to compute FLOPs and bytes. <code>apply_pseudo_op_extensions(tree)</code> auto-detects all four patterns and applies the appropriate injection.</p>
+  </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── TREEPERF ───────────────────────────────── -->
+<section id="treeperf">
+  <h2><span class="section-num">07</span>TreePerf — Performance Analysis Engine</h2>
+  <p class="section-desc"><code>TraceLens/TreePerf/tree_perf.py</code> · 3489 lines · The central analysis class combining tree structure with performance models.</p>
+
+  <h3>TreePerfAnalyzer</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method factm">FACTORY</span><span class="api-name">TreePerfAnalyzer.from_file(profile_filepath, arch, enable_origami, extension_file, ...)</span></div>
+    <div class="api-body">Primary entry point. Loads the trace, builds the tree, runs pseudo-op extensions, and returns a fully initialized <code>TreePerfAnalyzer</code>. Parameters include:
+      <ul>
+        <li><code>profile_filepath</code> — Path to .json or .json.gz trace</li>
+        <li><code>arch</code> — Architecture name or path to architecture JSON</li>
+        <li><code>enable_origami</code> — Use ROCm Origami for GEMM/SDPA simulation instead of analytical models</li>
+        <li><code>extension_file</code> — Path to user extension Python file</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>GPU Timeline</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">METHOD</span><span class="api-name">get_df_gpu_timeline(split_recompute=False) → DataFrame</span></div>
+    <div class="api-body">Returns a DataFrame with columns:
+      <ul>
+        <li><code>computation_time_us</code> — GPU time in compute kernels</li>
+        <li><code>exposed_comm_time_us</code> — NCCL/RCCL time not overlapped with compute</li>
+        <li><code>exposed_memcpy_time_us</code> — Memory copy time not overlapped with compute</li>
+        <li><code>busy_time_us</code> — Total non-idle GPU time</li>
+        <li><code>idle_time_us</code> — Wall time with no GPU activity</li>
+        <li><code>total_time_us</code> — Total trace wall time</li>
+        <li>If <code>split_recompute=True</code>: <code>recompute_time_us</code> and <code>forward_time_us</code> separated</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Unified Performance Table</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">METHOD</span><span class="api-name">build_df_unified_perf_table() → DataFrame</span></div>
+    <div class="api-body">
+      The most comprehensive output method. Traverses the entire tree collecting four event types:
+      <ol>
+        <li>Events with matching perf models (ops in <code>op_to_perf_model_class_map</code>)</li>
+        <li>1:1 backward ops linked to forward ops</li>
+        <li>Leaf CPU ops that launch GPU kernels but have no perf model</li>
+        <li>Orphan GPU kernels (no CPU parent found)</li>
+      </ol>
+      Result columns include: <code>op_name</code>, <code>cat</code>, <code>ts</code>, <code>dur</code>, <code>kernel_time_us</code>, <code>flops</code>, <code>bytes</code>, <code>tflops_s</code>, <code>tb_s</code>, <code>roofline_bound</code>, <code>Concrete Inputs</code>, <code>kernel_names</code>, <code>nccl_options</code>, and many more.
+    </div>
+  </div>
+
+  <h3>Kernel Launcher Analysis</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">METHOD</span><span class="api-name">get_df_kernel_launchers(include_kernel_details, include_call_stack, include_first_occurrence_time) → DataFrame</span></div>
+    <div class="api-body">Returns CPU ops that launched GPU kernels, with optional columns for kernel names, full call stack, and first-occurrence timestamp. Useful for identifying the top kernel launchers by count or duration.</div>
+  </div>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">METHOD</span><span class="api-name">get_df_kernel_launchers_summary() → DataFrame</span></div>
+    <div class="api-body">Count, cumulative percentage, and time breakdown — the "long tail" launcher summary.</div>
+  </div>
+
+  <h3>Other Key Methods</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Method</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr><td><code>build_df_perf_metrics()</code></td><td>DataFrame of all events with assigned perf models and computed FLOPs/bytes</td></tr>
+        <tr><td><code>summarize_df_perf_metrics()</code></td><td>Aggregated summary by op name</td></tr>
+        <tr><td><code>get_kernel_details(launcher_detail, cpu_op_detail, nn_module_detail)</code></td><td>Per-kernel metadata with optional parent call-stack levels</td></tr>
+        <tr><td><code>get_df_kernels()</code></td><td>Raw GPU kernel DataFrame (name, ts, dur, device)</td></tr>
+        <tr><td><code>build_nn_module_latency_tree()</code></td><td>Hierarchical nn.Module latency breakdown matching PyTorch's module tree</td></tr>
+        <tr><td><code>summarize_df_unified_perf_table()</code></td><td>Aggregated with static (per-iter) vs time-varying metric handling</td></tr>
+        <tr><td><code>agg_kernels_in_subtree(node)</code></td><td>Total GPU kernel time under a subtree node</td></tr>
+        <tr><td><code>_detect_recompute_events()</code></td><td>Marks gradient checkpointing recomputation nodes in the tree</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>JaxTreePerfAnalyzer</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">JaxTreePerfAnalyzer(TreePerfAnalyzer)</span></div>
+    <div class="api-body">Extends <code>TreePerfAnalyzer</code> for JAX traces. Key overrides:
+      <ul>
+        <li><code>from_file()</code> — Uses <code>JaxTraceToTree</code> and <code>JaxGPUEventAnalyser</code></li>
+        <li><code>parse_operands(operand_str)</code> — Parses JAX tensor shape strings like <code>bf16[67320,12288]{1,0}</code> into (dtype, shape) tuples</li>
+        <li><code>parse_JaxGemm_metadata()</code> — Extracts M/N/K/dtype from XPlane metadata via <code>JaxProfileProcessor</code></li>
+        <li><code>get_df_xla_perf()</code> — XLA-specific performance table including <code>total_input_bytes</code></li>
+        <li><code>compute_perf_metrics()</code> — Uses <code>jax_op_to_perf_model_class_map</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <div id="gpu-event">
+  <h3>GPUEventAnalyser</h3>
+  <p><code>TraceLens/TreePerf/gpu_event_analyser.py</code> · 508 lines · Computes GPU utilization via interval arithmetic.</p>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">GPUEventAnalyser</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>merge_intervals(intervals) → list</code> — Merges overlapping <code>[start, end]</code> intervals into a minimal set of non-overlapping intervals. O(n log n).</li>
+        <li><code>subtract_intervalsA_from_B(A, B) → list</code> — Set-difference: returns the parts of B not covered by any interval in A.</li>
+        <li><code>get_gpu_event_lists()</code> — Separates all GPU events into three lists: computation, communication (NCCL/RCCL), memcpy.</li>
+        <li><code>compute_metrics_dict() → dict</code> — Applies merge + subtract to produce: <code>computation</code>, <code>exposed_comm</code>, <code>exposed_memcpy</code>, <code>busy</code>, <code>idle</code>, <code>total</code> in microseconds.</li>
+      </ul>
+      <div class="callout callout-info" style="margin-top:12px">
+        <div class="callout-title">Interval Arithmetic</div>
+        <p><em>Exposed communication</em> = comm intervals that don't overlap compute. <em>Exposed memcpy</em> = memcpy intervals not overlapped by compute or exposed comm. This gives the true serialized overhead, not the raw collective time.</p>
+      </div>
+    </div>
+  </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── PERFMODEL ───────────────────────────────── -->
+<section id="perfmodel">
+  <h2><span class="section-num">08</span>PerfModel — Analytical Performance Models</h2>
+  <p class="section-desc"><code>TraceLens/PerfModel/perf_model.py</code> · 5355 lines · 62 classes providing FLOPs, memory bytes, and roofline predictions for GPU operations.</p>
+
+  <p>Each perf model class corresponds to one or more PyTorch ops (e.g., <code>aten::mm</code>, <code>aten::scaled_dot_product_attention</code>). Given the op's tensor shapes (from the trace's <code>Concrete Inputs</code> field), it computes:</p>
+  <ul>
+    <li><strong>FLOPs</strong> — Floating-point operations (arithmetic count)</li>
+    <li><strong>Bytes</strong> — HBM bytes read and written</li>
+    <li><strong>Roofline bound</strong> — Whether the op is compute-bound or memory-bandwidth-bound given the architecture</li>
+    <li><strong>Simulation time</strong> (optional) — For GEMM/SDPA: subprocess-based or Origami-based hardware simulation</li>
+  </ul>
+
+  <div id="perfmodel-families">
+  <h3>Model Families</h3>
+
+  <h4>1. GEMM Family</h4>
+  <p>Base class for all matrix multiply operations. <code>flops_func(M, N, K, bias) = 2·M·N·K + (M·N if bias)</code>. Bytes = read A + read B + optional bias read + write output.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Class</th><th>Operation</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>aten_mm</code></td><td><code>aten::mm</code></td><td>Basic C = A·B</td></tr>
+        <tr><td><code>aten_addmm</code></td><td><code>aten::addmm</code></td><td>C = beta·C + alpha·A·B</td></tr>
+        <tr><td><code>aten_scaled_mm</code></td><td><code>aten::_scaled_mm</code></td><td>FP8 scaled GEMM</td></tr>
+        <tr><td><code>aten_bmm</code></td><td><code>aten::bmm</code></td><td>Batched A·B</td></tr>
+        <tr><td><code>aten_baddbmm</code></td><td><code>aten::baddbmm</code></td><td>Batched addmm</td></tr>
+        <tr><td><code>vllm_gemm_with_dynamic_quant</code></td><td>vLLM dynamic-quant GEMM</td><td>FP8 quantized output</td></tr>
+        <tr><td><code>tex_ts_te_gemm_ts</code></td><td>TransformerEngine TE GEMM</td><td>Used by Megatron-LM</td></tr>
+        <tr><td><code>tev2_pseudo_gemm</code></td><td>TEv2 pseudo GEMM</td><td>Synthetic op for fused TE layers</td></tr>
+        <tr><td><code>jax_gemm</code></td><td>JAX lax.dot_general</td><td>XLA GEMM</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>2. CONV Family</h4>
+  <p>Supports Conv1d/2d/3d, transposed convolutions, and fused bias/ReLU variants. Output shape computed analytically from kernel size, stride, padding, dilation. Forward parameters cached for use by backward pass via <code>fwd_pass_cache</code>.</p>
+
+  <h4>3. Softmax</h4>
+  <p><code>flops_func(M, N, B) = B·M·3·N</code> (exp + sum + div for each of N elements across M rows). Uses roofline to distinguish L1-resident vs HBM-bound cases.</p>
+
+  <h4>4. SDPA Family — Scaled Dot Product Attention</h4>
+  <p>The most complex model family, covering all flash attention variants.</p>
+  <pre><code><span class="cm"># Forward FLOPs (non-causal)</span>
+QK_flops = 2 * B * H_Q * N_Q * N_KV * d_h_qk   <span class="cm"># Q·K^T</span>
+PV_flops = 2 * B * H_Q * N_Q * N_KV * d_h_v    <span class="cm"># P·V</span>
+total_fwd = QK_flops + PV_flops
+<span class="cm"># For causal: halved (upper triangle masked)</span>
+total_fwd_causal = total_fwd / 2</code></pre>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Class</th><th>Operation</th></tr></thead>
+      <tbody>
+        <tr><td><code>flash_attention</code></td><td>FA2 forward</td></tr>
+        <tr><td><code>flash_attention_backward</code></td><td>FA2 backward (recompute + dQ/dK/dV)</td></tr>
+        <tr><td><code>flash_attention_varlen_forward/backward</code></td><td>Variable sequence length variants</td></tr>
+        <tr><td><code>aiter__flash_attn_forward/backward</code></td><td>AITer flash attention</td></tr>
+        <tr><td><code>aiter__fmha_v3_forward/backward</code></td><td>AITer FMHA v3</td></tr>
+        <tr><td><code>vllm_unified_attention_with_output</code></td><td>vLLM unified attention (chunked-prefill + generation)</td></tr>
+        <tr><td><code>evoformer_attention</code></td><td>AlphaFold Evoformer biased attention</td></tr>
+        <tr><td><code>jax_te_fused_attn</code></td><td>JAX TransformerEngine fused attention</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>5. Elementwise Family</h4>
+  <ul>
+    <li><strong>UnaryElementwise</strong> — <code>FLOPs = nelems</code>, <code>bytes = nelems × (bpe_in + bpe_out)</code></li>
+    <li><strong>BinaryElementwise</strong> — With NumPy-style broadcast shape computation. <code>FLOPs = nelems_out</code>.</li>
+  </ul>
+
+  <h4>6. Reduce Family</h4>
+  <p><code>FLOPs = num_input_elems</code>. Parses reduction <code>dim</code> and <code>keepdim</code> from Concrete Inputs. Detects reduce type: sum/mean/max/min/norm/cumsum/cumprod.</p>
+
+  <h4>7. GroupedGemm Family</h4>
+  <p>Multi-group GEMM for MoE expert layers.</p>
+  <ul>
+    <li><code>primus_turbo_grouped_gemm</code> — Fixed K across groups</li>
+    <li><code>primus_turbo_grouped_gemm_variable_k</code> — Variable K per group, sums per-group FLOPs</li>
+  </ul>
+
+  <h4>8. Normalization Family</h4>
+  <p>Detailed FLOPs accounting for training vs inference, affine/non-affine, bias, and backward pass <code>output_mask</code>.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Class Pair</th><th>Forward FLOPs</th></tr></thead>
+      <tbody>
+        <tr><td><code>BatchNorm / BatchNormBwd</code></td><td>per-channel stats + normalize + affine</td></tr>
+        <tr><td><code>LayerNorm / LayerNormBwd</code></td><td>mean + var + normalize + affine</td></tr>
+        <tr><td><code>GroupNorm / GroupNormBwd</code></td><td>group-wise mean + var + normalize</td></tr>
+        <tr><td><code>RMSNorm / RMSNormBwd</code></td><td><code>non_norm × (2×channels+2) + elems × (2 if affine else 1)</code></td></tr>
+        <tr><td><code>InstanceNorm / InstanceNormBwd</code></td><td>per-instance mean + var + normalize</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>9. Specialized Operations</h4>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Class</th><th>FLOPs</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>FusedRoPE / fused_rope_fwd</code></td><td><code>3 × nelems</code></td><td>Rotary position embedding: 6 ops per pair</td></tr>
+        <tr><td><code>CrossEntropy / cross_entropy_fwd</code></td><td><code>5 × B × vocab</code></td><td>Fused softmax + NLL</td></tr>
+        <tr><td><code>CausalConv1d / causal_conv1d_fwd</code></td><td><code>2 × B × C × L × K</code></td><td>Depthwise 1D causal conv</td></tr>
+        <tr><td><code>MambaSSD / mamba_ssd_fwd</code></td><td>Conv1d + 4 SSD matmuls</td><td>Mamba-2 state-space model</td></tr>
+        <tr><td><code>MoEComm / moe_dispatch / moe_combine</code></td><td>0 (pure comm)</td><td>Bytes = tokens × hidden_dim × bpe</td></tr>
+      </tbody>
+    </table>
+  </div>
+  </div>
+
+  <div id="perfmodel-extensions">
+  <h3>PerfModel Extensions</h3>
+  <p><code>TraceLens/PerfModel/extensions/</code> · 40+ additional classes for inference-specific patterns.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>File</th><th>Key Classes</th><th>Coverage</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>perf_model_extensions.py</code></td>
+          <td><code>gemm_a8w8_blockscale</code>, <code>batched_gemm_a16wfp4</code>, <code>batched_gemm_a8w8</code>, <code>per_group_quant</code>, <code>aiter_silu_and_mul</code></td>
+          <td>Quantized GEMMs (INT8/FP8/FP4), dynamic quantization ops, activation functions</td>
+        </tr>
+        <tr>
+          <td><code>moe_perf_model_extensions.py</code></td>
+          <td><code>FusedMoE</code>, <code>moe_aiter_fused_1stage</code>, <code>UnfusedMoE_Up/Down</code>, <code>moe_gptq_awq_up/down</code></td>
+          <td>All MoE GEMM variants: fused 1-stage, unfused up/down, INT4 GPTQ/AWQ quantized</td>
+        </tr>
+        <tr>
+          <td><code>attention_perf_model_extensions.py</code></td>
+          <td><code>InferenceAttention</code>, <code>mla_decode_fwd</code>, <code>mla_tilelang_sparse_fwd</code>, <code>gdn_attention_core</code></td>
+          <td>Inference attention with chunked-prefill + generation parameter parsing</td>
+        </tr>
+        <tr>
+          <td><code>rmsnorm_perf_model_extensions.py</code></td>
+          <td><code>aiter_rms_norm</code>, <code>aiter_rmsnorm2d_fwd_with_dynamicquant_ck</code>, <code>vllm_rocm_aiter_rmsnorm_fp8_group_quant</code></td>
+          <td>Fused RMSNorm variants: + FP8 quant, + residual add, + group quant</td>
+        </tr>
+        <tr>
+          <td><code>custom_collectives_perf_model_extensions.py</code></td>
+          <td><code>aiter_fused_allreduce_rmsnorm</code>, <code>custom_ar_all_reduce</code>, <code>aiter_reduce_scatter</code></td>
+          <td>Fused allreduce+RMSNorm, custom AR, reduce-scatter, all-gather</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Op Mapping</h3>
+  <p><code>torch_op_mapping.py</code> contains <code>op_to_perf_model_class_map</code> — a dict mapping 70+ PyTorch op name strings to perf model classes. It also defines <code>dict_base_class2category</code> mapping base classes to category names (GEMM, CONV, SDPA_fwd, SDPA_bwd, Elementwise, Normalization, Reduce, GroupedGemm, MoEComm, CausalConv1d, FusedRoPE, CrossEntropy, MambaSSD).</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── REPORTING ───────────────────────────────── -->
+<section id="reporting">
+  <h2><span class="section-num">09</span>Reporting</h2>
+  <p class="section-desc"><code>TraceLens/Reporting/</code> · Multi-format report generation for all trace backends.</p>
+
+  <div id="report-pytorch">
+  <h3>PyTorch Report (<code>generate_perf_report_pytorch.py</code>)</h3>
+  <p>~1273 lines. The main report generator with 25+ parameters.</p>
+  <pre><code><span class="fn">generate_perf_report_pytorch</span>(
+    profile_json_path,       <span class="cm"># input trace</span>
+    output_xlsx_path,        <span class="cm"># output Excel</span>
+    output_csvs_dir,         <span class="cm"># optional per-sheet CSVs</span>
+    arch,                    <span class="cm"># hardware architecture</span>
+    extension_file,          <span class="cm"># user extension .py</span>
+    enable_origami,          <span class="cm"># Origami simulation</span>
+    simplified_nccl_mode,    <span class="cm"># fast NCCL analysis</span>
+    <span class="cm"># ... 18 more options</span>
+)</code></pre>
+
+  <h4>Output Excel Sheets</h4>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Sheet Name</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td><code>gpu_timeline</code></td><td>Compute / exposed-comm / exposed-memcpy / busy / idle breakdown</td></tr>
+        <tr><td><code>ops_summary_by_category</code></td><td>Time and FLOPs aggregated by op category (GEMM, SDPA, etc.)</td></tr>
+        <tr><td><code>ops_summary</code></td><td>Per-op-name time and FLOPs summary</td></tr>
+        <tr><td><code>ops_unique_args</code></td><td>Unique argument combinations per op</td></tr>
+        <tr><td><code>unified_perf_summary</code></td><td>Full annotated tree — the primary analysis sheet</td></tr>
+        <tr><td><code>GEMM_roofline</code></td><td>GEMM ops on arithmetic intensity vs TFLOPS/s plot</td></tr>
+        <tr><td><code>CONV_roofline</code></td><td>Convolution roofline</td></tr>
+        <tr><td><code>SDPA_fwd_roofline</code></td><td>Flash attention forward roofline</td></tr>
+        <tr><td><code>SDPA_bwd_roofline</code></td><td>Flash attention backward roofline</td></tr>
+        <tr><td><code>kernel_summary</code></td><td>Per-kernel GPU time, count, and percentage</td></tr>
+        <tr><td><code>short_kernel_histogram</code></td><td>Histogram of short kernels by duration bucket</td></tr>
+        <tr><td><code>short_kernels_summary</code></td><td>Short kernel overhead summary</td></tr>
+        <tr><td><code>coll_analysis</code></td><td>NCCL collective time and overlap analysis</td></tr>
+      </tbody>
+    </table>
+  </div>
+  </div>
+
+  <div id="report-rocprof">
+  <h3>rocprofv3 Report (<code>generate_perf_report_rocprof.py</code>)</h3>
+  <p>280 lines. Uses <code>RocprofParser</code> for loading and <code>RocprofAnalyzer</code> for analysis. No tree structure — operates on flat kernel dispatch events.</p>
+  <p>Sheets: <code>gpu_timeline</code>, <code>kernel_summary</code>, <code>kernel_summary_by_category</code>, <code>kernel_details</code>, <code>short_kernels_summary</code>, <code>short_kernel_histogram</code>.</p>
+  </div>
+
+  <div id="report-pftrace">
+  <h3>Perfetto (.pftrace) Reports</h3>
+  <p>Three specialized generators, each targeting a different analysis angle of Perfetto traces. All require <code>traceconv</code> to convert <code>.pftrace</code> → JSON first (auto-downloaded if not found).</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Generator</th><th>Analyzer Class</th><th>Primary Output</th></tr></thead>
+      <tbody>
+        <tr><td><code>generate_perf_report_pftrace_hip_api.py</code></td><td><code>PftraceHipApiAnalyzer</code></td><td>HIP API → kernel correlation; T/A/Q/K time breakdown per (PID, TID, DevId, API, Kernel) tuple</td></tr>
+        <tr><td><code>generate_perf_report_pftrace_hip_activity.py</code></td><td><code>PftraceHipActivityAnalyzer</code></td><td>GPU category summary (xla/gemm/ckfwd/aiterfwd/rccl/memcpy/te), kernel summary, HIP API summary, XLA top-K kernels</td></tr>
+        <tr><td><code>generate_perf_report_pftrace_memory_copy.py</code></td><td>inline</td><td>Memory copy operations: count/bytes by direction (h2d/d2h/d2d per GPU)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  </div>
+
+  <div id="report-compare">
+  <h3>Comparison Reports</h3>
+  <h4>PyTorch Report Comparison (<code>compare_perf_reports_pytorch.py</code>)</h4>
+  <p>673 lines. Merges two <code>.xlsx</code> files (baseline vs. variant) on configurable key columns per sheet, then computes absolute and percentage difference columns (<code>metric__baseline</code>, <code>metric__variant</code>, <code>metric__diff</code>, <code>metric__pct</code>). Splits result into three sections: intersect / baseline-only / variant-only.</p>
+
+  <h4>JAX LLaMA Trace Comparison (<code>compare_traces_jax_llama.py</code>)</h4>
+  <p>758 lines. Compares ROCm vs CUDA JAX traces for LLaMA-style transformers. Segments traces by token and Transformer layer using norm/attn markers. Classifies into 15 stages (norm_attn, q/k/v_add, q/k/v_gemm, attn_core, out_gemm, etc.) and outputs a Markdown report with per-layer stage tables and ROCm/CUDA ratios.</p>
+
+  <h4>Multi-rank Collective Report (<code>generate_multi_rank_collective_report_pytorch.py</code>)</h4>
+  <p>409 lines. Loads one trace per rank, runs <code>NcclAnalyser</code>, and generates a collective analysis sheet per operation type with bus bandwidth, implicit sync detection, and skew metrics.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── NCCL ───────────────────────────────── -->
+<section id="nccl">
+  <h2><span class="section-num">10</span>NcclAnalyser</h2>
+  <p class="section-desc"><code>TraceLens/NcclAnalyser/</code> · Multi-GPU collective communication analysis.</p>
+
+  <h3>NcclAnalyser (PyTorch)</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">NcclAnalyser</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>load_trace_data()</code> — Loads one trace per rank</li>
+        <li><code>build_df_long()</code> — Long-form DataFrame: one row per collective instance per rank, with columns: op, rank, ts, dur, msg_size, bus_bandwidth</li>
+        <li><code>build_df_nccl_implicit_sync_cat()</code> — Detects implicit synchronization by analyzing rank arrival time skew. High skew = some ranks waited for others.</li>
+        <li><code>build_df_nccl_all2allv()</code> — All-to-all-v specific analysis (variable message sizes per rank pair)</li>
+        <li><code>build_df_all2allv_heatmap()</code> — Heatmap data for all2allv message size distribution across rank pairs</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>JaxNcclAnalyser</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">JaxNcclAnalyser</span></div>
+    <div class="api-body">JAX-specific collective analysis using <code>XLACollectiveParser</code> to parse XLA HLO collective ops. Key methods:
+      <ul>
+        <li><code>_calculate_bandwidth_per_replica_group()</code> — Bus bandwidth per XLA replica group</li>
+        <li><code>analyze_all_collectives_from_df()</code> — Processes all collectives from a DataFrame</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>XLACollectiveParser</h3>
+  <p><code>NcclAnalyser/util/xla_parser.py</code> · 332 lines. Parses XLA collective op metadata from JAX traces, extracting replica group topology and message sizes.</p>
+
+  <div class="callout callout-tip">
+    <div class="callout-title">Implicit Synchronization Detection</div>
+    <p>TraceLens detects <em>implicit synchronization</em> — when one rank starts a collective late, forcing other ranks to wait even though no explicit barrier exists. This manifests as high arrival-time skew across ranks for the same collective instance. The <code>build_df_nccl_implicit_sync_cat()</code> method quantifies this.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── TRACEDIFF ───────────────────────────────── -->
+<section id="tracediff">
+  <h2><span class="section-num">11</span>TraceDiff</h2>
+  <p class="section-desc"><code>TraceLens/TraceDiff/trace_diff.py</code> · 1625 lines · Morphological trace comparison using tree edit distance.</p>
+
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">TraceDiff</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>wagner_fischer(tree_a, tree_b)</code> — Implements the Wagner-Fischer dynamic programming algorithm for tree edit distance. Computes the minimum number of node insertions, deletions, and renames to transform tree A into tree B.</li>
+        <li><code>merge_trees()</code> — Merges the two aligned trees into a unified diff tree, annotating each node as matched/inserted/deleted.</li>
+        <li><code>generate_diff_stats()</code> — Produces summary statistics on structural differences.</li>
+        <li><code>get_df_diff_stats_unique_args()</code> — DataFrame of unique argument differences between matched nodes — useful for finding ops that changed shape/dtype.</li>
+        <li><code>print_tracediff_report_files()</code> — Writes a human-readable diff report to files.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── TRACEFUSION ───────────────────────────────── -->
+<section id="tracefusion">
+  <h2><span class="section-num">12</span>TraceFusion</h2>
+  <p class="section-desc"><code>TraceLens/TraceFusion/trace_fuse.py</code> · 248 lines · Merge multi-rank traces into a single Perfetto-compatible visualization.</p>
+
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">TraceFuse</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>merge(trace_files, output_path)</code> — Reads N rank trace files and combines their events into a single JSON. Assigns distinct PIDs per rank so each rank appears as a separate process in Perfetto/chrome://tracing.</li>
+        <li><code>merge_and_save()</code> — With output file handling.</li>
+        <li><code>_generate_rank_metadata()</code> — Creates <code>M</code>-phase metadata events labeling each PID with its rank number.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout callout-tip">
+    <div class="callout-title">Use Case</div>
+    <p>After running a multi-GPU job, you get one trace file per rank. TraceFusion merges them so you can open a single file in <code>chrome://tracing</code> or Perfetto UI and see all ranks' timelines side by side — invaluable for spotting communication gaps and rank imbalance.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── EVENTREPLAY ───────────────────────────────── -->
+<section id="eventreplay">
+  <h2><span class="section-num">13</span>EventReplay</h2>
+  <p class="section-desc"><code>TraceLens/EventReplay/</code> · Re-executes operations from trace metadata using PyTorch JIT.</p>
+
+  <h3>EventReplayer</h3>
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">EventReplayer</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>_search_schema(op_name)</code> — Finds the matching <code>torch</code> operator schema for a given op name (e.g. <code>"aten::mm"</code>)</li>
+        <li><code>_is_schema_match()</code> — Validates that the event's argument types match the schema's parameter types</li>
+        <li><code>_get_event_replay_IR()</code> — Builds an intermediate representation of the op call with reconstructed tensor arguments using <code>TensorCfg</code></li>
+        <li><code>replay()</code> — Executes the operation via <code>torch._C._jit_get_operation</code> with the reconstructed tensors</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>TensorCfg &amp; build_tensor</h3>
+  <p><code>EventReplay/utils.py</code> · 126 lines.</p>
+  <ul>
+    <li><code>TensorCfg(dtype, shape, device)</code> — Dataclass representing a tensor's configuration</li>
+    <li><code>build_tensor(cfg)</code> — Allocates a random tensor matching the config, on the specified device</li>
+    <li><code>benchmark_func(fn, warmup, iters)</code> — Runs warmup iterations then measures median execution time</li>
+  </ul>
+
+  <h3>Batched Replay CLI</h3>
+  <p><code>EventReplay/batched_replay.py</code> · 203 lines. Standalone CLI that reads a trace, extracts all replayable events, and runs <code>benchmark_func</code> on each — producing a CSV of measured vs traced execution times.</p>
+</section>
+
+<!-- ───────────────────────────────── TRACEUTILS ───────────────────────────────── -->
+<section id="traceutils">
+  <h2><span class="section-num">14</span>TraceUtils — Inference Trace Preprocessing</h2>
+  <p class="section-desc"><code>TraceLens/TraceUtils/split_inference_trace_annotation.py</code> · 1353 lines.</p>
+
+  <p>Inference traces contain both prefill and decode phases, plus warm-up iterations. This module preprocesses them to isolate the steady-state decode window before handing off to the main analysis pipeline.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Function</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>preprocess_trace()</code></td><td>Filters and normalizes raw trace events</td></tr>
+        <tr><td><code>extract_iteration()</code></td><td>Extracts iteration boundaries from annotation events</td></tr>
+        <tr><td><code>identify_steady_state_regions()</code></td><td>Detects when the inference loop has warmed up and reached stable iteration times</td></tr>
+        <tr><td><code>find_steady_state_window(mode)</code></td><td>Three modes: <code>"mixed"</code> (prefill+decode), <code>"decode_only"</code>, <code>"max_prefilldecode"</code></td></tr>
+        <tr><td><code>divide_phases_and_save()</code></td><td>Writes separate trace files for prefill and decode phases</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>CLI</h3>
+  <pre><code>TraceLens_split_inference_trace \
+    --trace_path    long_inference_trace.json.gz \
+    --output_dir    ./split_traces/ \
+    --mode          decode_only</code></pre>
+</section>
+
+<!-- ───────────────────────────────── ORIGAMI ───────────────────────────────── -->
+<section id="origami">
+  <h2><span class="section-num">15</span>Origami Integration</h2>
+  <p class="section-desc"><code>TraceLens/PerfModel/origami_helper.py</code> · 408 lines · ROCm Origami hardware simulator integration.</p>
+
+  <p>By default, TraceLens uses analytical formulas for FLOPs and bytes. With <code>--enable_origami</code>, it instead calls ROCm Origami — a hardware simulation tool — for GEMM and SDPA predictions.</p>
+
+  <div class="api-block">
+    <div class="api-header"><span class="api-method classm">CLASS</span><span class="api-name">OrigamiHelper</span></div>
+    <div class="api-body">
+      <ul>
+        <li><code>get_hardware(arch) → OrigamiHardware</code> — Creates an Origami hardware config from the architecture JSON (reads <code>freq_mhz</code>, <code>num_cus</code>, <code>mem_bw_gbps</code>, etc.)</li>
+        <li><code>get_simulation_time(op_type, params) → float</code> — Returns predicted kernel execution time in microseconds. Requires <code>rocm-origami</code> package and a running ROCm environment.</li>
+      </ul>
+      <div class="callout callout-warn" style="margin-top:12px">
+        <div class="callout-title">Requirements</div>
+        <p>Origami requires <code>pip install rocm-origami</code> (not in the default dependencies) and an active ROCm runtime. Without it, TraceLens falls back to analytical models silently.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── CLI ───────────────────────────────── -->
+<section id="cli">
+  <h2><span class="section-num">16</span>CLI Commands</h2>
+  <p class="section-desc">10 console entry points installed via <code>pip install -e .</code></p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Command</th><th>Module</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_pytorch</code></td>
+          <td><code>Reporting.generate_perf_report_pytorch:main</code></td>
+          <td>Full PyTorch trace analysis → Excel</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_pytorch_inference</code></td>
+          <td><code>Reporting.generate_perf_report_pytorch_inference:main</code></td>
+          <td>PyTorch inference trace with prefill/decode annotation</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_jax</code></td>
+          <td><code>Reporting.generate_perf_report_jax:main</code></td>
+          <td>JAX/XPlane trace analysis → Excel</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_rocprof</code></td>
+          <td><code>Reporting.generate_perf_report_rocprof:main</code></td>
+          <td>rocprofv3 JSON trace analysis → Excel</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_compare_perf_reports_pytorch</code></td>
+          <td><code>Reporting.compare_perf_reports_pytorch:main</code></td>
+          <td>Diff two PyTorch Excel reports → comparison Excel</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_multi_rank_collective_report_pytorch</code></td>
+          <td><code>Reporting.generate_multi_rank_collective_report_pytorch:main</code></td>
+          <td>Multi-rank NCCL/RCCL collective analysis</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_pftrace_hip_api</code></td>
+          <td><code>Reporting.generate_perf_report_pftrace_hip_api:main</code></td>
+          <td>Perfetto HIP API timing analysis</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_pftrace_hip_activity</code></td>
+          <td><code>Reporting.generate_perf_report_pftrace_hip_activity:main</code></td>
+          <td>Perfetto GPU activity category breakdown</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_generate_perf_report_pftrace_memory_copy</code></td>
+          <td><code>Reporting.generate_perf_report_pftrace_memory_copy:main</code></td>
+          <td>Perfetto memory copy operation analysis</td>
+        </tr>
+        <tr>
+          <td><code>TraceLens_split_inference_trace</code></td>
+          <td><code>TraceUtils.split_inference_trace_annotation:main</code></td>
+          <td>Split inference traces into prefill/decode phases</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── EXTENSION SYSTEM ───────────────────────────────── -->
+<section id="extensions-system">
+  <h2><span class="section-num">17</span>Extension System</h2>
+  <p class="section-desc">A three-part plugin mechanism for customizing TraceLens without forking.</p>
+
+  <p>Pass <code>--extension_file path/to/my_extension.py</code> to any report generator. The file may define any or all of three hooks:</p>
+
+  <h3>1. tree_postprocess_extension</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">tree_postprocess_extension</span>(trace_to_tree):
+    <span class="cm"># Receives the fully-built TraceToTree object</span>
+    <span class="cm"># Inject pseudo-ops, rename nodes, or add metadata</span>
+    <span class="kw">from</span> TraceLens.Trace2Tree.extensions.pseudo_ops_utils <span class="kw">import</span> inject_pseudo_op
+    <span class="kw">for</span> node <span class="kw">in</span> <span class="fn">find_nodes</span>(trace_to_tree.root, <span class="str">"my_fused_op"</span>):
+        <span class="fn">inject_pseudo_op</span>(node, node.gpu_children[<span class="num">0</span>], <span class="str">"my_pseudo_up"</span>, {})
+        <span class="fn">inject_pseudo_op</span>(node, node.gpu_children[<span class="num">1</span>], <span class="str">"my_pseudo_down"</span>, {})</code></pre>
+
+  <h3>2. perf_model_extension</h3>
+  <pre><code><span class="cm"># Dict mapping op name strings to perf model classes</span>
+perf_model_extension = {
+    <span class="str">"my_pseudo_up"</span>: <span class="cls">MyUpProjPerfModel</span>,
+    <span class="str">"my_pseudo_down"</span>: <span class="cls">MyDownProjPerfModel</span>,
+    <span class="str">"te_layer_norm_fwd"</span>: <span class="cls">LayerNorm</span>,
+}</code></pre>
+
+  <h3>3. dict_cat2names_extension</h3>
+  <pre><code><span class="cm"># Dict mapping category names to lists of base class names</span>
+dict_cat2names_extension = {
+    <span class="str">"MyCustomOp"</span>: [<span class="str">"MyUpProjPerfModel"</span>, <span class="str">"MyDownProjPerfModel"</span>],
+}</code></pre>
+
+  <div class="callout callout-tip">
+    <div class="callout-title">Example: Megatron-LM Extension</div>
+    <p><code>examples/example_megatron_extension.py</code> ships a complete working extension that adds TransformerEngine layer norm (<code>te_layer_norm_fwd/bwd</code>) perf models and links gradient checkpoint forward/backward passes.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── PUBLIC API ───────────────────────────────── -->
+<section id="public-api">
+  <h2><span class="section-num">18</span>Public API — <code>__init__.py</code> Exports</h2>
+  <p class="section-desc">All classes importable directly from <code>TraceLens</code>.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Export</th><th>Source Module</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>TreePerfAnalyzer</code></td><td><code>TreePerf.tree_perf</code></td><td>PyTorch trace analysis (primary class)</td></tr>
+        <tr><td><code>JaxTreePerfAnalyzer</code></td><td><code>TreePerf.tree_perf</code></td><td>JAX trace analysis</td></tr>
+        <tr><td><code>GPUEventAnalyser</code></td><td><code>TreePerf.gpu_event_analyser</code></td><td>GPU utilization via interval arithmetic</td></tr>
+        <tr><td><code>JaxGPUEventAnalyser</code></td><td><code>TreePerf.gpu_event_analyser</code></td><td>JAX GPU utilization</td></tr>
+        <tr><td><code>TraceToTree</code></td><td><code>Trace2Tree.trace_to_tree</code></td><td>PyTorch flat → tree conversion</td></tr>
+        <tr><td><code>JaxTraceToTree</code></td><td><code>Trace2Tree.trace_to_tree</code></td><td>JAX flat → tree conversion</td></tr>
+        <tr><td><code>TraceFuse</code></td><td><code>TraceFusion.trace_fuse</code></td><td>Multi-rank trace merger</td></tr>
+        <tr><td><code>TraceDiff</code></td><td><code>TraceDiff.trace_diff</code></td><td>Tree edit distance comparison</td></tr>
+        <tr><td><code>NcclAnalyser</code></td><td><code>NcclAnalyser.nccl_analyser</code></td><td>PyTorch multi-rank NCCL analysis</td></tr>
+        <tr><td><code>JaxNcclAnalyser</code></td><td><code>NcclAnalyser.jax_nccl_analyser</code></td><td>JAX multi-rank collective analysis</td></tr>
+        <tr><td><code>EventReplayer</code></td><td><code>EventReplay.event_replay</code></td><td>Op replay via PyTorch JIT</td></tr>
+        <tr><td><code>DataLoader</code></td><td><code>util</code></td><td>JSON/JSON.GZ loader</td></tr>
+        <tr><td><code>TraceEventUtils</code></td><td><code>util</code></td><td>Event constants and utilities</td></tr>
+        <tr><td><code>JaxProfileProcessor</code></td><td><code>util</code></td><td>JAX XPlane HLO parser</td></tr>
+        <tr><td><code>RocprofParser</code></td><td><code>util</code></td><td>rocprofv3 JSON parser</td></tr>
+        <tr><td><code>PftraceParser</code></td><td><code>util</code></td><td>Perfetto trace parser</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── TESTING ───────────────────────────────── -->
+<section id="testing">
+  <h2><span class="section-num">19</span>Testing</h2>
+  <p class="section-desc"><code>tests/</code> · 33 test files + conftest.py + GitHub Actions CI.</p>
+
+  <h3>Test Coverage</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title">Regression Tests</div>
+      <div class="card-body"><code>test_perf_report_regression.py</code> — Generates reports from <code>.json.gz</code> fixtures and compares against reference CSVs. Ignores unstable columns like <code>Non-Data-Mov TFLOPS/s_mean</code>.</div>
+      <span class="card-tag">Integration</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Perf Model Tests</div>
+      <div class="card-body">Individual test files for flash attention backward, grouped GEMM, Mamba SSD, Evoformer, Liger SiLU·Mul, AITER MHA, roofline bound detection.</div>
+      <span class="card-tag">Unit</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Format Tests</div>
+      <div class="card-body">Separate test files for rocprofv3, all three Perfetto generators, JAX report, JAX NCCL, JAX conv analysis.</div>
+      <span class="card-tag">Integration</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Tree Tests</div>
+      <div class="card-body"><code>test_kernel_launchers.py</code>, <code>test_subtree_kernel_time.py</code>, <code>test_graph_mode.py</code>, <code>test_pseudo_ops_extension.py</code>, <code>test_detect_recompute.py</code></div>
+      <span class="card-tag">Unit</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Collective Tests</div>
+      <div class="card-body"><code>test_collective_analysis.py</code>, <code>test_all2allv_summary.py</code>, <code>test_jax_nccl_analyser.py</code>, <code>test_simplified_nccl_mode.py</code></div>
+      <span class="card-tag">Integration</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Quality Tests</div>
+      <div class="card-body"><code>test_copyright_headers.py</code> validates AMD copyright headers in all Python files.</div>
+      <span class="card-tag">Lint</span>
+    </div>
+  </div>
+
+  <h3>CI/CD (<code>.github/workflows/</code>)</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Workflow</th><th>Trigger</th><th>What It Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>lint.yml</code></td><td>PR / push</td><td>Runs <strong>Black 26.1.0</strong> on all Python files changed vs <code>origin/main</code></td></tr>
+        <tr>
+          <td><code>regression-tests.yml</code></td>
+          <td>PR / push</td>
+          <td>
+            Runs on <code>rocm/dev-ubuntu-24.04:7.2.1</code> container, Python 3.10.<br>
+            10 test stages: functional, rocprof, perf regression, comparison, inference, collective, all2allv, JAX, recompute, copyright.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Running Tests Locally</h3>
+  <pre><code><span class="cm"># Install with test dependencies</span>
+pip install -e .
+pip install pytest
+
+<span class="cm"># Run all tests</span>
+pytest tests/
+
+<span class="cm"># Run a specific test</span>
+pytest tests/test_flash_attention_backward.py -v
+
+<span class="cm"># Run regression tests only</span>
+pytest tests/test_perf_report_regression.py -v</code></pre>
+</section>
+
+<!-- ───────────────────────────────── FILE INDEX ───────────────────────────────── -->
+<section id="file-index">
+  <h2><span class="section-num">20</span>Complete File Index</h2>
+  <p class="section-desc">Every source file in the repository with its size and role.</p>
+
+  <h3>Core Package</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>File</th><th>Lines</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>TraceLens/__init__.py</code></td><td>~50</td><td>Public API exports</td></tr>
+        <tr><td><code>TraceLens/util.py</code></td><td>824</td><td>DataLoader, parsers, TraceEventUtils</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/trace_to_tree.py</code></td><td>1218</td><td>BaseTraceToTree, TraceToTree, JaxTraceToTree</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/trace_capture_merge_experimental.py</code></td><td>573</td><td>Graph capture/replay merging</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/extensions/pseudo_ops_utils.py</code></td><td>259</td><td>Pseudo-op injection utilities</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/extensions/mla_decode_pseudo_ops.py</code></td><td>94</td><td>MLA decode pseudo-op</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/extensions/moe_aiter_pseudo_ops.py</code></td><td>104</td><td>AITer fused MoE pseudo-op</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/extensions/moe_gptq_awq_pseudo_ops.py</code></td><td>148</td><td>GPTQ/AWQ INT4 MoE pseudo-op</td></tr>
+        <tr><td><code>TraceLens/Trace2Tree/extensions/moe_unfused_triton_pseudo_ops.py</code></td><td>206</td><td>Triton unfused MoE pseudo-ops</td></tr>
+        <tr><td><code>TraceLens/TreePerf/tree_perf.py</code></td><td>3489</td><td>TreePerfAnalyzer, JaxTreePerfAnalyzer</td></tr>
+        <tr><td><code>TraceLens/TreePerf/gpu_event_analyser.py</code></td><td>508</td><td>GPUEventAnalyser, interval arithmetic</td></tr>
+        <tr><td><code>TraceLens/TreePerf/jax_analyses.py</code></td><td>553</td><td>JaxAnalyses, JaxGemm</td></tr>
+        <tr><td><code>TraceLens/PerfModel/perf_model.py</code></td><td>5355</td><td>62 core perf model classes</td></tr>
+        <tr><td><code>TraceLens/PerfModel/torch_op_mapping.py</code></td><td>375</td><td>op_to_perf_model_class_map (70+ ops)</td></tr>
+        <tr><td><code>TraceLens/PerfModel/jax_op_mapping.py</code></td><td>16</td><td>JAX op to perf model mapping</td></tr>
+        <tr><td><code>TraceLens/PerfModel/kernel_name_parser.py</code></td><td>88</td><td>GEMM kernel name parsing</td></tr>
+        <tr><td><code>TraceLens/PerfModel/origami_helper.py</code></td><td>408</td><td>ROCm Origami integration</td></tr>
+        <tr><td><code>TraceLens/PerfModel/utils.py</code></td><td>112</td><td>Simulation helpers</td></tr>
+        <tr><td><code>TraceLens/PerfModel/run_perf_model.py</code></td><td>190</td><td>Standalone CLI for perf models</td></tr>
+        <tr><td><code>TraceLens/PerfModel/extensions/perf_model_extensions.py</code></td><td>643</td><td>Quantized GEMMs, activation functions</td></tr>
+        <tr><td><code>TraceLens/PerfModel/extensions/moe_perf_model_extensions.py</code></td><td>1396</td><td>All MoE GEMM variants</td></tr>
+        <tr><td><code>TraceLens/PerfModel/extensions/attention_perf_model_extensions.py</code></td><td>387</td><td>Inference attention models</td></tr>
+        <tr><td><code>TraceLens/PerfModel/extensions/rmsnorm_perf_model_extensions.py</code></td><td>283</td><td>Fused RMSNorm variants</td></tr>
+        <tr><td><code>TraceLens/PerfModel/extensions/custom_collectives_perf_model_extensions.py</code></td><td>220</td><td>Fused allreduce+norm, custom AR</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_pytorch.py</code></td><td>~1273</td><td>Main PyTorch report generator</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_pytorch_inference.py</code></td><td>similar</td><td>Inference variant with annotation</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_jax.py</code></td><td>251</td><td>JAX report generator</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_rocprof.py</code></td><td>280</td><td>rocprofv3 report generator</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_pftrace_hip_api.py</code></td><td>227</td><td>Perfetto HIP API report</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_pftrace_hip_activity.py</code></td><td>307</td><td>Perfetto activity report</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_perf_report_pftrace_memory_copy.py</code></td><td>231</td><td>Perfetto memory copy report</td></tr>
+        <tr><td><code>TraceLens/Reporting/compare_perf_reports_pytorch.py</code></td><td>673</td><td>Two-report Excel comparison</td></tr>
+        <tr><td><code>TraceLens/Reporting/compare_traces_jax_llama.py</code></td><td>758</td><td>ROCm vs CUDA JAX LLaMA comparison</td></tr>
+        <tr><td><code>TraceLens/Reporting/generate_multi_rank_collective_report_pytorch.py</code></td><td>409</td><td>Multi-rank NCCL report</td></tr>
+        <tr><td><code>TraceLens/Reporting/reporting_utils.py</code></td><td>229</td><td>Shared reporting utilities</td></tr>
+        <tr><td><code>TraceLens/Reporting/rocprof_analysis.py</code></td><td>441</td><td>RocprofAnalyzer class</td></tr>
+        <tr><td><code>TraceLens/Reporting/pftrace_hip_api_analysis.py</code></td><td>366</td><td>PftraceHipApiAnalyzer</td></tr>
+        <tr><td><code>TraceLens/Reporting/pftrace_hip_activity_analysis.py</code></td><td>864</td><td>PftraceHipActivityAnalyzer</td></tr>
+        <tr><td><code>TraceLens/Reporting/pftrace_utils.py</code></td><td>89</td><td>traceconv resolution and invocation</td></tr>
+        <tr><td><code>TraceLens/NcclAnalyser/nccl_analyser.py</code></td><td>1061</td><td>NcclAnalyser (PyTorch multi-rank)</td></tr>
+        <tr><td><code>TraceLens/NcclAnalyser/jax_nccl_analyser.py</code></td><td>793</td><td>JaxNcclAnalyser</td></tr>
+        <tr><td><code>TraceLens/NcclAnalyser/util/xla_parser.py</code></td><td>332</td><td>XLACollectiveParser</td></tr>
+        <tr><td><code>TraceLens/NcclAnalyser/util/node_rank_to_protobuf_file_mapping.py</code></td><td>213</td><td>Node-rank protobuf mapping</td></tr>
+        <tr><td><code>TraceLens/TraceDiff/trace_diff.py</code></td><td>1625</td><td>TraceDiff (Wagner-Fischer)</td></tr>
+        <tr><td><code>TraceLens/TraceFusion/trace_fuse.py</code></td><td>248</td><td>TraceFuse (multi-rank merge)</td></tr>
+        <tr><td><code>TraceLens/EventReplay/event_replay.py</code></td><td>429</td><td>EventReplayer (PyTorch JIT)</td></tr>
+        <tr><td><code>TraceLens/EventReplay/utils.py</code></td><td>126</td><td>TensorCfg, build_tensor, benchmark_func</td></tr>
+        <tr><td><code>TraceLens/EventReplay/batched_replay.py</code></td><td>203</td><td>Batch replay CLI</td></tr>
+        <tr><td><code>TraceLens/TraceUtils/split_inference_trace_annotation.py</code></td><td>1353</td><td>Steady-state detection, phase splitting</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+
+<script>
+  // Sidebar active link tracking
+  const links = document.querySelectorAll('.nav-link');
+  const sections = document.querySelectorAll('section[id], div[id]');
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const active = document.querySelector(`.nav-link[href="#${e.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+
+  sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

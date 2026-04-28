@@ -1,3 +1,4 @@
+CLAUDE.local.md
  ./tests/traces/*.csv
 **/__pycache__/
 **.ipynb_checkpoints/
