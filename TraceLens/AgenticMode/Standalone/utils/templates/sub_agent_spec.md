@@ -93,20 +93,48 @@ blank line between them. The validator checks for these as substring matches.
   observations with em-dashes, semicolons, or "while" bridges. Avoid run-on
   sentences.
 
-### Forbidden inferences (compute tier)
+### Trace observability (compute tier)
 
-These properties are NOT observable from a kernel-level PyTorch trace — they
-require hardware counters or profiler tools. If the trace evidence points at
-one of them, use the fallback prose in **Reasoning for Slowdown** /
-**Resolution** instead of speculating:
+This is the single source of truth for what compute-tier sub-agents can and
+cannot infer from a kernel-level PyTorch trace. Ground every claim in
+**Reasoning for Slowdown** / **Resolution** in a **CAN Infer** row; for any
+property in the **CANNOT Infer** rows, use the listed fallback prose instead
+of speculating.
 
-| NOT observable | Fallback prose |
-|----------------|----------------|
-| Bank conflicts | "Low efficiency — profile with hardware counters to diagnose." |
-| Cache hit rates | "Large working set may exceed cache." |
-| Wave occupancy | "Kernel running slower than expected — profile occupancy with hardware counters." |
-| Per-expert load imbalance / routing decisions (MoE) | "Cannot assess from trace data." |
-| Root causes generally | "Bottleneck identified — generate reproducer for kernel team." |
+#### CAN Infer (universal — all compute categories)
+
+| Observable | Source |
+|------------|--------|
+| Kernel names | `trunc_kernel_details` column |
+| Kernel durations | Trace events |
+| Achieved TFLOPS/s or TB/s | Calculated from duration + FLOPs/bytes |
+| Efficiency % vs roofline | Achieved / resolved peak (MAF or HBM BW) |
+| Invocation counts | Number of trace events per signature |
+| Library / backend | `library` column / kernel-name heuristics |
+| Bound type | `efficiency.bound_type` (compute / memory) |
+| Input shape dimensions | `Input Dims` column (semantics per category — e.g. M/N/K for GEMM, B/H/S/D for SDPA, expert/token counts for MoE, NCHW for convolution) |
+
+#### CANNOT Infer (universal — all compute categories)
+
+These require hardware counters or profiler tools, not a trace.
+
+| NOT Observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Bank conflicts | Requires hardware counters | "Low efficiency — profile with hardware counters to diagnose." |
+| Cache hit rates | Requires hardware counters | "Large working set may exceed cache." |
+| Wave / SM occupancy | Requires hardware counters | "Kernel running slower than expected — profile occupancy with hardware counters." |
+| Root causes generally | Traces show WHAT, not WHY | "Bottleneck identified — generate reproducer for kernel team." |
+
+#### CANNOT Infer (MoE-specific)
+
+In addition to the universal rows above, MoE workloads have category-specific
+blind spots:
+
+| NOT Observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Per-expert load imbalance | Trace lacks per-expert token counts | "Cannot assess expert load balance from trace data." |
+| Routing decisions / gating quality | Router internals are not traced | "Cannot assess routing quality from trace data." |
+| Token distribution across experts | Not surfaced in kernel-level events | "Cannot assess token distribution from trace data." |
 
 ---
 

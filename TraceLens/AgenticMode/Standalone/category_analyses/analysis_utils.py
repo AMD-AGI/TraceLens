@@ -33,7 +33,9 @@ TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
 TARGET_MID = 87.5
 
-MIN_PITEM_IMPACT_SCORE = 0.5 # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
+MIN_PITEM_IMPACT_SCORE = (
+    0.5  # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
+)
 
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),

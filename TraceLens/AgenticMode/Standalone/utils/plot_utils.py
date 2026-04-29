@@ -257,5 +257,3 @@ def _short_name(name: str, max_len: int = 8) -> str:
     if len(display) <= max_len:
         return display
     return display[: max_len - 1] + "\u2026"
-
-
