@@ -33,6 +33,8 @@ TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
 TARGET_MID = 87.5
 
+MIN_PITEM_IMPACT_SCORE = 0.5 # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
+
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),
     ("rocm_aiter", "AITER"),
@@ -466,8 +468,7 @@ def compute_impact_estimates(
     Args:
         operations: List of operation metric dicts (from build_operation_metrics)
         category: Category name for labelling
-        min_impact_score: Minimum ``impact_score_high`` threshold to include,
-            in % of E2E units (default 0.01, i.e. 0.01% of E2E time).
+        min_impact_score: Per-op noise floor on ``impact_score_high`` (% E2E).
         baseline_ms: Total end-to-end GPU time for impact_score calculation.
             Must be > 0; otherwise an empty list is returned.
 
@@ -516,10 +517,62 @@ def compute_impact_estimates(
             "confidence": confidence,
             "efficiency_pct": round(eff_pct, 2),
             "bound_type": eff.get("bound_type"),
+            "library": op.get("library"),
             "time_ms": round(time_ms, 3),
         }
         estimates.append(estimate)
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
+
+
+def build_category_findings(estimates: List[dict]) -> List[dict]:
+    """Group one category's per-op impact estimates by (bound_type, library).
+
+    Sums impact across members, drops groups below ``MIN_PITEM_IMPACT_SCORE``,
+    sorts by ``impact_score`` desc, attaches intra-category ``rank``. Each
+    surviving group becomes one P-item the sub-agent renders. The orchestrator
+    later concatenates these arrays across categories to derive the global
+    ``priority_data.json::findings[]`` ranking.
+    """
+    groups: dict = defaultdict(
+        lambda: {
+            "members": [],
+            "impact_score": 0.0,
+            "impact_score_low": 0.0,
+            "impact_score_high": 0.0,
+        }
+    )
+    for e in estimates:
+        key = (e.get("bound_type") or "unknown", e.get("library") or "Unknown")
+        g = groups[key]
+        g["members"].append(e)
+        g["impact_score"] += e.get("impact_score", 0)
+        g["impact_score_low"] += e.get("impact_score_low", 0)
+        g["impact_score_high"] += e.get("impact_score_high", 0)
+
+    findings = []
+    for (bound, lib), g in groups.items():
+        if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
+            continue
+        findings.append(
+            {
+                "bound_type": bound,
+                "library": lib,
+                "impact_score": round(g["impact_score"], 2),
+                "impact_score_low": round(g["impact_score_low"], 2),
+                "impact_score_high": round(g["impact_score_high"], 2),
+                "member_count": len(g["members"]),
+                "members": sorted(
+                    g["members"],
+                    key=lambda m: m.get("impact_score", 0),
+                    reverse=True,
+                ),
+            }
+        )
+
+    findings.sort(key=lambda f: f["impact_score"], reverse=True)
+    for rank, f in enumerate(findings, start=1):
+        f["rank"] = rank
+    return findings
 
 
 def parse_first_shape(dims_str):
@@ -675,6 +728,8 @@ def run_category_analysis(
     else:
         impact_estimates = []
 
+    category_findings = build_category_findings(impact_estimates)
+
     metrics = {
         "category": category,
         "status": "OK",
@@ -682,6 +737,7 @@ def run_category_analysis(
         "operations": operations,
         "category_specific": category_specific,
         "impact_estimates": impact_estimates,
+        "category_findings": category_findings,
         **extra,
     }
 

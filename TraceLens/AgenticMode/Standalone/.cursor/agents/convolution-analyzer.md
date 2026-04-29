@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # Convolution Analysis Subagent
 
-Analyze Convolution operations for compute efficiency and memory layout optimization.
+Analyze Convolution operations for compute efficiency and memory-layout optimization. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -51,8 +51,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 Use vendor-agnostic terminology:
 - "GPU kernels" not "CUDA kernels"
-- "DNN library" not "cuDNN" or "MIOpen"
-- "optimized convolution" not vendor-specific terms
+- "DNN library" not vendor-specific names
 - Focus on operation semantics, not vendor implementation details
 
 ---
@@ -61,75 +60,93 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/convolution_analysis.py \
   --output-dir <output_dir>
 ```
 
-### Step 2: Read Metrics
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read metrics
 
 ```bash
 cat <output_dir>/category_data/convolution_metrics.json
 ```
 
-Check `category_specific.transpose_overhead_percent` for layout issues.
+`category_specific.transpose_overhead_percent` flags memory-layout mismatch (NCHW vs NHWC); reference it in **Identification** for any memory-bound finding when it exceeds ~10%.
 
-### Step 3: Classify Operations by Name
+### Step 3: Classify members by name
 
-Each entry in `metrics['operations']` has a `name` field (e.g. `aten::conv2d`, `aten::conv_transpose2d`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
+Each `category_findings[i].members[j].operation` carries a torch op name (e.g. `aten::conv2d`, `aten::conv_transpose2d`). Classify each member semantically when describing the finding:
 
-- **Standard 2D**: conv2d operations (most common in CNNs)
-- **1D**: conv1d operations (sequence/audio models)
-- **3D**: conv3d operations (video/volumetric models)
-- **Depthwise**: depthwise or channel-wise convolutions (low parallelism, expect lower efficiency)
-- **Transpose / Deconv**: transpose convolutions, deconvolutions (also signals potential layout mismatch -- cross-reference with `category_specific.transpose_overhead_percent`)
-- **Other**: anything not matching the above
+- **Standard 2D**: `conv2d` operations (most common in CNNs).
+- **1D**: `conv1d` operations (sequence/audio models).
+- **3D**: `conv3d` operations (video/volumetric models).
+- **Depthwise**: depthwise / channel-wise convolutions (low parallelism, expect lower efficiency).
+- **Transpose / Deconv**: transpose convolutions, deconvolutions (also signals potential layout mismatch — cross-reference with `category_specific.transpose_overhead_percent`).
+- **Other**: anything not matching the above.
 
-These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it. Operations you classify as transpose should be flagged for layout mismatch analysis in Step 4.
+These are guidelines; if a member doesn't fit neatly, classify it semantically.
 
-### Step 4: Identify Bottlenecks
+### Step 4: Render P-items from `category_findings`
 
-**Bottleneck criteria:**
-- Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound)
+Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `time_ms`, `library`) using the Action Prose Guidance, Expected Efficiency, and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-**Key indicator:**
-- High transpose overhead (>20%) indicates memory layout mismatch
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-### Step 5: Determine Optimization Recommendations
+---
 
-For each validated bottleneck, provide recommendations in both categories:
+## Action Prose Guidance
 
-**Algorithmic Recommendations:**
-- **Layout fix:** `model.to(memory_format=torch.channels_last)`
-- This converts NCHW to NHWC, eliminating transpose overhead
-- Expected: 30-45% improvement when transpose overhead is high
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`:
 
-**Kernel Optimization Focus:**
-- **Compute-bound (large/3x3 kernels):** Tune tile sizes, check wave occupancy
-- **Memory-bound (1x1 pointwise):** Optimize memory access patterns, check bandwidth utilization
-- Check for memory layout inefficiencies affecting kernel performance
+| `bound_type` | Action template |
+|---|---|
+| `compute` | Profile the dominant member kernels for tile-size and wave-occupancy tuning. Depthwise members will naturally show lower efficiency due to limited parallelism — call that out in **Identification** before recommending tuning. |
+| `memory` | If `transpose_overhead_percent` > 10%, recommend converting to channels-last layout (`model.to(memory_format=torch.channels_last)`) to eliminate transpose overhead. Otherwise optimize memory access patterns of the dominant member kernels. |
 
-### Step 6: Write Category Findings
+---
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/convolution_findings.md` using the output format defined there, with `<category>` = `convolution`.
+## Expected efficiency per operation type
 
-**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/convolution_metadata.json::impact_estimates[]`.
+| Convolution type | Expected efficiency | Bound type |
+|------------------|---------------------|------------|
+| Large kernels (5×5+) | >70% of peak TFLOPS | compute-bound |
+| Standard 3×3 | >70% of peak TFLOPS | compute-bound |
+| 1×1 (pointwise) | >60% of peak HBM BW | memory-bound |
+| Depthwise | >50% (low parallelism) | varies |
 
-### Step 6.1: Write Impact Estimates to Metadata
+**Transpose overhead bands:**
+- `>20%`: high — strongly recommend channels-last.
+- `10–20%`: moderate — consider channels-last.
+- `<10%`: acceptable.
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
+---
 
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'convolution', 'compute')"
-```
+## Common Patterns
 
-### Step 6.2: Validate Findings
+### Transpose overhead (layout mismatch)
+- **Symptoms:** Many `batched_transpose` kernels; 30–45% of convolution time.
+- **Cause:** PyTorch defaults to NCHW; vendor DNN libraries prefer NHWC.
+- **Algorithmic (primary):** `model.to(memory_format=torch.channels_last)`.
+
+### Large-kernel convolutions
+- **Symptoms:** Kernel size > 3×3, compute-bound.
+- **Algorithmic:** Limited — these are typically well-optimized.
+- **Kernel:** Profile if efficiency below expected band.
+
+### Small-kernel convolutions (1×1, 3×3)
+- **Symptoms:** Common in modern architectures.
+- **Algorithmic:** Fusion opportunities → defer to kernel fusion analysis.
+- **Kernel:** Optimize memory access patterns.
+
+### Depthwise convolutions
+- **Symptoms:** Low efficiency due to limited parallelism.
+- **Algorithmic:** Limited optimization potential.
+- **Kernel:** Specialized depthwise kernels.
+
+---
+
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -148,57 +165,3 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
-
----
-
-## Common Patterns for Convolution Analysis
-
-### Transpose Overhead (Layout Mismatch)
-- **Symptoms:** Many batched_transpose kernels, 30-45% of convolution time
-- **Cause:** PyTorch defaults to NCHW, vendor DNN libraries prefer NHWC
-- **Algorithmic (primary):** `model.to(memory_format=torch.channels_last)`
-- **Impact:** Can eliminate 30-45% overhead
-
-### Large Kernel Convolutions
-- **Symptoms:** Kernel size > 3x3, compute-bound
-- **Expected:** >70% of peak TFLOPS
-- **Algorithmic:** Limited - these are typically well-optimized
-- **Kernel:** Profile kernel if efficiency is below expected threshold
-
-### Small Kernel Convolutions (1x1, 3x3)
-- **Symptoms:** Common in modern architectures
-- **Expected:** >60% of peak HBM BW (memory-bound for 1x1)
-- **Algorithmic:** For fusion opportunities, defer to the kernel fusion analysis
-- **Kernel:** Optimize memory access patterns
-
-### Depthwise Convolutions
-- **Symptoms:** Low efficiency due to low parallelism
-- **Expected:** Lower efficiency than standard convolutions
-- **Algorithmic:** Limited optimization potential
-- **Kernel:** Specialized kernels for depthwise
-
----
-
-## Key Principles
-
-1. **Layout is critical** - NHWC (channels_last) eliminates transpose overhead
-2. **Transpose indicates mismatch** - Check for batched_transpose kernels
-3. **Vendor libraries are good** - Convolution kernels are well-optimized
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
-
----
-
-## Efficiency Thresholds
-
-| Convolution Type | Expected Efficiency | Bound Type |
-|------------------|---------------------|------------|
-| Large kernels (5x5+) | >70% of peak TFLOPS | compute-bound |
-| Standard 3x3 | >70% of peak TFLOPS | compute-bound |
-| 1x1 (pointwise) | >60% of peak HBM BW | memory-bound |
-| Depthwise | >50% (low parallelism) | varies |
-
-**Transpose overhead:**
-- >20%: High - strongly recommend channels_last
-- 10-20%: Moderate - consider channels_last
-- <10%: Acceptable

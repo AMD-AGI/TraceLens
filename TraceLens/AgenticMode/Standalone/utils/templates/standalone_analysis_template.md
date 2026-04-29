@@ -14,9 +14,11 @@ See LICENSE for license information.
    bar showing the run's compute-time breakdown by kernel category. The plot is purely descriptive
    (no error bars, no throughput cone, no savings estimates). If the plot was not generated
    (Step 10.3 / Step 11.2 failed), the placeholder is removed.
-4. Compute Kernel Optimizations: P1-P3+ from category subagent findings. The P-item Impact line
-   uses the canonical mid impact_score value, e.g. "impact_score: 4.98". Low/high values appear
-   only in Detailed Analysis.
+4. Compute Kernel Optimizations: One P-item per entry in `priority_data.json::findings[]`,
+   numbered P1, P2, ... in `findings[]` order (already globally sorted by `impact_score`). The
+   P-item Impact line uses the canonical mid `impact_score` value; low/high values appear only
+   in Detailed Analysis. Cards join the corresponding sub-agent's Detailed Analysis block by
+   `(findings[i].category, findings[i].category_rank)`.
 5. System-Level Optimizations: If all system-level analyses report no actionable issues
    (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of
    P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue
@@ -105,7 +107,7 @@ The whole table block (header + separator + every body row) must be wrapped in a
 <!-- impact-end -->
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
-<!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
+<!-- One card per entry in priority_data.findings[] in array order. Title uses the entry's category and library; Action text is category-appropriate. Do NOT recommend "fuse the SDPA kernel" (already fused — defer upstream/downstream fusion to Kernel Fusion section). -->
 
 ### 🔴 P1: <Brief Title> (<Library>)
 
@@ -113,7 +115,7 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
-<!-- impact-begin kind=p_item category=<priority_data.priorities[0].category> low=<priority_data.priorities[0].impact_score_low> mid=<priority_data.priorities[0].impact_score> high=<priority_data.priorities[0].impact_score_high> -->
+<!-- impact-begin kind=p_item category=<priority_data.findings[0].category> low=<priority_data.findings[0].impact_score_low> mid=<priority_data.findings[0].impact_score> high=<priority_data.findings[0].impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
 <!-- impact-end -->
 
@@ -127,7 +129,7 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 **Action**: [1-2 sentences]
 
-<!-- impact-begin kind=p_item category=<priority_data.priorities[1].category> low=<priority_data.priorities[1].impact_score_low> mid=<priority_data.priorities[1].impact_score> high=<priority_data.priorities[1].impact_score_high> -->
+<!-- impact-begin kind=p_item category=<priority_data.findings[1].category> low=<priority_data.findings[1].impact_score_low> mid=<priority_data.findings[1].impact_score> high=<priority_data.findings[1].impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
 <!-- impact-end -->
 
@@ -141,13 +143,13 @@ The whole table block (header + separator + every body row) must be wrapped in a
 
 **Action**: [1-2 sentences]
 
-<!-- impact-begin kind=p_item category=<priority_data.priorities[2].category> low=<priority_data.priorities[2].impact_score_low> mid=<priority_data.priorities[2].impact_score> high=<priority_data.priorities[2].impact_score_high> -->
+<!-- impact-begin kind=p_item category=<priority_data.findings[2].category> low=<priority_data.findings[2].impact_score_low> mid=<priority_data.findings[2].impact_score> high=<priority_data.findings[2].impact_score_high> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
 <!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P3](#detailed-analysis-compute-p3) for details*
 
-<!-- All additional P-items (P4, P5, ...) follow the same pattern with marker wrapping (kind=p_item with category, low, mid, high attrs sourced from priority_data.priorities[N-1]) and Detailed Analysis links: → *See [Detailed Analysis: Compute kernel insights > PN](#detailed-analysis-compute-pN) for details* -->
+<!-- All additional P-items (P4, P5, ...) follow the same pattern, sourcing markers from priority_data.findings[N-1]. Detailed Analysis links: → *See [Detailed Analysis: Compute kernel insights > PN](#detailed-analysis-compute-pN) for details* -->
 
 ---
 
@@ -272,7 +274,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Compute Kernel Insights
 
-<!-- One #### 🔴/🟡/🟢 Pn: <title> block per promoted compute P-item, in priority order. -->
+<!-- One #### 🔴/🟡/🟢 Pn: <title> block per entry in priority_data.findings[], in array order. -->
+<!-- Source the body block from the sub-agent's findings.md by joining on (findings[i].category, findings[i].category_rank): the sub-agent emits its P-items ordered by intra-category rank, so its rank-N block becomes this report's PN where N matches the position in priority_data.findings[]. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
 <a id="detailed-analysis-compute-p1"></a>

@@ -32,6 +32,8 @@ from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
     _CAT_PALETTE,
     _REST_KEY,
     _short_name,
+)
+from TraceLens.AgenticMode.Standalone.utils.report_utils import (
     generate_priority_data,
 )
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest
