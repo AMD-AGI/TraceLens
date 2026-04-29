@@ -2029,6 +2029,17 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
+                    gpu_event_uids = event.get("gpu_events", [])
+                    if gpu_event_uids:
+                        gpu_events_list = [
+                            self.tree.get_UID2event(uid)
+                            for uid in gpu_event_uids
+                            if self.tree.get_UID2event(uid)
+                        ]
+                        if gpu_events_list:
+                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                                gpu_events_list
+                            ).compute_metrics()["busy_time"]
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
                 fwd_event, _ = self._get_linked_fwd_event(event)
@@ -2050,6 +2061,17 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
+                    gpu_event_uids = event.get("gpu_events", [])
+                    if gpu_event_uids:
+                        gpu_events_list = [
+                            self.tree.get_UID2event(uid)
+                            for uid in gpu_event_uids
+                            if self.tree.get_UID2event(uid)
+                        ]
+                        if gpu_events_list:
+                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                                gpu_events_list
+                            ).compute_metrics()["busy_time"]
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
                 row["perf_params"] = None

@@ -35,6 +35,7 @@ _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
 _P_ITEM_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
+_NO_ACTIONABLE_FINDINGS_MARKER = "<!-- no-actionable-findings -->"
 
 # Markdown table header containing an "Args" column. Match line that starts
 # with `|` and has `Args` as one of the column names.
@@ -83,6 +84,7 @@ def validate_findings_file(filepath, tier):
     - Required ## headers present and in correct order
     - P-item labels match tier (compute: Insight/Action/Impact; system: Insight/Action)
     - At least one reasoning-candidate block in Detailed Analysis
+      (unless ``<!-- no-actionable-findings -->`` marker is present)
     - P-item count matches reasoning-candidate count
 
     Args:
@@ -99,6 +101,8 @@ def validate_findings_file(filepath, tier):
         content = f.read()
 
     errors = []
+
+    no_findings = _NO_ACTIONABLE_FINDINGS_MARKER in content
 
     header_positions = []
     for h in _REQUIRED_FINDINGS_HEADERS:
@@ -120,30 +124,31 @@ def validate_findings_file(filepath, tier):
         rec_section = content[rec_start:rec_end]
 
         p_items = _P_ITEM_RE.findall(rec_section)
-        if not p_items:
+        if not p_items and not no_findings:
             errors.append("No ### P<N>: items found under ## Recommendations")
 
-        expected_labels = (
-            _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
-        )
-        for label in expected_labels:
-            if label not in rec_section:
-                errors.append(
-                    f"Missing label {label} in ## Recommendations "
-                    f"(required for {tier} tier)"
-                )
-
-        if tier == "system" and "**Impact**" in rec_section:
-            errors.append(
-                "System-tier ## Recommendations must not contain **Impact** labels"
+        if p_items:
+            expected_labels = (
+                _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
             )
+            for label in expected_labels:
+                if label not in rec_section:
+                    errors.append(
+                        f"Missing label {label} in ## Recommendations "
+                        f"(required for {tier} tier)"
+                    )
+
+            if tier == "system" and "**Impact**" in rec_section:
+                errors.append(
+                    "System-tier ## Recommendations must not contain **Impact** labels"
+                )
 
     candidates = []
     if da_start >= 0:
         da_section = content[da_start:]
 
         candidates = _CANDIDATE_RE.findall(da_section)
-        if not candidates:
+        if not candidates and not no_findings:
             errors.append(
                 "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
             )
@@ -408,7 +413,9 @@ def validate_report(output_dir, report_filename: str = "standalone_analysis.md")
     return len(missing) == 0, missing
 
 
-def _validate_report_args_column(content, output_dir, report_filename: str = "standalone_analysis.md"):
+def _validate_report_args_column(
+    content, output_dir, report_filename: str = "standalone_analysis.md"
+):
     """Level-3 check: every Args cell in report must match some
     operations[].args verbatim across all category metrics JSONs.
 

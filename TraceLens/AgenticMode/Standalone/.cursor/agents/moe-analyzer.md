@@ -91,7 +91,7 @@ Apply thresholds to identify bottlenecks from `metrics['operations']`:
 
 **Bottleneck criteria (efficiency — mode-specific):**
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
-- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**. Skip if `efficiency_percent` >= 100 — there is no optimization gap.
 
 ### Step 4: Determine Optimization Recommendations
 

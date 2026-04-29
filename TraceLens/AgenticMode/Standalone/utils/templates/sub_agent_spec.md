@@ -26,6 +26,24 @@ Applies to both tiers (compute → `category_findings/`, system → `system_find
 
 ---
 
+## No actionable findings
+
+If analysis succeeds but identifies **no actionable bottleneck**, the subagent should write:
+
+```markdown
+## Recommendations
+
+<!-- no-actionable-findings -->
+No actionable optimization opportunities identified for this category.
+
+## Detailed Analysis
+
+<!-- no-actionable-findings -->
+Analysis completed successfully. [Brief explanation of why no findings were generated.]
+```
+
+---
+
 ## Recommendations
 
 Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank.

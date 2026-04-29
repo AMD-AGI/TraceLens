@@ -148,8 +148,15 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 |------|----------|-------------------|-------------------|-------------------|-----|-----------------|-------------------------------------|
 | 1 | ... | ... | ... | ... | ... | +/-X.X or — | ~X–Y ms (X–Y%) or — |
 
+<!-- === NO ACTIONABLE FINDINGS (all compute categories contain no-actionable-findings marker) === -->
+<!-- Use when ALL compute category findings contain <!-- no-actionable-findings --> -->
+
+✅ No compute kernel optimization opportunities identified. All categories are within target performance bounds.
+
+<!-- === ACTIONABLE FINDINGS (at least one compute category has P-items) === -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
+<!-- Skip categories whose findings contain <!-- no-actionable-findings -->
 
 ### 🔴 P1: <Brief Title> (<Library>)
 
