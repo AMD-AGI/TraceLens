@@ -155,9 +155,7 @@ def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_o
 
 
 class TreePerfAnalyzer:
-    # Set on dicts returned by compute_perf_metrics when the perf model raises
-    # (including NotImplementedError) after kernel-only metrics were computed;
-    # callers must pop before exporting.
+    # Set on dicts returned by compute_perf_metrics when the perf model raises error
     _PARTIAL_PERF_METRICS_ERR_KEY = "_partial_perf_metrics_err"
 
     @staticmethod
@@ -641,12 +639,17 @@ class TreePerfAnalyzer:
             )  # Return an empty DataFrame instead of raising an error
 
         dict_agg = {}
-        # first element for GFLOPS and FLOPS/Byte
-        dict_agg["GFLOPS"] = "first"
-        dict_agg["Data Moved (MB)"] = "first"
-        dict_agg["FLOPS/Byte"] = "first"
-        dict_agg["TB/s"] = agg_metrics
-        dict_agg["TFLOPS/s"] = agg_metrics
+        # first element for GFLOPS and FLOPS/Byte (partial perf rows may omit these)
+        if "GFLOPS" in df_perf_metrics.columns:
+            dict_agg["GFLOPS"] = "first"
+        if "Data Moved (MB)" in df_perf_metrics.columns:
+            dict_agg["Data Moved (MB)"] = "first"
+        if "FLOPS/Byte" in df_perf_metrics.columns:
+            dict_agg["FLOPS/Byte"] = "first"
+        if "TB/s" in df_perf_metrics.columns:
+            dict_agg["TB/s"] = agg_metrics
+        if "TFLOPS/s" in df_perf_metrics.columns:
+            dict_agg["TFLOPS/s"] = agg_metrics
         if "process_name" in df_perf_metrics.columns:
             dict_agg["process_name"] = "first"
         if "process_label" in df_perf_metrics.columns:

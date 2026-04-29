@@ -11,15 +11,21 @@ When the analytic perf model fails (missing ``Input Dims``, ``NotImplementedErro
 from ``flops`` / ``flops_bwd``, etc.), reports must still show GPU kernel busy time
 from trace-derived aggregation where kernels exist.
 
-Covers ``build_df_unified_perf_table`` and ``build_df_perf_metrics``.
+Covers ``build_df_unified_perf_table``, ``build_df_perf_metrics``, and
+``generate_perf_report_pytorch`` output (``unified_perf_summary.csv``).
 """
 
+import json
 from copy import deepcopy
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
@@ -173,3 +179,53 @@ def test_kernel_time_populated_when_flops_raises_not_implemented_error():
     assert row["has_perf_model"]
     if "GFLOPS" in df.columns:
         assert pd.isna(row["GFLOPS"]) or row["GFLOPS"] is None
+
+
+@pytest.mark.parametrize("include_input_dims", [False, True])
+def test_generated_unified_perf_summary_csv_populates_kernel_time(
+    tmp_path, include_input_dims
+):
+    """
+    End-to-end: ``generate_perf_report_pytorch`` must write ``unified_perf_summary.csv``
+    with positive aggregated kernel time for ``aten::mm`` even when the perf model
+    cannot produce full metrics (missing ``Input Dims``), or when ``flops`` raises
+    ``NotImplementedError`` (patched).
+    """
+    events = _make_aten_mm_trace(include_input_dims=include_input_dims)
+    profile_path = tmp_path / "minimal_aten_mm.json"
+    profile_path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    out_dir = tmp_path / "perf_csvs"
+    kwargs = dict(
+        profile_json_path=str(profile_path),
+        output_xlsx_path=None,
+        output_csvs_dir=str(out_dir),
+        kernel_summary=False,
+        short_kernel_study=False,
+        collective_analysis=False,
+    )
+    if include_input_dims:
+        with patch.object(
+            perf_model.aten_mm,
+            "flops",
+            side_effect=NotImplementedError("test: flops not implemented"),
+        ):
+            generate_perf_report_pytorch(**kwargs)
+    else:
+        generate_perf_report_pytorch(**kwargs)
+
+    csv_path = out_dir / "unified_perf_summary.csv"
+    assert csv_path.is_file(), "unified_perf_summary.csv missing from report output"
+    df = pd.read_csv(csv_path)
+    mm = df[df["name"] == "aten::mm"]
+    assert not mm.empty, "aten::mm missing from unified_perf_summary.csv"
+
+    kt_mean = mm.iloc[0].get("Kernel Time (µs)_mean")
+    kt_sum = mm.iloc[0].get("Kernel Time (µs)_sum")
+    assert kt_mean is not None and not pd.isna(
+        kt_mean
+    ), "Kernel Time (µs)_mean must be present and finite"
+    assert float(kt_mean) > 0, "Kernel Time (µs)_mean must be > 0 in CSV output"
+    assert kt_sum is not None and not pd.isna(
+        kt_sum
+    ), "Kernel Time (µs)_sum must be present and finite"
+    assert float(kt_sum) > 0, "Kernel Time (µs)_sum must be > 0 in CSV output"
