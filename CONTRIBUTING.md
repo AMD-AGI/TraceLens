@@ -153,22 +153,12 @@ This format helps us to automatically generate changelogs and provide more clari
 
 ## Updating Reference Outputs
 
-Several regression tests (e.g. `test_perf_report_regression.py`,
-`test_compare_perf_reports.py`, `test_detect_recompute.py`,
-`test_jax_perf_report.py`, `test_collective_analysis.py`) compare freshly
-generated CSV outputs against checked-in reference CSVs. When an intentional
-code change legitimately alters those outputs, you can refresh the
-references in-place by passing the `--update-references` flag to pytest:
+Several regression tests compare freshly generated CSV outputs against checked-in reference CSVs. When an intentional code change legitimately alters those outputs, you can refresh the references in-place by passing the `--update-references` flag to pytest:
 
 ```sh
 python -m pytest tests/test_perf_report_regression.py --update-references
 ```
 
-> **⚠️ Important:** When you use `--update-references` in a PR, **explicitly
-> note in your PR description which reference files were updated and why**.
+> **⚠️ Important:** When you use `--update-references` in a PR, **explicitly note in your PR description which reference files were updated and why**.
 >
-> **Do not use this flag to paper over unexpected differences.** If a test
-> starts failing, first investigate *why* the output changed. Only refresh
-> references once you have confirmed the new output is intentionally
-> correct (e.g. a deliberate metric formula change, a new column, or a
-> bug fix in the reporting pipeline).
+> **Do not use this flag to paper over unexpected differences.** If a test starts failing, first investigate *why* the output changed. Only refresh references once you have confirmed the new output is intentionally correct (e.g. a deliberate metric formula change, a new column, or a bug fix in the reporting pipeline).
