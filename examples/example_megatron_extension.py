@@ -487,6 +487,8 @@ class transformer_engine_attention(SDPA):
         # ref TransformerEngine/transformer_engine/pytorch/cpp_extensions/fused_attn.py
         # https://github.com/NVIDIA/TransformerEngine/blob/51cd441501e8e6dee18c00056f008e1b53b89ebd/transformer_engine/pytorch/attention/dot_product_attention/backends.py#L881
         input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+
         q_idx, k_idx, v_idx = 9, 10, 11  # this is the idx in the args list
         q_shape, k_shape, v_shape = (
             input_dims[q_idx],
@@ -508,6 +510,7 @@ class transformer_engine_attention(SDPA):
             tuple(k_strides),
             tuple(v_strides),
         )
+        dtype_A_B = (input_types[q_idx], input_types[k_idx])
 
         is_causal = True
         dropout_p = 0.0
@@ -526,6 +529,7 @@ class transformer_engine_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": flash_impl,
+            "dtype_A_B": dtype_A_B,
         }
 
 
