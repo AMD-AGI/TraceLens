@@ -270,6 +270,11 @@ def categorize_torch_op(row):
             return "SDPA_bwd"
         else:
             return "SDPA_fwd"
+    elif row["name"] in dict_cat2names.get("GroupedGEMM", []):
+        if row["name"].endswith("Backward"):
+            return "GroupedGEMM_bwd"
+        else:
+            return "GroupedGEMM_fwd"
     elif row["name"] in dict_cat2names.get("MoE_fused", []):
         return "MoE_fused"
     elif row["name"] in dict_cat2names.get("MoE_unfused", []):

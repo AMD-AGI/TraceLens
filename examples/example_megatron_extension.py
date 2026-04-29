@@ -676,6 +676,6 @@ dict_cat2names_extension = {
         "_LayerNormLinearBackward_wgrad_mm",
     ],
     "SDPA": ["FusedAttnFunc", "FusedAttnFuncBackward"],
-    "GroupedGEMM": ["GroupedGemm"],
+    "GroupedGEMM": ["GroupedGemm", "GroupedGemmBackward"],
     "Normalization": ["LayerNormFn", "LayerNormFnBackward"],
 }
