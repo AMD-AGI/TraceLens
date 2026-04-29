@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TraceLens — TODO Issues Summary · 2026-04-28</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22253a;
+    --border: #2e3250;
+    --accent: #7c6af7;
+    --accent2: #56cfb2;
+    --accent3: #f7a35c;
+    --accent4: #e05c6a;
+    --text: #e2e4f0;
+    --text-muted: #8b90b0;
+    --code-bg: #141720;
+    --tag-bug: #3d1a20;
+    --tag-bug-text: #e05c6a;
+    --tag-bug-border: #6a1f2a;
+    --tag-perf: #1a2e35;
+    --tag-perf-text: #56cfb2;
+    --tag-perf-border: #2a5048;
+    --tag-feat: #2d2260;
+    --tag-feat-text: #7c6af7;
+    --tag-feat-border: #4a3a9a;
+    --tag-doc: #2e2010;
+    --tag-doc-text: #f7a35c;
+    --tag-doc-border: #5a3a10;
+    --tag-refactor: #1e2535;
+    --tag-refactor-text: #82aaff;
+    --tag-refactor-border: #2a3a60;
+    --tag-jax: #251a35;
+    --tag-jax-text: #c792ea;
+    --tag-jax-border: #4a2a6a;
+    --pri-high: #3d1a20;
+    --pri-high-text: #e05c6a;
+    --pri-med: #2e2010;
+    --pri-med-text: #f7a35c;
+    --pri-low: #1a2a1a;
+    --pri-low-text: #56cfb2;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.6; }
+
+  header { background: linear-gradient(135deg, #1a1d27 0%, #0f1117 60%, #1a1427 100%); border-bottom: 1px solid var(--border); padding: 36px 48px 28px; }
+  header h1 { font-size: 28px; font-weight: 800; color: var(--accent); letter-spacing: -0.5px; }
+  header .meta { color: var(--text-muted); font-size: 13px; margin-top: 6px; }
+  header .meta span { margin-right: 20px; }
+  header .meta strong { color: var(--text); }
+
+  .stats-bar { display: flex; gap: 16px; padding: 20px 48px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .stat { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; text-align: center; min-width: 100px; }
+  .stat-num { font-size: 24px; font-weight: 700; color: var(--accent); }
+  .stat-label { font-size: 11px; color: var(--text-muted); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .filters { padding: 16px 48px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .filters label { font-size: 12px; color: var(--text-muted); margin-right: 4px; }
+  .filter-btn { padding: 5px 14px; border-radius: 20px; border: 1px solid var(--border); background: var(--surface2); color: var(--text-muted); cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s; }
+  .filter-btn:hover, .filter-btn.active { border-color: var(--accent); color: var(--text); background: #2d2260; }
+  .filter-btn.active-bug { border-color: var(--tag-bug-border); color: var(--tag-bug-text); background: var(--tag-bug); }
+  .filter-btn.active-perf { border-color: var(--tag-perf-border); color: var(--tag-perf-text); background: var(--tag-perf); }
+  .filter-btn.active-feat { border-color: var(--tag-feat-border); color: var(--tag-feat-text); background: var(--tag-feat); }
+  .filter-btn.active-doc { border-color: var(--tag-doc-border); color: var(--tag-doc-text); background: var(--tag-doc); }
+  .filter-btn.active-jax { border-color: var(--tag-jax-border); color: var(--tag-jax-text); background: var(--tag-jax); }
+
+  .table-wrapper { padding: 24px 48px 48px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 1200px; }
+  thead { position: sticky; top: 0; z-index: 10; }
+  th { padding: 11px 14px; text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .8px; color: var(--text-muted); text-transform: uppercase; background: var(--surface2); border-bottom: 2px solid var(--border); white-space: nowrap; }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; font-size: 13px; color: var(--text-muted); }
+  tr:hover td { background: var(--surface); }
+  tr.hidden { display: none; }
+
+  td.id-cell { white-space: nowrap; }
+  td.id-cell a { color: var(--accent); text-decoration: none; font-weight: 600; font-family: monospace; font-size: 12px; }
+  td.id-cell a:hover { text-decoration: underline; }
+
+  td.title-cell { min-width: 220px; max-width: 280px; color: var(--text); font-weight: 500; line-height: 1.4; }
+  td.desc-cell { min-width: 280px; max-width: 360px; line-height: 1.5; font-size: 12.5px; }
+  td.solution-cell { min-width: 240px; max-width: 320px; line-height: 1.5; font-size: 12.5px; }
+
+  .tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 12px; margin: 2px 2px 2px 0; border: 1px solid; white-space: nowrap; }
+  .tag-bug { background: var(--tag-bug); color: var(--tag-bug-text); border-color: var(--tag-bug-border); }
+  .tag-perf { background: var(--tag-perf); color: var(--tag-perf-text); border-color: var(--tag-perf-border); }
+  .tag-feat { background: var(--tag-feat); color: var(--tag-feat-text); border-color: var(--tag-feat-border); }
+  .tag-doc { background: var(--tag-doc); color: var(--tag-doc-text); border-color: var(--tag-doc-border); }
+  .tag-refactor { background: var(--tag-refactor); color: var(--tag-refactor-text); border-color: var(--tag-refactor-border); }
+  .tag-jax { background: var(--tag-jax); color: var(--tag-jax-text); border-color: var(--tag-jax-border); }
+
+  .pri { display: inline-block; font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 12px; border: 1px solid; white-space: nowrap; }
+  .pri-high { background: var(--pri-high); color: var(--pri-high-text); border-color: var(--tag-bug-border); }
+  .pri-med { background: var(--pri-med); color: var(--pri-med-text); border-color: var(--tag-doc-border); }
+  .pri-low { background: var(--pri-low); color: var(--pri-low-text); border-color: var(--tag-perf-border); }
+
+  .effort { display: inline-block; font-size: 10px; color: var(--text-muted); background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px; margin-left: 4px; }
+
+  code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 11px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; color: var(--accent2); }
+
+  .no-results { text-align: center; padding: 60px; color: var(--text-muted); display: none; font-size: 15px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TraceLens — TODO Issues Summary</h1>
+  <div class="meta">
+    <span>Generated <strong>2026-04-28</strong></span>
+    <span>Source <strong>AMD-AGI/projects/37</strong></span>
+    <span>Status filter <strong>Todo</strong> (open issues)</span>
+  </div>
+</header>
+
+<div class="stats-bar">
+  <div class="stat"><div class="stat-num" id="total-count">67</div><div class="stat-label">Total TODO</div></div>
+  <div class="stat"><div class="stat-num" style="color:var(--tag-bug-text)">7</div><div class="stat-label">Bugs</div></div>
+  <div class="stat"><div class="stat-num" style="color:var(--tag-perf-text)">10</div><div class="stat-label">Perf Models</div></div>
+  <div class="stat"><div class="stat-num" style="color:var(--tag-feat-text)">18</div><div class="stat-label">Major Features</div></div>
+  <div class="stat"><div class="stat-num" style="color:var(--tag-jax-text)">8</div><div class="stat-label">JAX</div></div>
+  <div class="stat"><div class="stat-num" style="color:var(--tag-doc-text)">6</div><div class="stat-label">Docs</div></div>
+  <div class="stat"><div class="stat-num" style="color:var(--pri-high-text)">6</div><div class="stat-label">High Priority</div></div>
+</div>
+
+<div class="filters">
+  <label>Filter:</label>
+  <button class="filter-btn active" onclick="filterRows('all', this)">All</button>
+  <button class="filter-btn" onclick="filterRows('bug', this)">🐛 Bugs</button>
+  <button class="filter-btn" onclick="filterRows('perf', this)">📐 Perf Model</button>
+  <button class="filter-btn" onclick="filterRows('feat', this)">⭐ Major Feature</button>
+  <button class="filter-btn" onclick="filterRows('jax', this)">🔷 JAX</button>
+  <button class="filter-btn" onclick="filterRows('doc', this)">📄 Docs</button>
+  <button class="filter-btn" onclick="filterRows('refactor', this)">🔧 Refactor / API</button>
+  <button class="filter-btn" onclick="filterRows('high', this)">🔴 High Priority</button>
+</div>
+
+<div class="table-wrapper">
+<div class="no-results" id="no-results">No issues match the selected filter.</div>
+<table id="issues-table">
+<thead>
+  <tr>
+    <th>#</th>
+    <th>Title</th>
+    <th>What Needs to Be Done</th>
+    <th>Priority</th>
+    <th>Type</th>
+    <th>Potential Solution / Affected Files</th>
+  </tr>
+</thead>
+<tbody>
+
+<tr data-tags="feat high">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/17" target="_blank">#17</a></td>
+  <td class="title-cell">Easy to use API for distributed performance</td>
+  <td class="desc-cell">Users currently loop manually over per-rank files and analyse separately. Need a unified API that internally loops over rank profiles, computes per-rank perf metrics, and surfaces min/max/diff across ranks. Also merge <code>NcclAnalyser</code> into this API instead of keeping it as a separate tool.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Feature</span></td>
+  <td class="solution-cell">Add a <code>DistributedPerfAnalyzer</code> wrapper in <code>TreePerf/</code> that accepts a list of trace paths, internally instantiates <code>TreePerfAnalyzer</code> per rank, aggregates DataFrames, and exposes rank-diff statistics. Integrate <code>NcclAnalyser</code> as a property.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/21" target="_blank">#21</a></td>
+  <td class="title-cell">Diagnose runtime bugs [medium term]</td>
+  <td class="desc-cell">Detect anomalies in CPU–GPU runtime interactions: async kernel launches that stall unexpectedly, sync events (H2D/D2H memcpy) that block the queue longer than expected, and device synchronizations that indicate hidden bottlenecks.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XL</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">New analysis module in <code>TreePerf/</code>. Walk the tree looking for <code>cudaDeviceSynchronize</code> / <code>hipDeviceSynchronize</code> events and measure the gap between CPU launch and GPU start. Flag cases where sync time is disproportionate to kernel duration.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/22" target="_blank">#22</a></td>
+  <td class="title-cell">Diagnose NCCL Anomalies</td>
+  <td class="desc-cell">NCCL collectives (all-reduce, all-gather) must finish at approximately the same time across ranks. Detect cases where end-time divergence across ranks exceeds a threshold — indicating NCCL/RCCL implementation bugs. Start times can legitimately differ; it's end-time skew that's anomalous.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XS</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Extend <code>NcclAnalyser.build_df_nccl_implicit_sync_cat()</code> with end-time skew metric per collective instance. Add a <code>detect_nccl_anomalies(threshold_us)</code> method that flags instances where <code>max(end_time) - min(end_time) > threshold</code>.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/90" target="_blank">#90</a></td>
+  <td class="title-cell">Support analysis scoped by record_function regions</td>
+  <td class="desc-cell">PyTorch's <code>torch.autograd.profiler.record_function</code> adds named annotation events to traces. TraceLens should recognize these and allow: filtering events to a region, aggregate stats within regions, operator summaries per region, and tree highlighting.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>Trace2Tree/trace_to_tree.py</code>, detect <code>cat == "user_annotation"</code> or <code>cat == "python_function"</code> events from <code>record_function</code>. Add <code>get_df_by_region(region_name)</code> to <code>TreePerfAnalyzer</code> that scopes the unified perf table to the subtree under a named region.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/103" target="_blank">#103</a></td>
+  <td class="title-cell">TL Jarvis: Fully Automated Agent for Perf &amp; Opt</td>
+  <td class="desc-cell">End-to-end AI agent that: (1) adds profiling to a repo, (2) runs TraceLens perf analysis, (3) performs event replay and tuning on live GPU, (4) files minimal repro tickets automatically. 6-month roadmap item.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XL</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">Requires LLM agent scaffold using TraceLens Python API as tools. Start with a <code>TraceLensAgent</code> class wrapping <code>TreePerfAnalyzer</code> and <code>EventReplayer</code>. Phase 1: automated report summarization. Phase 2: replay-based tuning loop.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/104" target="_blank">#104</a></td>
+  <td class="title-cell">p2p NCCL support</td>
+  <td class="desc-cell">Add bus bandwidth estimation for point-to-point NCCL kernels (send/recv), which are currently not covered by <code>NcclAnalyser</code>. These appear in pipeline parallelism workloads.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>NcclAnalyser/nccl_analyser.py</code>, extend <code>is_communication_string()</code> in <code>util.py</code> to detect p2p patterns. Add bus bandwidth formula for send/recv: <code>msg_bytes / duration</code>. Expose in <code>build_df_long()</code>.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/113" target="_blank">#113</a></td>
+  <td class="title-cell">Pass event replay to HW counter profiling</td>
+  <td class="desc-cell">After replaying an op via <code>EventReplayer</code>, pass the replayed kernel through <code>rocprof-compute</code> to collect hardware performance counters (cache utilization, wavefront occupancy, memory bandwidth, etc.).</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">L</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>EventReplay/event_replay.py</code>, add optional <code>hw_profile=True</code> flag to <code>replay()</code>. Wrap the replayed op execution in a <code>subprocess</code> call to <code>rocprof-compute</code>. Parse and return the HW counter CSV alongside the timing result.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/114" target="_blank">#114</a></td>
+  <td class="title-cell">Perf projection</td>
+  <td class="desc-cell">Project the end-to-end performance impact of improving a specific op. An op on the non-critical path may not improve e2e even if 2× faster. Requires modeling op dependencies and the execution critical path.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XL</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">Depends on critical path analysis (#306). Once the critical path DAG is available, implement an Amdahl-style projection: for each op, compute its fraction on the critical path and the e2e speedup from a hypothetical improvement ratio. New module <code>PerfProjection/</code>.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/115" target="_blank">#115</a></td>
+  <td class="title-cell">Input arch details from user for roofline</td>
+  <td class="desc-cell">Allow users to pass a simple dict of hardware specs (peak TFLOPS, peak bandwidth) directly to <code>TreePerfAnalyzer.from_file()</code> instead of requiring a predefined architecture JSON file.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>TreePerf/tree_perf.py</code>, modify <code>from_file(arch=...)</code> to accept either a string (existing preset name/path) or a dict like <code>{'peak_perf': 1307e12, 'peak_bw': 5.3e12}</code>. Add dict-to-arch-object conversion in the factory method.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/124" target="_blank">#124</a></td>
+  <td class="title-cell">Fwd/bwd pass breakdown for kernel launchers</td>
+  <td class="desc-cell"><code>get_df_kernel_launchers()</code> does not indicate whether each launcher belongs to the forward or backward pass. Users need a <code>pass_type</code> column to split forward vs backward analysis.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>TreePerf/tree_perf.py</code>, traverse each launcher's ancestors looking for backward-pass markers (autograd function nodes, nodes linked via <code>link_all_fwd_bwd_events()</code>). Add <code>pass_type: 'forward' | 'backward' | 'unknown'</code> column to the returned DataFrame.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/128" target="_blank">#128</a></td>
+  <td class="title-cell">Calculate TFLOPS and GB/s in node replay</td>
+  <td class="desc-cell">After replaying an op via <code>EventReplayer</code>, compute TFLOPS/s and TB/s from the measured execution time and the perf model's FLOPs/bytes values. Enables comparison of microbenchmark throughput vs workload throughput.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>EventReplay/event_replay.py</code>, after <code>benchmark_func()</code> returns the median time, look up the event's perf model via <code>op_to_perf_model_class_map</code>, call <code>.flops()</code> and <code>.bytes()</code>, and append <code>tflops_s</code> and <code>tb_s</code> columns to the replay output.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/165" target="_blank">#165</a></td>
+  <td class="title-cell">Add dtype detail for FP8 TEv1 GEMM</td>
+  <td class="desc-cell">FP8 GEMMs have 4 dtype combinations (e4m3/e5m2 × e4m3/e5m2). Currently TraceLens doesn't parse the exact FP8 dtypes from <code>Concrete Inputs</code> indices 3 and 8 of <code>tex_ts_te_gemm_ts</code>. The dtype integer codes map to a known dict.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">In <code>PerfModel/perf_model.py</code> class <code>tex_ts_te_gemm_ts</code>, parse indices 3 and 8 of <code>Concrete Inputs</code> with the int-to-dtype mapping from TransformerEngine's <code>common.h</code>. Expose <code>dtype_a</code> and <code>dtype_b</code> as output columns in the unified perf table.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/171" target="_blank">#171</a></td>
+  <td class="title-cell">Align kernel launchers and perf model ops</td>
+  <td class="desc-cell">Kernel launchers show <code>aten::miopen_convolution</code>, <code>aten::cudnn_convolution</code>, <code>aten::native_convolution</code> as distinct. But the perf model treats all as <code>aten::convolution</code>. These two views need alignment so analysis is consistent.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">In <code>PerfModel/torch_op_mapping.py</code>, add alias entries: map <code>aten::miopen_convolution</code>, <code>aten::cudnn_convolution</code>, etc. all to the same <code>aten_conv</code> class. In <code>get_df_kernel_launchers()</code>, optionally normalize op names using the same alias table.</td>
+</tr>
+
+<tr data-tags="bug">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/185" target="_blank">#185</a></td>
+  <td class="title-cell">Make input strides optional in perf model</td>
+  <td class="desc-cell">Some traces omit tensor stride information from <code>Concrete Inputs</code>. The perf model currently crashes when strides are missing instead of gracefully handling the absence.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">In <code>PerfModel/perf_model.py</code> base class input parsers, wrap stride extraction in a try/except or add a <code>None</code> check. Default to assuming contiguous layout (row-major strides) when strides are absent. Add regression test with a stride-less fixture.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/187" target="_blank">#187</a></td>
+  <td class="title-cell">Expose roofline plotting as importable Python API</td>
+  <td class="desc-cell">Currently roofline plotting only works via the CLI in <code>examples/custom_workflows/roofline_analyzer/</code>. Users want to call a Python function directly on a <code>TreePerfAnalyzer</code> result — no intermediate Excel file required.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Extract <code>plot_roofline()</code> from <code>examples/custom_workflows/roofline_analyzer/src/roofline.py</code> into <code>TraceLens/Reporting/roofline.py</code>. Accept a DataFrame (output of <code>build_df_unified_perf_table()</code>) and an arch dict. Export from <code>__init__.py</code>.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/192" target="_blank">#192</a></td>
+  <td class="title-cell">Process memory events and profiles in torch</td>
+  <td class="desc-cell">PyTorch profiler can record memory allocation/deallocation events. TraceLens currently ignores these. Adding memory analysis would allow users to correlate peak memory usage with specific ops in the trace.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">L</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">Parse <code>ph: "i"</code> (instant) events with <code>cat == "[memory]"</code> from the trace. Add a new <code>get_df_memory_timeline()</code> method to <code>TreePerfAnalyzer</code>. Correlate allocation peaks to surrounding CPU ops by timestamp. Add a <code>memory_timeline</code> sheet to the Excel report.</td>
+</tr>
+
+<tr data-tags="bug">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/202" target="_blank">#202</a></td>
+  <td class="title-cell">TE v2 pseudo CPU ops not unique across GPU ranks</td>
+  <td class="desc-cell"><code>correlation</code> is used as <code>External id</code> for TEv2 pseudo CPU ops, but <code>correlation</code> IDs are not unique across different GPU ranks. This breaks per-rank statistics for expert-parallel models.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">In <code>Trace2Tree/trace_to_tree.py</code> (around line 130), replace the bare <code>correlation</code> field with a composite key of <code>rank_id + correlation</code> for TEv2 pseudo ops. Alternatively use the original <code>External id</code> field if it is already globally unique.</td>
+</tr>
+
+<tr data-tags="doc feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/206" target="_blank">#206</a></td>
+  <td class="title-cell">Example notebook: use perf model without a trace</td>
+  <td class="desc-cell">TraceLens perf models can compute FLOPs/bytes for any op given explicit tensor shapes — no trace file needed. This use case needs a notebook demonstrating standalone perf model usage.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-doc">Docs</span></td>
+  <td class="solution-cell">Create <code>examples/perf_model_standalone.ipynb</code>. Show: (1) instantiating <code>GEMM</code> / <code>flash_attention</code> classes directly with M/N/K/B/H params, (2) calling <code>.flops()</code> and <code>.bytes()</code>, (3) computing roofline bound given an arch dict.</td>
+</tr>
+
+<tr data-tags="bug">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/214" target="_blank">#214</a></td>
+  <td class="title-cell">Warn on host/device misaligned timelines</td>
+  <td class="desc-cell">When the CPU and GPU clocks are not synchronized, GPU kernel timestamps may appear before or after the CPU op that launched them. This silently produces incorrect attribution. A warning should be emitted when this is detected.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">In <code>Trace2Tree/trace_to_tree.py</code> after <code>add_gpu_ops_to_tree()</code>, check if any GPU kernel's start time falls before its parent CPU op's start time by more than a threshold (e.g. 10 µs). Emit a <code>warnings.warn()</code> with guidance to re-collect with clock sync enabled.</td>
+</tr>
+
+<tr data-tags="feat high">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/225" target="_blank">#225</a></td>
+  <td class="title-cell">Minimize dependencies in setup.py</td>
+  <td class="desc-cell">PyTorch-only users currently must install JAX-related dependencies (<code>xprof</code>, <code>protobuf</code>, TensorBoard). This is unnecessary and slows installation. Need optional install groups so users only install what they need.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">In <code>setup.py</code>, split <code>install_requires</code> into a minimal core (pandas, tqdm, orjson, openpyxl) and optional extras: <code>pip install TraceLens[jax]</code> adds <code>xprof</code>/<code>protobuf</code>; <code>TraceLens[rocprof]</code> adds rocprofv3 deps; <code>TraceLens[all]</code> installs everything.</td>
+</tr>
+
+<tr data-tags="jax feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/232" target="_blank">#232</a></td>
+  <td class="title-cell">Implement JAX Trace2Tree</td>
+  <td class="desc-cell">Build a proper hierarchical tree from JAX XPlane traces mirroring the PyTorch tree: JAX framework call stack → HLO op → (optional) HIP/CUDA runtime → GPU kernel. The current JAX analysis lacks this structured tree.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-feat">Feature</span></td>
+  <td class="solution-cell">Extend <code>JaxTraceToTree</code> in <code>Trace2Tree/trace_to_tree.py</code> to parse XPlane's <code>framework_op</code> and <code>hlo_module</code> metadata. Build intermediate tree layers before attaching GPU kernels. Reference the existing <code>JaxTrace_Analysis</code> repo for patterns.</td>
+</tr>
+
+<tr data-tags="jax feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/258" target="_blank">#258</a></td>
+  <td class="title-cell">Move all features from JaxTraceAnalysis</td>
+  <td class="desc-cell">The <code>amd-aig-aima/jaxtrace_analysis</code> external repo contains JAX-specific analysis features not yet ported to TraceLens. All functionality should be consolidated here.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">L</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-feat">Feature</span></td>
+  <td class="solution-cell">Audit <code>github.com/amd-aig-aima/jaxtrace_analysis</code> for features not in <code>TraceLens/NcclAnalyser/jax_nccl_analyser.py</code> and <code>TreePerf/jax_analyses.py</code>. Port incrementally: each feature as a separate PR with tests.</td>
+</tr>
+
+<tr data-tags="jax feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/262" target="_blank">#262</a></td>
+  <td class="title-cell">Implement NCCL/RCCL analyzer for JAX</td>
+  <td class="desc-cell">JAX collective analysis currently lacks the full <code>NcclAnalyser</code> feature set. Need to analyze collectives extracted from the JAX XPlane trace using <code>gpu_kernel_op_cat == "Communication rccl/nccl"</code>, supporting multi-node scenarios and HLO module metadata.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-feat">Feature</span></td>
+  <td class="solution-cell">Extend <code>NcclAnalyser/jax_nccl_analyser.py</code> to accept <code>JaxTraceToTree</code> as input (replacing raw event lists). Use <code>XLACollectiveParser</code> for replica-group topology. Add multi-node support by parsing node rank from trace metadata.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/263" target="_blank">#263</a></td>
+  <td class="title-cell">Add compute/communication tag to df_kernels</td>
+  <td class="desc-cell"><code>get_df_kernels()</code> returns raw GPU kernel data without indicating whether each kernel is compute, communication (NCCL), or memcpy. Adding this tag enables downstream filtering.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>TreePerf/tree_perf.py</code>, use <code>GPUEventAnalyser.get_gpu_event_lists()</code> to classify each kernel into compute/comm/memcpy. Add a <code>kernel_category</code> column to the DataFrame returned by <code>get_df_kernels()</code>.</td>
+</tr>
+
+<tr data-tags="bug">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/279" target="_blank">#279</a></td>
+  <td class="title-cell">NeMo framework trace parse failure</td>
+  <td class="desc-cell">Generating a perf report from a NeMo trace raises an assertion error. NeMo may produce non-standard event structures or correlation IDs that break assumptions in <code>TraceToTree</code>.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">Reproduce with the provided trace. Add defensive checks in <code>Trace2Tree/trace_to_tree.py</code> around the assertion that fails. Identify what NeMo-specific event structure differs (likely in <code>args</code> dict or event categories). Add NeMo trace fixture to test suite.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/281" target="_blank">#281</a></td>
+  <td class="title-cell">Update unary/binary ops based on unlabeled ops</td>
+  <td class="desc-cell">Many <code>aten::</code> elementwise ops (pow, sigmoid, relu, etc.) share the same kernel functor pattern. These should all map to the same <code>UnaryElementwise</code>/<code>BinaryElementwise</code> perf model but are currently "other".</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Check PyTorch source for the complete list of unary/binary ATen ops that share the elementwise kernel pattern. Add all missing entries to <code>PerfModel/torch_op_mapping.py</code> mapping to <code>aten_unary_elementwise</code> or <code>aten_binary_elementwise</code>.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/287" target="_blank">#287</a></td>
+  <td class="title-cell">Support FAv4 (Dao-AILab, NVIDIA Blackwell)</td>
+  <td class="desc-cell">Flash Attention v4 from Dao-AILab is not recognized. The kernel launcher is <code>flash_attn.cute.interface._flash_attn_fwd</code>. This is needed for diffusion model inference analysis (Flux, HunyuanVideo, Wan).</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Add <code>flash_attn_v4_fwd</code> class in <code>PerfModel/perf_model.py</code> extending <code>SDPA</code>. Register <code>"flash_attn.cute.interface._flash_attn_fwd"</code> in <code>torch_op_mapping.py</code>. Parse B/H/N/d from <code>Concrete Inputs</code> following the FAv3 pattern already in the codebase.</td>
+</tr>
+
+<tr data-tags="doc">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/288" target="_blank">#288</a></td>
+  <td class="title-cell">Update landing README</td>
+  <td class="desc-cell">README has stale WIP markers, outdated file structure references, and lacks a quickstart guide. Needs to reflect current features and point users to the most commonly used CLI scripts.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-doc">Docs</span> <span class="tag tag-doc">Pre-release</span></td>
+  <td class="solution-cell">Update <code>README.md</code>: mark completed features, add a quickstart section with the 3 most common CLI commands, update the file structure section, add a feature compatibility matrix (PyTorch / JAX / rocprofv3 / Perfetto).</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/289" target="_blank">#289</a></td>
+  <td class="title-cell">Allow custom kernel categorization (comm/copy)</td>
+  <td class="desc-cell">Users need to categorize custom kernels (e.g. DeepEP dispatch/combine) as communication or copy without modifying TraceLens source. Currently requires source code edits; a callback/extension mechanism is needed.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Extend the extension system in <code>generate_perf_report_pytorch.py</code> with a 4th hook: <code>kernel_category_extension = {"kernel_name_pattern": "Communication"}</code>. In <code>GPUEventAnalyser.get_gpu_event_lists()</code>, check user-supplied patterns before the default categorization.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/290" target="_blank">#290</a></td>
+  <td class="title-cell">Perf model for aiter::wrapper_fmha_v3_varlen_fwd</td>
+  <td class="desc-cell">Variable-length attention via <code>aiter.flash_attn_varlen_func</code> (launcher: <code>aiter::wrapper_fmha_v3_varlen_fwd</code>) is not recognized. Used in diffusion models (Wan 2.1, Wan 2.2). PR #272 added FA varlen support; this needs the AITer-specific variant.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Add <code>aiter__wrapper_fmha_v3_varlen_fwd</code> class in <code>PerfModel/extensions/attention_perf_model_extensions.py</code> extending <code>flash_attention_varlen_forward</code>. Register in <code>torch_op_mapping.py</code>. Reuse varlen SDPA FLOPs formula already implemented in PR #272.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/291" target="_blank">#291</a></td>
+  <td class="title-cell">TraceAugment</td>
+  <td class="desc-cell">Extend <code>TraceFusion</code> to support general trace augmentation: take input trace(s), transform/annotate events, and write output trace(s). Enables adding synthetic annotations, filtering, and normalization as a pipeline stage.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">L</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">Generalize <code>TraceFusion/trace_fuse.py</code> into a <code>TraceAugment</code> class with a pluggable transform pipeline. Each transform is a callable <code>(events) → events</code>. Ship built-in transforms: timestamp normalization, event filtering by cat/name, annotation injection.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/296" target="_blank">#296</a></td>
+  <td class="title-cell">Perf model for trtllm::attention_inplace</td>
+  <td class="desc-cell">TRT-LLM's <code>trtllm::attention_inplace</code> is classified as "other". Known input dims: BF16 activations, FP8 weights, complex shape signature with 50+ inputs. Should show in the attention roofline sheet.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Add <code>trtllm_attention_inplace</code> class in <code>PerfModel/extensions/attention_perf_model_extensions.py</code> extending <code>InferenceAttention</code>. Parse B, N_Q, H from the known input shape at index 0 <code>(1000, 6144)</code>. Handle MLA-style KV cache layout from inputs at indices 11–12.</td>
+</tr>
+
+<tr data-tags="bug high">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/297" target="_blank">#297</a></td>
+  <td class="title-cell">Perf reports for SGLang are mostly empty</td>
+  <td class="desc-cell">SGLang (DeepSeek) torch traces show a deep call stack in Perfetto, but the TraceLens perf report is nearly empty — most ops are missing. The tree builder likely misses SGLang's non-standard event structure.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">Load an SGLang trace in debug mode and inspect the raw events. The issue is likely that SGLang uses <code>hipGraphLaunch</code> (graph capture) or non-standard <code>cat</code> fields that break <code>TraceToTree</code>'s categorization. Apply <code>trace_capture_merge_experimental.py</code> or add SGLang-specific event detection.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/299" target="_blank">#299</a></td>
+  <td class="title-cell">CPU numeric checking for event replay</td>
+  <td class="desc-cell">When replaying an op, run the same operation on CPU and compare output tensors to the GPU result using L2 and L∞ norms. This validates numerical correctness of the GPU kernel.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>EventReplay/event_replay.py</code>, add <code>numeric_check=False</code> flag to <code>replay()</code>. When enabled: clone input tensors to CPU, run the op on CPU, run on GPU, compute <code>torch.norm(cpu_out - gpu_out.cpu())</code> L2 and L∞, return as part of the result dict.</td>
+</tr>
+
+<tr data-tags="jax feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/301" target="_blank">#301</a></td>
+  <td class="title-cell">Add JAX rocprofv3 analysis</td>
+  <td class="desc-cell">Port <code>rocprof_output_analysis.py</code> from <code>JaxTrace_Analysis</code> repo into TraceLens. Enables rocprofv3-based profiling for JAX workloads with the same report format as the PyTorch rocprof path.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-feat">Feature</span></td>
+  <td class="solution-cell">Port logic from <code>github.com/AMD-AGI/JaxTrace_Analysis/blob/main/rocprof_output_analysis.py</code> into <code>Reporting/generate_perf_report_rocprof_jax.py</code>. Reuse <code>RocprofAnalyzer</code> from <code>rocprof_analysis.py</code> where possible. Add CLI entry point to <code>setup.py</code>.</td>
+</tr>
+
+<tr data-tags="jax feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/304" target="_blank">#304</a></td>
+  <td class="title-cell">Add JAX trace diff</td>
+  <td class="desc-cell">TraceDiff (Wagner-Fischer tree edit distance) exists for PyTorch. The same capability needs to be extended to JAX traces using <code>JaxTraceToTree</code> as input instead of <code>TraceToTree</code>.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-feat">Feature</span></td>
+  <td class="solution-cell"><code>TraceDiff/trace_diff.py</code> should already work on any tree structure. Verify <code>JaxTraceToTree</code> produces a compatible node structure. Add a <code>JaxTraceDiff</code> subclass or factory method <code>TraceDiff.from_jax_files()</code> and a corresponding JAX-aware report generator.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/306" target="_blank">#306</a></td>
+  <td class="title-cell">Implement critical path analysis</td>
+  <td class="desc-cell">Determine the longest dependency chain through the execution graph — the operations that directly determine the minimum possible iteration time. Required as a foundation for perf projection (#114).</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XL</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">Requires the PyTorch execution trace dependency graph (#328). Once the DAG is available, run a longest-path algorithm (topological sort + relaxation). New module <code>TraceLens/CriticalPath/critical_path.py</code>. Output: list of ops on the critical path with their cumulative time.</td>
+</tr>
+
+<tr data-tags="refactor feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/312" target="_blank">#312</a></td>
+  <td class="title-cell">Extend replay beyond aten:: dispatch</td>
+  <td class="desc-cell"><code>EventReplayer</code> currently only handles <code>aten::</code> ops via <code>torch._C._jit_get_operation</code>. Custom ops (vLLM, TransformerEngine, etc.) use different dispatch mechanisms and are not replayable.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">In <code>EventReplay/event_replay.py</code>, add fallback dispatch paths: (1) <code>torch.ops</code> namespace lookup for custom ops, (2) <code>importlib</code>-based lookup for ops registered via <code>torch.library</code>. Add a registry of known non-aten ops and their Python call paths.</td>
+</tr>
+
+<tr data-tags="refactor feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/314" target="_blank">#314</a></td>
+  <td class="title-cell">API cleanup</td>
+  <td class="desc-cell">General API cleanup before public release: consistent naming, removal of deprecated methods, better docstrings, unified return type conventions across <code>TreePerfAnalyzer</code> methods.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-refactor">Refactor</span> <span class="tag tag-doc">Pre-release</span></td>
+  <td class="solution-cell">Audit all public methods in <code>TreePerfAnalyzer</code>, <code>JaxTreePerfAnalyzer</code>, <code>NcclAnalyser</code>, <code>TraceDiff</code>. Standardize: snake_case names, DataFrame return types, consistent <code>arch</code> parameter handling. Update <code>__init__.py</code> exports accordingly.</td>
+</tr>
+
+<tr data-tags="refactor">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/315" target="_blank">#315</a></td>
+  <td class="title-cell">Clarify UID vs Event in the API</td>
+  <td class="desc-cell">The API inconsistently uses "UID" and "event" to refer to the same concept. This causes confusion when users query events by UID vs by event object. Needs clear documentation and consistent naming.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XS</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">Establish a naming convention: <em>event</em> = the raw dict from the trace, <em>node</em> = the tree node wrapping an event, <em>UID</em> = the integer assigned by <code>set_bookkeeping_attr()</code>. Update parameter names and docstrings in <code>TreePerf/tree_perf.py</code> and <code>Trace2Tree/trace_to_tree.py</code>.</td>
+</tr>
+
+<tr data-tags="refactor">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/316" target="_blank">#316</a></td>
+  <td class="title-cell">Rename kernel launchers to leaf ops</td>
+  <td class="desc-cell">"Kernel launcher" is technically inaccurate — it refers to the CPU op that launches GPU kernels, not the HIP/CUDA runtime call. "Leaf op" better describes its role in the tree. All public API references need renaming.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">Rename <code>get_df_kernel_launchers()</code> → <code>get_df_leaf_ops()</code>, <code>get_df_kernel_launchers_summary()</code> → <code>get_df_leaf_ops_summary()</code> in <code>TreePerf/tree_perf.py</code>. Keep old names as deprecated aliases. Update report sheet names and column headers in <code>Reporting/</code>.</td>
+</tr>
+
+<tr data-tags="doc">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/319" target="_blank">#319</a></td>
+  <td class="title-cell">TraceLens release ROCm blog</td>
+  <td class="desc-cell">Draft and publish a ROCm developer blog post announcing the TraceLens public release. Covers key capabilities, usage examples, and performance insights achievable with the tool.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-doc">Docs</span> <span class="tag tag-doc">Pre-release</span></td>
+  <td class="solution-cell">Write draft in Markdown. Include: what TraceLens is, 3 key use cases with screenshots (roofline plot, NCCL analysis, trace diff), quick install + CLI example. Coordinate with AMD ROCm developer blog team for publication.</td>
+</tr>
+
+<tr data-tags="doc">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/322" target="_blank">#322</a></td>
+  <td class="title-cell">Detailed docs based on profiling workflows deck</td>
+  <td class="desc-cell">An internal PowerPoint deck on profiling workflows for AI models exists. This should be converted to structured documentation in the repo covering end-to-end profiling workflows.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-doc">Docs</span></td>
+  <td class="solution-cell">Convert the profiling workflows deck to <code>docs/profiling_workflows.md</code>. Cover: (1) collecting a torch.profiler trace, (2) running TraceLens CLI, (3) interpreting the GPU timeline sheet, (4) reading the roofline sheet, (5) NCCL analysis workflow.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/328" target="_blank">#328</a></td>
+  <td class="title-cell">Input PyTorch execution trace for dependency info</td>
+  <td class="desc-cell">PyTorch Kineto can produce an <em>execution trace</em> (ET) in addition to the profiler trace. The ET contains op-to-op data dependency edges. TraceLens should ingest this to build a dependency DAG for critical path analysis.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XL</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">Add <code>ExecutionTraceLoader</code> in <code>util.py</code> to parse the Kineto ET JSON format. Map ET node IDs to TraceLens tree node UIDs via correlation. Expose a <code>get_dependency_graph()</code> method on <code>TreePerfAnalyzer</code> returning a DAG of op nodes.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/331" target="_blank">#331</a></td>
+  <td class="title-cell">Add op category to perf report comparison</td>
+  <td class="desc-cell">When comparing two perf reports, the output diff DataFrame doesn't include the op category (GEMM, SDPA, etc.). This makes it hard to filter the comparison by op type.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>Reporting/compare_perf_reports_pytorch.py</code>, add <code>category</code> to the <code>SHEETS_COMPARE_CONFIG</code> merge keys for the relevant sheets. Ensure the category column from <code>op_to_perf_model_class_map</code> is preserved in the diff output.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/340" target="_blank">#340</a></td>
+  <td class="title-cell">Publish pip installable package</td>
+  <td class="desc-cell">TraceLens is currently only installable from source via <code>pip install -e .</code>. It should be published to PyPI so users can install with <code>pip install tracelens</code>.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-doc">Release</span></td>
+  <td class="solution-cell">Add a GitHub Actions workflow <code>.github/workflows/publish.yml</code> using <code>pypa/gh-action-pypi-publish</code>. Ensure <code>setup.py</code> has correct metadata (license, classifiers, long description from README). Coordinate the package name on PyPI (<code>tracelens</code> vs <code>AMD-TraceLens</code>).</td>
+</tr>
+
+<tr data-tags="doc">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/342" target="_blank">#342</a></td>
+  <td class="title-cell">Update GitHub Wiki Tab</td>
+  <td class="desc-cell">The GitHub Wiki for TraceLens is outdated or empty. It should provide navigable documentation covering installation, usage, architecture, and the extension system.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-doc">Docs</span></td>
+  <td class="solution-cell">Mirror the key Markdown files from <code>docs/</code> into the GitHub Wiki. Use a GitHub Actions workflow to auto-sync <code>docs/*.md</code> to the Wiki on merge to main. Or link the Wiki home page to the online rendered docs.</td>
+</tr>
+
+<tr data-tags="refactor">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/343" target="_blank">#343</a></td>
+  <td class="title-cell">Hide max/min metrics in perf report by default</td>
+  <td class="desc-cell">The Excel report includes many <code>_min</code>, <code>_max</code> aggregate columns that clutter the view. These should be hidden by default (via Excel column grouping) to improve readability, with a way to expand them if needed.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">In <code>Reporting/reporting_utils.py</code>, use <code>openpyxl</code>'s <code>ColumnDimension(hidden=True)</code> on columns matching <code>_min</code> and <code>_max</code> suffixes. Add a parameter <code>hide_stats_cols=True</code> to <code>generate_perf_report_pytorch()</code>.</td>
+</tr>
+
+<tr data-tags="jax doc">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/359" target="_blank">#359</a></td>
+  <td class="title-cell">Add JAX details to README and feature matrix</td>
+  <td class="desc-cell">README barely mentions JAX support. Needs a feature compatibility matrix showing which TraceLens features work for PyTorch vs JAX vs rocprofv3 vs Perfetto, and a JAX-specific quickstart section.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-doc">Docs</span> <span class="tag tag-doc">Pre-release</span></td>
+  <td class="solution-cell">Add a Markdown table to <code>README.md</code> with rows = features (tree analysis, roofline, NCCL, TraceDiff, TraceFusion, EventReplay) and columns = trace backends. Add a JAX quickstart block below the PyTorch one.</td>
+</tr>
+
+<tr data-tags="bug">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/374" target="_blank">#374</a></td>
+  <td class="title-cell">RuntimeError in EventReplay for aten::bmm</td>
+  <td class="desc-cell"><code>EventReplayer</code> raises <code>RuntimeError: unsupported operation: more than one element of the written-to tensor refers to a single memory location</code> for some <code>aten::bmm</code> calls. Caused by tensors with overlapping strides (e.g. expanded/broadcast tensors).</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">In <code>EventReplay/utils.py</code>'s <code>build_tensor()</code>, detect when the reconstructed tensor would have overlapping memory (via stride analysis) and automatically call <code>.clone()</code> before passing to the op. Or add a pre-replay <code>.contiguous()</code> call.</td>
+</tr>
+
+<tr data-tags="refactor">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/412" target="_blank">#412</a></td>
+  <td class="title-cell">Move _annotate_gpu_events_with_stream_index to GPUEventAnalyzer</td>
+  <td class="desc-cell"><code>_annotate_gpu_events_with_stream_index</code> currently lives in <code>Trace2Tree</code> but is GPU-timeline-specific logic. It belongs in <code>GPUEventAnalyser</code> which handles all GPU timeline operations.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XS</span></td>
+  <td><span class="tag tag-refactor">Refactor</span></td>
+  <td class="solution-cell">Move the method from <code>Trace2Tree/trace_to_tree.py</code> to <code>TreePerf/gpu_event_analyser.py</code>. Update the call site in <code>TreePerfAnalyzer</code>. Add a deprecation shim in <code>TraceToTree</code> pointing to the new location. Ensure tests still pass.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/419" target="_blank">#419</a></td>
+  <td class="title-cell">Focus analysis on sub-regions (computation phases)</td>
+  <td class="desc-cell">Allow users to scope the perf report to a specific computation phase (prefill/decode, fwd/bwd) by providing a CPU op name as the root. The report should only include events in the subtree under that op.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Add <code>scope_to_op(op_name)</code> method to <code>TreePerfAnalyzer</code> that finds the first matching node and re-roots the analysis tree at that node. All subsequent <code>build_df_*</code> calls operate on the sub-tree. Add <code>--scope_op</code> CLI flag to the report generators.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/420" target="_blank">#420</a></td>
+  <td class="title-cell">Focus analysis on sub-regions by timestamps</td>
+  <td class="desc-cell">Allow users to provide <code>start_ts</code> and <code>end_ts</code> to restrict the perf report to a specific time window within the trace. Prototype exists in branch <code>feat/treeperf/window_filter_by_timestamps_v0.1</code>.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Port the timestamp window filter from <code>feat/treeperf/window_filter_by_timestamps_v0.1</code>. Add <code>filter_by_timestamps(start_ts, end_ts)</code> to <code>TreePerfAnalyzer</code> that prunes the tree to nodes whose <code>ts</code> and <code>ts+dur</code> fall within the window. Expose as <code>--start_ts</code> / <code>--end_ts</code> CLI flags.</td>
+</tr>
+
+<tr data-tags="bug perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/422" target="_blank">#422</a></td>
+  <td class="title-cell">__amd_rocclr_fillBufferAligned.kd miscategorized</td>
+  <td class="desc-cell">Events named <code>__amd_rocclr_fillBufferAligned.kd</code> are categorized as <code>Uncategorized Events/XLA</code>, but some actually are TE-based fused attention kernels (they have valid operand shapes and <code>custom_call_target</code> metadata).</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-bug">Bug</span> <span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">In <code>util.py</code>'s <code>prepare_event_categorizer()</code>, add a secondary check for <code>__amd_rocclr_fillBufferAligned.kd</code> events: inspect the event's <code>metadata</code> for <code>custom_call_target</code> matching TE attention patterns. Reclassify accordingly.</td>
+</tr>
+
+<tr data-tags="bug perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/423" target="_blank">#423</a></td>
+  <td class="title-cell">'FillBuffer' events miscategorized as Conv</td>
+  <td class="desc-cell"><code>FillBuffer</code> events are classified as Conv via <code>JaxOpKeys.ClassCategories</code> pattern matching, but inspection of their <code>custom_call_target</code> shows they are TE fused attention kernels.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-bug">Bug</span> <span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Refine the <code>JaxOpKeys.ClassCategories</code> pattern for <code>FillBuffer</code> in <code>util.py</code>. Add a <code>custom_call_target</code> override: if the target matches TE attention patterns, set <code>gpu_kernel_op_cat = "te_fused_attn"</code> instead of Conv.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/424" target="_blank">#424</a></td>
+  <td class="title-cell">Auxiliary events in TE kernels need separate perf model</td>
+  <td class="desc-cell">TransformerEngine fused kernels include auxiliary events (workspace buffers, scaling factor updates) that inflate FLOP counts when lumped into the main kernel's perf model. Need a separate class to model these correctly.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Identify the auxiliary event names in TE kernel traces. Add dedicated perf model classes in <code>PerfModel/extensions/</code> with correct FLOPs (typically 0 or small constant) and bytes (workspace read/write). Register in the op mapping.</td>
+</tr>
+
+<tr data-tags="jax feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/425" target="_blank">#425</a></td>
+  <td class="title-cell">Add hlo_op and framework scope nodes to JAX tree</td>
+  <td class="desc-cell">Current JAX tree nodes are: Unknown / kernel / cpu_op / memcpy / python_function. Need to add <code>hlo_op</code> layer (XLA's key representation with input/output shapes, dtypes, data deps) and framework name scope as tree layers for richer analysis.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">L</span></td>
+  <td><span class="tag tag-jax">JAX</span> <span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">In <code>JaxTraceToTree</code>, parse <code>hlo_module</code> sidecar data to extract HLO op metadata. Insert new tree layers between the framework call stack and GPU kernels. Each <code>hlo_op</code> node carries: op type, input/output shapes, dtype, data dependencies.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/428" target="_blank">#428</a></td>
+  <td class="title-cell">Optional kernel name categorizer in GPUEventAnalysis</td>
+  <td class="desc-cell">TraceLens primarily categorizes via CPU op names, but sometimes kernel-name-based categorization is needed (e.g. for <code>hipGraphLaunch</code> or JAX). The existing kernel name categorization in the codebase should be exposed as an optional, pluggable component.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Refactor the existing kernel categorization logic from <code>util.py</code>'s <code>prepare_event_categorizer()</code> into a standalone <code>KernelNameCategorizer</code> class. Expose it as an optional parameter to <code>GPUEventAnalyser</code> and <code>TreePerfAnalyzer.from_file()</code>.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/436" target="_blank">#436</a></td>
+  <td class="title-cell">Classify memsets as memcpy in GPUEventAnalyzer</td>
+  <td class="desc-cell">GPU memset operations (e.g. zeroing buffers) are currently not classified as memcpy events in <code>GPUEventAnalyser</code>, so they appear as unclassified time. They should be included in the memcpy bucket for GPU timeline accounting.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XS</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">In <code>TreePerf/gpu_event_analyser.py</code>'s <code>get_gpu_event_lists()</code>, add pattern detection for memset kernel names (<code>Memset</code>, <code>fillBuffer</code>, <code>__amd_rocclr_fillBufferAligned</code>) and route them into the memcpy interval list.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/449" target="_blank">#449</a></td>
+  <td class="title-cell">Load trace files direct from SharePoint</td>
+  <td class="desc-cell">AMD teams share trace files via SharePoint. Users currently download them manually before running TraceLens. Direct SharePoint loading would streamline the workflow (the <code>office365-rest-python-client</code> dependency is already in <code>setup.py</code>).</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Add a <code>SharePointLoader</code> class in <code>util.py</code> using <code>office365-rest-python-client</code> and <code>msal</code> (both already in deps). Accept a SharePoint URL, authenticate via device code flow, download to a temp file, and return the path. Add <code>--sharepoint_url</code> flag to CLI commands.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/459" target="_blank">#459</a></td>
+  <td class="title-cell">Multi-node breakdown in multi-rank collective report</td>
+  <td class="desc-cell">The multi-rank collective report doesn't distinguish intra-node (NVLink/xGMI) vs inter-node (InfiniBand/RoCE) communication. For multi-node experiments, this breakdown is essential for diagnosing bottlenecks.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Prototype exists in PR #458. Merge and extend: use the rank-to-node mapping (from <code>NcclAnalyser/util/node_rank_to_protobuf_file_mapping.py</code>) to tag each collective as intra/inter-node. Add breakdown columns to the collective report DataFrame.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/477" target="_blank">#477</a></td>
+  <td class="title-cell">Systematic debug mode logging</td>
+  <td class="desc-cell">When a perf model fails (e.g. cannot parse tensor shapes), the failure is currently silent or produces a cryptic error. Failures should be logged in debug mode with op name, input shapes, and the specific parsing step that failed.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Add Python <code>logging</code> calls throughout <code>PerfModel/perf_model.py</code> base class input parsers. Use <code>logger.debug(f"perf model {cls.__name__} failed for op {op_name}: {e}")</code>. Expose <code>--debug</code> / <code>TRACELENS_DEBUG=1</code> flag that sets the log level to DEBUG.</td>
+</tr>
+
+<tr data-tags="bug">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/482" target="_blank">#482</a></td>
+  <td class="title-cell">Spurious warnings from dict_cat2names loop</td>
+  <td class="desc-cell">In <code>generate_perf_report_pytorch.py</code> line ~325, a for loop iterates over all categories in <code>dict_cat2names</code> and tries to build a DataFrame for each, even when that category has no events in the trace. This emits confusing user warnings.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">XS</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">Add a guard: before processing each category, check if the category exists in the trace's op set. If not, <code>continue</code> silently. Simple one-line fix in <code>Reporting/generate_perf_report_pytorch.py</code> around line 325.</td>
+</tr>
+
+<tr data-tags="bug high">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/510" target="_blank">#510</a></td>
+  <td class="title-cell">Missing kernels in unified perf report</td>
+  <td class="desc-cell">The unified perf report traverses <code>cpu_root_nodes</code> top-down, but misses GPU kernels whose call stack goes through Python functions without passing through any <code>cpu_op</code> node (e.g. kernels launched from scheduler or wrapper code).</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-bug">Bug</span></td>
+  <td class="solution-cell">In <code>TreePerfAnalyzer.collect_unified_perf_events()</code>, after the top-down traversal, add a second pass: compare the set of all GPU kernel UIDs in the tree against those already included in the report. Add unmatched kernels as "orphan" entries. Already partially handled — extend the existing orphan detection logic.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/516" target="_blank">#516</a></td>
+  <td class="title-cell">Add perf models for Primus op groups</td>
+  <td class="desc-cell">Primus training traces have up to 90%+ "other" ops with no perf model. Target models: DeepSeek V2 Lite, GPT OSS 20B, Llama3 70B, Qwen 3 8B, Kimi K2, Mamba 370M. After planned PRs, "other" should drop to ~2–8%.</td>
+  <td><span class="pri pri-high">High</span> <span class="effort">L</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Identify all op names in the "other" bucket across Primus traces. For each, add a perf model class in <code>PerfModel/extensions/</code> and register in <code>torch_op_mapping.py</code>. Track progress against the coverage table in the issue (PRs #514, #519, #528, #550, #553 already merged).</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/530" target="_blank">#530</a></td>
+  <td class="title-cell">Comprehensive tests for reports</td>
+  <td class="desc-cell">Current regression tests generate reports from fixture traces and diff against reference files. This is fragile — any reporting enhancement breaks tests. Need synthetic trace-based tests that test features independently of exact output format.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Add helper functions in <code>tests/conftest.py</code> for generating synthetic trace events. Write feature-specific tests: one test per core feature (GPU timeline, roofline, NCCL, pseudo-ops, etc.) that creates minimal synthetic data and asserts specific column values — not full-report equality.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/532" target="_blank">#532</a></td>
+  <td class="title-cell">CPU Idle and Device Sync Analysis</td>
+  <td class="desc-cell">Develop CPU-side idle analysis (time CPU threads are blocked waiting for GPU) and device sync analysis (H2D/D2H synchronization frequency and overhead). Complements the existing GPU-side timeline.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Major Feature</span></td>
+  <td class="solution-cell">New method <code>get_df_cpu_idle_analysis()</code> in <code>TreePerfAnalyzer</code>: measure gaps between consecutive CPU ops and correlate with GPU activity to distinguish CPU-compute idle vs CPU-waiting-for-GPU idle. Extend <code>GPUEventAnalyser</code> to track H2D/D2H sync events separately.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/541" target="_blank">#541</a></td>
+  <td class="title-cell">Add SSM category for Mamba scan/conv ops</td>
+  <td class="desc-cell">Mamba and Zebra model ops (<code>MambaSplitConv1dScanCombinedFn</code>, <code>DaoAILab::_causal_conv1d_fwd_cpp</code>) have no category and fall into "other". Need an <code>SSM</code> category with TB/s model for scan (memory-bound) and FLOPs for causal conv1d.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Add pattern matching for <code>MambaSplitConv1dScanCombinedFn</code> and <code>DaoAILab::_causal_conv1d_*</code> in <code>torch_op_mapping.py</code>. Create <code>SSM</code> category entry in <code>dict_base_class2category</code>. The <code>MambaSSD</code> and <code>CausalConv1d</code> base classes already exist in <code>perf_model.py</code> — wire them up.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/542" target="_blank">#542</a></td>
+  <td class="title-cell">Add MoE_comm category for dispatch/combine ops</td>
+  <td class="desc-cell">Kimi K2 MoE communication ops (<code>MoEDispatch</code>, <code>MoECombine</code>, <code>TokenPermuteMaskMap*</code>) are permutation/scatter-gather ops that belong in an <code>MoE_comm</code> category with TB/s metric.</td>
+  <td><span class="pri pri-med">Medium</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Add <code>MoEDispatch</code>, <code>MoECombine</code>, <code>MoEDispatchBackward</code>, <code>MoECombineBackward</code>, <code>TokenPermuteMaskMap*</code> to <code>torch_op_mapping.py</code> pointing to the existing <code>moe_dispatch</code> / <code>moe_combine</code> classes. Add <code>MoE_comm</code> to <code>dict_base_class2category</code>.</td>
+</tr>
+
+<tr data-tags="perf">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens/issues/543" target="_blank">#543</a></td>
+  <td class="title-cell">Add RoPE and CrossEntropy categories</td>
+  <td class="desc-cell"><code>FusedRoPEFunc</code> and <code>CrossEntropyFunction</code> (and their backward variants) currently fall into "other". Both are memory-bound; TB/s is the primary metric. Need dedicated categories.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">S</span></td>
+  <td><span class="tag tag-perf">Perf Model</span></td>
+  <td class="solution-cell">Register <code>FusedRoPEFunc</code> / <code>FusedRoPEFuncBackward</code> in <code>torch_op_mapping.py</code> pointing to the existing <code>fused_rope_fwd</code> class. Register <code>CrossEntropyFunction</code> / <code>CrossEntropyFunctionBackward</code> to <code>cross_entropy_fwd</code>. Add <code>RoPE</code> and <code>CrossEntropy</code> entries in <code>dict_base_class2category</code>.</td>
+</tr>
+
+<tr data-tags="feat">
+  <td class="id-cell"><a href="https://github.com/AMD-AGI/TraceLens-internal/issues/22" target="_blank">internal #22</a></td>
+  <td class="title-cell">Feature: Kernel timeline</td>
+  <td class="desc-cell">Users want to find the iteration step with the largest tensor shape for a given op (e.g. MLA), then extract all kernels in order for one layer of that step — a focused kernel-level timeline view.</td>
+  <td><span class="pri pri-low">Low</span> <span class="effort">M</span></td>
+  <td><span class="tag tag-feat">Enhancement</span></td>
+  <td class="solution-cell">Add <code>get_kernel_timeline(op_name, step_selector='max_shape')</code> to <code>TreePerfAnalyzer</code>. Identify the step with the largest input shape for the target op, then return all GPU kernels in launch order for one layer of that step via <code>get_df_kernels()</code> filtered by timestamp range.</td>
+</tr>
+
+</tbody>
+</table>
+</div>
+
+<script>
+  function filterRows(tag, btn) {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active','active-bug','active-perf','active-feat','active-doc','active-jax','active-refactor'));
+    if (tag === 'all') {
+      btn.classList.add('active');
+    } else {
+      btn.classList.add('active-' + (tag === 'refactor' ? 'refactor' : tag === 'high' ? 'bug' : tag));
+    }
+
+    let visible = 0;
+    document.querySelectorAll('#issues-table tbody tr').forEach(row => {
+      const tags = row.dataset.tags || '';
+      let show = false;
+      if (tag === 'all') show = true;
+      else if (tag === 'high') show = tags.includes('high');
+      else show = tags.includes(tag);
+      row.classList.toggle('hidden', !show);
+      if (show) visible++;
+    });
+
+    document.getElementById('total-count').textContent = visible;
+    document.getElementById('no-results').style.display = visible === 0 ? 'block' : 'none';
+  }
+</script>
+</body>
+</html>
