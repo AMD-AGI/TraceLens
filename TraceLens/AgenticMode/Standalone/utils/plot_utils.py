@@ -13,10 +13,6 @@ Public API:
   error bars).
 - ``generate_and_embed_plot`` -- end-to-end pipeline (priority_data -> plot
   -> embed).
-
-Data aggregation (``generate_priority_data``) lives in ``report_utils.py``;
-per-category grouping (``build_category_findings``) lives in
-``category_analyses/analysis_utils.py``.
 """
 
 import base64

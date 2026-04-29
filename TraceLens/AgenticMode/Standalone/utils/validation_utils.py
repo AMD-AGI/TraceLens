@@ -55,7 +55,10 @@ def _category_findings_empty(filepath):
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
-_P_ITEM_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
+# Optional icon / prefix before P<N>: (e.g. kernel fusion `### 🟢 P1:`).
+_P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
+
+_KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
 
 # Markdown table header containing an "Args" column. Match line that starts
@@ -161,7 +164,12 @@ def validate_findings_file(filepath, tier):
                         f"(required for {tier} tier)"
                     )
 
-        if tier == "system" and "**Impact**" in rec_section:
+        # Kernel fusion (system_findings) uses roofline-backed **Impact** on P-items.
+        if (
+            tier == "system"
+            and "**Impact**" in rec_section
+            and os.path.basename(filepath) != _KERNEL_FUSION_FINDINGS
+        ):
             errors.append(
                 "System-tier ## Recommendations must not contain **Impact** labels"
             )

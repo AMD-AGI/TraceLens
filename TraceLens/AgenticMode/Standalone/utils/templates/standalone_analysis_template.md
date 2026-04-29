@@ -96,9 +96,7 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ### Top Operations
 
-Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops.
-
-The whole table block (header + separator + every body row) must be wrapped in a `kind=top_ops` marker. Each body row needs a per-row trailer carrying the `low`/`high` impact_score values for that category, sourced from `priority_data.json::priorities[]` (`impact_score_low` / `impact_score_high`). For categories without a quantifiable rollup, emit `low=null high=null` on the trailer.
+One row per entry in `priority_data.json::priorities[]`, in array order (no manifest-sort, no extra rows). For row N (= `priorities[N-1]`): `Rank`/`Category` = `rank`/`display_name`; `Time (ms)` = matching `manifest.categories[].gpu_kernel_time_ms` (verbatim); `Ops` = matching `manifest.categories[].ops_count`; `% of Compute Time` = `Time (ms) / (gpu_utilization.total_time_ms * computation_time_percent / 100)`; trailer `low`/`high` = `priorities[N-1].impact_score_low`/`impact_score_high` (use `null` for `source: "manifest_fallback"`). Wrap the whole block (header + separator + rows) in the `kind=top_ops` marker.
 
 <!-- impact-begin kind=top_ops -->
 | Rank | Category | Time (ms) | % of Compute Time | Ops |
