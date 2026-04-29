@@ -126,8 +126,8 @@ inside `## Detailed Analysis` blocks.
 
 **Column mappings** (T1 source: `metrics['operations']`; T2 source: `category_data/<category>_ops.csv`):
 - **Trace 1 Time (ms)**: `operations[i].time_ms`
-- **Trace 2 Time (ms)**: `Kernel Time (µs)_trace2_sum / 1000` from the aligned CSV row
-- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operation_count_trace2` from the CSV row. Format `T1 / T2` (use `—` for missing T2).
+- **Trace 2 Time (ms)**: `lca_total_kernel_time_trace2_us / 1000` from the CSV row
+- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `lca_kernel_count_trace2` from the CSV row. Format `T1 / T2` (use `—` for missing T2).
 - **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row
 - **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
 - **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix

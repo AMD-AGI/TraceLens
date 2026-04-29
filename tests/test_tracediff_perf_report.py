@@ -22,9 +22,8 @@ import pandas as pd
 import pytest
 
 from TraceLens.Reporting.tracediff_comparison_extension import (
-    _apply_lca_consolidation,
     _build_gpu_uid_to_canonical,
-    _build_lca_consolidation,
+    _build_lca_metadata,
     _build_trace2_time_lookup,
     _enrich_sheet_with_trace2,
     _resolve_diff_row_to_key,
@@ -454,7 +453,14 @@ class TestBuildTrace2TimeLookup:
     def test_empty_canonical_map_returns_empty(self):
         rows = [
             _make_diff_stats_row(
-                "k", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=1
+                "k",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=1,
             ),
             _make_diff_stats_row(
                 "k", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
@@ -466,7 +472,14 @@ class TestBuildTrace2TimeLookup:
     def test_single_lca_single_kernel(self):
         rows = [
             _make_diff_stats_row(
-                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=1
+                "k1",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=1,
             ),
             _make_diff_stats_row(
                 "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
@@ -505,7 +518,14 @@ class TestBuildTrace2TimeLookup:
     def test_trace1_only_lca_records_zero_trace2_time(self):
         rows = [
             _make_diff_stats_row(
-                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=1
+                "k1",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=1,
             ),
         ]
         canonical = {1: 1}
@@ -518,10 +538,24 @@ class TestBuildTrace2TimeLookup:
     def test_unmatched_gpu_uid_skipped(self):
         rows = [
             _make_diff_stats_row(
-                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=999
+                "k1",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=999,
             ),
             _make_diff_stats_row(
-                "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=888
+                "k2",
+                "aten::mm",
+                "trace2",
+                80.0,
+                "mm",
+                10,
+                busy_time=80.0,
+                gpu_op_uid=888,
             ),
         ]
         canonical = {1: 1}  # 999 and 888 not in map
@@ -537,11 +571,20 @@ class TestBuildTrace2TimeLookup:
 class TestEnrichSheetWithTrace2:
     def test_empty_sheet_returned_unchanged(self):
         df = pd.DataFrame()
-        lookup = {1: 100.0}
-        result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
+        meta = {
+            1: {
+                "lca_ids": [1],
+                "lca_names": ["mm"],
+                "lca_total_kernel_time_trace1_us": 100.0,
+                "lca_total_kernel_time_trace2_us": 80.0,
+            }
+        }
+        result = _enrich_sheet_with_trace2(
+            df, "Kernel Time (µs)_sum", lca_metadata=meta
+        )
         assert result.empty
 
-    def test_empty_lookup_returned_unchanged(self):
+    def test_empty_metadata_returned_unchanged(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm"],
@@ -549,7 +592,7 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        result = _enrich_sheet_with_trace2(df, {}, "Kernel Time (µs)_sum")
+        result = _enrich_sheet_with_trace2(df, "Kernel Time (µs)_sum", lca_metadata={})
         assert "speedup (trace2/trace1)" not in result.columns
 
     def test_single_row_enrichment(self):
@@ -560,14 +603,21 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        lookup = {1: 80.0}
+        meta = {
+            1: {
+                "lca_ids": [1],
+                "lca_names": ["mm"],
+                "lca_total_kernel_time_trace1_us": 100.0,
+                "lca_total_kernel_time_trace2_us": 80.0,
+            }
+        }
         result = _enrich_sheet_with_trace2(
-            df, lookup, "Kernel Time (µs)_sum", count_lookup={1: 3}
+            df, "Kernel Time (µs)_sum", count_lookup={1: 3}, lca_metadata=meta
         )
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-20.0)
-        assert result.iloc[0]["operation_count_trace2"] == 3.0
-        assert result.iloc[0]["Kernel Time (µs)_trace2_sum"] == 80.0
+        assert result.iloc[0]["lca_kernel_count_trace2"] == 3.0
+        assert result.iloc[0]["lca_total_kernel_time_trace2_us"] == 80.0
 
     def test_unmatched_row_gets_nan(self):
         df = pd.DataFrame(
@@ -577,16 +627,32 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        lookup = {99: 10.0}  # different canonical
-        result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
+        meta = {
+            99: {
+                "lca_ids": [99],
+                "lca_names": ["other"],
+                "lca_total_kernel_time_trace1_us": 10.0,
+                "lca_total_kernel_time_trace2_us": 5.0,
+            }
+        }
+        result = _enrich_sheet_with_trace2(
+            df, "Kernel Time (µs)_sum", lca_metadata=meta
+        )
         assert np.isnan(result.iloc[0]["speedup (trace2/trace1)"])
 
     def test_row_without_kernel_details_gets_nan(self):
-        df = pd.DataFrame(
-            {"name": ["aten::mm"], "Kernel Time (µs)_sum": [100.0]}
+        df = pd.DataFrame({"name": ["aten::mm"], "Kernel Time (µs)_sum": [100.0]})
+        meta = {
+            1: {
+                "lca_ids": [1],
+                "lca_names": ["mm"],
+                "lca_total_kernel_time_trace1_us": 100.0,
+                "lca_total_kernel_time_trace2_us": 80.0,
+            }
+        }
+        result = _enrich_sheet_with_trace2(
+            df, "Kernel Time (µs)_sum", lca_metadata=meta
         )
-        lookup = {1: 80.0}
-        result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
         assert np.isnan(result.iloc[0]["speedup (trace2/trace1)"])
 
     def test_columns_inserted_after_kernel_time(self):
@@ -599,17 +665,30 @@ class TestEnrichSheetWithTrace2:
                 "TFLOPS/s_mean": [10.0],
             }
         )
-        lookup = {1: 40.0}
-        result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
+        meta = {
+            1: {
+                "lca_ids": [1],
+                "lca_names": ["mm"],
+                "lca_total_kernel_time_trace1_us": 50.0,
+                "lca_total_kernel_time_trace2_us": 40.0,
+            }
+        }
+        result = _enrich_sheet_with_trace2(
+            df, "Kernel Time (µs)_sum", lca_metadata=meta
+        )
         cols = list(result.columns)
         kt_idx = cols.index("Kernel Time (µs)_sum")
         assert cols[kt_idx + 1] == "speedup (trace2/trace1)"
         assert cols[kt_idx + 2] == "delta_us (trace2 - trace1)"
-        assert cols[kt_idx + 3] == "Kernel Time (µs)_trace2_sum"
-        assert cols[kt_idx + 4] == "operation_count_trace2"
-        assert np.isnan(result.iloc[0]["operation_count_trace2"])
+        assert cols[kt_idx + 3] == "lca_kernel_count_trace2"
+        assert cols[kt_idx + 4] == "lca_id"
+        assert cols[kt_idx + 5] == "lca_name"
+        assert cols[kt_idx + 6] == "lca_total_kernel_time_trace1_us"
+        assert cols[kt_idx + 7] == "lca_total_kernel_time_trace2_us"
+        assert np.isnan(result.iloc[0]["lca_kernel_count_trace2"])
+        assert result.iloc[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(50.0)
 
-    def test_debug_inserts_lca_ids(self):
+    def test_lca_id_contains_semicolon_separated_list(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm"],
@@ -617,18 +696,51 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [50.0],
             }
         )
-        lookup = {1: 40.0}
-        lca_ids = {1: [101, 102]}
+        meta = {
+            1: {
+                "lca_ids": [101, 102],
+                "lca_names": ["mm_scope_a", "mm_scope_b"],
+                "lca_total_kernel_time_trace1_us": 50.0,
+                "lca_total_kernel_time_trace2_us": 40.0,
+            }
+        }
         result = _enrich_sheet_with_trace2(
             df,
-            lookup,
             "Kernel Time (µs)_sum",
-            lca_ids_lookup=lca_ids,
             count_lookup={1: 2},
-            debug=True,
+            lca_metadata=meta,
         )
-        assert "debug_lca_ids" in result.columns
-        assert "101" in str(result.iloc[0]["debug_lca_ids"])
+        assert "101" in str(result.iloc[0]["lca_id"])
+        assert "102" in str(result.iloc[0]["lca_id"])
+        assert ";" in str(result.iloc[0]["lca_id"])
+        assert "mm_scope_a" in str(result.iloc[0]["lca_name"])
+        assert "mm_scope_b" in str(result.iloc[0]["lca_name"])
+
+    def test_multi_op_lca_uses_lca_totals_for_speedup(self):
+        df = pd.DataFrame(
+            {
+                "name": ["aiter::fmha_v3_bwd"],
+                "kernel_details_summary": [_kds_str((201, 500.0))],
+                "Kernel Time (µs)_sum": [500.0],
+            }
+        )
+        lca_meta = {
+            201: {
+                "lca_ids": [99],
+                "lca_names": ["lca"],
+                "lca_total_kernel_time_trace1_us": 525.0,
+                "lca_total_kernel_time_trace2_us": 300.0,
+            }
+        }
+        result = _enrich_sheet_with_trace2(
+            df, "Kernel Time (µs)_sum", lca_metadata=lca_meta
+        )
+        assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(300.0 / 525.0)
+        assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-200.0)
+        assert result.iloc[0]["lca_id"] == "99"
+        assert result.iloc[0]["lca_name"] == "lca"
+        assert result.iloc[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        assert result.iloc[0]["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
 
     def test_zero_trace2_time_gives_zero_speedup(self):
         df = pd.DataFrame(
@@ -638,8 +750,17 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
-        lookup = {1: 0.0}
-        result = _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
+        meta = {
+            1: {
+                "lca_ids": [1],
+                "lca_names": ["mm"],
+                "lca_total_kernel_time_trace1_us": 100.0,
+                "lca_total_kernel_time_trace2_us": 0.0,
+            }
+        }
+        result = _enrich_sheet_with_trace2(
+            df, "Kernel Time (µs)_sum", lca_metadata=meta
+        )
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(0.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-100.0)
 
@@ -652,18 +773,24 @@ class TestEnrichSheetWithTrace2:
             }
         )
         original_cols = list(df.columns)
-        lookup = {1: 80.0}
-        _enrich_sheet_with_trace2(df, lookup, "Kernel Time (µs)_sum")
+        meta = {
+            1: {
+                "lca_ids": [1],
+                "lca_names": ["mm"],
+                "lca_total_kernel_time_trace1_us": 100.0,
+                "lca_total_kernel_time_trace2_us": 80.0,
+            }
+        }
+        _enrich_sheet_with_trace2(df, "Kernel Time (µs)_sum", lca_metadata=meta)
         assert list(df.columns) == original_cols
 
 
 # ---------------------------------------------------------------------------
-# Tests: _build_lca_consolidation
+# Tests: _build_lca_metadata
 # ---------------------------------------------------------------------------
-class TestBuildLCAConsolidation:
+class TestBuildLCAMetadata:
     def test_empty_df(self):
-        adds, subs, t2map, lca_ids, t2cnt = _build_lca_consolidation(pd.DataFrame())
-        assert adds == {} and subs == {} and t2map == {} and lca_ids == {} and t2cnt == {}
+        assert _build_lca_metadata(pd.DataFrame(), {1: 1}) == {}
 
     def test_empty_canonical_map(self):
         rows = [
@@ -671,25 +798,32 @@ class TestBuildLCAConsolidation:
                 "k", "op_a", "trace1", 10.0, "lca", 1, busy_time=10.0, gpu_op_uid=1
             ),
         ]
-        adds, subs, *_ = _build_lca_consolidation(pd.DataFrame(rows))
-        assert adds == {} and subs == {}
+        assert _build_lca_metadata(pd.DataFrame(rows), {}) == {}
 
-    def test_single_op_lca_produces_no_adjustments(self):
+    def test_single_op_lca(self):
         rows = [
             _make_diff_stats_row(
-                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=1
+                "k1",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=1,
             ),
             _make_diff_stats_row(
                 "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
             ),
         ]
         canonical = {1: 1, 2: 2}
-        adds, subs, t2map, *_ = _build_lca_consolidation(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
-        )
-        assert adds == {} and subs == {} and t2map == {}
+        meta = _build_lca_metadata(pd.DataFrame(rows), canonical)
+        assert meta[1]["lca_ids"] == [10]
+        assert meta[1]["lca_names"] == ["mm"]
+        assert meta[1]["lca_total_kernel_time_trace1_us"] == pytest.approx(100.0)
+        assert meta[1]["lca_total_kernel_time_trace2_us"] == pytest.approx(80.0)
 
-    def test_multi_op_lca_dominant_selection(self):
+    def test_multi_op_lca(self):
         rows = [
             _make_diff_stats_row(
                 "fill_k",
@@ -723,156 +857,13 @@ class TestBuildLCAConsolidation:
             ),
         ]
         canonical = {101: 101, 201: 201, 301: 301}
-        adds, subs, t2map, _, t2cnt = _build_lca_consolidation(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
-        )
-
-        # fmha (500us) dominates fill_ (25us); 25us moves from fill_ → fmha.
-        assert adds == {201: 25.0}
-        assert subs == {101: 25.0}
-        assert t2map == {201: 300.0}
-        assert t2cnt == {201: 1}
-
-    def test_multi_op_lca_aggregated_across_instances(self):
-        rows = [
-            _make_diff_stats_row(
-                "fill1", "aten::fill_", "trace1", 20.0, "lca", 1,
-                busy_time=420.0, gpu_op_uid=101,
-            ),
-            _make_diff_stats_row(
-                "fmha1", "aiter::fmha", "trace1", 400.0, "lca", 1,
-                busy_time=420.0, gpu_op_uid=201,
-            ),
-            _make_diff_stats_row(
-                "flash1", "flash_attn::bwd", "trace2", 250.0, "lca", 1,
-                busy_time=250.0, gpu_op_uid=301,
-            ),
-            _make_diff_stats_row(
-                "fill2", "aten::fill_", "trace1", 30.0, "lca", 2,
-                busy_time=630.0, gpu_op_uid=102,
-            ),
-            _make_diff_stats_row(
-                "fmha2", "aiter::fmha", "trace1", 600.0, "lca", 2,
-                busy_time=630.0, gpu_op_uid=202,
-            ),
-            _make_diff_stats_row(
-                "flash2", "flash_attn::bwd", "trace2", 350.0, "lca", 2,
-                busy_time=350.0, gpu_op_uid=302,
-            ),
-        ]
-        # Both fill_ instances → canonical 101; both fmha → canonical 201.
-        canonical = {
-            101: 101, 102: 101,
-            201: 201, 202: 201,
-            301: 301, 302: 302,
-        }
-        adds, subs, t2map, _, t2cnt = _build_lca_consolidation(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
-        )
-        assert adds[201] == pytest.approx(50.0)  # 20 + 30
-        assert subs[101] == pytest.approx(50.0)
-        assert t2map[201] == pytest.approx(600.0)  # 250 + 350
-        assert t2cnt[201] == 2
-
-
-# ---------------------------------------------------------------------------
-# Tests: _apply_lca_consolidation
-# ---------------------------------------------------------------------------
-class TestApplyLCAConsolidation:
-    def test_no_adjustments_passthrough(self):
-        sheets = {
-            "ops": pd.DataFrame(
-                {
-                    "name": ["aten::mm"],
-                    "kernel_details": [_kd_list((1, 100))],
-                    "Kernel Time (µs)_sum": [100.0],
-                }
-            )
-        }
-        result = _apply_lca_consolidation(sheets, {}, {})
-        assert result["ops"].iloc[0]["Kernel Time (µs)_sum"] == 100.0
-
-    def test_addition_applied(self):
-        sheets = {
-            "ops": pd.DataFrame(
-                {
-                    "name": ["aiter::fmha"],
-                    "kernel_details": [_kd_list((201, 500))],
-                    "Kernel Time (µs)_sum": [500.0],
-                }
-            )
-        }
-        result = _apply_lca_consolidation(sheets, {201: 25.0}, {})
-        assert result["ops"].iloc[0]["Kernel Time (µs)_sum"] == pytest.approx(525.0)
-
-    def test_subtraction_applied(self):
-        sheets = {
-            "ops": pd.DataFrame(
-                {
-                    "name": ["aten::fill_"],
-                    "kernel_details": [_kd_list((101, 100))],
-                    "Kernel Time (µs)_sum": [100.0],
-                }
-            )
-        }
-        result = _apply_lca_consolidation(sheets, {}, {101: 25.0})
-        assert result["ops"].iloc[0]["Kernel Time (µs)_sum"] == pytest.approx(75.0)
-
-    def test_subtraction_removes_row_when_zero(self):
-        sheets = {
-            "ops": pd.DataFrame(
-                {
-                    "name": ["aten::fill_", "aten::mm"],
-                    "kernel_details": [_kd_list((101, 25)), _kd_list((1, 200))],
-                    "Kernel Time (µs)_sum": [25.0, 200.0],
-                }
-            )
-        }
-        result = _apply_lca_consolidation(sheets, {}, {101: 25.0})
-        assert len(result["ops"]) == 1
-        assert result["ops"].iloc[0]["name"] == "aten::mm"
-
-    def test_cross_sheet_same_canonical_applied(self):
-        """Rows in op-category sheets that share a canonical uid with
-        unified_perf_summary get the same consolidation adjustment."""
-        sheets = {
-            "Attention": pd.DataFrame(
-                {
-                    "name": ["aiter::fmha"],
-                    "kernel_details": [_kd_list((205, 100), (201, 400))],
-                    "Kernel Time (µs)_sum": [500.0],
-                }
-            ),
-            "unified_perf_summary": pd.DataFrame(
-                {
-                    "name": ["aiter::fmha"],
-                    "kernel_details_summary": [_kds_str((205, 100.0), (201, 400.0))],
-                    "Kernel Time (µs)_sum": [500.0],
-                }
-            ),
-        }
-        # canonical for both sheets is min(201, 205) = 201
-        result = _apply_lca_consolidation(sheets, {201: 25.0}, {})
-        assert result["Attention"].iloc[0]["Kernel Time (µs)_sum"] == pytest.approx(525.0)
-        assert result["unified_perf_summary"].iloc[0]["Kernel Time (µs)_sum"] == pytest.approx(525.0)
-
-    def test_sheet_without_name_column_unchanged(self):
-        sheets = {
-            "gpu_timeline": pd.DataFrame({"type": ["total_time"], "time ms": [5.0]})
-        }
-        result = _apply_lca_consolidation(sheets, {1: 10.0}, {})
-        assert result["gpu_timeline"].equals(sheets["gpu_timeline"])
-
-    def test_sheet_without_kernel_details_unchanged(self):
-        """A sheet with name+kt_col but no kernel_details can't be matched
-        and is left alone (no name+args fallback anymore)."""
-        sheets = {
-            "legacy": pd.DataFrame(
-                {"name": ["aten::fill_"], "Kernel Time (µs)_sum": [100.0]}
-            )
-        }
-        result = _apply_lca_consolidation(sheets, {}, {101: 25.0})
-        assert result["legacy"].iloc[0]["Kernel Time (µs)_sum"] == 100.0
+        meta = _build_lca_metadata(pd.DataFrame(rows), canonical)
+        assert meta[101]["lca_ids"] == [99]
+        assert meta[201]["lca_ids"] == [99]
+        assert meta[101]["lca_names"] == ["lca"]
+        assert meta[101]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        assert meta[101]["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
+        assert meta[201]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
 
 
 # ---------------------------------------------------------------------------
@@ -951,12 +942,24 @@ class TestPassthroughWithoutMatchingInfo:
     def test_no_kernel_details_column(self):
         diff_rows = [
             _make_diff_stats_row(
-                "k", "aten::mm", "trace1", 100.0, "mm", 10,
-                busy_time=100.0, gpu_op_uid=1,
+                "k",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=1,
             ),
             _make_diff_stats_row(
-                "k", "aten::mm", "trace2", 80.0, "mm", 10,
-                busy_time=80.0, gpu_op_uid=2,
+                "k",
+                "aten::mm",
+                "trace2",
+                80.0,
+                "mm",
+                10,
+                busy_time=80.0,
+                gpu_op_uid=2,
             ),
         ]
         perf1 = {
@@ -994,32 +997,60 @@ class TestPassthroughWithoutMatchingInfo:
             assert pd.isna(ups.iloc[0]["speedup (trace2/trace1)"])
 
 
-class TestConsolidationEndToEnd:
-    """Multi-op LCA consolidation applied through enrich_perf_report_dict_inplace."""
+class TestMultiOpLCAEnrichmentEndToEnd:
+    """Multi-op LCA: perf sheets unchanged; unified summary uses LCA totals."""
 
-    def test_dominant_and_non_dominant_consolidated(self):
+    def test_multi_op_rows_get_lca_totals_and_nan_trace2(self):
         diff_rows = [
-            # Multi-op LCA 99: fill_ (25us, gpu 101) + fmha (500us, gpu 201) → flash_bwd (300us, gpu 301)
             _make_diff_stats_row(
-                "fill_k", "aten::fill_", "trace1", 25.0, "lca", 99,
-                busy_time=525.0, gpu_op_uid=101,
+                "fill_k",
+                "aten::fill_",
+                "trace1",
+                25.0,
+                "lca",
+                99,
+                busy_time=525.0,
+                gpu_op_uid=101,
             ),
             _make_diff_stats_row(
-                "fmha_k", "aiter::fmha_v3_bwd", "trace1", 500.0, "lca", 99,
-                busy_time=525.0, gpu_op_uid=201,
+                "fmha_k",
+                "aiter::fmha_v3_bwd",
+                "trace1",
+                500.0,
+                "lca",
+                99,
+                busy_time=525.0,
+                gpu_op_uid=201,
             ),
             _make_diff_stats_row(
-                "flash_k", "flash_attn::bwd", "trace2", 300.0, "lca", 99,
-                busy_time=300.0, gpu_op_uid=301,
+                "flash_k",
+                "flash_attn::bwd",
+                "trace2",
+                300.0,
+                "lca",
+                99,
+                busy_time=300.0,
+                gpu_op_uid=301,
             ),
-            # Single-op LCA 10: mm (200us, gpu 1) → mm (150us, gpu 2)
             _make_diff_stats_row(
-                "gemm_k", "aten::mm", "trace1", 200.0, "mm", 10,
-                busy_time=200.0, gpu_op_uid=1,
+                "gemm_k",
+                "aten::mm",
+                "trace1",
+                200.0,
+                "mm",
+                10,
+                busy_time=200.0,
+                gpu_op_uid=1,
             ),
             _make_diff_stats_row(
-                "gemm_k2", "aten::mm", "trace2", 150.0, "mm", 10,
-                busy_time=150.0, gpu_op_uid=2,
+                "gemm_k2",
+                "aten::mm",
+                "trace2",
+                150.0,
+                "mm",
+                10,
+                busy_time=150.0,
+                gpu_op_uid=2,
             ),
         ]
         diff_df = pd.DataFrame(diff_rows)
@@ -1051,15 +1082,31 @@ class TestConsolidationEndToEnd:
         enriched = _enrich_perf_from_diff(diff_df, perf1)
 
         ops = enriched["ops_unique_args"]
-        fmha = ops[ops["name"] == "aiter::fmha_v3_bwd"].iloc[0]
-        fill = ops[ops["name"] == "aten::fill_"].iloc[0]
-        assert fmha["total_direct_kernel_time_sum"] == pytest.approx(525.0)
-        assert fill["total_direct_kernel_time_sum"] == pytest.approx(75.0)
+        assert ops[ops["name"] == "aiter::fmha_v3_bwd"].iloc[0][
+            "total_direct_kernel_time_sum"
+        ] == pytest.approx(500.0)
+        assert ops[ops["name"] == "aten::fill_"].iloc[0][
+            "total_direct_kernel_time_sum"
+        ] == pytest.approx(100.0)
 
         ups = enriched["unified_perf_summary"]
         fmha_u = ups[ups["name"] == "aiter::fmha_v3_bwd"].iloc[0]
+        fill_u = ups[ups["name"] == "aten::fill_"].iloc[0]
         mm_u = ups[ups["name"] == "aten::mm"].iloc[0]
+
         assert fmha_u["speedup (trace2/trace1)"] == pytest.approx(300.0 / 525.0)
+        assert fill_u["speedup (trace2/trace1)"] == pytest.approx(300.0 / 525.0)
+        assert fmha_u["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        assert fmha_u["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
+        assert fill_u["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        assert fill_u["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
+        assert fmha_u["lca_id"] == "99"
+        assert fill_u["lca_id"] == "99"
+
+        assert mm_u["lca_id"] == "10"
+        assert mm_u["lca_name"] == "mm"
+        assert mm_u["lca_total_kernel_time_trace1_us"] == pytest.approx(200.0)
+        assert mm_u["lca_total_kernel_time_trace2_us"] == pytest.approx(150.0)
         assert mm_u["speedup (trace2/trace1)"] == pytest.approx(150.0 / 200.0)
 
 
@@ -1185,8 +1232,12 @@ def _build_synthetic_trace(kernel_specs):
             )
         )
 
-        events.append(_mk_ac2g(corr_id, pid=gpu_pid, tid=gpu_tid, ts=kernel_ts, phase="s"))
-        events.append(_mk_ac2g(corr_id, pid=gpu_pid, tid=gpu_tid, ts=kernel_ts, phase="f"))
+        events.append(
+            _mk_ac2g(corr_id, pid=gpu_pid, tid=gpu_tid, ts=kernel_ts, phase="s")
+        )
+        events.append(
+            _mk_ac2g(corr_id, pid=gpu_pid, tid=gpu_tid, ts=kernel_ts, phase="f")
+        )
 
         ts += cpu_op_dur + 200
         corr_id += 1
@@ -1250,7 +1301,9 @@ class TestIntegrationSyntheticTraces:
             for _, row in summary.iterrows():
                 assert row["kernel_time_trace1_us"] >= 0
                 assert row["kernel_time_trace2_us"] >= 0
-                assert row["kernel_time_trace1_us"] > 0 or row["kernel_time_trace2_us"] > 0
+                assert (
+                    row["kernel_time_trace1_us"] > 0 or row["kernel_time_trace2_us"] > 0
+                )
 
     def test_gpu_timeline_passthrough(self, traces_and_report):
         _, _, _, enriched, _ = traces_and_report

@@ -323,9 +323,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Impact estimate:**
 
 <!-- === COMPARATIVE Compute Kernel Data table === -->
-<!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = Kernel Time (µs)_trace2_sum / 1000 when
-     present; else delta_us + t1, or —. Count T1/T2 = operation_count / operation_count_trace2 when
-     present. Difference (ms) = Trace 2 Time − Trace 1 Time (positive ⇒ more time on Trace 2), or —. -->
+<!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = lca_total_kernel_time_trace2_us / 1000.
+     Count T1/T2 = operation_count / lca_kernel_count_trace2 when present.
+     Difference (ms) = delta_us (trace2 - trace1) / 1000 (positive ⇒ more time on Trace 2), or —. -->
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>

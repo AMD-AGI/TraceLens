@@ -386,7 +386,7 @@ comparison_scope: {comparison_scope}
 
 **CRITICAL - READ FIRST:**
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement"
+- **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement". In **comparative** mode, > 100% means Trace 2 is slower — NOT an anomaly.
 - When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
 
 **Platform Specs:**
@@ -395,7 +395,7 @@ comparison_scope: {comparison_scope}
 - Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
 
 **CRITICAL CONSTRAINTS:**
-1. **Standalone only:** Any efficiency > 100% → `[ANOMALY] - verify measurement`
+1. **Standalone only:** Any efficiency > 100% → `[ANOMALY] - verify measurement`. **Comparative:** efficiency > 100% means Trace 2 is slower — NOT an anomaly.
 2. Status must be SUCCESS or ERROR; times in ms; efficiencies as percentages
 3. Operations with `fusion_flagged: true` in the metrics JSON are already covered by
    a high-confidence kernel fusion candidate — do NOT flag them as bottlenecks or write

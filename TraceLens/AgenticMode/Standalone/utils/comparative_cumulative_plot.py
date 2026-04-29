@@ -52,18 +52,25 @@ def _pick_agg_column(df: pd.DataFrame) -> str:
 
 
 def _row_trace2_us(row: pd.Series) -> float:
+    """Estimate per-row trace2 kernel time in µs.
+
+    Scales the per-row trace1 time proportionally using
+    ``lca_total_kernel_time_trace2_us / lca_total_kernel_time_trace1_us``.
+    """
     t1 = row.get(_KERNEL_TIME_COL)
     if t1 is None or (isinstance(t1, float) and np.isnan(t1)):
         return float("nan")
     t1 = float(t1)
-    d = row.get(_DELTA_COL)
-    if d is not None and not (isinstance(d, float) and np.isnan(d)):
-        return t1 + float(d)
-    sp = row.get(_SPEEDUP_COL)
-    if sp is not None and not (isinstance(sp, float) and np.isnan(sp)):
-        s = float(sp)
-        if s >= 0:
-            return t1 * s
+    lca_t1 = row.get("lca_total_kernel_time_trace1_us")
+    lca_t2 = row.get("lca_total_kernel_time_trace2_us")
+    if (
+        lca_t1 is not None
+        and lca_t2 is not None
+        and not (isinstance(lca_t1, float) and np.isnan(lca_t1))
+        and not (isinstance(lca_t2, float) and np.isnan(lca_t2))
+        and float(lca_t1) > 0
+    ):
+        return t1 * float(lca_t2) / float(lca_t1)
     return t1
 
 
@@ -105,9 +112,7 @@ def load_unified_comparative_from_excel(
     return df, agg_col
 
 
-def _debug_category_projection_ms(
-    df: pd.DataFrame, agg_col: str
-) -> pd.DataFrame:
+def _debug_category_projection_ms(df: pd.DataFrame, agg_col: str) -> pd.DataFrame:
     """Per-category Trace1, Trace2, and projection (min) in ms — matches chart math."""
     t1 = pd.to_numeric(df[_KERNEL_TIME_COL], errors="coerce").fillna(0.0)
     t2 = df.apply(_row_trace2_us, axis=1)
@@ -318,9 +323,7 @@ def generate_and_embed_comparative_cumulative_plot(
             output_dir, report_filename=report_filename
         )
     else:
-        embed_comparative_cumulative_plot(
-            output_dir, report_filename=report_filename
-        )
+        embed_comparative_cumulative_plot(output_dir, report_filename=report_filename)
     return out
 
 
