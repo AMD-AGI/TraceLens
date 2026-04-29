@@ -170,21 +170,22 @@ def load_findings(output_dir):
 
 def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str:
     """Aggregate ``impact_estimates`` into ``priority_data.json`` -- the single
-    deterministic source of truth for both report P-item ordering and the
-    optional detailed extension plot.
+    deterministic source of truth for report P-item ordering, the Top-Ops
+    table, and the optional detailed extension plot.
 
     Produces four top-level arrays:
-      - ``priorities``: ranked category list (quantified categories sorted by
-        summed ``impact_score``, then unmodeled categories with >5% of compute
-        time sorted by ``gpu_kernel_time_ms``). Drives the per-category
-        category-section ordering in the report.
-      - ``recommendations``: same quantified categories, capped, used by the
-        extension plot.
       - ``findings``: per-(category, bound_type, library) groups, concatenated
         from each ``_metrics.json::category_findings`` (already grouped and
         gated by ``MIN_PITEM_IMPACT_SCORE`` in the analyzer script). Sorted
         globally by ``impact_score`` with ``global_rank`` / ``category_rank``
-        attached. Single source of truth for the report's flat P-numbering.
+        attached. Drives the report's flat P-numbering.
+      - ``priorities``: ranked category list. Quantified categories are a
+        per-category rollup of ``findings`` (so the Top-Ops "Potential
+        improvement" column equals the sum of the rendered P-item Impacts for
+        that category). Unmodeled categories with >5% of compute time follow,
+        sorted by ``gpu_kernel_time_ms``.
+      - ``recommendations``: same quantified rollup, capped, used by the
+        extension plot.
       - ``all_estimates``: flat unfiltered audit trail of every per-op
         estimate the analyzers emitted.
 
@@ -225,31 +226,18 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 cf["category_rank"] = cf.pop("rank", 0)
                 findings.append(cf)
 
-        category_savings: dict = defaultdict(
+        quantified: dict = defaultdict(
             lambda: {
                 "impact_score": 0.0,
                 "impact_score_low": 0.0,
                 "impact_score_high": 0.0,
-                "count": 0,
-                "ops": [],
             }
         )
-        for e in all_estimates:
-            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
-                "high",
-                "medium",
-            ):
-                cat = e["category"]
-                mid = e.get("impact_score", 0)
-                category_savings[cat]["impact_score"] += mid
-                category_savings[cat]["impact_score_low"] += e.get(
-                    "impact_score_low", mid
-                )
-                category_savings[cat]["impact_score_high"] += e.get(
-                    "impact_score_high", mid
-                )
-                category_savings[cat]["count"] += 1
-                category_savings[cat]["ops"].append(e.get("operation", ""))
+        for f in findings:
+            cat = f["category"]
+            quantified[cat]["impact_score"] += f.get("impact_score", 0)
+            quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
+            quantified[cat]["impact_score_high"] += f.get("impact_score_high", 0)
 
         plot_recs = sorted(
             [
@@ -258,10 +246,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                     "impact_score": round(v["impact_score"], 2),
                     "impact_score_low": round(v["impact_score_low"], 2),
                     "impact_score_high": round(v["impact_score_high"], 2),
-                    "operation_count": v["count"],
                     "type": "kernel_tuning",
                 }
-                for cat, v in category_savings.items()
+                for cat, v in quantified.items()
             ],
             key=lambda x: x["impact_score"],
             reverse=True,
@@ -283,11 +270,11 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                     "impact_score": rec["impact_score"],
                     "impact_score_low": rec["impact_score_low"],
                     "impact_score_high": rec["impact_score_high"],
-                    "source": "impact_estimates",
+                    "source": "findings_rollup",
                 }
             )
 
-        quantified_cats = set(category_savings.keys())
+        quantified_cats = set(quantified.keys())
         unmodeled = []
         for cat_entry in manifest.get("categories", []):
             cat_name = cat_entry.get("name")
