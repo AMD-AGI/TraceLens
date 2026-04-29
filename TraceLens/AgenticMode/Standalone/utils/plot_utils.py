@@ -11,31 +11,26 @@ Public API:
 - ``generate_perf_plot`` -- single horizontal stacked bar showing the run's
   compute-time breakdown by kernel category (manifest-only, no savings, no
   error bars).
-- ``generate_priority_data`` -- aggregate ``impact_estimates`` into
-  ``priority_data.json`` (used for orchestrator P-item ranking and by the
-  optional detailed extension plot).
 - ``generate_and_embed_plot`` -- end-to-end pipeline (priority_data -> plot
   -> embed).
-
 """
 
 import base64
-import json
 import os
 import re
-from collections import defaultdict
-from typing import List
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest
+from TraceLens.AgenticMode.Standalone.utils.report_utils import (
+    generate_priority_data,
+    load_manifest,
+)
 
 __all__ = [
     "generate_perf_plot",
-    "generate_priority_data",
     "generate_and_embed_plot",
     "embed_plot_in_report",
 ]
@@ -53,172 +48,6 @@ _CAT_PALETTE = [
 
 _REST_KEY = "__rest_e2e__"
 _REST_COLOR = "#aab7c4"
-
-
-def _short_name(name: str, max_len: int = 8) -> str:
-    """Shorten a category name for plot labels. Capitalizes first letter, truncates if needed."""
-    display = name[0].upper() + name[1:] if name else name
-    if len(display) <= max_len:
-        return display
-    return display[: max_len - 1] + "\u2026"
-
-
-def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str:
-    """Aggregate ``impact_estimates`` into ``priority_data.json`` -- the single
-    deterministic source of truth for both report P-item ordering and the
-    optional detailed extension plot.
-
-    Produces three top-level arrays:
-      - ``priorities``: ranked category list for report P-items (quantified
-        categories sorted by ``impact_score``, then unmodeled categories with
-        >5% of compute time sorted by ``gpu_kernel_time_ms``).
-      - ``recommendations``: same quantified categories.
-      - ``all_estimates``: flat list of every per-operation estimate.
-
-    Args:
-        output_dir: Base output directory containing ``category_data/``.
-        max_recommendations: Max categories in the plot recommendations.
-
-    Returns:
-        Path to written ``priority_data.json``.
-    """
-    out_path = os.path.join(output_dir, "priority_data.json")
-    category_data_dir = os.path.join(output_dir, "category_data")
-
-    try:
-        manifest = load_manifest(output_dir)
-
-        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
-        computation_pct = manifest.get("gpu_utilization", {}).get(
-            "computation_time_percent", 0
-        )
-        computation_time_ms = baseline_ms * computation_pct / 100
-        threshold_ms = computation_time_ms * 0.05
-
-        all_estimates: List[dict] = []
-        for fname in sorted(os.listdir(category_data_dir)):
-            if not fname.endswith("_metrics.json"):
-                continue
-            fpath = os.path.join(category_data_dir, fname)
-            with open(fpath, "r") as f:
-                metrics = json.load(f)
-            if metrics.get("status") in ("ERROR", "NO_DATA"):
-                continue
-            all_estimates.extend(metrics.get("impact_estimates", []))
-
-        category_savings: dict = defaultdict(
-            lambda: {
-                "impact_score": 0.0,
-                "impact_score_low": 0.0,
-                "impact_score_high": 0.0,
-                "count": 0,
-                "ops": [],
-            }
-        )
-        for e in all_estimates:
-            if e.get("type") == "kernel_tuning" and e.get("confidence") in (
-                "high",
-                "medium",
-            ):
-                cat = e["category"]
-                mid = e.get("impact_score", 0)
-                category_savings[cat]["impact_score"] += mid
-                category_savings[cat]["impact_score_low"] += e.get(
-                    "impact_score_low", mid
-                )
-                category_savings[cat]["impact_score_high"] += e.get(
-                    "impact_score_high", mid
-                )
-                category_savings[cat]["count"] += 1
-                category_savings[cat]["ops"].append(e.get("operation", ""))
-
-        plot_recs = sorted(
-            [
-                {
-                    "category": cat,
-                    "impact_score": round(v["impact_score"], 2),
-                    "impact_score_low": round(v["impact_score_low"], 2),
-                    "impact_score_high": round(v["impact_score_high"], 2),
-                    "operation_count": v["count"],
-                    "type": "kernel_tuning",
-                }
-                for cat, v in category_savings.items()
-            ],
-            key=lambda x: x["impact_score"],
-            reverse=True,
-        )[:max_recommendations]
-
-        cat_display = {}
-        for cat_entry in manifest.get("categories", []):
-            cat_display[cat_entry["name"]] = cat_entry.get(
-                "display_name", cat_entry["name"]
-            )
-
-        priorities: List[dict] = []
-        for rank, rec in enumerate(plot_recs, 1):
-            priorities.append(
-                {
-                    "rank": rank,
-                    "category": rec["category"],
-                    "display_name": cat_display.get(rec["category"], rec["category"]),
-                    "impact_score": rec["impact_score"],
-                    "impact_score_low": rec["impact_score_low"],
-                    "impact_score_high": rec["impact_score_high"],
-                    "source": "impact_estimates",
-                }
-            )
-
-        quantified_cats = set(category_savings.keys())
-        unmodeled = []
-        for cat_entry in manifest.get("categories", []):
-            cat_name = cat_entry.get("name")
-            if cat_entry.get("tier") != "compute_kernel":
-                continue
-            if cat_name in quantified_cats:
-                continue
-            gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
-            if gpu_time >= threshold_ms:
-                unmodeled.append(
-                    {
-                        "category": cat_name,
-                        "display_name": cat_entry.get("display_name", cat_name),
-                        "gpu_kernel_time_ms": round(gpu_time, 3),
-                    }
-                )
-        unmodeled.sort(key=lambda x: x["gpu_kernel_time_ms"], reverse=True)
-
-        next_rank = len(priorities) + 1
-        for entry in unmodeled:
-            priorities.append(
-                {
-                    "rank": next_rank,
-                    "category": entry["category"],
-                    "display_name": entry["display_name"],
-                    "impact_score": None,
-                    "gpu_kernel_time_ms": entry["gpu_kernel_time_ms"],
-                    "source": "manifest_fallback",
-                }
-            )
-            next_rank += 1
-
-        priority_data = {
-            "baseline_ms": baseline_ms,
-            "priorities": priorities,
-            "recommendations": plot_recs,
-            "all_estimates": all_estimates,
-        }
-    except Exception:
-        priority_data = {
-            "baseline_ms": 0,
-            "priorities": [],
-            "recommendations": [],
-            "all_estimates": [],
-        }
-
-    with open(out_path, "w") as f:
-        json.dump(priority_data, f, indent=2)
-
-    return out_path
 
 
 def generate_perf_plot(
@@ -416,3 +245,11 @@ def generate_and_embed_plot(output_dir: str, title: str) -> dict:
         results["embed"] = embed_plot_in_report(output_dir)
 
     return results
+
+
+def _short_name(name: str, max_len: int = 8) -> str:
+    """Shorten a category name for plot labels."""
+    display = name[0].upper() + name[1:] if name else name
+    if len(display) <= max_len:
+        return display
+    return display[: max_len - 1] + "\u2026"

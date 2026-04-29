@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # MoE Analysis Subagent
 
-Analyze MoE (Mixture of Experts) operations for performance bottlenecks using roofline-based efficiency analysis.
+Analyze MoE (Mixture of Experts) fused operations for performance bottlenecks using roofline-based efficiency analysis. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -60,66 +60,68 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/moe_analysis.py \
   --output-dir <output_dir>
 ```
 
-The script outputs `moe_fused_metrics.json` to `category_data/`.
-
-### Step 2: Read Metrics and Data
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read Metrics
 
 ```bash
 cat <output_dir>/category_data/moe_fused_metrics.json
 ```
 
-Check `status` field - if 'NO_DATA', write findings noting no MoE operations and stop.
+If `status` is `NO_DATA`, write the no-MoE finding noted in Error Handling and stop.
 
-### Step 3: Identify Bottlenecks
+The byte estimation for MoE is an **average-case approximation** under uniform routing; the FLOPS calculation is exact. When emitting any memory-bound finding (where the byte estimate drives the metric), state in **Identification** that TB/s, FLOPS/Byte, and efficiency carry this approximation. Do not speculate about per-expert load imbalance or routing decisions — they are not observable from kernel-level trace data.
 
-Apply roofline-based thresholds to identify bottlenecks from `metrics['operations']`:
+### Step 3: Render P-items from `category_findings`
 
-**Bottleneck criteria:**
-- Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak (roofline)
+Read `category_data/moe_fused_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`, precision from `Compute Spec`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-### Step 4: Determine Optimization Recommendations
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-For each validated bottleneck, provide recommendations in both categories:
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows (including the MoE-specific rows for expert load imbalance, routing decisions, and token distribution across experts), use the listed fallback prose instead of speculating.
 
-**Algorithmic Recommendations:**
-- For memory-bound MoE ops: batch more tokens to increase arithmetic intensity and shift toward compute-bound
-- For compute-bound MoE ops at BF16/FP8: consider quantization to a narrower precision (FP8/FP4) to reduce compute requirements if quality allows
-- For compute-bound MoE ops already at FP4: limited algorithmic levers visible from the trace — focus on kernel tuning. Note the current precision explicitly.
-- Always check `compute_spec` before recommending quantization — do NOT suggest "lower precision" if the operation is already at the narrowest practical precision (FP4)
+---
 
-**Kernel Optimization Focus:**
-- For memory-bound ops not reaching peak HBM BW: kernel is leaving bandwidth on the table — prioritize memory access optimization
-- For compute-bound ops not reaching peak MAF: kernel has room for better utilization — flag for tile size or wave occupancy tuning
-- Note the specific gap: achieved vs peak for the relevant metric (TFLOPS or TB/s)
+## Action Prose Guidance
 
-### Step 5: Write Category Findings
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`. Always check member `Compute Spec` before recommending precision narrowing — do NOT suggest "lower precision" if the operation is already at the narrowest practical precision (FP4):
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/moe_fused_findings.md` using the output format defined there, with `<category>` = `moe_fused`.
+| `bound_type` | Action template |
+|---|---|
+| `compute` | Profile the dominant member kernels for tile-size and wave-occupancy tuning. If the operation runs at a wider precision than the model tolerates (e.g. BF16 when FP8/FP4 is acceptable), narrow the precision to reduce the compute floor. If already at FP4, focus on kernel tuning. |
+| `memory` | Batch more tokens upstream to increase arithmetic intensity and shift toward compute-bound. Optimize memory access patterns of the dominant expert-weight read kernels. |
 
-**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/moe_fused_metadata.json::impact_estimates[]`.
+---
 
-Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `impact_score` field in `metadata/moe_fused_metadata.json::impact_estimates[]`.
+## Common Patterns
 
-### Step 5.1: Write Impact Estimates to Metadata
+### Memory-bound MoE (FP4/FP8 weights, low token count)
+- **Symptoms:** Low FLOPS/Byte; low TB/s vs. peak HBM BW.
+- **Reasoning:** Weight reads dominate memory traffic; narrow-precision weights reduce bytes but FLOPs stay the same per token, so few tokens means low arithmetic intensity.
+- **Algorithmic:** Batch more tokens to raise arithmetic intensity.
+- **Kernel:** If well below peak HBM BW, kernel has room for memory-access optimization.
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
+### Compute-bound MoE (BF16 weights or high token count)
+- **Symptoms:** High FLOPS/Byte; low TFLOPS/s vs. peak MAF.
+- **Reasoning:** Compute dominates with large token counts or wider-precision weights.
+- **Algorithmic:** Quantization (FP8/FP4) if model quality allows.
+- **Kernel:** If well below peak MAF, kernel has room for compute-utilization tuning.
 
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'moe_fused', 'compute')"
-```
+### Already-fused operations
+- **Reasoning:** Fused MoE kernels combine routing + FC1 + activation + FC2 in a single kernel launch; fusion opportunities are limited.
+- **Focus:** The roofline gap (efficiency vs. peak), not further fusion.
 
-### Step 5.2: Validate Findings
+### No MoE category in trace
+- **Reasoning:** Model doesn't use Mixture of Experts.
+- **Action:** Report as "N/A" and stop.
+
+---
+
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -138,79 +140,3 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
-
----
-
-## Common Patterns for MoE Analysis
-
-### Memory-Bound MoE (FP4/FP8 weights, low token count)
-- **Symptoms:** Low FLOPS/Byte, low TB/s compared to peak HBM BW
-- **Issue:** Weight reads dominate memory traffic; narrow-precision weights reduce bytes but FLOPs stay the same relative to token count. With few tokens, arithmetic intensity is low.
-- **Algorithmic:** Batch more tokens to increase arithmetic intensity
-- **Kernel:** If not reaching peak HBM BW, kernel has room for memory access optimization
-
-### Compute-Bound MoE (BF16 weights or high token count)
-- **Symptoms:** High FLOPS/Byte, low TFLOPS/s compared to peak MAF
-- **Issue:** Compute dominates with large token counts or wider-precision weights.
-- **Algorithmic:** Consider quantization (FP8/FP4) if model quality allows
-- **Kernel:** If not reaching peak MAF, kernel has room for compute utilization tuning
-
-### Already Fused Operations
-- **Note:** Fused MoE kernels combine routing + FC1 + activation + FC2 into a single kernel launch
-- **Focus:** Fusion opportunities are limited; focus on the roofline gap (efficiency vs peak)
-- **Efficiency varies:** Based on token count, expert count, data types, and weight dimensions
-
-### Missing MoE Operations
-- **Symptoms:** No MoE category in trace
-- **Meaning:** Model doesn't use Mixture of Experts
-- **Action:** Report as "N/A" and move on
-
----
-
-## Key Principles
-
-1. **Roofline analysis drives recommendations** - Classify each operation as compute-bound or memory-bound and measure efficiency against the appropriate ceiling
-2. **Be specific about the gap** - Report achieved TFLOPS/s or TB/s vs the appropriate peak (MAF for compute-bound, HBM BW for memory-bound)
-3. **MoE ops are matrix operations** - They follow the same roofline model as GEMMs; analyze them the same way
-4. **Provide BOTH recommendation types** - Algorithmic and kernel-level, tailored to the bound type
-5. The byte estimation for MoE operations is an **average-case approximation**, not an exact measurement. The performance model estimates the number of unique expert weight matrices read from HBM using a uniform routing assumption. If load is concentrated on fewer experts, actual `E_active` is lower and real weight bytes are **less** than estimated.The **FLOPS calculation is exact**. When reporting findings, always note that byte-derived metrics (TB/s, FLOPS/Byte, efficiency %) carry this approximation.
-6. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters. Do NOT speculate about load imbalance, routing balance, or token distribution -- these are not observable from kernel-level trace data
-7. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
-
----
-
-## Efficiency Thresholds
-
-| Efficiency | Assessment | Action |
-|------------|------------|--------|
-| >70% | Good | Limited optimization potential |
-| <70% | Needs investigation | Priority for kernel optimization |
-
----
-
-## What You CAN Infer
-
-| Observable | Source |
-|------------|--------|
-| Kernel names | `trunc_kernel_details` column |
-| Kernel durations | Trace events |
-| Input shapes (M/K/N/E/topk) | `Input Dims` column |
-| Data types (FP4/FP8/BF16) | `Input type` / `Compute Spec` columns |
-| Achieved TFLOPS/s | Calculated from duration + FLOPs |
-| Achieved TB/s | Calculated from duration + Bytes |
-| Efficiency % | Achieved / Peak (roofline) |
-| FLOPS/Byte | Arithmetic intensity from perf model |
-| Bound type | Compute vs memory from roofline balance point |
-| Batch counts | Number of invocations |
-
-## What You CANNOT Infer
-
-| NOT Observable | Why | Instead Say |
-|----------------|-----|-------------|
-| Expert load imbalance | Would need per-expert token counts not in trace | "Cannot assess from trace data" |
-| Routing decisions | Router internals not captured | "Cannot assess from trace data" |
-| Token distribution across experts | Per-expert breakdown not available | "Cannot assess from trace data" |
-| Bank conflicts | Requires hardware counters | "Low efficiency - profile with hardware counters to diagnose" |
-| Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
-| Occupancy | Requires hardware counters | "Kernel running slower than expected" |
-| Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |

@@ -32,11 +32,33 @@ from .report_utils import load_manifest, _scan_findings_dir
 # Constants — all validation thresholds and patterns in one place
 # ---------------------------------------------------------------------------
 
+def _metrics_json_for_findings(filepath):
+    """Path to category_data/<stem>_metrics.json for a *_findings.md under category_findings/."""
+    output_dir = os.path.dirname(os.path.dirname(filepath))
+    stem = os.path.basename(filepath).replace("_findings.md", "")
+    return os.path.join(output_dir, "category_data", f"{stem}_metrics.json")
+
+
+def _category_findings_empty(filepath):
+    """True when metrics JSON exists and category_findings is an empty list (sub_agent_spec § empty)."""
+    mp = _metrics_json_for_findings(filepath)
+    try:
+        with open(mp) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    cf = data.get("category_findings")
+    return isinstance(cf, list) and len(cf) == 0
+
+
 # Level 1: findings file structure
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
-_P_ITEM_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
+# Optional icon / prefix before P<N>: (e.g. kernel fusion `### 🟢 P1:`).
+_P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
+
+_KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
 
 # Markdown table header containing an "Args" column. Match line that starts
@@ -120,26 +142,34 @@ def validate_findings_file(filepath, tier):
     rec_start = content.find("## Recommendations")
     da_start = content.find("## Detailed Analysis")
 
+    relaxed_empty = tier == "compute" and _category_findings_empty(filepath)
+
     p_items = []
     if rec_start >= 0:
         rec_end = da_start if da_start > rec_start else len(content)
         rec_section = content[rec_start:rec_end]
 
         p_items = _P_ITEM_RE.findall(rec_section)
-        if not p_items:
-            errors.append("No ### P<N>: items found under ## Recommendations")
+        if not relaxed_empty:
+            if not p_items:
+                errors.append("No ### P<N>: items found under ## Recommendations")
 
-        expected_labels = (
-            _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
-        )
-        for label in expected_labels:
-            if label not in rec_section:
-                errors.append(
-                    f"Missing label {label} in ## Recommendations "
-                    f"(required for {tier} tier)"
-                )
+            expected_labels = (
+                _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
+            )
+            for label in expected_labels:
+                if label not in rec_section:
+                    errors.append(
+                        f"Missing label {label} in ## Recommendations "
+                        f"(required for {tier} tier)"
+                    )
 
-        if tier == "system" and "**Impact**" in rec_section:
+        # Kernel fusion (system_findings) uses roofline-backed **Impact** on P-items.
+        if (
+            tier == "system"
+            and "**Impact**" in rec_section
+            and os.path.basename(filepath) != _KERNEL_FUSION_FINDINGS
+        ):
             errors.append(
                 "System-tier ## Recommendations must not contain **Impact** labels"
             )
@@ -149,12 +179,13 @@ def validate_findings_file(filepath, tier):
         da_section = content[da_start:]
 
         candidates = _CANDIDATE_RE.findall(da_section)
-        if not candidates:
-            errors.append(
-                "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
-            )
+        if not relaxed_empty:
+            if not candidates:
+                errors.append(
+                    "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
+                )
 
-    if p_items and candidates and len(p_items) != len(candidates):
+    if not relaxed_empty and p_items and candidates and len(p_items) != len(candidates):
         errors.append(
             f"P-item count ({len(p_items)}) does not match "
             f"reasoning-candidate count ({len(candidates)})"
@@ -166,7 +197,11 @@ def validate_findings_file(filepath, tier):
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
-    errors.extend(MarkerValidator.check_findings_file(filepath, file_class))
+    errors.extend(
+        MarkerValidator.check_findings_file(
+            filepath, file_class, skip_p_item_required=relaxed_empty
+        )
+    )
 
     passed = len(errors) == 0
     if passed:
@@ -528,19 +563,20 @@ class MarkerValidator:
         return errors, seen_kinds
 
     @classmethod
-    def check_findings_file(cls, path, file_class):
+    def check_findings_file(cls, path, file_class, *, skip_p_item_required=False):
         """Marker checks for a sub-agent findings file.
 
         file_class must be "category_findings" or "system_findings". Adds
         the per-tier "p_item required" check on top of `scan`, with the
         triton exemption for category findings.
+        skip_p_item_required: when True (empty category_findings[] per metrics), omit kind=p_item requirement.
         """
         rel = os.path.basename(path)
         with open(path) as f:
             text = f.read()
         errors, seen_kinds = cls.scan(text, rel)
         if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
-            if "p_item" not in seen_kinds:
+            if not skip_p_item_required and "p_item" not in seen_kinds:
                 errors.append(f"{rel}: missing required kind=p_item")
         if file_class == "system_findings" and "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")

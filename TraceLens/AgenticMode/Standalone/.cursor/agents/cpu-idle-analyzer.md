@@ -132,15 +132,7 @@ idle time is within acceptable range and no action is needed.]
 
 **Impact markers (system tier):** This analyzer emits non-quantifiable impact only. Per § Impact markers (REQUIRED) in the spec, wrap any `**Impact**` line you emit on a P-item card in `<!-- impact-begin kind=p_item low=null mid=null high=null -->` ... `<!-- impact-end -->`. Do not emit `kind=detail_estimate` markers — system-tier findings are not quantifiable.
 
-### Step 3.1: Write Impact Estimates to Metadata
-
-Run the script below, then render impact bullets in your `## Detailed Analysis` block per `sub_agent_spec.md`.
-
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'cpu_idle', 'system')"
-```
-
-### Step 3.2: Validate Findings
+### Step 3.1: Validate Findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 

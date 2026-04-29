@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # Normalization Analysis Subagent
 
-Analyze normalization operations (BatchNorm, LayerNorm, GroupNorm, InstanceNorm) for memory bandwidth efficiency.
+Analyze normalization operations (BatchNorm, LayerNorm, GroupNorm, InstanceNorm) for memory-bandwidth efficiency. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -51,7 +51,7 @@ When invoked by the orchestrator, you will receive the following context:
 
 Use vendor-agnostic terminology:
 - "GPU kernels" not "CUDA kernels"
-- "native normalization kernels" not vendor-specific terms
+- "native normalization kernels" not vendor-specific names
 - Focus on operation semantics, not vendor implementation details
 
 ---
@@ -60,72 +60,73 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/norm_analysis.py \
   --output-dir <output_dir>
 ```
 
-### Step 2: Read Metrics
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read metrics
 
 ```bash
 cat <output_dir>/category_data/norm_metrics.json
 ```
 
-### Step 3: Classify Operations by Name
+### Step 3: Classify members by name
 
-Each entry in `metrics['operations']` has a `name` field (e.g. `aten::batch_norm`, `aten::layer_norm`, `aten::group_norm`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
+Each `category_findings[i].members[j].operation` carries a torch op name (e.g. `aten::batch_norm`, `aten::layer_norm`, `aten::group_norm`). Classify each member semantically when describing the finding:
 
-- **BatchNorm**: batch_norm, batchnorm (per-channel normalization, common in CNNs)
-- **LayerNorm**: layer_norm, layernorm (per-token normalization, common in Transformers)
-- **GroupNorm**: group_norm, groupnorm (hybrid approach, used in diffusion models)
-- **InstanceNorm**: instance_norm (per-instance normalization, used in style transfer)
-- **Other**: anything not matching the above
+- **BatchNorm**: `batch_norm`, `batchnorm` (per-channel; common in CNNs).
+- **LayerNorm**: `layer_norm`, `layernorm` (per-token; common in Transformers).
+- **GroupNorm**: `group_norm`, `groupnorm` (hybrid; used in diffusion models).
+- **InstanceNorm**: `instance_norm` (per-instance; used in style transfer).
+- **Other**: anything not matching the above.
 
-These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it. Note that different norm types may have different efficiency characteristics due to their implementations.
+Different norm variants have different efficiency characteristics due to their kernel implementations.
 
-### Step 4: Identify Bottlenecks
+### Step 4: Render P-items from `category_findings`
 
-**Bottleneck criteria:**
-- Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW
+Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-**Baseline comparison:**
-- Compare to simple elementwise ops (add_, mul, copy_)
-- If normalization ops <20% while elementwise >70%, indicates kernel issue
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-### Step 5: Determine Optimization Recommendations
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
 
-For each validated bottleneck, provide recommendations in both categories:
+---
 
-**Algorithmic Recommendations:**
-- Consider alternatives: LayerNorm, GroupNorm may have better kernels
-- Check if torch.compile helps
-- For fusion opportunities, defer to the kernel fusion analysis
+## Action Prose Guidance
 
-**Kernel Optimization Focus:**
-- Normalization ops use native PyTorch kernels, not optimized BLAS
-- If significantly below baseline, investigate kernel issues
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`:
 
-### Step 6: Write Category Findings
+| `bound_type` | Action template |
+|---|---|
+| `memory` | Optimize memory access patterns of the dominant member kernels. For BatchNorm-heavy CNNs, channels-last layout (`model.to(memory_format=torch.channels_last)`) often improves coalescing. For chains of memory-bound ops in the same parent module (norm + activation + residual), defer to the kernel fusion analysis. |
+| `compute` | Rare for normalization; if it occurs, profile the kernel for tile-size and wave-occupancy tuning. |
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/norm_findings.md` using the output format defined there, with `<category>` = `norm`.
+---
 
-**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/norm_metadata.json::impact_estimates[]`.
+## Common Patterns
 
-### Step 6.1: Write Impact Estimates to Metadata
+### Low efficiency vs. baseline
+- **Symptoms:** Normalization at <20% of peak HBM BW while simple elementwise hits >70%.
+- **Reasoning:** Norm kernel may be suboptimal; the elementwise baseline shows the hardware is healthy.
+- **Algorithmic:** LayerNorm or GroupNorm alternatives may have better kernels.
+- **Kernel:** Profile the norm kernel.
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
+### CNN-heavy workloads
+- **Symptoms:** BatchNorm is 10–50% of compute (ResNet, EfficientNet, etc.).
+- **Algorithmic:** Channels-last memory format.
+- **Kernel:** Optimize the BatchNorm kernel.
 
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'norm', 'compute')"
-```
+### Norm-type variations
+- **BatchNorm**: per-channel.
+- **LayerNorm**: per-token.
+- **GroupNorm**: hybrid.
+- Different implementations may have different efficiency — name the variant in **Identification**.
 
-### Step 6.2: Validate Findings
+---
+
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -144,45 +145,3 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
-
----
-
-## Common Patterns for Normalization Analysis
-
-### Low Efficiency vs Baseline
-- **Symptoms:** Normalization at <20% while elementwise at >70%
-- **Issue:** Normalization kernel may be suboptimal
-- **Algorithmic:** Try LayerNorm or GroupNorm alternatives
-- **Kernel:** Profile kernel if efficiency is below expected threshold
-
-### CNN-Heavy Workloads
-- **Symptoms:** BatchNorm is 10-50% of compute
-- **Common in:** ResNet, EfficientNet, etc.
-- **Algorithmic:** Consider channels_last memory format
-- **Kernel:** Optimize normalization kernels
-
-### Norm Type Variations
-- **BatchNorm:** Per-channel normalization
-- **LayerNorm:** Per-token normalization
-- **GroupNorm:** Hybrid approach
-- **Note:** Different implementations may have different efficiency
-
----
-
-## Key Principles
-
-1. **Baseline comparison critical** - Compare to simple elementwise ops
-2. **Memory-bound** - Should match elementwise efficiency
-3. **Native kernels** - Uses PyTorch native, not vendor BLAS
-4. **Alternatives exist** - LayerNorm/GroupNorm may perform better
-5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-6. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
-
----
-
-## Efficiency Thresholds
-
-| Efficiency | Assessment |
-|------------|------------|
-| >70% | Good |
-| <70% | Compare to baseline, may indicate kernel issue |

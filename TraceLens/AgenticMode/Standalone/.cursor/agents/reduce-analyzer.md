@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # Reduce Analysis Subagent
 
-Analyze reduce operations (softmax, sum, mean, max) for memory bandwidth efficiency and optimization opportunities.
+Analyze reduce operations (softmax, sum, mean, max, min) for memory-bandwidth efficiency. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -60,74 +60,62 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/reduce_analysis.py \
   --output-dir <output_dir>
 ```
 
-### Step 2: Read Metrics
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read metrics
 
 ```bash
 cat <output_dir>/category_data/reduce_metrics.json
 ```
 
-Check `category_specific.softmax_count` to identify attention patterns.
+`category_specific.softmax_count` flags attention-pattern reductions; reference it in **Identification** when softmax dominates a finding.
 
-### Step 3: Classify Operations by Name
+### Step 3: Classify members by name
 
-Each entry in `metrics['operations']` has a `name` field (e.g. `aten::softmax`, `aten::sum`, `aten::mean`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
+Each `category_findings[i].members[j].operation` carries a torch op name (e.g. `aten::softmax`, `aten::sum`, `aten::mean`). Classify each member semantically when describing the finding:
 
-- **Softmax**: softmax (attention activation function, common in Transformer attention layers)
-- **Sum**: sum (element summation across one or more dimensions, common in loss computation and gradient accumulation)
-- **Mean**: mean, avg (average reduction across dimensions, used in pooling and normalization)
-- **Max**: max (maximum value reduction, used in argmax patterns and pooling)
-- **Min**: min (minimum value reduction, used in clamping and threshold logic)
-- **Other**: anything not matching the above
+- **Softmax**: `softmax` (attention activation; common in Transformer attention layers).
+- **Sum**: `sum` (element summation across dimensions; common in loss / gradient accumulation).
+- **Mean**: `mean`, `avg` (average reduction; used in pooling and normalization).
+- **Max**: `max` (maximum-value reduction; used in argmax and pooling).
+- **Min**: `min` (minimum-value reduction; used in clamping and threshold logic).
+- **Other**: anything not matching the above.
 
-These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it.
+### Step 4: Render P-items from `category_findings`
 
-### Step 4: Identify Bottlenecks
+Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-**Bottleneck criteria:**
-- Time: > 10ms OR > 5% of category time
-- Efficiency: < 70% of peak HBM BW
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Special considerations:**
-- Reduce ops are generally memory-bound
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
 
-### Step 5: Determine Optimization Recommendations
+---
 
-For each validated bottleneck, provide recommendations in both categories:
+## Action Prose Guidance
 
-**Algorithmic Recommendations:**
-- For fusion opportunities (e.g., softmax in attention context), defer to the kernel fusion analysis
-- Use torch.compile to auto-fuse operations
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`:
 
-**Kernel Optimization Focus:**
-- If standalone reduce ops have low efficiency, investigate kernel issues
-- Check memory access patterns for reduction operations
-- Identify wave occupancy issues
+| `bound_type` | Action template |
+|---|---|
+| `memory` | Optimize memory access patterns of the dominant member kernels. For softmax members in an attention parent chain, the unfused softmax indicates a fusion opportunity — defer to the kernel fusion analysis. For chains of memory-bound reductions in the same parent module (norm + reduce + scale), defer to the kernel fusion analysis. |
+| `compute` | Rare for reductions; if it occurs, profile the kernel for wave-occupancy tuning. |
 
-### Step 6: Write Category Findings
+---
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/reduce_findings.md` using the output format defined there, with `<category>` = `reduce`.
+## Common Patterns
 
-**Pay particular attention to § Impact markers (REQUIRED) in the spec.** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `metadata/reduce_metadata.json::impact_estimates[]`.
+### Standalone reductions
+- **Symptoms:** `sum`, `mean`, `max` operations in isolation (no fusion candidate above).
+- **Reasoning:** Memory-bound reductions should approach peak HBM BW for simple cases.
+- **Kernel:** Investigate kernel-level memory access patterns if well below the band.
 
-### Step 6.1: Write Impact Estimates to Metadata
+---
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
-
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'reduce', 'compute')"
-```
-
-### Step 6.2: Validate Findings
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -146,30 +134,3 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
-
----
-
-## Common Patterns for Reduce Analysis
-
-### Standalone Reductions
-- **Symptoms:** sum, mean, max operations in isolation
-- **General guideline:** >70% of peak HBM BW is the target
-- **Kernel:** Flag for investigation if below 70% efficiency threshold
-
----
-
-## Key Principles
-
-1. **Generally memory-bound** - Should approach peak HBM BW for simple reductions
-2. **Fusion opportunities** - If softmax patterns suggest unfused attention, note the observation but defer fusion analysis to the kernel fusion module
-3. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-4. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
-
----
-
-## Efficiency Thresholds
-
-| Efficiency | Assessment |
-|------------|------------|
-| >70% | Good |
-| <70% | Investigate kernel issues |

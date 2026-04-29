@@ -13,7 +13,9 @@ for the standalone report pipeline.
 
 import json
 import os
-import re
+from collections import defaultdict
+from typing import List
+
 import pandas as pd
 
 
@@ -166,80 +168,166 @@ def load_findings(output_dir):
     return result
 
 
-def _non_quantifiable_entry() -> dict:
-    """Return a single non-quantifiable impact estimate entry."""
-    return {
-        "impact_score_low": None,
-        "impact_score": None,
-        "impact_score_high": None,
-        "quantifiable": False,
-    }
+def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str:
+    """Aggregate ``impact_estimates`` into ``priority_data.json`` -- the single
+    deterministic source of truth for report P-item ordering, the Top-Ops
+    table, and the optional detailed extension plot.
 
+    Produces four top-level arrays:
+      - ``findings``: per-(category, bound_type, library) groups, concatenated
+        from each ``_metrics.json::category_findings`` (already grouped and
+        gated by ``MIN_PITEM_IMPACT_SCORE`` in the analyzer script). Sorted
+        globally by ``impact_score`` with ``global_rank`` / ``category_rank``
+        attached. Drives the report's flat P-numbering.
+      - ``priorities``: ranked category list. Quantified categories are a
+        per-category rollup of ``findings`` (so the Top-Ops "Potential
+        improvement" column equals the sum of the rendered P-item Impacts for
+        that category). Unmodeled categories with >5% of compute time follow,
+        sorted by ``gpu_kernel_time_ms``.
+      - ``recommendations``: same quantified rollup, capped, used by the
+        extension plot.
+      - ``all_estimates``: flat unfiltered audit trail of every per-op
+        estimate the analyzers emitted.
 
-def write_impact_estimates(output_dir: str, category: str, tier: str) -> None:
-    """Write ``impact_estimates`` to metadata JSON for a category.
+    Args:
+        output_dir: Base output directory containing ``category_data/``.
+        max_recommendations: Max categories in the plot recommendations.
 
-    Compute tier: reads per-operation estimates from *_metrics.json and builds
-    one rollup entry per reasoning-candidate block in the findings file.
-
-    System tier: writes one non-quantifiable entry per reasoning-candidate block.
-    If no candidates exist, writes an empty array.
+    Returns:
+        Path to written ``priority_data.json``.
     """
-    meta_path = os.path.join(output_dir, "metadata", f"{category}_metadata.json")
-    with open(meta_path) as f:
-        meta = json.load(f)
+    out_path = os.path.join(output_dir, "priority_data.json")
+    category_data_dir = os.path.join(output_dir, "category_data")
 
-    subdir = "system_findings" if tier == "system" else "category_findings"
-    findings_path = os.path.join(output_dir, subdir, f"{category}_findings.md")
-    if os.path.isfile(findings_path):
-        with open(findings_path) as f:
-            n_candidates = len(re.findall(r"<!-- reasoning-candidate", f.read()))
-    else:
-        n_candidates = 0
+    try:
+        manifest = load_manifest(output_dir)
 
-    if tier == "system":
-        meta["impact_estimates"] = [_non_quantifiable_entry()] * n_candidates
-    else:
-        metrics_path = os.path.join(
-            output_dir, "category_data", f"{category}_metrics.json"
+        baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+        computation_pct = manifest.get("gpu_utilization", {}).get(
+            "computation_time_percent", 0
         )
-        with open(metrics_path) as f:
-            metrics = json.load(f)
-        estimates = metrics.get("impact_estimates", [])
+        computation_time_ms = baseline_ms * computation_pct / 100
+        threshold_ms = computation_time_ms * 0.05
 
-        if n_candidates == 0:
-            meta["impact_estimates"] = []
-        elif estimates:
-            score_low = round(sum(e.get("impact_score_low", 0) for e in estimates), 2)
-            score_mid = round(sum(e.get("impact_score", 0) for e in estimates), 2)
-            score_high = round(sum(e.get("impact_score_high", 0) for e in estimates), 2)
-            rollup = {
-                "impact_score_low": score_low,
-                "impact_score": score_mid,
-                "impact_score_high": score_high,
-                "quantifiable": True,
+        all_estimates: List[dict] = []
+        findings: List[dict] = []
+        for fname in sorted(os.listdir(category_data_dir)):
+            if not fname.endswith("_metrics.json"):
+                continue
+            fpath = os.path.join(category_data_dir, fname)
+            with open(fpath, "r") as f:
+                metrics = json.load(f)
+            if metrics.get("status") in ("ERROR", "NO_DATA"):
+                continue
+            all_estimates.extend(metrics.get("impact_estimates", []))
+            cat = metrics.get("category")
+            for cf in metrics.get("category_findings", []):
+                cf["category"] = cat
+                cf["category_rank"] = cf.pop("rank", 0)
+                findings.append(cf)
+
+        quantified: dict = defaultdict(
+            lambda: {
+                "impact_score": 0.0,
+                "impact_score_low": 0.0,
+                "impact_score_high": 0.0,
             }
-            if n_candidates == 1:
-                meta["impact_estimates"] = [rollup]
-            else:
-                per_low = round(score_low / n_candidates, 2)
-                per_mid = round(score_mid / n_candidates, 2)
-                per_high = round(score_high / n_candidates, 2)
-                meta["impact_estimates"] = [
-                    {
-                        "impact_score_low": per_low,
-                        "impact_score": per_mid,
-                        "impact_score_high": per_high,
-                        "quantifiable": True,
-                    }
-                    for _ in range(n_candidates)
-                ]
-        else:
-            meta["impact_estimates"] = [_non_quantifiable_entry()] * n_candidates
+        )
+        for f in findings:
+            cat = f["category"]
+            quantified[cat]["impact_score"] += f.get("impact_score", 0)
+            quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
+            quantified[cat]["impact_score_high"] += f.get("impact_score_high", 0)
 
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(
-        f"Impact estimates written: {len(meta['impact_estimates'])} entries "
-        f"to {meta_path}"
-    )
+        plot_recs = sorted(
+            [
+                {
+                    "category": cat,
+                    "impact_score": round(v["impact_score"], 2),
+                    "impact_score_low": round(v["impact_score_low"], 2),
+                    "impact_score_high": round(v["impact_score_high"], 2),
+                    "type": "kernel_tuning",
+                }
+                for cat, v in quantified.items()
+            ],
+            key=lambda x: x["impact_score"],
+            reverse=True,
+        )[:max_recommendations]
+
+        cat_display = {}
+        for cat_entry in manifest.get("categories", []):
+            cat_display[cat_entry["name"]] = cat_entry.get(
+                "display_name", cat_entry["name"]
+            )
+
+        priorities: List[dict] = []
+        for rank, rec in enumerate(plot_recs, 1):
+            priorities.append(
+                {
+                    "rank": rank,
+                    "category": rec["category"],
+                    "display_name": cat_display.get(rec["category"], rec["category"]),
+                    "impact_score": rec["impact_score"],
+                    "impact_score_low": rec["impact_score_low"],
+                    "impact_score_high": rec["impact_score_high"],
+                    "source": "findings_rollup",
+                }
+            )
+
+        quantified_cats = set(quantified.keys())
+        unmodeled = []
+        for cat_entry in manifest.get("categories", []):
+            cat_name = cat_entry.get("name")
+            if cat_entry.get("tier") != "compute_kernel":
+                continue
+            if cat_name in quantified_cats:
+                continue
+            gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
+            if gpu_time >= threshold_ms:
+                unmodeled.append(
+                    {
+                        "category": cat_name,
+                        "display_name": cat_entry.get("display_name", cat_name),
+                        "gpu_kernel_time_ms": round(gpu_time, 3),
+                    }
+                )
+        unmodeled.sort(key=lambda x: x["gpu_kernel_time_ms"], reverse=True)
+
+        next_rank = len(priorities) + 1
+        for entry in unmodeled:
+            priorities.append(
+                {
+                    "rank": next_rank,
+                    "category": entry["category"],
+                    "display_name": entry["display_name"],
+                    "impact_score": None,
+                    "gpu_kernel_time_ms": entry["gpu_kernel_time_ms"],
+                    "source": "manifest_fallback",
+                }
+            )
+            next_rank += 1
+
+        findings.sort(key=lambda f: f["impact_score"], reverse=True)
+        for global_rank, f in enumerate(findings, start=1):
+            f["global_rank"] = global_rank
+
+        priority_data = {
+            "baseline_ms": baseline_ms,
+            "priorities": priorities,
+            "recommendations": plot_recs,
+            "findings": findings,
+            "all_estimates": all_estimates,
+        }
+    except Exception:
+        priority_data = {
+            "baseline_ms": 0,
+            "priorities": [],
+            "recommendations": [],
+            "findings": [],
+            "all_estimates": [],
+        }
+
+    with open(out_path, "w") as f:
+        json.dump(priority_data, f, indent=2)
+
+    return out_path

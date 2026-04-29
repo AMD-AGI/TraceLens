@@ -32,6 +32,8 @@ from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
     _CAT_PALETTE,
     _REST_KEY,
     _short_name,
+)
+from TraceLens.AgenticMode.Standalone.utils.report_utils import (
     generate_priority_data,
 )
 from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest
@@ -141,8 +143,7 @@ class ImpactPlot:
             lat_mid = max(0.01, baseline_ms - cum_mid)
             lat_best = max(0.01, baseline_ms - cum_hi)
             lat_worst = max(0.01, baseline_ms - cum_lo)
-            cnt = rec.get("operation_count", 1)
-            steps.append(f"{_short_name(rec['category'], max_len=20)}\n({cnt} ops)")
+            steps.append(_short_name(rec["category"], max_len=20))
             e2e_ms.append(lat_mid)
             savings.append(sm)
             rel.append(round(baseline_ms / lat_mid * 100, 1))

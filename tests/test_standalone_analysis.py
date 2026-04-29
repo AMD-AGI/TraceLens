@@ -46,7 +46,7 @@ from TraceLens.AgenticMode.Standalone.category_analyses.reduce_analysis import (
 from TraceLens.AgenticMode.Standalone.category_analyses.other_analysis import (
     classify_other_operation,
 )
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
+from TraceLens.AgenticMode.Standalone.utils.report_utils import (
     generate_priority_data,
 )
 
