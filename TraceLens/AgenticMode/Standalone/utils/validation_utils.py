@@ -36,9 +36,9 @@ from .report_utils import load_manifest, _scan_findings_dir
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
-# Match optional severity emoji prefix (same convention as report Template sections).
-_P_ITEM_RE = re.compile(r"^### (?:\S+\s+)?P(\d+):", re.MULTILINE)
+_P_ITEM_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
+_NOT_QUANTIFIABLE_SENTINEL = re.compile(r"not quantifiable from trace data", re.IGNORECASE)
 
 # Markdown table header containing an "Args" column. Match line that starts
 # with `|` and has `Args` as one of the column names.
@@ -74,29 +74,6 @@ _KNOWN_REPORT_PLACEHOLDERS = {
     "<precision>",
 }
 
-# Marker enforcement: shared scoping helpers used by MarkerValidator at both
-# Level 1 (findings files) and Level 3 (assembled report).
-_NOT_QUANTIFIABLE_SENTINEL = re.compile(
-    r"not quantifiable from trace data", re.IGNORECASE
-)
-# Matches both the findings convention `### P<N>:` and the report convention
-# `### 🔴 P<N>:` (template uses an emoji severity prefix in the assembled
-# report). The optional `\S+\s+` token covers the emoji + space.
-_P_ITEM_HEADING_RE = re.compile(r"^### (?:\S+\s+)?P\d+:.*$", re.MULTILINE)
-# Report sections that get strict 1:1 ### P<N>: ↔ kind=p_item enforcement.
-# System-Level is excluded — system P-items have no per-card **Impact** field
-# by template (see standalone_analysis_template.md).
-_REPORT_STRICT_P_ITEM_HEADERS = (
-    "## Compute Kernel Optimizations",
-    "## Kernel Fusion Opportunities (Experimental)",
-)
-# Detailed Analysis subsections whose `#### ` blocks must each carry either a
-# kind=detail_estimate marker or the not-quantifiable sentinel.
-_REPORT_DETAIL_ESTIMATE_SUBSECTIONS = (
-    "### Compute Kernel Insights",
-    "### Kernel Fusion Insights",
-)
-
 # ---------------------------------------------------------------------------
 # Level 1: per-file findings validation (called within each sub-agent)
 # ---------------------------------------------------------------------------
@@ -114,11 +91,6 @@ def validate_findings_file(filepath, tier):
     - Marker structure: pairing, kind= attribute, per-kind required attrs,
       no mixed null/numeric values, mandatory kind=p_item (except for
       triton_findings.md)
-    - Per-card kind=p_item 1:1 for compute findings and
-      kernel_fusion_findings.md (every ### P<N>: card carries exactly
-      one marker)
-    - Per-reasoning-candidate kind=detail_estimate marker OR explicit
-      "not quantifiable from trace data" sentinel string
 
     Args:
         filepath: Path to the *_findings.md file
@@ -158,13 +130,8 @@ def validate_findings_file(filepath, tier):
         if not p_items:
             errors.append("No ### P<N>: items found under ## Recommendations")
 
-        rel_findings = os.path.basename(filepath)
-        # kernel_fusion_findings.md uses compute-style P-items (Insight/Action/Impact + markers).
-        fusion_strict = rel_findings == "kernel_fusion_findings.md"
         expected_labels = (
-            _COMPUTE_P_ITEM_LABELS
-            if tier == "compute" or fusion_strict
-            else _SYSTEM_P_ITEM_LABELS
+            _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
         )
         for label in expected_labels:
             if label not in rec_section:
@@ -173,7 +140,7 @@ def validate_findings_file(filepath, tier):
                     f"(required for {tier} tier)"
                 )
 
-        if tier == "system" and "**Impact**" in rec_section and not fusion_strict:
+        if tier == "system" and "**Impact**" in rec_section:
             errors.append(
                 "System-tier ## Recommendations must not contain **Impact** labels"
             )
@@ -391,16 +358,6 @@ def validate_report(output_dir):
     - Args column cells match operations[].args verbatim
     - Report-level marker structure: pairing, kind= attribute, per-kind
       required attrs, mandatory kind=top_ops
-    - Per-section kind=p_item 1:1 in Compute Kernel Optimizations and
-      Kernel Fusion Opportunities (System-Level intentionally excluded)
-    - Per-#### block kind=detail_estimate marker OR not-quantifiable
-      sentinel under Compute Kernel Insights and Kernel Fusion Insights
-      subsections of Detailed Analysis
-
-    Note: the marker checks are intentionally pre-extension. Step 11.2's
-    agent_extension.py consumes these markers when it rewrites the report
-    into ms-savings form, so re-running validate_report after Step 11.2
-    would always fail by design.
 
     Findings files are validated separately by validate_findings_file
     (Level 1, called within each sub-agent at Steps 6-7), which also
@@ -510,17 +467,6 @@ class MarkerValidator:
 
     Stateless: regexes and kind tables are class-level constants and the
     entry points are classmethods.
-
-    Two layers of enforcement:
-
-    - `scan` does whole-file marker hygiene (pairing, kind=, required
-      attrs, no mixed null/numeric).
-    - Per-card / per-block / per-candidate scoping enforces a 1:1
-      contract between visible cards (### P<N>:, #### blocks under
-      Detailed Analysis, <!-- reasoning-candidate --> blocks) and their
-      paired markers, so a missing marker on any single card or block
-      raises an error rather than being silently absorbed by the
-      "at least one marker" check.
     """
 
     BEGIN_RE = re.compile(r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL)
@@ -535,11 +481,6 @@ class MarkerValidator:
     }
     # Compute findings files that do NOT need a p_item marker.
     COMPUTE_NO_P_ITEM = {"triton_findings.md"}
-    # System findings files that get strict 1:1 ### P<N>: ↔ kind=p_item
-    # enforcement (same contract as compute findings). Other system findings
-    # keep the looser "at least one kind=p_item" rule because their P-items
-    # are intentionally markerless per template.
-    STRICT_P_ITEM_SYSTEM_FILES = {"kernel_fusion_findings.md"}
 
     @classmethod
     def scan(cls, text, rel):
@@ -591,55 +532,59 @@ class MarkerValidator:
     def check_findings_file(cls, path, file_class):
         """Marker checks for a sub-agent findings file.
 
-        file_class must be "category_findings" or "system_findings". On top
-        of `scan`, runs:
-
-        - Compute findings (excluding triton): strict 1:1 ### P<N>: ↔
-          kind=p_item per card.
-        - System findings in STRICT_P_ITEM_SYSTEM_FILES (kernel_fusion):
-          same strict 1:1 enforcement.
-        - Other system findings: keep the looser "at least one kind=p_item"
-          rule (their P-items are markerless by template).
-        - All tiers: per-reasoning-candidate detail_estimate-or-sentinel.
+        file_class must be "category_findings" or "system_findings". Adds
+        the per-tier "p_item required" check on top of `scan`, with the
+        triton exemption for category findings.
         """
         rel = os.path.basename(path)
         with open(path) as f:
             text = f.read()
         errors, seen_kinds = cls.scan(text, rel)
-
-        is_compute_strict = (
-            file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM
-        )
-        is_system_strict = (
-            file_class == "system_findings" and rel in cls.STRICT_P_ITEM_SYSTEM_FILES
-        )
-
-        if is_compute_strict or is_system_strict:
-            errors.extend(cls._check_p_item_per_card(text, rel))
-        elif file_class == "system_findings":
+        if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
             if "p_item" not in seen_kinds:
                 errors.append(f"{rel}: missing required kind=p_item")
-
+        if file_class == "system_findings" and "p_item" not in seen_kinds:
+            errors.append(f"{rel}: missing required kind=p_item")
+        n_headings = len(_P_ITEM_RE.findall(text))
+        n_markers = sum(
+            1 for m in cls.BEGIN_RE.finditer(text)
+            if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == "p_item"
+        )
+        if n_headings and n_markers and n_headings != n_markers:
+            errors.append(
+                f"{rel}: {n_headings} ### P<N>: headings but {n_markers} kind=p_item markers"
+            )
         errors.extend(cls._check_detail_estimate_per_candidate(text, rel))
+        return errors
+
+    @classmethod
+    def _check_detail_estimate_per_candidate(cls, text, rel):
+        """Each <!-- reasoning-candidate --> block must contain either a
+        kind=detail_estimate marker or the not-quantifiable sentinel.
+        """
+        candidates = list(_CANDIDATE_RE.finditer(text))
+        if not candidates:
+            return []
+        errors = []
+        for i, c in enumerate(candidates):
+            scope = text[c.end(): candidates[i + 1].start() if i + 1 < len(candidates) else len(text)]
+            has_marker = any(
+                (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
+                and km.group(1) == "detail_estimate"
+                for m in cls.BEGIN_RE.finditer(scope)
+            )
+            if not (has_marker or bool(_NOT_QUANTIFIABLE_SENTINEL.search(scope))):
+                errors.append(
+                    f"{rel}: reasoning-candidate rank={c.group(1)} missing "
+                    f"kind=detail_estimate marker or 'not quantifiable from trace data' sentinel"
+                )
         return errors
 
     @classmethod
     def check_report(cls, path):
         """Marker checks for the assembled standalone_analysis.md.
 
-        On top of `scan`, runs:
-
-        - Mandatory kind=top_ops marker.
-        - Strict 1:1 ### P<N>: ↔ kind=p_item per section in
-          _REPORT_STRICT_P_ITEM_HEADERS (Compute Kernel + Kernel Fusion).
-        - Per-#### block detail_estimate-or-sentinel under each subsection
-          in _REPORT_DETAIL_ESTIMATE_SUBSECTIONS (Compute Kernel Insights +
-          Kernel Fusion Insights).
-
-        These are intentionally pre-extension checks: agent_extension.py
-        consumes the markers when it rewrites the report into ms-savings
-        form, so re-running validate_report after Step 11.2 would always
-        fail by design.
+        Adds the report-only "top_ops required" check on top of `scan`.
         """
         rel = os.path.basename(path)
         with open(path) as f:
@@ -647,156 +592,4 @@ class MarkerValidator:
         errors, seen_kinds = cls.scan(text, rel)
         if "top_ops" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=top_ops")
-        errors.extend(cls._check_report_p_item_per_section(text, rel))
-        errors.extend(cls._check_report_detail_estimate_per_block(text, rel))
-        return errors
-
-    # ---- Per-card / per-block / per-candidate scoping ---------------------
-
-    @classmethod
-    def _slice_section(cls, text, start_header, end_headers=("\n## ",)):
-        """Return the substring from `start_header` to the first match of any
-        end_headers after it, or to EOF. Returns "" if start_header absent.
-        """
-        start = text.find(start_header)
-        if start < 0:
-            return ""
-        end = -1
-        for eh in end_headers:
-            i = text.find(eh, start + 1)
-            if i >= 0 and (end < 0 or i < end):
-                end = i
-        return text[start:] if end < 0 else text[start:end]
-
-    @classmethod
-    def _count_p_item_markers(cls, text):
-        """Count `<!-- impact-begin ... kind=p_item ... -->` markers in text."""
-        return sum(
-            1
-            for m in cls.BEGIN_RE.finditer(text)
-            if cls.KIND_ATTR_RE.search(m.group(1)) is not None
-            and cls.KIND_ATTR_RE.search(m.group(1)).group(1) == "p_item"
-        )
-
-    @classmethod
-    def _check_p_item_per_card(cls, text, rel):
-        """Strict 1:1: each ### P<N>: card under ## Recommendations must
-        contain exactly one kind=p_item marker.
-        """
-        errors = []
-        rec_section = cls._slice_section(
-            text, "## Recommendations", end_headers=("\n## ",)
-        )
-        if not rec_section:
-            return errors
-
-        headings = list(_P_ITEM_HEADING_RE.finditer(rec_section))
-        if not headings:
-            return errors  # already flagged by Level 1 "no P-items" check
-
-        for i, h in enumerate(headings):
-            start = h.start()
-            end = headings[i + 1].start() if i + 1 < len(headings) else len(rec_section)
-            card = rec_section[start:end]
-            n = cls._count_p_item_markers(card)
-            heading_text = h.group(0).strip()
-            if n == 0:
-                errors.append(f"{rel}: {heading_text} card missing kind=p_item marker")
-            elif n > 1:
-                errors.append(
-                    f"{rel}: {heading_text} card has {n} kind=p_item markers (expected 1)"
-                )
-        return errors
-
-    @classmethod
-    def _check_detail_estimate_per_candidate(cls, text, rel):
-        """Each <!-- reasoning-candidate ... --> block must contain either a
-        kind=detail_estimate marker or the not-quantifiable sentinel.
-        """
-        errors = []
-        candidates = list(_CANDIDATE_RE.finditer(text))
-        if not candidates:
-            return errors
-
-        for i, c in enumerate(candidates):
-            scope_start = c.end()
-            scope_end = (
-                candidates[i + 1].start() if i + 1 < len(candidates) else len(text)
-            )
-            scope = text[scope_start:scope_end]
-            has_marker = any(
-                (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
-                and km.group(1) == "detail_estimate"
-                for m in cls.BEGIN_RE.finditer(scope)
-            )
-            has_sentinel = bool(_NOT_QUANTIFIABLE_SENTINEL.search(scope))
-            if not (has_marker or has_sentinel):
-                rank = c.group(1) if c.groups() else "?"
-                errors.append(
-                    f"{rel}: reasoning-candidate rank={rank} missing "
-                    f"kind=detail_estimate marker or 'not quantifiable from "
-                    f"trace data' sentinel"
-                )
-        return errors
-
-    @classmethod
-    def _check_report_p_item_per_section(cls, text, rel):
-        """For each strict report section, count of ### P<N>: headings must
-        equal count of kind=p_item markers in that section.
-        """
-        errors = []
-        for header in _REPORT_STRICT_P_ITEM_HEADERS:
-            section = cls._slice_section(text, header, end_headers=("\n## ",))
-            if not section:
-                continue
-            n_headings = len(_P_ITEM_HEADING_RE.findall(section))
-            n_markers = cls._count_p_item_markers(section)
-            if n_headings != n_markers:
-                section_name = header.lstrip("# ").strip()
-                errors.append(
-                    f"{rel}: {section_name} P-item count mismatch "
-                    f"({n_headings} ### P<N>: headings vs {n_markers} kind=p_item markers)"
-                )
-        return errors
-
-    @classmethod
-    def _check_report_detail_estimate_per_block(cls, text, rel):
-        """In ## Detailed Analysis, each #### block under the strict
-        subsections must contain a kind=detail_estimate marker or the
-        not-quantifiable sentinel.
-        """
-        errors = []
-        da_section = cls._slice_section(
-            text, "## Detailed Analysis", end_headers=("\n## ",)
-        )
-        if not da_section:
-            return errors
-
-        for sub_header in _REPORT_DETAIL_ESTIMATE_SUBSECTIONS:
-            sub = cls._slice_section(
-                da_section, sub_header, end_headers=("\n### ", "\n## ")
-            )
-            if not sub:
-                continue
-            blocks = list(re.finditer(r"^#### .*$", sub, re.MULTILINE))
-            if not blocks:
-                continue
-            sub_name = sub_header.lstrip("# ").strip()
-            for i, b in enumerate(blocks):
-                start = b.start()
-                end = blocks[i + 1].start() if i + 1 < len(blocks) else len(sub)
-                block = sub[start:end]
-                has_marker = any(
-                    (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
-                    and km.group(1) == "detail_estimate"
-                    for m in cls.BEGIN_RE.finditer(block)
-                )
-                has_sentinel = bool(_NOT_QUANTIFIABLE_SENTINEL.search(block))
-                if not (has_marker or has_sentinel):
-                    first_line = b.group(0).strip()
-                    errors.append(
-                        f"{rel}: {sub_name} block '{first_line}' missing "
-                        f"kind=detail_estimate marker or 'not quantifiable "
-                        f"from trace data' sentinel"
-                    )
         return errors
