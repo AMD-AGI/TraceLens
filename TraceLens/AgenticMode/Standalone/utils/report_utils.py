@@ -231,6 +231,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 "impact_score": 0.0,
                 "impact_score_low": 0.0,
                 "impact_score_high": 0.0,
+                "operation_count": 0,
             }
         )
         for f in findings:
@@ -238,6 +239,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             quantified[cat]["impact_score"] += f.get("impact_score", 0)
             quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
             quantified[cat]["impact_score_high"] += f.get("impact_score_high", 0)
+            quantified[cat]["operation_count"] += f.get("operation_count", 0)
 
         plot_recs = sorted(
             [
@@ -246,6 +248,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                     "impact_score": round(v["impact_score"], 2),
                     "impact_score_low": round(v["impact_score_low"], 2),
                     "impact_score_high": round(v["impact_score_high"], 2),
+                    "operation_count": v["operation_count"],
                     "type": "kernel_tuning",
                 }
                 for cat, v in quantified.items()

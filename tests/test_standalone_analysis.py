@@ -126,6 +126,17 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "confidence": "medium",
             },
         ],
+        "category_findings": [
+            {
+                "rank": 1,
+                "bound_type": "compute",
+                "library": "Tensile",
+                "impact_score": 150.0,
+                "impact_score_low": 127.0,
+                "impact_score_high": 173.0,
+                "operation_count": 2,
+            },
+        ],
     }
     (cat_data / "gemm_metrics.json").write_text(json.dumps(gemm_metrics, indent=2))
 
@@ -143,6 +154,17 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score_low": 68.0,
                 "impact_score_high": 92.0,
                 "confidence": "medium",
+            },
+        ],
+        "category_findings": [
+            {
+                "rank": 1,
+                "bound_type": "memory",
+                "library": "CK",
+                "impact_score": 80.0,
+                "impact_score_low": 68.0,
+                "impact_score_high": 92.0,
+                "operation_count": 1,
             },
         ],
     }
