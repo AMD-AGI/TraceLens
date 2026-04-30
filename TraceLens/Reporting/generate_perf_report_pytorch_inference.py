@@ -24,7 +24,6 @@ import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
-from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -88,10 +87,7 @@ def perf_report_sanity_check(
             e["name"]
             for e in events
             if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"}
-            and (
-                not TraceEventUtils.is_communication_string(e.get("name", ""))
-                or include_nccl
-            )
+            and ("nccl" not in e.get("name", "").lower() or include_nccl)
         )
     )
 
