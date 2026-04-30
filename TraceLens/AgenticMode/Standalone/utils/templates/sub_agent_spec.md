@@ -125,16 +125,11 @@ These require hardware counters or profiler tools, not a trace.
 | Wave / SM occupancy | Requires hardware counters | "Kernel running slower than expected — profile occupancy with hardware counters." |
 | Root causes generally | Traces show WHAT, not WHY | "Bottleneck identified — generate reproducer for kernel team." |
 
-#### CANNOT Infer (MoE-specific)
+#### CANNOT Infer (category-specific)
 
-In addition to the universal rows above, MoE workloads have category-specific
-blind spots:
-
-| NOT Observable | Why | Fallback prose |
-|----------------|-----|----------------|
-| Per-expert load imbalance | Trace lacks per-expert token counts | "Cannot assess expert load balance from trace data." |
-| Routing decisions / gating quality | Router internals are not traced | "Cannot assess routing quality from trace data." |
-| Token distribution across experts | Not surfaced in kernel-level events | "Cannot assess token distribution from trace data." |
+Each analyzer owns its own category-specific blind spots under a
+`## Trace observability (category-specific)` section in its `*-analyzer.md` file.
+The universal rows above always apply on top of those.
 
 ---
 

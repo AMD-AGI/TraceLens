@@ -84,7 +84,7 @@ Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/template
 
 **Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows (including the MoE-specific rows for expert load imbalance, routing decisions, and token distribution across experts), use the listed fallback prose instead of speculating.
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
 ---
 
@@ -126,6 +126,19 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 ### No MoE category in trace
 - **Reasoning:** Model doesn't use Mixture of Experts.
 - **Action:** Report as "N/A" and stop.
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, MoE workloads have these blind spots:
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Per-expert load imbalance | Trace lacks per-expert token counts | "Cannot assess expert load balance from trace data." |
+| Routing decisions / gating quality | Router internals are not traced | "Cannot assess routing quality from trace data." |
+| Token distribution across experts | Not surfaced in kernel-level events | "Cannot assess token distribution from trace data." |
+| True per-token byte traffic | Byte estimate assumes uniform routing; the per-token bytes actually moved depend on routing | "TB/s, FLOPS/Byte, and efficiency are uniform-routing approximations." |
 
 ---
 
