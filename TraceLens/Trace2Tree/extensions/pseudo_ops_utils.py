@@ -159,18 +159,48 @@ def inject_pseudo_op_wrap_children(
     parent_evt["children"] = [pseudo_evt["UID"]]
     pseudo_evt["parent"] = parent_evt["UID"]
 
-    # Descendants that were cpu_root_nodes are no longer roots since they
-    # now live under the pseudo op. Remove them and promote the pseudo op.
-    root_set = set(tree.cpu_root_nodes)
+    # Descendants that were cpu_root_nodes are no longer roots since they now
+    # live under the pseudo op. Removals/additions are accumulated into per-tree
+    # pending sets and callers MUST invoke ``finalize_pseudo_op_mutations(tree)`` after the
+    # last call to commit the accumulated changes back to ``tree.cpu_root_nodes``.
+    pending_removals = getattr(tree, "_cpu_root_nodes_pending_removals", None)
+    if pending_removals is None:
+        pending_removals = set()
+        tree._cpu_root_nodes_pending_removals = pending_removals
+        tree._cpu_root_nodes_pending_additions = []
+        tree._cpu_root_nodes_set = set(tree.cpu_root_nodes)
+    pending_additions = tree._cpu_root_nodes_pending_additions
+    root_set = tree._cpu_root_nodes_set
+
     stack = list(children_uids)
     while stack:
         uid = stack.pop()
         if uid in root_set:
-            tree.cpu_root_nodes.remove(uid)
+            pending_removals.add(uid)
             root_set.discard(uid)
         evt = tree.get_UID2event(uid)
         stack.extend(evt.get("children", []))
-    tree.cpu_root_nodes.append(pseudo_evt["UID"])
+    pending_additions.append(pseudo_evt["UID"])
+
+
+def finalize_pseudo_op_mutations(tree):
+    """Commit any pending cpu_root_nodes mutations from
+    ``inject_pseudo_op_wrap_children`` back to ``tree.cpu_root_nodes`` 
+    """
+    pending_removals = getattr(tree, "_cpu_root_nodes_pending_removals", None)
+    if pending_removals is None:
+        return
+    pending_additions = tree._cpu_root_nodes_pending_additions
+    if pending_removals:
+        tree.cpu_root_nodes = [
+            u for u in tree.cpu_root_nodes if u not in pending_removals
+        ]
+    if pending_additions:
+        tree.cpu_root_nodes.extend(pending_additions)
+    del tree._cpu_root_nodes_pending_removals
+    del tree._cpu_root_nodes_pending_additions
+    if hasattr(tree, "_cpu_root_nodes_set"):
+        del tree._cpu_root_nodes_set
 
 
 def apply_pseudo_op_extensions(tree, verbose: bool = False):
@@ -256,3 +286,7 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
             ext_func(tree)
         except Exception as e:
             logger.warning(f"Failed to apply pseudo-op extension {ext_name}: {e}")
+
+    # Commit any pending cpu_root_nodes mutations accumulated by
+    # inject_pseudo_op_wrap_children (no-op if none were made).
+    finalize_pseudo_op_mutations(tree)
