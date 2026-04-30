@@ -61,6 +61,7 @@ _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
+_NOT_QUANTIFIABLE_SENTINEL = re.compile(r"not quantifiable from trace data", re.IGNORECASE)
 
 # Markdown table header containing an "Args" column. Match line that starts
 # with `|` and has `Args` as one of the column names.
@@ -581,6 +582,39 @@ class MarkerValidator:
                 errors.append(f"{rel}: missing required kind=p_item")
         if file_class == "system_findings" and "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")
+        n_headings = len(_P_ITEM_RE.findall(text))
+        n_markers = sum(
+            1 for m in cls.BEGIN_RE.finditer(text)
+            if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == "p_item"
+        )
+        if n_headings and n_markers and n_headings != n_markers:
+            errors.append(
+                f"{rel}: {n_headings} ### P<N>: headings but {n_markers} kind=p_item markers"
+            )
+        errors.extend(cls._check_detail_estimate_per_candidate(text, rel))
+        return errors
+
+    @classmethod
+    def _check_detail_estimate_per_candidate(cls, text, rel):
+        """Each <!-- reasoning-candidate --> block must contain either a
+        kind=detail_estimate marker or the not-quantifiable sentinel.
+        """
+        candidates = list(_CANDIDATE_RE.finditer(text))
+        if not candidates:
+            return []
+        errors = []
+        for i, c in enumerate(candidates):
+            scope = text[c.end(): candidates[i + 1].start() if i + 1 < len(candidates) else len(text)]
+            has_marker = any(
+                (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
+                and km.group(1) == "detail_estimate"
+                for m in cls.BEGIN_RE.finditer(scope)
+            )
+            if not (has_marker or bool(_NOT_QUANTIFIABLE_SENTINEL.search(scope))):
+                errors.append(
+                    f"{rel}: reasoning-candidate rank={c.group(1)} missing "
+                    f"kind=detail_estimate marker or 'not quantifiable from trace data' sentinel"
+                )
         return errors
 
     @classmethod
