@@ -185,7 +185,7 @@ def inject_pseudo_op_wrap_children(
 
 def finalize_pseudo_op_mutations(tree):
     """Commit any pending cpu_root_nodes mutations from
-    ``inject_pseudo_op_wrap_children`` back to ``tree.cpu_root_nodes`` 
+    ``inject_pseudo_op_wrap_children`` back to ``tree.cpu_root_nodes``
     """
     pending_removals = getattr(tree, "_cpu_root_nodes_pending_removals", None)
     if pending_removals is None:
