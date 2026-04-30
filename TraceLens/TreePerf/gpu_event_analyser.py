@@ -6,8 +6,23 @@
 
 import pandas as pd
 import itertools
+import re
 import tqdm
 from TraceLens.util import TraceEventUtils
+
+# ROCm 7.1 / older Primus images label memory copies and fills as cat=kernel
+# with rocclr-internal names (MEMORY_COPY_*, __amd_rocclr_copyBuffer*,
+# __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
+# cat=gpu_memset matching the CUDA convention. These patterns rebucket
+# legacy traces so cross-version reports compare like-for-like.
+# See: AMD-AGI/TraceLens-internal#182
+_ROCM_LEGACY_MEMCPY_NAMES = re.compile(
+    r"^("
+    r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"
+    r"|__amd_rocclr_copyBuffer(Rect)?(Aligned)?"
+    r")(\.kd)?$"
+)
+_ROCM_LEGACY_MEMSET_NAMES = re.compile(r"^__amd_rocclr_fillBuffer(Aligned)?(\.kd)?$")
 
 
 class GPUEventAnalyser:
@@ -121,7 +136,16 @@ class GPUEventAnalyser:
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if TraceEventUtils.is_communication_string(event.get("name")):
+                    name = event.get("name") or ""
+                    # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
+                    # bucket so cross-version (7.1 vs 7.2) reports compare
+                    # like-for-like; rocclr fill kernels follow gpu_memset's
+                    # existing home (comp_events). See AMD-AGI/TraceLens-internal#182.
+                    if category == "kernel" and _ROCM_LEGACY_MEMCPY_NAMES.match(name):
+                        memcpy_events.append(event)
+                    elif category == "kernel" and _ROCM_LEGACY_MEMSET_NAMES.match(name):
+                        comp_events.append(event)
+                    elif TraceEventUtils.is_communication_string(name):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)
