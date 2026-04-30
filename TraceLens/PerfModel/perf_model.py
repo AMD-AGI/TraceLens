@@ -3698,6 +3698,15 @@ class GroupedGemm:
             self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
         )
 
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.event.get("args", {}).get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for grouped GEMM)."""
+        return "matrix"
+
 
 def _collect_2d_shapes(obj):
     """Recursively extract all (rows, cols) int pairs from nested lists/tuples."""
