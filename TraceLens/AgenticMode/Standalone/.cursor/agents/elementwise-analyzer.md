@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # Elementwise Analysis Subagent
 
-Analyze elementwise operations for memory bandwidth efficiency and optimization opportunities.
+Analyze elementwise operations for memory-bandwidth efficiency. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -63,8 +63,6 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/elementwise_analysis.py \
@@ -72,69 +70,68 @@ Execute the analysis script using the command prefix:
   --comparison_scope <comparison_scope>
 ```
 
-### Step 2: Read Metrics
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read metrics
 
 ```bash
 cat <output_dir>/category_data/elementwise_metrics.json
 ```
 
-Use `category_specific.peak_hbm_bw_tbs` as the peak HBM bandwidth reference for estimating expected efficiency of elementwise ops.
+`category_specific.peak_hbm_bw_tbs` is the HBM BW reference for elementwise efficiency expectations.
 
-### Step 3: Classify Operations by Name
+### Step 3: Classify members by name
 
-Each entry in `metrics['operations']` has a `name` field (e.g. `aten::add_`, `aten::sigmoid`, `aten::gelu`). Classify each operation semantically from its name rather than relying on a pre-computed label. Use these groupings for your analysis:
+Each `category_findings[i].members[j].operation` carries a torch op name (e.g. `aten::add_`, `aten::sigmoid`, `aten::gelu`). Classify each member semantically when describing the finding:
 
-- **Baseline ops** (simple memory-bound; expect >70% HBM BW): add, mul, copy, fill
-- **Arithmetic**: sub, div, remainder, fmod, neg, abs, clamp
-- **Activation**: sigmoid, relu, gelu, silu, swish, tanh, mish, hardswish, leaky_relu
-- **Cast / Convert**: to, _to_copy, type_as, float, half, bfloat16
-- **Math**: exp, log, pow, sqrt, rsqrt, reciprocal, erf
-- **Comparison / Mask**: where, masked_fill, eq, ne, gt, lt, ge, le
-- **Other**: anything not matching the above
+- **Baseline ops** (simple memory-bound; expect >70% HBM BW): `add`, `mul`, `copy`, `fill`.
+- **Arithmetic**: `sub`, `div`, `remainder`, `fmod`, `neg`, `abs`, `clamp`.
+- **Activation**: `sigmoid`, `relu`, `gelu`, `silu`, `swish`, `tanh`, `mish`, `hardswish`, `leaky_relu`.
+- **Cast / Convert**: `to`, `_to_copy`, `type_as`, `float`, `half`, `bfloat16`.
+- **Math**: `exp`, `log`, `pow`, `sqrt`, `rsqrt`, `reciprocal`, `erf`.
+- **Comparison / Mask**: `where`, `masked_fill`, `eq`, `ne`, `gt`, `lt`, `ge`, `le`.
+- **Other**: anything not matching the above.
 
-These groupings are guidelines. If you encounter an operation that doesn't fit neatly, use your understanding of the operation's semantics to classify it. Operations you classify as baseline should be used for the baseline bandwidth comparison in Step 4.
+Baseline ops anchor the bandwidth comparison — if a baseline op underperforms while a complex op meets expectations, it points at a kernel issue, not an algorithmic one.
 
-### Step 4: Identify Bottlenecks
+### Step 4: Render P-items from `category_findings`
 
-**Bottleneck criteria (time — both modes):**
-- Time: > 10ms OR > 5% of category time
+**efficiency_percent semantics:**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
-**Bottleneck criteria (efficiency — mode-specific):**
-- **Standalone:** Treat `efficiency_percent` as **% of roofline** (peak HBM BW for these ops). Flag when **< 70% of peak** compared to baseline simple ops.
-- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
+Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `time_ms`, `library`) using the Action Prose Guidance, Expected Efficiency, and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-**Special considerations:**
-- Simple elementwise ops (add, mul, copy) should achieve >70% of peak HBM BW
-- Complex elementwise ops may have lower efficiency
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-### Step 5: Determine Optimization Recommendations
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
 
-For each validated bottleneck, provide recommendations in both categories:
+---
 
-**Algorithmic Recommendations:**
-- Use torch.compile to auto-fuse operations
-- For fusion opportunities, defer to the kernel fusion analysis
+## Action Prose Guidance
 
-**Kernel Optimization Focus:**
-- If baseline ops (add, mul, copy) have low efficiency, investigate kernel issues
-- Compare to baseline bandwidth to identify anomalies
-- Check for memory access pattern issues
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`:
 
-### Step 6: Write Category Findings
+| `bound_type` | Action template |
+|---|---|
+| `memory` | Optimize memory access patterns of the dominant member kernels. For chains of memory-bound elementwise ops in the same parent module (activation + bias-add + dropout, etc.), defer to the kernel fusion analysis — fusion eliminates the intermediate write-back. For very high invocation counts of identically-shaped ops, batch upstream so each launch amortizes the load. |
+| `compute` | Rare for elementwise; if it occurs, profile the kernel for tile-size tuning and confirm the operation isn't actually a small reduction or transcendental being misclassified. |
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/elementwise_findings.md` using the output format defined there, with `<category>` = `elementwise`.
+---
 
-### Step 6.1: Write Impact Estimates to Metadata
+## Common Patterns
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
+### Low baseline efficiency
+- **Symptoms:** Simple ops (`add_`, `mul`, `copy_`) at <50% of peak HBM BW.
+- **Reasoning:** Baseline elementwise should approach peak HBM BW; well below indicates kernel-level memory-access or launch-overhead issues.
+- **Kernel:** Investigate memory access patterns and per-launch overhead.
 
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'elementwise', 'compute')"
-```
+### High invocation count
+- **Symptoms:** >1000 invocations of similar elementwise ops.
+- **Reasoning:** Per-launch overhead dominates; batching or fusion likely available.
+- **Algorithmic:** Restructure to batch operations; chains in the same parent module → defer to kernel fusion analysis.
 
-### Step 6.2: Validate Findings
+---
+
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -153,6 +150,7 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
+<<<<<<< HEAD
 
 ---
 
@@ -189,3 +187,5 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 |------------|------------|
 | >70% | Good |
 | <70% | Significant gap - investigate kernel issues |
+=======
+>>>>>>> staging

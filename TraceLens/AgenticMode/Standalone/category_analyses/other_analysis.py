@@ -22,6 +22,7 @@ from analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
+    build_category_findings,
     compute_impact_estimates,
     write_metrics_json,
 )
@@ -143,6 +144,7 @@ def main():
         operations, category, baseline_ms=baseline_ms,
         analysis_mode=args.comparison_scope,
     )
+    category_findings = build_category_findings(impact_estimates)
 
     metrics = {
         "category": category,
@@ -152,6 +154,7 @@ def main():
         "operations": operations,
         "category_specific": category_specific,
         "impact_estimates": impact_estimates,
+        "category_findings": category_findings,
     }
 
     output_path = write_metrics_json(metrics, args.output_dir, category)

@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # GEMM Analysis Subagent
 
-Analyze GEMM operations (matrix multiplications: mm, bmm, addmm) for performance bottlenecks.
+Analyze GEMM operations (`mm`, `bmm`, `addmm`) for performance bottlenecks. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -40,16 +40,13 @@ When invoked by the orchestrator, you will receive the following context:
 ## Error Handling
 
 **If category data files are missing:**
-1. Check if `gemm_ops.csv` exists in `category_data/`
-2. If missing, write a findings file noting: "No GEMM operations found in trace"
-3. Return gracefully - do not fail the orchestrator workflow
+1. Write a findings file noting: "No GEMM operations found in trace"
+2. Return gracefully
 
 **If analysis script fails:**
-1. Capture the error message from stdout/stderr
-2. Write a findings file with Status: ERROR
-3. **CRITICAL: Do NOT attempt to manually analyze the raw CSV data as a workaround**
-4. **CRITICAL: Do NOT provide any bottleneck findings or recommendations for this category**
-5. The orchestrator will exclude this category from the final analysis and add to Warnings section
+1. Write a findings file with Status: ERROR
+2. **CRITICAL: Do NOT manually analyze the raw CSV data**
+3. **CRITICAL: Do NOT provide any bottleneck findings**
 
 ---
 
@@ -57,9 +54,8 @@ When invoked by the orchestrator, you will receive the following context:
 
 Use vendor-agnostic terminology:
 - "GPU kernels" not "CUDA kernels"
-- "collective communication" not "NCCL"
-- "vendor GEMM library" not "CUTLASS" or "cuBLAS"
-- "DNN primitives" not "cuDNN"
+- "vendor GEMM library" not specific product names
+- "DNN primitives" not vendor-specific names
 - Focus on operation semantics, not vendor implementation details
 
 ---
@@ -68,8 +64,6 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/gemm_analysis.py \
@@ -77,60 +71,57 @@ Execute the analysis script using the command prefix:
   --comparison_scope <comparison_scope>
 ```
 
-The script outputs `gemm_metrics.json` to `category_data/`.
-
-### Step 2: Read Metrics and Data
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read Metrics
 
 ```bash
-# Read the metrics file
 cat <output_dir>/category_data/gemm_metrics.json
 ```
 
-Check `status` field - if 'ERROR', write error findings and stop.
+### Step 3: Render P-items from `category_findings`
 
-### Step 3: Identify Bottlenecks
+Read `category_data/gemm_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `time_ms`, `library`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-Apply GEMM-specific thresholds to identify bottlenecks from `metrics['operations']`:
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Bottleneck criteria (time — both modes):**
-- Time: > 100ms OR > 5% of category time
+**efficiency_percent semantics:**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
-**Bottleneck criteria (efficiency — mode-specific):**
-- **Standalone:** Treat `efficiency_percent` as **% of roofline**. Flag when **< 70% of peak** for the relevant bound (`bound_type`: TFLOPS vs `resolved_peak_maf`, or TB/s vs `resolved_peak_hbm_bw`).
-- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
 
-### Step 4: Determine Optimization Recommendations
+---
 
-For each validated bottleneck, provide recommendations in both categories:
+## Action Prose Guidance
 
-**Algorithmic Recommendations:**
-- Batch small GEMMs together to improve GPU parallelism
-- Use sparsity-aware operations if weights are sparse
-- Consider quantization (W8A8, FP8) for memory-bound GEMMs
-- Check if torch.compile can batch operations automatically
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`:
 
-**Kernel Optimization Focus:**
-- **Compute-bound:** Tune tile sizes, improve wave occupancy
-- **Memory-bound:** Optimize memory access patterns, check for bandwidth bottlenecks
-- Flag suboptimal GEMM kernel selections
+| `bound_type` | Action template |
+|---|---|
+| `compute` | Profile the dominant member kernels for tile-size and wave-occupancy tuning. If the operation runs at a wider precision than the model tolerates (e.g. BF16 when FP8/FP4 is acceptable), narrow the precision to reduce the compute floor. For tiny batched GEMMs (huge `count`, small M/N/K), batch upstream so each launch amortizes the load. |
+| `memory` | Optimize memory access patterns of the dominant member kernels. For chains of memory-bound GEMMs in the same parent module (epilogue elementwise, bias-add), defer to the kernel fusion analysis. |
 
-### Step 5: Write Category Findings
+---
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/gemm_findings.md` using the output format defined there, with `<category>` = `gemm`. Do NOT use `classification.gemm_type` for the Type column — that field distinguishes quantized vs regular, not the compute/memory bound type.
+## Common Patterns
 
-Synthesize **Insight** from the Key Bottleneck's **Issue**, **Action** from merged **Algorithmic** + **Kernel**, and **Impact** from the `## Impact Summary` savings range.
+### Compute-bound GEMMs
+- **Symptoms:** High FLOPS/Byte (>200), low TFLOPS/s vs. peak MAF.
+- **Algorithmic:** Smaller batch sizes / better batching may help.
+- **Kernel:** Tile-size tuning, better wave occupancy.
 
-### Step 5.1: Write Impact Estimates to Metadata
+### Memory-bound GEMMs
+- **Symptoms:** Low FLOPS/Byte (<100), low TB/s vs. peak HBM BW.
+- **Algorithmic:** GEMM-epilogue fusion opportunities → defer to kernel fusion analysis.
+- **Kernel:** If not reaching expected BW, kernel optimization opportunity.
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run:
+### Tiny batched GEMMs
+- **Symptoms:** Huge `count`, tiny M/N/K (e.g. 1000+ GEMMs with M=8, N=16).
+- **Issue:** GPU can't efficiently parallelize; per-launch overhead dominates.
+- **Algorithmic:** Batch GEMMs together (`torch.bmm`, grouped operations).
 
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', 'gemm', 'compute')"
-```
+---
 
-### Step 5.2: Validate Findings
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -149,66 +140,3 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
-
----
-
-## Common Patterns for GEMM Analysis
-
-### Compute-Bound GEMMs
-- **Symptoms:** High FLOPS/Byte (>200), low TFLOPS/s compared to peak MAF
-- **Algorithmic:** Check if smaller batch sizes or better batching helps
-- **Kernel:** Kernel tuning for tile size optimization, better wave occupancy
-
-### Memory-Bound GEMMs
-- **Symptoms:** Low FLOPS/Byte (<100), low TB/s compared to peak HBM BW
-- **Algorithmic:** For fusion opportunities (e.g., GEMM epilogue fusion), defer to the kernel fusion analysis
-- **Kernel:** If not reaching expected BW, indicates kernel optimization opportunity
-
-
-### Tiny Batched GEMMs
-- **Symptoms:** Huge batch count, tiny M/N/K dimensions (e.g., 1000+ GEMMs with M=8, N=16)
-- **Issue:** GPU can't efficiently parallelize, memory overhead dominates
-- **Algorithmic:** Batch GEMMs together using torch.bmm or grouped operations
-- **Kernel:** If batching >5x slower than expected, investigate kernel issues
-
----
-
-## Key Principles
-
-1. **Verify with tree data** - Understand where GEMMs are called from (attention, MLP, etc.)
-2. **Be specific** - Include M/N/K shapes, batch sizes, data types
-3. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-4. **Trace-level analysis only** - This analysis identifies bottlenecks; root cause diagnosis requires profiling tools with hardware counters
-5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
-
----
-
-## Efficiency Thresholds
-
-| Efficiency | Assessment | Action |
-|------------|------------|--------|
-| >70% | Good | Limited optimization potential |
-| <70% | Needs investigation | Priority for kernel optimization |
-
----
-
-## What You CAN Infer
-
-| Observable | Source |
-|------------|--------|
-| Kernel names | `trunc_kernel_details` column |
-| Kernel durations | Trace events |
-| Input shapes (M/N/K) | `Input Dims` column |
-| Achieved TFLOPS/s | Calculated from duration + FLOPs |
-| Efficiency % (standalone) | `efficiency_percent` as Achieved / Peak (roofline) |
-| Efficiency % (comparative) | `efficiency_percent` as 100×trace2/trace1 kernel time for the op |
-| Batch counts | Number of invocations |
-
-## What You CANNOT Infer
-
-| NOT Observable | Why | Instead Say |
-|----------------|-----|-------------|
-| Bank conflicts | Requires hardware counters | "Low efficiency - profile with hardware counters to diagnose" |
-| Cache hit rates | Requires hardware counters | "Large working set may exceed cache" |
-| Occupancy | Requires hardware counters | "Kernel running slower than expected" |
-| Root causes | Traces show WHAT, not WHY | "Bottleneck identified - generate reproducer for kernel team" |

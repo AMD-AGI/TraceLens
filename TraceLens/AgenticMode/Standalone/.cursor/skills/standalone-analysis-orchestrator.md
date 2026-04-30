@@ -46,15 +46,16 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 1. Generate Performance Report (branches on analysis mode: training vs inference then, comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
-7. Invoke Compute Kernel Subagents (PARALLEL) → category_findings/
+7. Invoke Compute Kernel Subagents (PARALLEL, read category_findings[] from _metrics.json) → category_findings/
+   7.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted)
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
 9. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
-10. Generate Performance Improvement Plot (reads priority_data.json → PNG + base64 embed)
-11. Generate Final Report (composable System + Compute sections)
-11.3. **Comparative only:** Cumulative TraceDiff plot (`{{COMPARATIVE_CUMULATIVE_PLOT}}`) — see Step 11.3
+10. Render performance PNG IF agent_extension.py is absent
+11. Generate Final Report (composable System + Compute sections), validate it,
+    optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
-**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps must be performed directly by the orchestrator using the command prefix.
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps (including Step 7.5) must be performed directly by the orchestrator using the command prefix.
 
 ---
 
@@ -360,6 +361,7 @@ Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 | `reduce` | `reduce-analyzer.md` |
 | `triton` | `triton-analyzer.md` |
 | `moe_fused` | `moe-analyzer.md` |
+| `moe_unfused` | `moe-analyzer.md` |
 | `norm` | `norm-analyzer.md` |
 | `convolution` | `convolution-analyzer.md` |
 | `other` | `generic-op-analyzer.md` |
@@ -423,7 +425,8 @@ Read and follow the FULL instructions in:
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
-  category_data/{category}_tree_data.json (if available)
+  category_data/{category}_tree_data.json (if available),
+  category_data/{category}_metrics.json (P-items come from `category_findings[]`)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
@@ -445,6 +448,18 @@ After all compute kernel subagents complete:
 3. **Retry each failed category exactly once** by re-launching its subagent with the same prompt structure from Step 7.2. Launch all retries in parallel and wait for completion.
 4. After retries, re-check outputs. Any category that still fails is excluded from aggregation and recommendations.
 5. **CRITICAL: Do NOT attempt to manually analyze failed categories — only automated subagent retry is allowed.**
+
+### 7.5 Aggregate findings → priority_data.json
+
+After all compute sub-agent `_metrics.json` files exist (each carrying its own `category_findings[]`), concatenate them into a globally-sorted `priority_data.json::findings[]` for the report template.
+
+```bash
+<prefix> python3 -c \"
+import sys
+from TraceLens.AgenticMode.Standalone.utils.report_utils import generate_priority_data
+generate_priority_data(sys.argv[1])
+\" '<output_dir>'
+```
 
 ---
 
@@ -490,9 +505,9 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ---
 
-## Step 10: Generate Performance Improvement Plot
+## Step 10: Render Plot (conditional)
 
-**Important:** The plot data is sourced from deterministic `impact_estimates` pre-computed by the analysis scripts (stored in each `*_metrics.json`). Do **not** parse the `## Impact Summary` markdown tables in findings files for the plot -- those tables are for human readability only.
+**Important:** Plot data is sourced from `priority_data.json` (written in Step 7.5). This step only renders the PNG, when `agent_extension.py` is absent.
 
 ### 10.1 Ensure matplotlib is available
 
@@ -500,29 +515,22 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 <prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
 ```
 
-### 10.2 Generate priority_data.json
+### 10.2 Generate Plot and Base64 File (conditional)
 
-Run `generate_priority_data()` to aggregate all `impact_estimates` from `*_metrics.json` files and manifest fallback categories into `priority_data.json` — the single source of truth for both report P-item ordering and the plot:
-
-```bash
-<prefix> python3 -c \"
-import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_priority_data
-generate_priority_data(sys.argv[1])
-\" '<output_dir>'
-```
-
-### 10.3 Generate Plot and Base64 File
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the perf plot here. If the file is present, **skip this step** — Step 11.2 will produce `perf_improvement.png` and Step 11.3 will embed it.
 
 ```bash
-<prefix> python3 -c \"
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ ! -f "$EXT" ]; then
+  <prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+\" '<output_dir>' '<Model> on <Platform> — Performance Breakdown'
+fi
 ```
 
-If the plot fails, retry once. If still failing, proceed to Step 11 without the plot.
+If the plot fails (extension-absent branch), retry once. If still failing, proceed to Step 11 without the plot.
 
 ---
 
@@ -533,17 +541,17 @@ If the plot fails, retry once. If still failing, proceed to Step 11 without the 
 **CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/<report_filename>` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.2 will use to read and modify it.
+2. **Copy** it to `<output_dir>/<report_filename>` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 will use to read and modify it.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
    - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
-   - `priority_data.json` — use `priorities` array for compute kernel P-item ordering (P1 = rank 1, P2 = rank 2, P3+ = rest). Categories with `source: "manifest_fallback"` use Impact: "Not quantifiable from trace data".
+   - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping.
    - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
    - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
-   - **No-findings categories:** If a findings file contains `<!-- no-actionable-findings -->`, the category has no actionable recommendations. Include it in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** compute categories have no actionable findings, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds."
+   - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds." Do **not** rely on `<!-- no-actionable-findings -->` markers — validation uses the metrics JSON, not markers (`sub_agent_spec.md` § No actionable findings).
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
 The report at `<output_dir>/<report_filename>` must use these exact `##` headers — do NOT rename them:
@@ -585,24 +593,40 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 2. Run validation again.
-3. Maximum 2 retry attempts. If still failing after retry, proceed to Step 11.2 with a warning.
+3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
 ---
 
-### 11.2 Generate and Embed Performance Improvement Plot
+### 11.2 Optional extension (auto-detected)
 
-Render `perf_improvement.png`, and embed the base64-encoded plot into the report.
+If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
+
+If the file is absent, skip this step silently. The standalone analysis is complete; the simple plot from Step 10.3 stays in place.
+
+```bash
+EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+if [ -f "$EXT" ]; then
+  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
+fi
+```
+
+This step is a hook for an optional extension; if `agent_extension.py` is not present, skip it.
+
+---
+
+### 11.3 Embed Performance Improvement Plot
+
+The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Step 11.2 (whichever ran). This step only embeds its base64 sidecar into the report at the `{{PERF_PLOT}}` placeholder.
 
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_and_embed_plot
-generate_and_embed_plot(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<Model> on <Platform> — Kernel Tuning Potential'
+from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
+embed_plot_in_report(sys.argv[1])
+\" '<output_dir>'
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
-
 ---
 
 ### 10.3 Comparative cumulative kernel-time plot (comparative scope only)
