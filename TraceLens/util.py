@@ -26,10 +26,44 @@ logger = logging.getLogger(__name__)
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
-# tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
+# tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can
+# have incorrect timestamps and missing information
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
+        # for loading data, try streaming json, then ortjson, then standard json
+        need_full_read = True
+        try:
+            import json_stream
+            raise ImportError("json_stream not available")
+            def readfn(data):
+                import io
+
+                if isinstance(data, str):
+                    data = io.StringIO(data)
+                elif isinstance(data, bytes):
+                    data = io.BytesIO(data)
+                # using json_stream in persistent mode should be faster than reading the full file
+                # into memory and then parsing it
+                return json_stream.to_standard_types(
+                    json_stream.load(data, persistent=True)
+                )
+
+            need_full_read = False
+            reader = readfn
+        except ImportError:
+            # Use orjson for faster parsing (23% faster than stdlib json)
+            # Falls back to json if orjson not available
+            try:
+                import orjson
+                raise ImportError("orjson not available")
+                reader = lambda data: orjson.loads(data)
+            except ImportError:
+                logger.warning(
+                    "orjson not available, falling back to standard json. "
+                    "Install orjson for faster JSON parsing: pip install orjson"
+                )
+                reader = lambda data: json.loads(data.decode("utf-8"))
         if filename_path.endswith("pb"):
             try:
                 from xprof.convert import raw_to_tool_data as convert
@@ -53,36 +87,28 @@ class DataLoader:
                     f"{filename_path}. Ensure the file exists and the output directory "
                     "is writable (cache files may need to be written)."
                 )
-            data = data.decode("utf-8")  # we get bytes back from the call above
+            parsed_data = reader(data)
+            if save_preprocessed:
+                with open(
+                    filename_path.replace("pb", "processed.json"), "w"
+                ) as writefile:
+                    writefile.write(data.decode("utf-8"))
         elif filename_path.endswith("json.gz"):
             import gzip
 
-            with gzip.open(filename_path, "r") as fin:
-                data = fin.read()  # Keep as bytes for orjson
+            with gzip.open(filename_path, "r") as data:
+                if need_full_read:
+                    data = data.read()
+                parsed_data = reader(data)
         elif filename_path.endswith("json"):
-            with open(filename_path, "rb") as fin:  # Read as bytes for orjson
-                data = fin.read()
+            with open(filename_path, "rb") as data:
+                if need_full_read:
+                    data = data.read()
+                parsed_data = reader(data)
         else:
             raise ValueError("Unknown file type", filename_path)
-        if save_preprocessed:
-            data_str = data if isinstance(data, str) else data.decode("utf-8")
-            with open(filename_path.replace("pb", "processed.json"), "w") as writefile:
-                writefile.write(data_str)
 
-        # Use orjson for faster parsing (23% faster than stdlib json)
-        # Falls back to json if orjson not available
-        try:
-            import orjson
-
-            return orjson.loads(data)
-        except ImportError:
-            logger.warning(
-                "orjson not available, falling back to standard json. "
-                "Install orjson for faster JSON parsing: pip install orjson"
-            )
-            if isinstance(data, bytes):
-                data = data.decode("utf-8")
-            return json.loads(data)
+        return parsed_data
 
 
 class JaxProfileProcessor:
