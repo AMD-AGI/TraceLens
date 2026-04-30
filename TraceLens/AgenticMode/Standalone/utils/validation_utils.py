@@ -61,7 +61,9 @@ _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
-_NOT_QUANTIFIABLE_SENTINEL = re.compile(r"not quantifiable from trace data", re.IGNORECASE)
+_NOT_QUANTIFIABLE_SENTINEL = re.compile(
+    r"not quantifiable from trace data", re.IGNORECASE
+)
 
 # Markdown table header containing an "Args" column. Match line that starts
 # with `|` and has `Args` as one of the column names.
@@ -584,7 +586,8 @@ class MarkerValidator:
             errors.append(f"{rel}: missing required kind=p_item")
         n_headings = len(_P_ITEM_RE.findall(text))
         n_markers = sum(
-            1 for m in cls.BEGIN_RE.finditer(text)
+            1
+            for m in cls.BEGIN_RE.finditer(text)
             if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == "p_item"
         )
         if n_headings and n_markers and n_headings != n_markers:
@@ -604,7 +607,11 @@ class MarkerValidator:
             return []
         errors = []
         for i, c in enumerate(candidates):
-            scope = text[c.end(): candidates[i + 1].start() if i + 1 < len(candidates) else len(text)]
+            scope = text[
+                c.end() : (
+                    candidates[i + 1].start() if i + 1 < len(candidates) else len(text)
+                )
+            ]
             has_marker = any(
                 (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
                 and km.group(1) == "detail_estimate"
