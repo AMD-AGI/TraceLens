@@ -15,7 +15,7 @@ from TraceLens.util import TraceEventUtils
 # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
 # cat=gpu_memset matching the CUDA convention. These patterns rebucket
 # legacy traces so cross-version reports compare like-for-like.
-# See: AMD-AGI/TraceLens-internal#182
+# See: AMD-AGI/TraceLens-internal#357
 _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
     r"^("
     r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"
@@ -140,7 +140,7 @@ class GPUEventAnalyser:
                     # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
                     # bucket so cross-version (7.1 vs 7.2) reports compare
                     # like-for-like; rocclr fill kernels follow gpu_memset's
-                    # existing home (comp_events). See AMD-AGI/TraceLens-internal#182.
+                    # existing home (comp_events). See AMD-AGI/TraceLens-internal#357.
                     if category == "kernel" and _ROCM_LEGACY_MEMCPY_NAMES.match(name):
                         memcpy_events.append(event)
                     elif category == "kernel" and _ROCM_LEGACY_MEMSET_NAMES.match(name):

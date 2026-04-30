@@ -419,7 +419,7 @@ def test_only_zero_duration_events_does_not_raise():
 # __amd_rocclr_copyBuffer*, __amd_rocclr_fillBuffer*). ROCm 7.2 uses
 # cat=gpu_memcpy / cat=gpu_memset matching the CUDA convention. These tests
 # pin the rerouting so a 7.1 trace's gpu_timeline buckets compute / memcpy /
-# memset the same way a 7.2 trace would. See AMD-AGI/TraceLens-internal#182.
+# memset the same way a 7.2 trace would. See AMD-AGI/TraceLens-internal#357.
 
 
 def test_rocm_legacy_copy_kernels_routed_to_memcpy():
