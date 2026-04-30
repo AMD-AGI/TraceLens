@@ -123,6 +123,8 @@ These require hardware counters or profiler tools, not a trace.
 | Bank conflicts | Requires hardware counters | "Low efficiency — profile with hardware counters to diagnose." |
 | Cache hit rates | Requires hardware counters | "Large working set may exceed cache." |
 | Wave / SM occupancy | Requires hardware counters | "Kernel running slower than expected — profile occupancy with hardware counters." |
+| Shared-memory / LDS usage | Requires hardware counters | "Shared-memory usage not visible — profile with hardware counters." |
+| Intra-warp shuffle efficiency | Requires hardware counters | "Warp-shuffle efficiency not visible — profile with hardware counters." |
 | Root causes generally | Traces show WHAT, not WHY | "Bottleneck identified — generate reproducer for kernel team." |
 
 #### CANNOT Infer (category-specific)
