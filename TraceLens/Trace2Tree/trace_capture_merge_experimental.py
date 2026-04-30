@@ -28,8 +28,11 @@ import TraceLens
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 
-EXECUTE_CONTEXT_PATTERN = re.compile(
-    r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+EXECUTE_CONTEXT_PATTERNS = (
+    re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
 )
 
 
@@ -340,7 +343,7 @@ def find_execution_roots(graph_tree):
     roots = [
         event
         for event in graph_tree.events
-        if EXECUTE_CONTEXT_PATTERN.match(event.get("name", ""))
+        if any(p.match(event.get("name", "")) for p in EXECUTE_CONTEXT_PATTERNS)
         and event.get("cat") == "user_annotation"
     ]
     roots.sort(key=lambda x: x.get("ts", 0))
@@ -450,8 +453,11 @@ def find_closest_batch_size(
 
 
 def find_execution_details(execution_root):
-    name = execution_root["name"].split("_")[1]
-    return name
+    name = execution_root["name"]
+    if name.startswith("execute_context_"):
+        paren_values = re.findall(r"\((\d+)\)", name)
+        return str(sum(int(v) for v in paren_values))
+    return name.split("_")[1]
 
 
 def merge_capture_trace_into_graph(
