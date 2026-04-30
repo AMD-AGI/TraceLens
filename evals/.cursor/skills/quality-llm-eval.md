@@ -102,57 +102,13 @@ Check the category findings files for detailed values if the top-level report su
 
 **PASS** if overall_score >= 7.0 and correctness >= 4. **FAIL** listing specific mismatches with expected vs actual values and per-dimension scores.
 
-### quality_eval_4: Impact Format Completeness
-
-**Category:** Quality
-**Issue Summary:** Impact Format Completeness
-
-Structural check on the **generated** report only (no reference comparison). Scan every `**Impact**` line and every `**Impact estimate:**` block in `<output_dir>/standalone_analysis.md` and in `<output_dir>/category_findings/*_findings.md`, and verify each entry follows one of the accepted shapes.
-
-Two patterns appear in the reports:
-
-- Top-level P-item summaries (under `## Compute Kernel Optimizations` and `### Kernel Fusion Insights`) use a single inline line, e.g.
-
-  ```
-  **Impact**: ~2.7–3.7 ms savings (8.3–11.1% of E2E) from closing efficiency gaps ...
-  **Impact**: Not quantifiable from trace data
-  ```
-
-- Detailed P-item sections use a labelled block followed by bullets, e.g.
-
-  ```
-  **Impact estimate:**
-
-  - Low end (75% roofline): 2.750 ms savings (8.30% E2E)
-  - High end (100% roofline): 3.668 ms savings (11.07% E2E)
-  ```
-
-  or the inline NQ form:
-
-  ```
-  **Impact estimate:** Impact estimate is not quantifiable from trace data.
-  ```
-
-**Validation rules:**
-
-- A `**Impact**` line is **valid** when it either (a) contains a numeric value followed by `ms savings` (e.g. `~2.7 ms savings`, `2.7–3.7 ms savings`), or (b) matches the case-insensitive phrase `Not quantifiable from trace data` (or close equivalents such as `Not quantifiable`).
-- A `**Impact estimate:**` entry is **valid** when it is either (a) followed by **at least two** bullet lines (lines beginning with `- `) each containing a numeric value and the literal token `ms savings`, or (b) the inline `Not quantifiable` form on the same line as the label.
-- "Not quantifiable from trace data" entries are **accepted** as valid; do not flag them.
-
-**Scoring guide:**
-- **correctness**: Among entries that DO present numbers, do they carry the literal token `ms savings` (numeric value adjacent to `ms` followed by `savings`)? 10=all entries well-formed, 7=minor wording drift but ms still present, 4=1-2 malformed (e.g. missing `ms` unit or missing `savings`), 0=pervasive malformation (most numeric entries lack `ms savings`)
-- **completeness**: Fraction of `**Impact**` lines and `**Impact estimate:**` blocks that pass the validation rule above (numeric+ms, or NQ). 10=100%, 7=one entry fails, 4=several entries fail, 0=most fail
-- **precision**: For `**Impact estimate:**` blocks that are NOT the NQ form, do they have the expected two bullets (Low end / High end) each containing `ms savings`? 10=all blocks have both bullets, 7=one block missing a bullet, 4=several blocks missing a bullet, 0=most blocks missing the two-bullet structure
-
-**PASS** if overall_score >= 7.0 and correctness >= 4. **FAIL** listing the specific offending entries as `<file_path>:<line_number>: <snippet>` along with per-dimension scores.
-
 ## Output
 
-Write a CSV to the specified `results_path` with exactly these 5 columns and 3 data rows:
+Write a CSV to the specified `results_path` with exactly these 5 columns and 2 data rows:
 
 `index,category,issue_summary,result,details`
 
-Use `quality_eval_2`, `quality_eval_3`, and `quality_eval_4` as the `index` values.
+Use `quality_eval_2` and `quality_eval_3` as the `index` values.
 
 In the `details` column, include the scoring breakdown in the format:
 `correctness=N/10 completeness=N/10 precision=N/10 overall=N.N | <explanation>`
