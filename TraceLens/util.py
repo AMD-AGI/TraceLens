@@ -644,14 +644,8 @@ class TraceEventUtils:
 
     @staticmethod
     def is_communication_string(text: str) -> bool:
-        """Return True if *text* case-insensitively contains an NCCL/RCCL marker.
-
-        Uses substring search (``Pattern.search``), not start-anchored ``match``,
-        so demangled names like ``void rcclGenericKernel<...>(...)`` match.
-        """
-        if not text:
-            return False
-        return any(x.search(text) for x in TraceEventUtils.get_communication_regexes())
+        """Return True if *text* case-insensitively indicates a collective operation."""
+        return any(x.match(text) for x in TraceEventUtils.get_communication_regexes())
 
 
 class RocprofParser:

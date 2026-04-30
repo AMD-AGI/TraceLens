@@ -1823,9 +1823,7 @@ class TreePerfAnalyzer:
                 continue
             if evt["UID"] in collected_gpu_uids:
                 continue
-            if not include_nccl and TraceEventUtils.is_communication_string(
-                evt.get("name", "")
-            ):
+            if not include_nccl and "nccl" in evt.get("name", "").lower():
                 continue
 
             has_cpu_op = False
