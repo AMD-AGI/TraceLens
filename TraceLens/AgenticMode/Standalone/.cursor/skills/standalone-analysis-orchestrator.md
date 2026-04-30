@@ -557,7 +557,7 @@ fi
 
 This step is a hook for an optional extension; if `agent_extension.py` is not present, skip it.
 
-**Do NOT re-run `validate_report` (Step 11.1) after this step.** The marker requirement in `validate_report` is intentionally a pre-extension check; re-validating post-extension would always fail by design.
+**Do NOT re-run `validate_report` after this step.**
 
 ---
 
