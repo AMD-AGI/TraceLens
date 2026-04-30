@@ -32,6 +32,7 @@ from .report_utils import load_manifest, _scan_findings_dir
 # Constants — all validation thresholds and patterns in one place
 # ---------------------------------------------------------------------------
 
+
 def _metrics_json_for_findings(filepath):
     """Path to category_data/<stem>_metrics.json for a *_findings.md under category_findings/."""
     output_dir = os.path.dirname(os.path.dirname(filepath))
