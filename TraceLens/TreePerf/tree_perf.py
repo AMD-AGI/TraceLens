@@ -333,48 +333,56 @@ class TreePerfAnalyzer:
     def compute_perf_metrics(
         self, event, bwd=False, non_data_mov=False, perf_model_class=None
     ):
+        partial_metrics = {"Kernel Time (µs)": 0}
+        if non_data_mov:
+            partial_metrics["Non-Data-Mov Kernel Time (µs)"] = 0
 
-        # Handle kernel aggregation
-        if bwd:
-            # Always use subtree aggregation for backward metrics
-            cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
-        else:
-            cpu_op_uids = [event["UID"]]
-        cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
-        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
-        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
-        if len(list_kernels) > 0:
-            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
-                "busy_time"
-            ]
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
-            cpu_op_list, filter_func=self.non_data_mov_filter
-        )
-        list_non_data_mov_kernels = [
-            self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
-        ]
         busy_non_data_mov_time = 0
-        if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = self.GPUEventAnalyser(
-                list_non_data_mov_kernels
-            ).compute_metrics()["busy_time"]
-        event["kernel_details"] = [
-            {
-                "name": kernel["name"],
-                "dur": kernel["dur"],
-                "stream": kernel.get("args", {}).get("stream", None),
-            }
-            for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
-        ]
+        try:
+            # Handle kernel aggregation (same busy_time used for partial + full metrics)
+            if bwd:
+                # Always use subtree aggregation for backward metrics
+                cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
+            else:
+                cpu_op_uids = [event["UID"]]
+            cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
+            _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
+            list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
+            if len(list_kernels) > 0:
+                busy_kernel_time = self.GPUEventAnalyser(
+                    list_kernels
+                ).compute_metrics()["busy_time"]
+            _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
+                cpu_op_list, filter_func=self.non_data_mov_filter
+            )
+            list_non_data_mov_kernels = [
+                self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
+            ]
+            if len(list_non_data_mov_kernels) > 0:
+                busy_non_data_mov_time = self.GPUEventAnalyser(
+                    list_non_data_mov_kernels
+                ).compute_metrics()["busy_time"]
+            event["kernel_details"] = [
+                {
+                    "name": kernel["name"],
+                    "dur": kernel["dur"],
+                    "stream": kernel.get("args", {}).get("stream", None),
+                }
+                for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
+            ]
+        except Exception as e:
+            event["kernel_details"] = []
+            partial_metrics[self._PARTIAL_PERF_METRICS_ERR_KEY] = e
+            return partial_metrics
+
+        partial_metrics["Kernel Time (µs)"] = busy_kernel_time
+        if non_data_mov:
+            partial_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
-
-        partial_metrics = {"Kernel Time (µs)": busy_kernel_time}
-        if non_data_mov:
-            partial_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
 
         try:
             perf_model = perf_model_class(
@@ -2044,17 +2052,6 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
-                    gpu_event_uids = event.get("gpu_events", [])
-                    if gpu_event_uids:
-                        gpu_events_list = [
-                            self.tree.get_UID2event(uid)
-                            for uid in gpu_event_uids
-                            if self.tree.get_UID2event(uid)
-                        ]
-                        if gpu_events_list:
-                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
-                                gpu_events_list
-                            ).compute_metrics()["busy_time"]
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
                 fwd_event, _ = self._get_linked_fwd_event(event)
@@ -2076,17 +2073,6 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
-                    gpu_event_uids = event.get("gpu_events", [])
-                    if gpu_event_uids:
-                        gpu_events_list = [
-                            self.tree.get_UID2event(uid)
-                            for uid in gpu_event_uids
-                            if self.tree.get_UID2event(uid)
-                        ]
-                        if gpu_events_list:
-                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
-                                gpu_events_list
-                            ).compute_metrics()["busy_time"]
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
                 row["perf_params"] = None
