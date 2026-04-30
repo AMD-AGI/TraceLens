@@ -263,13 +263,14 @@ def generate_perf_report_pytorch(
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-
+    add_python_func = True if include_call_stack else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
         arch=gpu_arch_json,
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
+        add_python_func=add_python_func,
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
     )
