@@ -38,6 +38,7 @@ Thanks for your interest in improving **TraceLens** — a toolkit that parses Py
   - [Scope (optional)](#scope-optional)
   - [Examples](#examples)
 - [Commit Message Convention](#commit-message-convention)
+- [Updating Reference Outputs](#updating-reference-outputs)
 
 ---
 
@@ -149,3 +150,15 @@ docs(readme-tracediff): add docs for jax tracediff
 ```
 
 This format helps us to automatically generate changelogs and provide more clarity in versioning.
+
+## Updating Reference Outputs
+
+Several regression tests compare freshly generated CSV outputs against checked-in reference CSVs. When an intentional code change legitimately alters those outputs, you can refresh the references in-place by passing the `--update-references` flag to pytest:
+
+```sh
+python -m pytest tests/test_perf_report_regression.py --update-references
+```
+
+> **⚠️ Important:** When you use `--update-references` in a PR, **explicitly note in your PR description which reference files were updated and why**.
+>
+> **Do not use this flag to paper over unexpected differences.** If a test starts failing, first investigate *why* the output changed. Only refresh references once you have confirmed the new output is intentionally correct (e.g. a deliberate metric formula change, a new column, or a bug fix in the reporting pipeline).
