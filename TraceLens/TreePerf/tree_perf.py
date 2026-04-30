@@ -2111,7 +2111,9 @@ class TreePerfAnalyzer:
         agg_metrics=["mean", "std"],
         include_pct=True,
         group_by_num_kernels=False,
+        include_call_stack=False,
         include_overlapping_kernels=False,
+        tree=None,
     ):
         """
         Summarize unified perf table by unique (name, Input Dims, Input type, etc.).
@@ -2126,6 +2128,8 @@ class TreePerfAnalyzer:
             include_pct (bool): Include percentage and cumulative percentage columns.
             include_overlapping_kernels (bool): If True, group by overlapping_kernel_names
                 and aggregate overlapping_kernels_details.
+            tree: Required when include_call_stack=True; used to look up call stacks
+                post-aggregation via ex_UID.
 
         Returns:
             pd.DataFrame: Summarized DataFrame grouped by unique args.
@@ -2291,6 +2295,24 @@ class TreePerfAnalyzer:
                 rename_map[col] = "overlapping_kernels_details_summary"
 
         df_summary = df_summary.rename(columns=rename_map)
+
+        if include_call_stack and tree is not None and "ex_UID" in df_summary.columns:
+
+            def _get_call_stack(ex_uid):
+                try:
+                    event = tree.get_UID2event(int(ex_uid))
+                    cs = tree.traverse_parents_and_get_callstack(
+                        event, filter=["nn.Module", "::", "/"]
+                    )
+                    return re.sub(r"_\d+", "", cs)
+                except Exception:
+                    return ""
+
+            df_summary["call_stack"] = df_summary["ex_UID"].apply(_get_call_stack)
+        elif include_call_stack and tree is None:
+            warnings.warn(
+                "include_call_stack=True but tree=None; skipping call stack column."
+            )
 
         # Sort: overlap mode matches grouped ordering; otherwise by kernel time / duration
         if include_overlapping_kernels:
