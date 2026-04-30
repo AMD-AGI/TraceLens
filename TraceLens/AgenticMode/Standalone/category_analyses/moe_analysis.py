@@ -29,7 +29,7 @@ def _check_moe_data(output_dir, category):
         return {
             "category": category,
             "status": "NO_DATA",
-            "message": "No MoE operations detected in this trace",
+            "message": f"No MoE operations detected in this trace ({category} bucket)",
             "total_time_ms": 0,
             "percent_of_compute": 0,
             "operation_count": 0,
@@ -45,12 +45,20 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze MoE fused operations")
+    parser = argparse.ArgumentParser(
+        description="Analyze MoE fused or unfused operations"
+    )
     parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument(
+        "--category",
+        default="moe_fused",
+        choices=("moe_fused", "moe_unfused"),
+        help="MoE bucket to analyze (default: moe_fused).",
+    )
     args = parser.parse_args()
 
     run_category_analysis(
-        category="moe_fused",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,

@@ -6,13 +6,13 @@ See LICENSE for license information.
 
 ---
 name: moe-analyzer
-description: Analyze MoE (Mixture of Experts) fused operations for performance bottlenecks. Use when orchestrator needs MoE category analysis.
+description: Analyze MoE (Mixture of Experts) fused and unfused operations for performance bottlenecks. Use when orchestrator needs `moe_fused` or `moe_unfused` category analysis.
 model: claude-4.6-sonnet-medium-thinking
 ---
 
 # MoE Analysis Subagent
 
-Analyze MoE (Mixture of Experts) fused operations for performance bottlenecks using roofline-based efficiency analysis. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
+Analyze MoE (Mixture of Experts) fused and unfused operations for performance bottlenecks using roofline-based efficiency analysis. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -22,15 +22,16 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
+- `cat`: MoE bucket being analyzed — one of `moe_fused` or `moe_unfused`. Substitute `<cat>` everywhere below before executing.
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input files (pre-computed by orchestrator, if MoE exists):**
-1. `<output_dir>/category_data/moe_fused_ops.csv` - Filtered MoE operations
-2. `<output_dir>/metadata/moe_fused_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/moe_fused_tree_data.json` - Pre-computed parent chains
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered MoE operations
+2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
+3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
-- `<output_dir>/category_findings/moe_fused_findings.md`
+- `<output_dir>/category_findings/<cat>_findings.md`
 
 ---
 
@@ -63,13 +64,14 @@ Use vendor-agnostic terminology:
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/moe_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --category <cat>
 ```
 
 ### Step 2: Read Metrics
 
 ```bash
-cat <output_dir>/category_data/moe_fused_metrics.json
+cat <output_dir>/category_data/<cat>_metrics.json
 ```
 
 If `status` is `NO_DATA`, write the no-MoE finding noted in Error Handling and stop.
@@ -78,7 +80,7 @@ The byte estimation for MoE is an **average-case approximation** under uniform r
 
 ### Step 3: Render P-items from `category_findings`
 
-Read `category_data/moe_fused_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`, precision from `Compute Spec`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
+Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`, precision from `Compute Spec`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
 **Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
@@ -111,7 +113,13 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 - **Algorithmic:** Quantization (FP8/FP4) if model quality allows.
 - **Kernel:** If well below peak MAF, kernel has room for compute-utilization tuning.
 
-### Already-fused operations
+### Unfused multi-stage MoE GEMMs (`moe_unfused` only)
+- **Symptoms:** Multiple sequential expert-GEMM kernel launches per token group (e.g. `*_gemm1_*` followed by `*_gemm2_*`).
+- **Reasoning:** Each launch pays kernel-launch overhead and cannot share on-chip memory across the FC1 -> activation -> FC2 chain; intermediate activations must round-trip through HBM.
+- **Algorithmic:** Switch to a fused MoE expert kernel that combines the per-stage GEMMs (and ideally activation) in a single launch.
+- **Kernel:** If a fused variant is unavailable, apply the standard per-bound-type tuning from the table above to each stage independently.
+
+### Already-fused operations (`moe_fused` only)
 - **Reasoning:** Fused MoE kernels combine routing + FC1 + activation + FC2 in a single kernel launch; fusion opportunities are limited.
 - **Focus:** The roofline gap (efficiency vs. peak), not further fusion.
 
@@ -136,7 +144,7 @@ if not passed:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/moe_fused_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
