@@ -67,9 +67,13 @@ _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
 def get_enhanced_category(row):
-    """Determine category with special handling for MoE, Norm, Convolution."""
+    """Trust upstream `op category`; name-based heuristics only for `other` rows."""
     op_name = row.get("name", "")
     category = row.get("op category", "")
+
+    if not pd.isna(category) and category not in ("", "other"):
+        category_name = category.replace(" ", "_").replace("/", "_").lower()
+        return category_name, category
 
     if "moe" in op_name.lower() or "fused_moe" in op_name.lower():
         return "moe_fused", "MoE Fused"
@@ -91,12 +95,7 @@ def get_enhanced_category(row):
     ):
         return "convolution", "Convolution"
 
-    if pd.isna(category) or category == "":
-        return "other", "Other"
-    else:
-        category_name = category.replace(" ", "_").replace("/", "_").lower()
-        display_name = category
-        return category_name, display_name
+    return "other", "Other"
 
 
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):

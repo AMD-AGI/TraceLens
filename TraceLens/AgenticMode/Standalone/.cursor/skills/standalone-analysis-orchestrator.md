@@ -321,6 +321,7 @@ Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 | `reduce` | `reduce-analyzer.md` |
 | `triton` | `triton-analyzer.md` |
 | `moe_fused` | `moe-analyzer.md` |
+| `moe_unfused` | `moe-analyzer.md` |
 | `norm` | `norm-analyzer.md` |
 | `convolution` | `convolution-analyzer.md` |
 | `other` | `generic-op-analyzer.md` |
