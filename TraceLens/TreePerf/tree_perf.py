@@ -2297,6 +2297,7 @@ class TreePerfAnalyzer:
         df_summary = df_summary.rename(columns=rename_map)
 
         if include_call_stack and tree is not None and "ex_UID" in df_summary.columns:
+
             def _get_call_stack(ex_uid):
                 try:
                     event = tree.get_UID2event(int(ex_uid))
@@ -2306,6 +2307,7 @@ class TreePerfAnalyzer:
                     return re.sub(r"_\d+", "", cs)
                 except Exception:
                     return ""
+
             df_summary["call_stack"] = df_summary["ex_UID"].apply(_get_call_stack)
         elif include_call_stack and tree is None:
             warnings.warn(
