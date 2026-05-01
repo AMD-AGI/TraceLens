@@ -20,7 +20,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
-from typing import List, Dict, Callable, Iterable, Tuple
+from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +392,11 @@ class JaxProfileProcessor:
 # inside the nested JaxOpKeys class (outer class name is not bound yet during nested exec).
 COMMUNICATION_KEYS = ["rccl", "nccl"]
 
+# (kernel-name regex fragment, canonical collective name for inference)
+DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
+    (r"cross_device_reduce", "allreduce"),
+]
+
 
 class TraceEventUtils:
     class JaxOpKeys:
@@ -639,15 +644,58 @@ class TraceEventUtils:
             )
 
     @staticmethod
-    def get_communication_regexes() -> List[re.Pattern]:
-        return [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+    def get_communication_regexes(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> List[re.Pattern]:
+        """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
+
+        When *custom_collective_patterns* is ``None``, built-in defaults from
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
+        are included. Pass an explicit list (possibly empty) to override that
+        set while keeping NCCL/RCCL markers.
+        """
+        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+        custom = (
+            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+            if custom_collective_patterns is None
+            else custom_collective_patterns
+        )
+        for pattern, _ in custom:
+            regexes.append(re.compile(pattern, re.IGNORECASE))
+        return regexes
+
+    @staticmethod
+    def build_collective_filter_and_inference_rules(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> Tuple[List[re.Pattern], List[Tuple[re.Pattern, str]]]:
+        """Compile NCCL/RCCL/custom kernel match patterns and collective inference rules.
+
+        Same *custom_collective_patterns* semantics as
+        :meth:`get_communication_regexes`: ``None`` uses
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS``; otherwise the given list
+        replaces that default set (use ``[]`` for no custom kernels).
+        """
+        effective = (
+            custom_collective_patterns
+            if custom_collective_patterns is not None
+            else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+        )
+        filter_patterns = TraceEventUtils.get_communication_regexes(
+            custom_collective_patterns=effective
+        )
+        inference_rules = [
+            (re.compile(pattern, re.IGNORECASE), collective)
+            for pattern, collective in effective
+        ]
+        return filter_patterns, inference_rules
 
     @staticmethod
     def is_communication_string(text: str) -> bool:
-        """Return True if *text* case-insensitively contains an NCCL/RCCL marker.
+        """Return True if *text* matches NCCL/RCCL or default custom collective patterns.
 
         Uses substring search (``Pattern.search``), not start-anchored ``match``,
         so demangled names like ``void rcclGenericKernel<...>(...)`` match.
+        Custom kernels use the same defaults as :meth:`get_communication_regexes`.
         """
         if not text:
             return False
