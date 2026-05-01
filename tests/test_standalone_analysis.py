@@ -13,6 +13,7 @@
 
 import json
 import os
+import subprocess
 import sys
 
 import pandas as pd
@@ -169,6 +170,44 @@ def output_dir_with_manifest_and_metrics(tmp_path):
         ],
     }
     (cat_data / "sdpa_fwd_metrics.json").write_text(json.dumps(sdpa_metrics, indent=2))
+
+    return str(out)
+
+
+@pytest.fixture
+def output_dir_other_and_customcollective_nccl(tmp_path):
+    """Minimal ops CSV + metadata for ``other`` and ``customcollective`` (NCCL-style name).
+
+    ``classify_other_operation`` treats this op as communication; ``customcollective``
+    analysis must still retain it, while ``other`` strips it for NCCL Analyzer routing.
+    """
+    out = tmp_path / "analysis_output"
+    (out / "category_data").mkdir(parents=True)
+    (out / "metadata").mkdir(parents=True)
+
+    df = pd.DataFrame(
+        {
+            "name": ["ncclKernel_AllReduce_RING_LL"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [100_000],
+            "TFLOPS/s_mean": [10.0],
+            "TB/s_mean": [0.1],
+            "FLOPS/Byte": [100.0],
+            "Compute Spec": ["matrix_bf16"],
+        }
+    )
+    for cat in ("customcollective", "other"):
+        df.to_csv(out / "category_data" / f"{cat}_ops.csv", index=False)
+
+    meta = {
+        "platform": "MI300X",
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    meta_text = json.dumps(meta, indent=2)
+    for cat in ("customcollective", "other"):
+        (out / "metadata" / f"{cat}_metadata.json").write_text(meta_text)
 
     return str(out)
 
@@ -417,6 +456,89 @@ def test_classify_other_operation(op_name, expected):
     assert classify_other_operation(op_name) == expected
 
 
+def test_other_analysis_customcollective_keeps_communication_classified_ops(
+    output_dir_other_and_customcollective_nccl,
+):
+    """Regression: do not apply the communication pre-filter when category != other."""
+    script = os.path.join(STANDALONE, "category_analyses", "other_analysis.py")
+    if not os.path.isfile(script):
+        pytest.skip("other_analysis.py not found")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
+    result = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            output_dir_other_and_customcollective_nccl,
+            "--category",
+            "customcollective",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+
+    metrics_path = os.path.join(
+        output_dir_other_and_customcollective_nccl,
+        "category_data",
+        "customcollective_metrics.json",
+    )
+    assert os.path.isfile(metrics_path)
+    with open(metrics_path) as f:
+        m = json.load(f)
+    assert m.get("status") == "OK"
+    assert m.get("category") == "customcollective"
+    assert len(m.get("operations", [])) == 1
+    assert m["operations"][0]["name"] == "ncclKernel_AllReduce_RING_LL"
+    assert "communication_ops_skipped" not in m.get("category_specific", {})
+
+
+def test_other_analysis_other_category_still_skips_communication_ops(
+    output_dir_other_and_customcollective_nccl,
+):
+    script = os.path.join(STANDALONE, "category_analyses", "other_analysis.py")
+    if not os.path.isfile(script):
+        pytest.skip("other_analysis.py not found")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT
+    result = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            output_dir_other_and_customcollective_nccl,
+            "--category",
+            "other",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+
+    metrics_path = os.path.join(
+        output_dir_other_and_customcollective_nccl,
+        "category_data",
+        "other_metrics.json",
+    )
+    assert os.path.isfile(metrics_path)
+    with open(metrics_path) as f:
+        m = json.load(f)
+    assert m.get("status") == "OK"
+    assert len(m.get("operations", [])) == 0
+    skipped = m.get("category_specific", {}).get("communication_ops_skipped", {})
+    assert skipped.get("count") == 1
+    assert "ncclKernel_AllReduce_RING_LL" in (skipped.get("op_names") or [])
+
+
 # ----- Unit tests: detect_* helpers -----
 
 
@@ -521,8 +643,6 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     script = os.path.join(STANDALONE, "category_analyses", "gemm_analysis.py")
     if not os.path.isfile(script):
         pytest.skip("gemm_analysis.py not found")
-
-    import subprocess
 
     env = os.environ.copy()
     env["PYTHONPATH"] = REPO_ROOT

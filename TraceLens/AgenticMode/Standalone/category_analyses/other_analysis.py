@@ -99,24 +99,28 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    comm_mask = ops_df["name"].apply(
-        lambda n: classify_other_operation(str(n)) == "communication"
-    )
-    comm_ops_df = ops_df[comm_mask]
-    skipped_comm_ops = {
-        "count": len(comm_ops_df),
-        "op_names": comm_ops_df["name"].tolist(),
-        "message": (
-            "Communication kernels detected. Use TraceLens's NCCL Analyzer "
-            "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
-        ),
-    }
-    if skipped_comm_ops["count"] > 0:
-        print(
-            f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
-            f"use TraceLens's NCCL Analyzer instead."
+    # Strip communication kernels from the "other" bucket only; other categories
+    # (e.g. customcollective) reuse this script and must keep those ops.
+    skipped_comm_ops = None
+    if category == "other":
+        comm_mask = ops_df["name"].apply(
+            lambda n: classify_other_operation(str(n)) == "communication"
         )
-    ops_df = ops_df[~comm_mask]
+        comm_ops_df = ops_df[comm_mask]
+        skipped_comm_ops = {
+            "count": len(comm_ops_df),
+            "op_names": comm_ops_df["name"].tolist(),
+            "message": (
+                "Communication kernels detected. Use TraceLens's NCCL Analyzer "
+                "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
+            ),
+        }
+        if skipped_comm_ops["count"] > 0:
+            print(
+                f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
+                f"use TraceLens's NCCL Analyzer instead."
+            )
+        ops_df = ops_df[~comm_mask]
 
     config = {
         "extra_fields": ["Input Dims", "Input type"],
