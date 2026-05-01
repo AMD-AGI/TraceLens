@@ -622,8 +622,8 @@ The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Ste
 <prefix> python3 -c \"
 import sys
 from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
-embed_plot_in_report(sys.argv[1])
-\" '<output_dir>'
+embed_plot_in_report(sys.argv[1], sys.argv[2])
+\" '<output_dir>' '<report_filename>'
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
