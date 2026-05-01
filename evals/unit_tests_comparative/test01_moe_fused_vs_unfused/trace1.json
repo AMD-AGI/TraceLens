@@ -1,0 +1,571 @@
+{
+  "metadata": {
+    "num_errors": 0,
+    "errors": {},
+    "profiler": {
+      "repeats": 3,
+      "warmups": 2,
+      "wait": 0,
+      "grad_mode": "no_grad",
+      "synchronize_each_step": true,
+      "torch_profiler_kwargs": {
+        "record_shapes": true,
+        "profile_memory": false,
+        "with_stack": false,
+        "with_flops": true,
+        "with_modules": false,
+        "activities": [
+          "CPU",
+          "CUDA"
+        ]
+      }
+    },
+    "timestamp": 1700000000.0,
+    "base_image": "synthetic",
+    "started_by": "synthetic_generator",
+    "experiment": {
+      "kind": "synthetic",
+      "repo_id": "test01_moe_fused_trace2",
+      "pipeline_tag": "text-generation",
+      "device": "auto",
+      "torch_dtype": "bfloat16",
+      "cache_dir": null,
+      "pretrained": true,
+      "trust_remote_code": false,
+      "use_deepspeed": false,
+      "custom_automodel_kwargs": {},
+      "custom_autoconfig_kwargs": {}
+    },
+    "current_task": {
+      "shape": {
+        "batch_size": 1,
+        "text_input_length": 512,
+        "tag": "text"
+      }
+    },
+    "system": {
+      "pid": 12345,
+      "tid": 12345,
+      "uname": {
+        "system": "Linux",
+        "version": "#1 SMP",
+        "processor": "x86_64",
+        "node": "synthetic-node",
+        "release": "5.15.0",
+        "machine": "x86_64"
+      },
+      "architecture": {
+        "bits": "64bit",
+        "linkage": "ELF"
+      },
+      "cpu": {},
+      "gpu": {
+        "gpu_00": "AMD Instinct MI300X VF"
+      },
+      "libc_ver": [
+        "glibc",
+        "2.35"
+      ],
+      "os_release": {
+        "NAME": "Ubuntu",
+        "ID": "ubuntu",
+        "PRETTY_NAME": "Ubuntu 22.04.3 LTS",
+        "VERSION_ID": "22.04"
+      },
+      "python": {
+        "major": 3,
+        "minor": 10,
+        "patchlevel": 12,
+        "implementation": "CPython"
+      },
+      "pip_packages": [
+        "torch==2.3.0"
+      ]
+    }
+  },
+  "traceEvents": [
+    {
+      "ph": "X",
+      "cat": "user_annotation",
+      "name": "ProfilerStep#1",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000000.0,
+      "dur": 2000.0,
+      "args": {
+        "External id": 0,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 0
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "moe_layer",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000050.0,
+      "dur": 700.0,
+      "args": {
+        "External id": 5,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 5,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ]
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::bfloat16"
+        ],
+        "flops": 0
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aiter::moe_sorting_fwd",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000100.0,
+      "dur": 20.0,
+      "args": {
+        "External id": 1,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 1,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ]
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::bfloat16"
+        ],
+        "flops": 0
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "hipLaunchKernel",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000117.0,
+      "dur": 2.0,
+      "args": {
+        "External id": 1,
+        "kernel": "moe_sorting_kernel<BF16>",
+        "cid": 1001,
+        "correlation": 1001,
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "shared memory": 0
+      }
+    },
+    {
+      "ph": "s",
+      "id": 1001,
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000117.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 1001,
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000000130.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "moe_sorting_kernel<BF16>",
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000000130.0,
+      "dur": 120.0,
+      "args": {
+        "External id": 1,
+        "device": 0,
+        "stream": 0,
+        "correlation": 1001,
+        "kind": "Dispatch Kernel",
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aiter::ck_moe_stage1",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000300.0,
+      "dur": 20.0,
+      "args": {
+        "External id": 2,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 2,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ]
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::bfloat16"
+        ],
+        "flops": 5909874999296
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "hipLaunchKernel",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000317.0,
+      "dur": 2.0,
+      "args": {
+        "External id": 2,
+        "kernel": "ck_moe_stage1_kernel<BF16, 128, 128>",
+        "cid": 1002,
+        "correlation": 1002,
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "shared memory": 0
+      }
+    },
+    {
+      "ph": "s",
+      "id": 1002,
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000317.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 1002,
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000000330.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "ck_moe_stage1_kernel<BF16, 128, 128>",
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000000330.0,
+      "dur": 480.0,
+      "args": {
+        "External id": 2,
+        "device": 0,
+        "stream": 0,
+        "correlation": 1002,
+        "kind": "Dispatch Kernel",
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aiter::ck_moe_stage2",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000500.0,
+      "dur": 20.0,
+      "args": {
+        "External id": 3,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 3,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ]
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::bfloat16"
+        ],
+        "flops": 5909874999296
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "hipLaunchKernel",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000517.0,
+      "dur": 2.0,
+      "args": {
+        "External id": 3,
+        "kernel": "ck_moe_stage2_kernel<BF16, 128, 128>",
+        "cid": 1003,
+        "correlation": 1003,
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "shared memory": 0
+      }
+    },
+    {
+      "ph": "s",
+      "id": 1003,
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000517.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 1003,
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000000820.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "ck_moe_stage2_kernel<BF16, 128, 128>",
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000000820.0,
+      "dur": 480.0,
+      "args": {
+        "External id": 3,
+        "device": 0,
+        "stream": 0,
+        "correlation": 1003,
+        "kind": "Dispatch Kernel",
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "aiter::moe_sum",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000700.0,
+      "dur": 20.0,
+      "args": {
+        "External id": 4,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 4,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ]
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::bfloat16"
+        ],
+        "flops": 0
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "hipLaunchKernel",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000717.0,
+      "dur": 2.0,
+      "args": {
+        "External id": 4,
+        "kernel": "moe_sum_kernel<BF16>",
+        "cid": 1004,
+        "correlation": 1004,
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "shared memory": 0
+      }
+    },
+    {
+      "ph": "s",
+      "id": 1004,
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000717.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 1004,
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000001310.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "moe_sum_kernel<BF16>",
+      "pid": 2,
+      "tid": 0,
+      "ts": 2200000001310.0,
+      "dur": 80.0,
+      "args": {
+        "External id": 4,
+        "device": 0,
+        "stream": 0,
+        "correlation": 1004,
+        "kind": "Dispatch Kernel",
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "deviceProperties": [
+    {
+      "id": 0,
+      "name": "AMD Instinct MI300X VF",
+      "totalGlobalMem": 205571227648,
+      "computeMajor": 9,
+      "computeMinor": 4,
+      "maxThreadsPerBlock": 1024,
+      "maxThreadsPerMultiprocessor": 2048,
+      "regsPerBlock": 65536,
+      "warpSize": 64,
+      "sharedMemPerBlock": 65536,
+      "numSms": 304,
+      "maxSharedMemoryPerMultiProcessor": 65536
+    }
+  ],
+  "roctracer_version": "4.1.0",
+  "with_flops": true,
+  "with_modules": false,
+  "record_shapes": true,
+  "hip_runtime_version": "60131199",
+  "profile_memory": false,
+  "hip_driver_version": "60131199",
+  "with_stack": false,
+  "trace_id": "synthetic",
+  "traceName": "synthetic_trace",
+  "displayTimeUnit": "ms",
+  "baseTimeNanoseconds": 2200000000000000
+}

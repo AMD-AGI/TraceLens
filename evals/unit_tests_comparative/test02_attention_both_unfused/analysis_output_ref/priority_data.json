@@ -1,0 +1,48 @@
+{
+  "baseline_ms": 0.28,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "gemm",
+      "display_name": "GEMM",
+      "savings_ms": 0.088,
+      "savings_ms_low": 0.075,
+      "savings_ms_high": 0.1,
+      "source": "impact_estimates"
+    },
+    {
+      "rank": 2,
+      "category": "other",
+      "display_name": "other",
+      "savings_ms": null,
+      "gpu_kernel_time_ms": 0.11,
+      "source": "manifest_fallback"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "gemm",
+      "savings_ms": 0.088,
+      "savings_ms_low": 0.075,
+      "savings_ms_high": 0.1,
+      "operation_count": 1,
+      "type": "kernel_tuning"
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::bmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0.088,
+      "savings_ms_low": 0.075,
+      "savings_ms_high": 0.1,
+      "confidence": "medium",
+      "efficiency_pct": 44.44,
+      "bound_type": "memory",
+      "time_ms": 0.18,
+      "e2e_pct_low": 26.79,
+      "e2e_pct_high": 35.72
+    }
+  ]
+}

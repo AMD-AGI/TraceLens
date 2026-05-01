@@ -1,0 +1,4 @@
+name,cpu_op_name,cpu_op_uid,source,thread_name,Input Dims,Input Strides,Input type,Concrete Inputs,kernel_time,busy_time,lowest_common_ancestor_name,lowest_common_ancestor_id,gpu_op_uid,nn_module_stack,nn_module_parent,gpu_event_uid
+batched_transpose_64x64_pack_4x4_ediv_4x4_bf16,aten::mm,1,trace1,,"((1024, 2048), (2048, 4096))",,"('c10::bfloat16', 'c10::bfloat16')",,80.0,730.0,aten::mm | aten::addmm,0,8,root,root,8
+"Cijk_Ailk_Bljk_SB<BF16,BF16,float>_MT128x128x32_SE_SU4_TT1_1",aten::mm,1,trace1,,"((1024, 2048), (2048, 4096))",,"('c10::bfloat16', 'c10::bfloat16')",,650.0,730.0,aten::mm | aten::addmm,0,9,root,root,9
+sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize256x128x64_warpgroupsize2x1x1_execute_segment_k_off_kernel,aten::addmm,1,trace2,,"((1024, 1), (1024, 2048), (2048, 4096))",,"('c10::bfloat16', 'c10::bfloat16', 'c10::bfloat16')",,480.0,480.0,aten::mm | aten::addmm,0,5,root,root,5

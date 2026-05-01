@@ -37,7 +37,8 @@ No actionable optimization opportunities identified for this category.
 
 ## Detailed Analysis
 
-Analysis completed successfully. [Brief explanation of why no findings were generated.]
+<!-- no-actionable-findings -->
+Analysis completed successfully. [Brief explanation of why no findings were generated. Do not include operations breakdown table]
 ```
 
 ---

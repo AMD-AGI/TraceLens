@@ -1,0 +1,2 @@
+name,total_direct_kernel_time_sum,total_subtree_kernel_time_sum,total_direct_kernel_time_ms,total_subtree_kernel_time_ms,Count,Categories,Percentage (%),Cumulative Percentage (%)
+aten::convolution,40.0,40.0,0.04,0.04,1,{'CONV_fwd'},100.0,100.0

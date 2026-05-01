@@ -388,7 +388,11 @@ comparison_scope: {comparison_scope}
 
 **CRITICAL - READ FIRST:**
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- **Standalone only:** flag roofline `efficiency_percent` > 100% as "[ANOMALY] - verify measurement". In **comparative** mode, > 100% means Trace 2 is slower — NOT an anomaly.
+- `efficiency_percent` semantics differ by mode:
+  - **Standalone:** % of roofline. Flag > 100% as "[ANOMALY] - verify measurement".
+  - **Comparative:** `100 × (Trace 2 kernel time) / (Trace 1 kernel time)`.
+    - **< 100%** → Trace 1 is slower than Trace 2. **This is an optimization opportunity — flag it.**
+    - **> 100%** → Trace 2 is slower than Trace 1. **NOT an anomaly; no Trace-1 optimization needed.**
 - When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
 
 **Platform Specs:**
@@ -397,7 +401,7 @@ comparison_scope: {comparison_scope}
 - Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
 
 **CRITICAL CONSTRAINTS:**
-1. **Standalone only:** Any efficiency > 100% → `[ANOMALY] - verify measurement`. **Comparative:** efficiency > 100% means Trace 2 is slower — NOT an anomaly.
+1. **Standalone:** Any efficiency > 100% → `[ANOMALY] - verify measurement`. **Comparative:** efficiency > 100% means Trace 2 is slower — NOT an anomaly; efficiency < 100% means Trace 1 is slower — flag as optimization opportunity.
 2. Status must be SUCCESS or ERROR; times in ms; efficiencies as percentages
 3. Operations with `fusion_flagged: true` in the metrics JSON are already covered by
    a high-confidence kernel fusion candidate — do NOT flag them as bottlenecks or write
@@ -627,33 +631,6 @@ embed_plot_in_report(sys.argv[1], sys.argv[2])
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
----
-
-### 10.3 Comparative cumulative kernel-time plot (comparative scope only)
-
-When `<comparison_scope>` = **`comparative`**, after Step 10.2 (or immediately after the report file exists with `{{COMPARATIVE_CUMULATIVE_PLOT}}` in the comparative Executive Summary), run **one** command to build a **stacked Baseline → Projection** chart from TraceDiff-enriched `unified_perf_summary.csv`, and embed it in the markdown.
-
-**Labels:** Use the same naming you used in the report for the two traces (e.g. **Trace 1** = `<trace_path>` platform, **Trace 2** = comparison platform).
-
-```bash
-<prefix> python3 -c \"
-import sys
-from TraceLens.AgenticMode.Standalone.utils.comparative_cumulative_plot import (
-    generate_and_embed_comparative_cumulative_plot,
-)
-generate_and_embed_comparative_cumulative_plot(
-    sys.argv[1],
-    sys.argv[2],
-    sys.argv[3],
-    title=sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None,
-)
-\" '<output_dir>' '<Plaform1>' '<Platform2>' '<Optional suptitle>'
-```
-
-- If generation fails (missing CSV, no comparative columns), the placeholder is **removed** so the report stays valid.
-
-For **`standalone`** scope, the comparative block (including `{{COMPARATIVE_CUMULATIVE_PLOT}}`) is deleted per template rules — no Step 10.3 run.
-
 ---
 
 ## Error Handling

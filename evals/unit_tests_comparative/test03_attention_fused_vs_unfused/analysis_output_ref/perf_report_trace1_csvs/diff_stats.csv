@@ -1,0 +1,5 @@
+name,cpu_op_name,cpu_op_uid,source,thread_name,Input Dims,Input Strides,Input type,Concrete Inputs,kernel_time,busy_time,lowest_common_ancestor_name,lowest_common_ancestor_id,gpu_op_uid,nn_module_stack,nn_module_parent,gpu_event_uid
+"flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>",aiter::_flash_attn_forward,2,trace1,,"((8, 512, 16, 64), (8, 512, 16, 64), (8, 512, 16, 64))",,"('c10::bfloat16', 'c10::bfloat16', 'c10::bfloat16')",,350.0,350.0,attention,0,6,root,root,6
+"volta_h16gemm_<BF16,BF16,float>_tt_v1",aten::bmm,2,trace2,,"((8, 512, 64), (8, 64, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,10.0,780.0,attention,0,6,root,root,6
+"softmax_warp_forward<float, float, float, 4, true>",aten::softmax,7,trace2,,"((8, 16, 512, 512),)",,"('c10::bfloat16', 'c10::bfloat16')",,260.0,780.0,attention,0,11,root,root,11
+"volta_h16gemm_<BF16,BF16,float>_nt_v1",aten::bmm,12,trace2,,"((8, 512, 64), (8, 64, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,510.0,780.0,attention,0,16,root,root,16

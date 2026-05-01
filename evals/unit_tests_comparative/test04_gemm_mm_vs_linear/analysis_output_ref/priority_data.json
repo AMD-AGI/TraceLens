@@ -1,0 +1,40 @@
+{
+  "baseline_ms": 0.74,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "gemm",
+      "display_name": "GEMM",
+      "savings_ms": 0.219,
+      "savings_ms_low": 0.188,
+      "savings_ms_high": 0.25,
+      "source": "impact_estimates"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "gemm",
+      "savings_ms": 0.219,
+      "savings_ms_low": 0.188,
+      "savings_ms_high": 0.25,
+      "operation_count": 1,
+      "type": "kernel_tuning"
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "savings_ms": 0.219,
+      "savings_ms_low": 0.188,
+      "savings_ms_high": 0.25,
+      "confidence": "medium",
+      "efficiency_pct": 65.75,
+      "bound_type": "compute",
+      "time_ms": 0.73,
+      "e2e_pct_low": 25.34,
+      "e2e_pct_high": 33.79
+    }
+  ]
+}

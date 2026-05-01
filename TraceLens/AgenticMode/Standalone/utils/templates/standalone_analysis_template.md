@@ -100,8 +100,6 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 
 {{PERF_PLOT}}
 
-{{COMPARATIVE_CUMULATIVE_PLOT}}
-
 ## Warnings
 
 **Include this section ONLY if any subagent failed OR any operation has high_variance: true in *_metrics.json:**

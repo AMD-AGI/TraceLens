@@ -1,0 +1,264 @@
+{
+  "metadata": {
+    "num_errors": 0,
+    "errors": {},
+    "profiler": {
+      "repeats": 3,
+      "warmups": 2,
+      "wait": 0,
+      "grad_mode": "no_grad",
+      "synchronize_each_step": true,
+      "torch_profiler_kwargs": {
+        "record_shapes": true,
+        "profile_memory": false,
+        "with_stack": false,
+        "with_flops": true,
+        "with_modules": false,
+        "activities": [
+          "CPU",
+          "CUDA"
+        ]
+      }
+    },
+    "timestamp": 1700000000.0,
+    "base_image": "synthetic",
+    "started_by": "synthetic_generator",
+    "experiment": {
+      "kind": "synthetic",
+      "repo_id": "test01_moe_fused_trace1",
+      "pipeline_tag": "text-generation",
+      "device": "auto",
+      "torch_dtype": "bfloat16",
+      "cache_dir": null,
+      "pretrained": true,
+      "trust_remote_code": false,
+      "use_deepspeed": false,
+      "custom_automodel_kwargs": {},
+      "custom_autoconfig_kwargs": {}
+    },
+    "current_task": {
+      "shape": {
+        "batch_size": 1,
+        "text_input_length": 512,
+        "tag": "text"
+      }
+    },
+    "system": {
+      "pid": 12345,
+      "tid": 12345,
+      "uname": {
+        "system": "Linux",
+        "version": "#1 SMP",
+        "processor": "x86_64",
+        "node": "synthetic-node",
+        "release": "5.15.0",
+        "machine": "x86_64"
+      },
+      "architecture": {
+        "bits": "64bit",
+        "linkage": "ELF"
+      },
+      "cpu": {},
+      "gpu": {
+        "gpu_00": "NVIDIA H100 80GB HBM3"
+      },
+      "libc_ver": [
+        "glibc",
+        "2.35"
+      ],
+      "os_release": {
+        "NAME": "Ubuntu",
+        "ID": "ubuntu",
+        "PRETTY_NAME": "Ubuntu 22.04.3 LTS",
+        "VERSION_ID": "22.04"
+      },
+      "python": {
+        "major": 3,
+        "minor": 10,
+        "patchlevel": 12,
+        "implementation": "CPython"
+      },
+      "pip_packages": [
+        "torch==2.3.0"
+      ]
+    }
+  },
+  "traceEvents": [
+    {
+      "ph": "X",
+      "cat": "user_annotation",
+      "name": "ProfilerStep#1",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000000.0,
+      "dur": 2000.0,
+      "args": {
+        "External id": 0,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 0
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "moe_layer",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000005.0,
+      "dur": 65.0,
+      "args": {
+        "External id": 2,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 2,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ],
+          []
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::float8_e4m3fnuz",
+          "int"
+        ],
+        "flops": 0
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cpu_op",
+      "name": "triton::fused_moe_kernel",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000010.0,
+      "dur": 50.0,
+      "args": {
+        "External id": 1,
+        "Record function id": 0,
+        "finished": true,
+        "Ev Idx": 1,
+        "Input Dims": [
+          [
+            4096,
+            8192
+          ],
+          [
+            8,
+            8192,
+            22016
+          ],
+          []
+        ],
+        "Input type": [
+          "c10::bfloat16",
+          "c10::float8_e4m3fnuz",
+          "int"
+        ],
+        "flops": 11819749998592
+      }
+    },
+    {
+      "ph": "X",
+      "cat": "cuda_runtime",
+      "name": "cudaLaunchKernel",
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000057.0,
+      "dur": 2.0,
+      "args": {
+        "External id": 1,
+        "cbid": 211,
+        "correlation": 1001
+      }
+    },
+    {
+      "ph": "s",
+      "id": 1001,
+      "pid": 12345,
+      "tid": 12345,
+      "ts": 2200000000057.0,
+      "cat": "ac2g",
+      "name": "ac2g"
+    },
+    {
+      "ph": "f",
+      "id": 1001,
+      "pid": 0,
+      "tid": 7,
+      "ts": 2200000000080.0,
+      "cat": "ac2g",
+      "name": "ac2g",
+      "bp": "e"
+    },
+    {
+      "ph": "X",
+      "cat": "kernel",
+      "name": "triton__moe_fused_kernel_0d1d2d3d4d5d6d7d8d9d10d",
+      "pid": 0,
+      "tid": 7,
+      "ts": 2200000000080.0,
+      "dur": 800.0,
+      "args": {
+        "External id": 1,
+        "device": 0,
+        "stream": 7,
+        "correlation": 1001,
+        "grid": [
+          128,
+          8,
+          1
+        ],
+        "block": [
+          256,
+          1,
+          1
+        ],
+        "queued": 0,
+        "context": 1,
+        "registers per thread": 64,
+        "blocks per SM": 32,
+        "warps per SM": 256.0,
+        "est. achieved occupancy %": 100
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "deviceProperties": [
+    {
+      "id": 0,
+      "name": "NVIDIA H100 80GB HBM3",
+      "totalGlobalMem": 85018279936,
+      "computeMajor": 9,
+      "computeMinor": 0,
+      "maxThreadsPerBlock": 1024,
+      "maxThreadsPerMultiprocessor": 2048,
+      "regsPerBlock": 65536,
+      "warpSize": 32,
+      "sharedMemPerBlock": 49152,
+      "numSms": 132,
+      "regsPerMultiprocessor": 65536,
+      "sharedMemPerBlockOptin": 232448,
+      "sharedMemPerMultiprocessor": 233472
+    }
+  ],
+  "with_flops": true,
+  "with_modules": false,
+  "record_shapes": true,
+  "profile_memory": false,
+  "with_stack": false,
+  "trace_id": "synthetic",
+  "traceName": "synthetic_trace",
+  "displayTimeUnit": "ms",
+  "baseTimeNanoseconds": 2200000000000000,
+  "cuda_runtime_version": 12040,
+  "cuda_driver_version": 12090,
+  "cupti_version": 22
+}
