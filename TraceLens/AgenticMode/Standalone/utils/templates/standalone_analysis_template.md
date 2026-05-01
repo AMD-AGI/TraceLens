@@ -360,7 +360,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Source the body block from the sub-agent's findings.md by joining on (findings[i].category, findings[i].category_rank): the sub-agent emits its P-items ordered by intra-category rank, so its rank-N block becomes this report's PN where N matches the position in priority_data.findings[]. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
-<!-- === STANDALONE Compute Kernel Data table === -->
+<!-- === STANDALONE Compute Kernel Data table === Use this schema for standalone mode ONLY. Use these 8 exact columns-->
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title> (<Library>)
@@ -375,7 +375,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Resolution:**
 **Impact estimate:**
 
-<!-- === COMPARATIVE Compute Kernel Data table === -->
+<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 7 exact columns-->
 <!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = lca_total_kernel_time_trace2_us / 1000.
      Count T1/T2 = operation_count / lca_kernel_count_trace2 when present.
      Difference (ms) = delta_us (trace2 - trace1) / 1000 (positive ⇒ more time on Trace 2), or —. -->
