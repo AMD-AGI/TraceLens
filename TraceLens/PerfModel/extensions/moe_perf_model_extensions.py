@@ -861,6 +861,7 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
 
         input_dtype = args["Input type"][0]
         weight_dtype = args["Input type"][1]
+        output_dtype = args["Input type"][2]
         return {
             "num_tokens": num_tokens,
             "hidden_dim": hidden_dim,
@@ -870,6 +871,7 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
             "gated": gated,
             "input_dtype": input_dtype,
             "weight_dtype": weight_dtype,
+            "output_dtype": output_dtype,
         }
 
     def flops(self):
@@ -892,7 +894,9 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
         weight_bpe = DTYPE_TO_BYTES.get(
             self.param_details["weight_dtype"], 1
         )  # Default to 1 (FP8)
-        output_bpe = input_bpe  # Output typically same as input
+        output_bpe = DTYPE_TO_BYTES.get(
+            self.param_details["output_dtype"], 2
+        )  # Output typically same as input
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -964,6 +968,7 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
 
         input_dtype = args["Input type"][0]
         weight_dtype = args["Input type"][1]
+        out_dtype = args["Input type"][2]
 
         return {
             "num_tokens": num_tokens,
@@ -973,6 +978,7 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
             "topk": topk,
             "input_dtype": input_dtype,
             "weight_dtype": weight_dtype,
+            "output_dtype": out_dtype,
         }
 
     def flops(self):
@@ -994,7 +1000,9 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
         weight_bpe = DTYPE_TO_BYTES.get(
             self.param_details["weight_dtype"], 1
         )  # Default to 1 (FP8)
-        output_bpe = input_bpe  # Output typically same as input
+        output_bpe = DTYPE_TO_BYTES.get(
+            self.param_details["output_dtype"], 2
+        )  # Output typically same as input
 
         return self.bytes_func(
             self.param_details["num_tokens"],
