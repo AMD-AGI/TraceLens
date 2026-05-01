@@ -100,7 +100,7 @@ blank line between them. The validator checks for these as substring matches.
 | Label | Purpose |
 |-------|---------|
 | `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
+| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. include metric table (see § Metric Table Schema). |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*. **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower", plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Compute tier: rendered from `category_findings[i]` (matched by `rank`), two-bullet low/high `impact_score` format (see § Impact estimate rendering). System tier: `Impact estimate is not quantifiable from trace data.` |
@@ -197,6 +197,22 @@ inside `## Detailed Analysis` blocks.
 - **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
 
 Agents may add extra columns when needed (e.g. `Sub-Category` in the generic-op analyzer).
+
+---
+
+## Metric Table Schema (system tier)
+
+Standard schema for the `**Data:**` table inside system-tier `## Detailed Analysis` blocks. In comparative mode, report Trace 1 metrics only — do not add Trace 2 columns or comparisons.
+
+```markdown
+| Metric | Value | Flagged |
+|--------|-------|---------|
+```
+
+**Column rules:**
+- **Metric**: Copy metric label directly from earlier findings sections — do not rename or reformat.
+- **Value**: `X.X ms` or `X.X%` or `X.X ms (X.X%)`
+- **Flagged**: `false` when the metric's threshold is exceeded; `true` otherwise.
 
 ---
 
