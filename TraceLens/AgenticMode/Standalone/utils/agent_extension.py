@@ -68,7 +68,7 @@ class ImpactPlot:
             1,
             2,
             figsize=(14, 5.5),
-            gridspec_kw={"width_ratios": [1.45, 1.0]},
+            gridspec_kw={"width_ratios": [1.3, 1.0]},
         )
         self._render_stacked_bars(ax_stack)
         fig.text(
@@ -246,8 +246,6 @@ class ImpactPlot:
             }
 
         bottom = np.zeros(n_bars, dtype=float)
-        rest_bottom = np.zeros(n_bars, dtype=float)
-        rest_height = np.zeros(n_bars, dtype=float)
         for seg_name in segment_order:
             h = np.array(
                 [_segment_heights(k)[seg_name] for k in range(n_bars)], dtype=float
@@ -271,9 +269,6 @@ class ImpactPlot:
                 linewidth=0.9,
                 alpha=0.95,
             )
-            if seg_name == _REST_KEY:
-                rest_bottom = bottom.copy()
-                rest_height = h.copy()
             bottom += h
 
         for k in range(n_bars):
@@ -294,19 +289,20 @@ class ImpactPlot:
                 color=accent,
             )
             if k > 0 and proj["savings"][k] > 0:
-                rest_mid = float(rest_bottom[k]) + float(rest_height[k]) / 2
+                err_lo_k = proj["err_lo"][k] if show_error_bars else 0.0
+                text_y = total_h - err_lo_k - 1.0
                 ax.text(
                     x[k],
-                    rest_mid,
+                    text_y,
                     f"-{proj['savings'][k]:.1f} ms",
                     ha="center",
-                    va="center",
+                    va="top",
                     fontsize=8,
                     color=accent,
                     fontweight="bold",
                     zorder=5,
                 )
-            if show_error_bars:
+            if show_error_bars and (proj["err_lo"][k] > 0 or proj["err_hi"][k] > 0):
                 ax.errorbar(
                     [x[k]],
                     [total_h],
@@ -319,7 +315,13 @@ class ImpactPlot:
                 )
 
         ax.set_xticks(x)
-        ax.set_xticklabels(proj["steps"], fontsize=8)
+        tick_colors = ["#333333"] + [
+            cat_color_map.get(recommendations[k]["category"], "#333333")
+            for k in range(len(recommendations))
+        ]
+        tick_labels = ax.set_xticklabels(proj["steps"], fontsize=9)
+        for tick, color in zip(tick_labels, tick_colors):
+            tick.set_color(color)
         ax.set_ylabel("E2E time stacked by category (ms)", fontsize=11)
         ax.set_title(
             "Projected E2E Latency (stacked by kernel category)",
@@ -335,28 +337,6 @@ class ImpactPlot:
         ax.set_ylim(0, ymax * 1.12)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        handles, labels = ax.get_legend_handles_labels()
-        rec_order = [_short_name(r["category"]) for r in recommendations]
-        ordered_handles = []
-        ordered_labels = []
-        for rn in rec_order:
-            if rn in labels:
-                idx = labels.index(rn)
-                ordered_handles.append(handles[idx])
-                ordered_labels.append(labels[idx])
-        for h, l in zip(handles, labels):
-            if l not in ordered_labels:
-                ordered_handles.append(h)
-                ordered_labels.append(l)
-        ax.legend(
-            ordered_handles,
-            ordered_labels,
-            loc="upper left",
-            bbox_to_anchor=(1.0, 1.0),
-            fontsize=7.5,
-            frameon=False,
-            title="Operations",
-        )
 
     def _render_throughput_cone(self, ax) -> None:
         """Render the cumulative throughput cone on the given axes."""
