@@ -188,6 +188,7 @@ inside `## Detailed Analysis` blocks.
 ```
 
 **Column mappings** (T1 source: `metrics['operations']`; T2 source: `category_data/<category>_ops.csv`):
+- **Operation**: `operations[i].name`. Bare op name only.
 - **Trace 1 Time (ms)**: `operations[i].time_ms`
 - **Trace 2 Time (ms)**: `lca_total_kernel_time_trace2_us / 1000` from the CSV row
 - **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `lca_kernel_count_trace2` from the CSV row. Format `T1 / T2` (use `—` for missing T2).
