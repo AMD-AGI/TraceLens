@@ -42,7 +42,19 @@ def main():
     found_files = {os.path.basename(p) for p in glob.glob(csv_pattern)}
 
     for csv_path in sorted(glob.glob(csv_pattern)):
-        df = pd.read_csv(csv_path)
+        try:
+            df = pd.read_csv(csv_path, on_bad_lines="warn")
+        except Exception:
+            try:
+                df = pd.read_csv(
+                    csv_path,
+                    sep=None,
+                    engine="python",
+                    on_bad_lines="warn",
+                )
+            except Exception as exc:
+                print(f"Warning: could not parse {csv_path}: {exc}")
+                continue
         frames.append(df)
 
     for expected in expected_csvs:

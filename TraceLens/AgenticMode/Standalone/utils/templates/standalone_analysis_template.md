@@ -9,14 +9,16 @@ See LICENSE for license information.
 
 1. Warnings section: Only include if there were errors or high-variance operations; omit entirely if all succeeded and no variance flags.
 2. Executive Summary: Max ~20 lines.
-3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 10.2 with a base64-embedded
-   PNG data URI (![Performance Improvement](data:image/png;base64,...)). This makes the report
-   fully portable. The plot shows kernel tuning potential only with 75–100% roofline potential on
-   both panes (left: E2E latency error bars from savings_ms_low/savings_ms_high, baseline bar has
-   no error bar; right: throughput uncertainty band from same range, no uncertainty at baseline).
-   If the plot was not generated (Step 9.5 failed), the placeholder is removed.
-4. Compute Kernel Optimizations: P1-P3+ from category subagent findings. Impact estimates show a
-   range (75–100% of roofline target), e.g. "~X.X–Y.Y ms savings (X.X–Y.Y% of E2E)".
+3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 11.3 with a base64-embedded
+   PNG data URI (![Performance Breakdown](data:image/png;base64,...)) of a single horizontal stacked
+   bar showing the run's compute-time breakdown by kernel category. The plot is purely descriptive
+   (no error bars, no throughput cone, no savings estimates). If the plot was not generated
+   (Step 10.3 / Step 11.2 failed), the placeholder is removed.
+4. Compute Kernel Optimizations: One P-item per entry in `priority_data.json::findings[]`,
+   numbered P1, P2, ... in `findings[]` order (already globally sorted by `impact_score`). The
+   P-item Impact line uses the canonical mid `impact_score` value; low/high values appear only
+   in Detailed Analysis. Cards join the corresponding sub-agent's Detailed Analysis block by
+   `(findings[i].category, findings[i].category_rank)`.
 5. System-Level Optimizations: If all system-level analyses report no actionable issues
    (NONE/N/A severity), use a single "✅ No system-level bottlenecks detected" summary instead of
    P1/P2/P3 recommendations. Only generate numbered priorities when at least one actionable issue
@@ -94,14 +96,16 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 ### Top Operations
 
-Use **% of computation time** (not % of total trace time) so readers can see each category's share of the GPU compute budget. Compute the denominator as `total_time_ms * computation_time_percent / 100` from the manifest `gpu_utilization`. The table is category-level with columns: Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %). The last column shows both the time range and E2E % range when kernel_tuning estimates exist (e.g. "~770–9801 ms (1.4–17.3%)"); use "—" when no estimates.
+One row per entry in `priority_data.json::priorities[]`, in array order (no manifest-sort, no extra rows). For row N (= `priorities[N-1]`): `Rank`/`Category` = `rank`/`display_name`; `Time (ms)` = matching `manifest.categories[].gpu_kernel_time_ms` (verbatim); `Ops` = matching `manifest.categories[].ops_count`; `% of Compute Time` = `Time (ms) / (gpu_utilization.total_time_ms * computation_time_percent / 100)`; trailer `low`/`high` = `priorities[N-1].impact_score_low`/`impact_score_high` (use `null` for `source: "manifest_fallback"`). Wrap the whole block (header + separator + rows) in the `kind=top_ops` marker.
 
-| Rank | Category | Time (ms) | % of Compute Time | Ops | Potential improvement (time, E2E %) |
-|------|----------|-----------|-------------------|-----|-------------------------------------|
-| 1 | ... | ... | ... | ... | ~X–Y ms (X–Y%) or — |
+<!-- impact-begin kind=top_ops -->
+| Rank | Category | Time (ms) | % of Compute Time | Ops |
+|------|----------|-----------|-------------------|-----|
+| 1 | ... | ... | ... | ... | <!-- top-ops-row low=<impact_score_low> high=<impact_score_high> -->
+<!-- impact-end -->
 
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
-<!-- Use category-specific Action text: SDPA (fwd/bwd) → tile/block tuning, Flash Attention backend; GEMM → fusion with adjacent ops, tile sizes, library; elementwise → fuse with adjacent ops; other → fusion where applicable, tile sizes. Do NOT suggest "kernel fusion" for SDPA (already fused). -->
+<!-- One card per entry in priority_data.findings[] in array order. Title uses the entry's category and library; Action text is category-appropriate. Do NOT recommend "fuse the SDPA kernel" (already fused — defer upstream/downstream fusion to Kernel Fusion section). -->
 
 ### 🔴 P1: <Brief Title> (<Library>)
 
@@ -109,7 +113,9 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences - category-appropriate: GEMM fusion/tile/library; SDPA tile/backend; elementwise fusion; etc.]
 
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+<!-- impact-begin kind=p_item category=<priority_data.findings[0].category> low=<priority_data.findings[0].impact_score_low> mid=<priority_data.findings[0].impact_score> high=<priority_data.findings[0].impact_score_high> -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
+<!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P1](#detailed-analysis-compute-p1) for details*
 
@@ -121,7 +127,9 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+<!-- impact-begin kind=p_item category=<priority_data.findings[1].category> low=<priority_data.findings[1].impact_score_low> mid=<priority_data.findings[1].impact_score> high=<priority_data.findings[1].impact_score_high> -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
+<!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P2](#detailed-analysis-compute-p2) for details*
 
@@ -133,24 +141,73 @@ Use **% of computation time** (not % of total trace time) so readers can see eac
 
 **Action**: [1-2 sentences]
 
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) from closing efficiency gaps to 75–100% of roofline (pre-computed), OR "Not quantifiable from trace data" if no kernel_tuning estimates]
+<!-- impact-begin kind=p_item category=<priority_data.findings[2].category> low=<priority_data.findings[2].impact_score_low> mid=<priority_data.findings[2].impact_score> high=<priority_data.findings[2].impact_score_high> -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
+<!-- impact-end -->
 
 → *See [Detailed Analysis: Compute kernel insights > P3](#detailed-analysis-compute-p3) for details*
 
-<!-- All additional P-items (P4, P5, ...) follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Compute kernel insights > PN](#detailed-analysis-compute-pN) for details* -->
+<!-- All additional P-items (P4, P5, ...) follow the same pattern, sourcing markers from priority_data.findings[N-1]. Detailed Analysis links: → *See [Detailed Analysis: Compute kernel insights > PN](#detailed-analysis-compute-pN) for details* -->
 
 ---
 
 ## Kernel Fusion Opportunities (Experimental)
 
-> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual recoverable time depends on implementation feasibility and interaction effects.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
-<!-- Each finding uses Insight / Action / Impact format, with Impact from kernel_fusion_metrics.json. -->
+<!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
-<!-- If no findings or kernel_fusion category not in manifest, show the message below. -->
+<!-- Icon mapping by CONFIDENCE (not priority number): 🔴 high → 🟡 medium → 🟢 low. -->
+<!-- If no findings or kernel_fusion category not in manifest, replace the cards below with: "No kernel fusion opportunities detected." -->
 
-No kernel fusion opportunities detected.
+### 🔴 P1: <Candidate Name>
+
+**Insight**: [1 sentence - what fusion pattern was detected]
+
+**Action**: [1-2 sentences - which kernels to fuse and how]
+
+<!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[0].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[0].impact_score> high=<kernel_fusion_metrics.impact_estimates[0].impact_score_high> -->
+**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+<!-- impact-end -->
+
+**Confidence**: [high / medium / low - fusion pattern quality]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P1](#detailed-analysis-fusion-P1) for details*
+
+---
+
+### 🟡 P2: <Candidate Name>
+
+**Insight**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+<!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[1].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[1].impact_score> high=<kernel_fusion_metrics.impact_estimates[1].impact_score_high> -->
+**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+<!-- impact-end -->
+
+**Confidence**: [high / medium / low]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P2](#detailed-analysis-fusion-P2) for details*
+
+---
+
+### 🟢 P3: <Candidate Name>
+
+**Insight**: [1 sentence]
+
+**Action**: [1-2 sentences]
+
+<!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[2].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[2].impact_score> high=<kernel_fusion_metrics.impact_estimates[2].impact_score_high> -->
+**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+<!-- impact-end -->
+
+**Confidence**: [high / medium / low]
+
+→ *See [Detailed Analysis: Kernel fusion insights > P3](#detailed-analysis-fusion-P3) for details*
+
+<!-- All additional fusion P-items (P4, P5, ...) follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Kernel fusion insights > PN](#detailed-analysis-fusion-PN) for details* -->
 
 ---
 
@@ -215,7 +272,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Compute Kernel Insights
 
-<!-- One #### 🔴/🟡/🟢 Pn: <title> block per promoted compute P-item, in priority order. -->
+<!-- One #### 🔴/🟡/🟢 Pn: <title> block per entry in priority_data.findings[], in array order. -->
+<!-- Source the body block from the sub-agent's findings.md by joining on (findings[i].category, findings[i].category_rank): the sub-agent emits its P-items ordered by intra-category rank, so its rank-N block becomes this report's PN where N matches the position in priority_data.findings[]. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
 <a id="detailed-analysis-compute-p1"></a>
@@ -233,11 +291,11 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 
-> **Note:** Kernel fusion analysis is experimental. Savings estimates use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual savings depend on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
-<!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion savings estimates available." -->
+<!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion impact estimates available." -->
 
 <a id="detailed-analysis-fusion-P1"></a>
 #### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)

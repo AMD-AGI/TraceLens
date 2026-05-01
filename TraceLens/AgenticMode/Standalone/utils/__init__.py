@@ -6,18 +6,21 @@
 
 """AgenticMode utilities package."""
 
+from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
+    build_category_findings,
+)
+
 from .arch_utils import list_platforms, load_arch
 from .plot_utils import (
     generate_and_embed_plot,
     generate_perf_plot,
-    generate_priority_data,
 )
 from .report_utils import (
     extract_condensed_op_info,
+    generate_priority_data,
     load_findings,
     load_manifest,
     load_manifest_categories,
-    write_impact_estimates,
 )
 from .validation_utils import (
     validate_findings_file,
@@ -26,6 +29,7 @@ from .validation_utils import (
 )
 
 __all__ = [
+    "build_category_findings",
     "extract_condensed_op_info",
     "generate_and_embed_plot",
     "generate_perf_plot",
@@ -38,5 +42,4 @@ __all__ = [
     "validate_findings_file",
     "validate_report",
     "validate_subagent_outputs",
-    "write_impact_estimates",
 ]

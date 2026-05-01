@@ -13,7 +13,7 @@ SUITE_NAME="${SUITE_NAME:-eval}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
-REPO_ROOT="$(pwd)"
+REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
@@ -54,7 +54,8 @@ run_single_job() {
 
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
     local OUTPUT_DIR="$CASE_RESULTS/analysis_output"
-    rm -rf "$CASE_RESULTS"
+    $DEXEC rm -rf "$CASE_RESULTS" 2>/dev/null || true
+    rm -rf "$CASE_RESULTS" 2>/dev/null || true
     mkdir -p "$OUTPUT_DIR"
     $DEXEC bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
     $DEXEC bash -c "mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS"
@@ -68,7 +69,7 @@ run_single_job() {
         agent_attempts=$((agent_attempts + 1))
         (
             cd "$STANDALONE_DIR"
-            timeout 1200 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+            timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                 "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
@@ -203,8 +204,8 @@ echo "========================================="
 
 if [[ "$SKIP_POST_PROCESSING" == "1" ]]; then
     echo ""
-    echo "  Post-processing skipped (SKIP_POST_PROCESSING=1)."
-    echo "  To run later: agent \"Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER\""
+    echo "  Post-processing skipped -- SKIP_POST_PROCESSING=1."
+    echo "  To run later: agent 'Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=$CONTAINER'"
 else
     mkdir -p "$REPORT_DIR"
 

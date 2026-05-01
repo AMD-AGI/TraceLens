@@ -12,7 +12,7 @@ model: claude-4.6-sonnet-medium-thinking
 
 # SDPA Analysis Subagent
 
-Analyze SDPA (Scaled Dot Product Attention) operations for performance bottlenecks and optimization opportunities. Supports **forward** (`sdpa_fwd`) and **backward** (`sdpa_bwd`) passes, including **Flash Attention** and **Paged Attention** (vLLM inference) analysis.
+Analyze SDPA (Scaled Dot Product Attention) operations for performance bottlenecks. Supports forward (`sdpa_fwd`) and backward (`sdpa_bwd`), Flash Attention, and Paged Attention (vLLM). Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -53,7 +53,7 @@ When invoked by the orchestrator, you will receive the following context:
 Use vendor-agnostic terminology:
 - "GPU kernels" not "CUDA kernels"
 - "optimized attention kernel" not vendor-specific names
-- "DNN primitives" not "cuDNN"
+- "DNN primitives" not vendor-specific names
 - Focus on operation semantics, not vendor implementation details
 
 ---
@@ -62,8 +62,6 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix. Pass `--category` to specify forward or backward:
-
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/sdpa_analysis.py \
@@ -71,103 +69,124 @@ Execute the analysis script using the command prefix. Pass `--category` to speci
   --category <sdpa>
 ```
 
-Where `<sdpa>` is `sdpa_fwd` or `sdpa_bwd`.
-
 ### Step 2: Read Metrics
-
-After the script completes, read the JSON metrics file:
 
 ```bash
 cat <output_dir>/category_data/<sdpa>_metrics.json
 ```
 
-### Step 2.5: Identify Attention Implementation Type
-
-Check `category_specific` for implementation type:
+Check `category_specific` for the attention implementation:
 
 | Field | Meaning |
 |-------|---------|
-| `flash_attention_detected` | Standard Flash Attention (PyTorch SDPA) |
-| `paged_attention_detected` | vLLM Paged Attention |
-| Neither | Unfused attention (major optimization opportunity) |
+| `flash_attention_detected` | Standard Flash Attention (PyTorch SDPA). |
+| `paged_attention_detected` | vLLM Paged Attention. Operation names contain `unified_attention` or `paged`; per-op `classification.kernel_breakdown` (typical components: `reshape_and_cache`, `_fwd_kernel`, `kernel_paged_attention_2d`) and `classification.workload_profile` (`n_q`, `n_kv`, `sum_ctx_tokens`, `sum_gen_tokens`, `ctx_ratio`, `attention_pattern`, `gqa_ratio`) qualify the workload. |
+| Neither | Unfused attention (typically a major opportunity to migrate to Flash Attention). |
 
-**Paged Attention Indicators:**
-- Operation name contains `unified_attention` or `paged`
-- `kernel_breakdown_avg` present in metrics
-- `workload_profile` with `ctx_ratio` present
+Reference the detected implementation in the **Identification** prose of every finding. For Paged Attention, also reference the kernel-breakdown component that dominates and the workload profile (prefill-heavy when `ctx_ratio > 0.8`, decode-heavy when `ctx_ratio < 0.2`).
 
-**If Paged Attention detected, also check:**
-- `kernel_breakdown_avg`: Average kernel time distribution
-- `workload_profile`: Prefill vs decode workload type
+### Step 3: Render P-items from `category_findings`
 
-### Step 3: Identify Bottlenecks
+Read `category_data/<sdpa>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`) and the per-op `classification.kernel_breakdown` / `classification.workload_profile` (Paged) using the Action Prose Guidance, Expected Efficiency, and Common Patterns below. For Paged Attention, extend the **Data:** operations table with kernel-breakdown component, workload type, and attention pattern columns when populated. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-**Bottleneck criteria:**
-- Time: > 100ms OR > 5% of category time
-- Efficiency: < 70% of peak (TFLOPS for compute-bound, HBM BW for memory-bound — consider sequence length and workload type)
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Special considerations for Paged Attention:**
-- Decode-only workloads naturally have lower efficiency (5-15%)
-- Prefill-heavy workloads should achieve 30-50% efficiency
-- Mixed workloads typically achieve 10-30% efficiency
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
-### Step 4: Analyze Kernel Breakdown (Paged Attention Only)
+---
 
-If `paged_attention_detected` is true, analyze kernel composition from each operation's `classification.kernel_breakdown`:
+## Action Prose Guidance
 
-| Kernel Component | Purpose | Expected % | Red Flag |
-|------------------|---------|------------|----------|
-| `reshape_and_cache` | KV cache update | 3-5% | >10% indicates KV cache inefficiency |
-| `_fwd_kernel` | Prefill computation | 20-50% | Low % with high ctx_ratio is unexpected |
-| `kernel_paged_attention_2d` | Decode attention | 40-60% | >70% indicates decode-heavy bottleneck |
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type` and the attention implementation. **Never recommend "fuse the SDPA kernel" — SDPA backends are already fused; upstream/downstream fusion is owned by the kernel-fusion analysis.**
 
-### Step 5: Analyze Workload Profile (Paged Attention Only)
+| `bound_type` | Attention type | Action template |
+|---|---|---|
+| `compute` | Flash / Standard | Profile the dominant member kernels for tile-size and wave-occupancy tuning. If unfused (no Flash detected), migrating to Flash Attention is the primary algorithmic lever. |
+| `memory` | Flash / Standard | Optimize memory access patterns of the dominant member kernels. Short sequences (N < 1024) naturally show lower efficiency due to memory-overhead dominance — note that in **Identification** before recommending tuning. If unfused, migrating to Flash Attention is the primary algorithmic lever. |
+| `compute` | Paged | Profile the dominant kernel-breakdown component (typically `_fwd_kernel` for prefill-heavy, `kernel_paged_attention_2d` for decode-heavy) for tile-size tuning. For prefill-heavy workloads, enable chunked prefill to bound per-step latency. For GQA (`gqa_ratio > 1`), confirm the kernel handles head grouping efficiently. |
+| `memory` | Paged | Optimize memory access patterns of the dominant kernel-breakdown component. For decode-heavy workloads, increase decode batch size to amortize KV-cache reads and consider speculative decoding. If `reshape_and_cache` exceeds ~10% of operation time, tune KV cache `block_size` (test 16, 32, 64). |
 
-From each operation's `classification.workload_profile`:
+---
 
-| Metric | Field | Interpretation |
-|--------|-------|----------------|
-| Query sequence length | `n_q` | Prefill size |
-| KV sequence length | `n_kv` | Context length |
-| Context tokens | `sum_ctx_tokens` | Prefill workload |
-| Generation tokens | `sum_gen_tokens` | Decode iterations |
-| Context ratio | `ctx_ratio` | >0.8 = prefill-heavy, <0.2 = decode-heavy |
-| Attention pattern | `attention_pattern` | MHA or GQA |
-| GQA ratio | `gqa_ratio` | Query heads / KV heads |
+## Expected efficiency by sequence length (Standard / Flash Attention)
 
-### Step 6: Determine Optimization Recommendations
+Short sequences naturally show lower efficiency — do NOT call low efficiency a bottleneck if it falls within the expected band for `N`.
 
-For each validated bottleneck, provide recommendations based on attention type. **Do NOT suggest "kernel fusion" for SDPA — these kernels are already fused.**
+| Sequence length `N` | Expected efficiency |
+|---------------------|---------------------|
+| `N < 512` | 5–15% (memory overhead dominates) |
+| `N = 1024` | 20–40% |
+| `N = 2048` | 40–60% |
+| `N > 4096` | 50–70% |
 
-**For Standard/Unfused Attention:**
-- **Algorithmic:** Migrate to Flash Attention
-- **Kernel (compute-bound):** Profile for tile size and wave occupancy tuning
-- **Kernel (memory-bound):** Optimize memory access patterns; check bandwidth utilization
+---
 
-**For Paged Attention (vLLM):**
-- See "Paged Attention Recommendations" section below
+## Common Patterns
 
-### Step 7: Write Category Findings
+### Standard / Flash Attention
 
-**Read [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) first.** Write `<output_dir>/category_findings/<sdpa>_findings.md` using the output format defined there, with `<category>` = `<sdpa>` (i.e., `sdpa_fwd` or `sdpa_bwd`).
+#### Unfused attention
+- **Symptoms:** Multiple ops (`softmax`, `bmm`, `mul`, `copy_`) appear together, no Flash kernel detected.
+- **Algorithmic:** Migrate to Flash Attention.
+- **Note:** Fusion of unfused attention is handled by the kernel fusion module.
 
-Additionally include:
-- Attention type detected (Flash, Paged, Standard)
-- Kernel breakdown analysis (for Paged Attention)
-- Workload profile (prefill vs decode)
-- Bottlenecks with context
-- Prioritized recommendations
-- For Paged Attention, extend the operations table with additional columns: kernel breakdown (if available), workload type (prefill_heavy, decode_heavy, mixed), attention pattern (MHA, GQA)
+#### Flash Attention already used
+- **Reasoning:** Confirm efficiency falls in the Expected Efficiency band for the sequence length; if well below, profile the kernel.
 
-### Step 7.1: Write Impact Estimates to Metadata
+#### Contiguous-copy overhead in SDPA wrapper
+- **Symptoms:** Multiple `aten::copy_` ops with the same shape as Q/K/V immediately before/after the Flash Attention call (3 copies for Q/K/V before, 1 for output after).
+- **Cause:** Framework SDPA wrapper unconditionally calls `.contiguous()` on Q/K/V/output even when the Flash backend supports strided tensors.
+- **Algorithmic:** If the Flash backend supports strided inputs, remove the `.contiguous()` calls from the SDPA wrapper.
 
-Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Impact Estimation, run (pass `<sdpa>` as the second argument):
+### Backward pass (`sdpa_bwd`)
 
-```bash
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', '<sdpa>', 'compute')"
-```
+#### Flash Attention backward
+- **Op name:** `flash_attn::_flash_attn_backward`.
+- **Reasoning:** Generally lower efficiency than forward (recomputation of attention weights, more memory bandwidth).
+- **Kernel:** Profile backward kernel for tile/block tuning.
 
-### Step 7.2: Validate Findings
+### Paged Attention (vLLM)
+
+#### Decode-heavy workload
+- **Symptoms:** High `kernel_paged_attention_2d` %, low `_fwd_kernel` %, `ctx_ratio < 0.2`.
+- **Algorithmic:** Increase batch size; speculative decoding.
+- **Kernel:** Optimize paged attention kernel if well below the resolved memory roofline.
+
+#### Prefill bottleneck
+- **Symptoms:** High `_fwd_kernel` %, large `sum_ctx_tokens`, `ctx_ratio > 0.8`.
+- **Algorithmic:** Enable chunked prefill; reduce `max_model_len` if memory-constrained.
+- **Kernel:** Profile `_fwd_kernel` for tile-size optimization.
+
+#### KV-cache overhead
+- **Symptoms:** `reshape_and_cache` > 10% of operation time.
+- **Algorithmic:** Tune KV cache `block_size` (test 16, 32, 64).
+- **Kernel:** Check memory access patterns in the reshape kernel.
+
+#### GQA (Grouped Query Attention)
+- **Detection:** `gqa_ratio > 1` (e.g. 8:1 means 8 query heads per KV head).
+- **Reasoning:** GQA reduces KV-cache memory but may slightly lower kernel efficiency vs. MHA — note this in **Identification** before recommending tuning.
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, SDPA analysis cannot observe:
+
+**Flash / Standard Attention:**
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Internal block / tile size of the Flash kernel | Tile selection is internal to the Flash backend | "Flash tile size not visible — profile the kernel for tile-size tuning." |
+
+**Paged Attention (vLLM):**
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Per-request KV-cache hit rate | Cache hits/misses are not surfaced as kernel events | "Per-request KV-cache hit rate not visible from trace data." |
+
+---
+
+## Validate findings
 
 Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
 
@@ -186,130 +205,3 @@ print('PASS: Findings file is valid')
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
-
----
-
-## Common Patterns for SDPA Analysis
-
-### Standard Attention Patterns
-
-#### Attention-Heavy Models (Transformers, ViT)
-- **Look for:** softmax, bmm, mul (scaling), copy_ (transposes)
-- **Algorithmic:** Flash Attention
-- **Kernel:** Optimize individual kernels
-
-#### Unfused Attention Patterns
-- **Symptoms:** Multiple operations: softmax, bmm, mul, copy_ appearing together
-- **Note:** Fusion analysis and recommendations for unfused attention are handled by the kernel fusion module
-
-#### Flash Attention Already Used
-- **Good sign:** Model is already optimized
-- **Check efficiency:** Should be 40-70% for long sequences (>2048)
-- **Kernel:** Profile kernel if efficiency is below expected threshold
-
-#### Contiguous Copy Overhead in SDPA Wrapper
-- **Symptoms:** Multiple aten::copy_ ops with same shape as SDPA Q/K/V inputs, appearing immediately before and after the Flash Attention call
-- **Look for:** aten::contiguous -> aten::clone -> aten::copy_ chain within the sdpa_attention_ wrapper function, typically 3 copies before SDPA (Q, K, V) and 1 after (output)
-- **Issue:** Framework SDPA wrapper unconditionally calls .contiguous() on Q, K, V inputs and output, even when the Flash Attention backend supports strided tensors
-- **Algorithmic:** Check if the Flash Attention backend supports strided (non-contiguous) inputs; if so, remove .contiguous() calls from the SDPA wrapper
-- **Impact:** Eliminates significant overhead relative to SDPA compute time across all attention layers
-
-### Backward Pass Patterns (sdpa_bwd)
-
-#### Flash Attention Backward
-- **Op name:** `flash_attn::_flash_attn_backward`
-- **Arguments:** dout, q, k, v, out, softmax_lse, ... (different order from forward)
-- **Expected efficiency:** Generally lower than forward pass due to recomputation of attention weights
-- **Kernel:** Profile backward kernel for tile/block tuning opportunities
-- **Note:** Backward pass computes gradients for Q, K, V and requires more memory bandwidth than forward
-
-### Paged Attention Patterns (vLLM)
-
-#### Decode-Heavy Workload
-- **Symptoms:** High `kernel_paged_attention_2d` %, low `_fwd_kernel` %, ctx_ratio < 0.2
-- **Expected efficiency:** 5-15% for single-token decode (memory-bound)
-- **Algorithmic:** Increase batch size, use speculative decoding
-- **Kernel:** Optimize paged attention kernel if below 10%
-
-#### Prefill Bottleneck
-- **Symptoms:** High `_fwd_kernel` %, large `sum_ctx_tokens`, ctx_ratio > 0.8
-- **Expected efficiency:** 30-50% for medium-long sequences
-- **Algorithmic:** Enable chunked prefill, reduce max_model_len if memory-constrained
-- **Kernel:** Profile `_fwd_kernel` for tile size optimization
-
-#### KV Cache Overhead
-- **Symptoms:** `reshape_and_cache` > 10% of operation time
-- **Issue:** Excessive KV cache updates or suboptimal block size
-- **Algorithmic:** Tune KV cache block size (16, 32, 64)
-- **Kernel:** Check memory access patterns in reshape kernel
-
-#### GQA (Grouped Query Attention) Operations
-- **Detection:** `gqa_ratio` > 1 (e.g., 8:1 means 8 query heads per KV head)
-- **Note:** GQA reduces memory for KV cache but may affect kernel efficiency
-- **Expected:** Slightly lower efficiency than MHA due to head grouping
-
----
-
-## Key Principles
-
-1. **Identify attention type first** - Flash, Paged, or Standard
-2. **Sequence length matters** - Short sequences naturally have lower efficiency
-3. **Workload type matters for Paged Attention** - Prefill vs decode have different expectations
-4. **Unfused attention is a major opportunity** - migrate to Flash Attention
-5. **Provide BOTH recommendation types** - Algorithmic and kernel-level
-6. **Context ratio determines optimization focus** - Prefill kernel vs paged attention kernel
-7. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
-
----
-
-## Efficiency Context
-
-### Standard/Flash Attention
-
-| Sequence Length | Expected Efficiency |
-|----------------|---------------------|
-| N < 512 | 5-15% (memory overhead dominates) |
-| N = 1024 | 20-40% |
-| N = 2048 | 40-60% |
-| N > 4096 | 50-70% |
-
-### Paged Attention (vLLM)
-
-| Workload Type | Expected Efficiency | Notes |
-|---------------|---------------------|-------|
-| Decode-only (single token) | 5-15% | Memory-bound, batch helps |
-| Prefill-only (long sequence) | 30-50% | Similar to Flash Attention |
-| Mixed (typical inference) | 10-30% | Depends on ctx/gen ratio |
-| Short prefill (N < 512) | 5-15% | Same as Flash Attention |
-
-**Note:** Efficiency below these ranges indicates kernel optimization opportunity.
-
----
-
-## Paged Attention Recommendations
-
-### Algorithmic Recommendations
-
-| Issue | Recommendation |
-|-------|----------------|
-| Low decode efficiency (<5%) | Increase decode batch size |
-| High latency long prefill | Enable chunked prefill |
-| Memory pressure | Tune max_model_len, enable KV cache quantization |
-| Single-request latency | Use speculative decoding |
-
-### Kernel Optimization Focus
-
-| Kernel | When to Optimize | Action |
-|--------|------------------|--------|
-| `kernel_paged_attention_2d` | >70% of time, <10% efficiency | Profile page table lookup, memory access |
-| `_fwd_kernel` | Prefill-heavy, <30% efficiency | Tune tile sizes, check GQA handling |
-| `reshape_and_cache` | >10% of operation time | Check KV cache block size, memory coalescing |
-
-### Configuration Parameters to Check
-
-| Parameter | Impact | Recommendation |
-|-----------|--------|----------------|
-| `block_size` | KV cache efficiency | Test 16, 32, 64 |
-| `max_num_batched_tokens` | Prefill chunking | Balance latency vs throughput |
-| `enable_chunked_prefill` | Long context handling | Enable for contexts > 4K |
-| `speculative_model` | Decode acceleration | Use for latency-sensitive workloads |

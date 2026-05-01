@@ -59,8 +59,12 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
             mismatches.append(f"{fname}: missing")
             continue
 
-        ref_df = pd.read_csv(os.path.join(ref_dir, fname))
-        gen_df = pd.read_csv(gen_path)
+        try:
+            ref_df = pd.read_csv(os.path.join(ref_dir, fname), on_bad_lines="warn")
+            gen_df = pd.read_csv(gen_path, on_bad_lines="warn")
+        except Exception as exc:
+            mismatches.append(f"{fname}: parse error: {exc}")
+            continue
 
         missing_cols = set(ref_df.columns) - set(gen_df.columns)
         missing_cols = {
@@ -78,7 +82,13 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
             continue
 
         for col in ref_df.columns:
-            if pd.api.types.is_numeric_dtype(ref_df[col]):
+            if pd.api.types.is_bool_dtype(ref_df[col]) or pd.api.types.is_bool_dtype(
+                gen_df[col]
+            ):
+                if not ref_df[col].equals(gen_df[col]):
+                    n_diff = (ref_df[col] != gen_df[col]).sum()
+                    mismatches.append(f"{fname}:{col} {n_diff} bool value(s) differ")
+            elif pd.api.types.is_numeric_dtype(ref_df[col]):
                 if not ref_df[col].equals(gen_df[col]):
                     diff = (ref_df[col] - gen_df[col]).abs()
                     denom = ref_df[col].abs().replace(0, 1)

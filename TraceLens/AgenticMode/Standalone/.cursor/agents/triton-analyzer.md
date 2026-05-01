@@ -115,17 +115,26 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 | Operation | Time (ms) | % of Category | Invocations |
 |-----------|-----------|---------------|-------------|
 | <op_name> | X.X       | X.X%          | N           |
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
 ```
 
+This analyzer does not emit `kind=p_item` or `kind=detail_estimate` markers because Triton has no quantifiable impact estimates.
+
 **Key rules for the findings file:**
-- The Impact Summary table must be present but must have **zero data rows**
 - Do NOT add any "Key Findings", "Bottleneck", or "Recommendations" sections
 - Do NOT assess efficiency or compare to peak performance
 - Only report factual time and count data from the metrics JSON
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, Triton custom-kernel analysis cannot observe:
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| FLOPs per kernel | TraceLens has no analytical performance model for user-written Triton kernels | "FLOPs not computable for Triton custom kernels — report time and counts only." |
+| Bytes moved per kernel | TraceLens has no analytical performance model for user-written Triton kernels | "Bytes not computable for Triton custom kernels — report time and counts only." |
+| Roofline % / efficiency % / impact_score | All three derive from FLOPs and Bytes, which are not available for Triton | "No efficiency or impact estimate available — Triton is informational only." |
 
 ---
 
@@ -134,5 +143,4 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 1. **Informational only** -- no performance model exists for user-written Triton kernels (see [Performance Model Limitation](#performance-model-limitation)); report time and operation data without drawing efficiency conclusions
 2. **No impact estimates** -- the metrics JSON contains an empty `impact_estimates` list by design
 3. **No recommendations** -- do not suggest algorithmic or kernel-level optimizations
-4. **Empty Impact Summary** -- the table header must exist (for orchestrator parsing) but must have zero rows
-5. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+4. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization

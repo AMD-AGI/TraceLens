@@ -33,13 +33,16 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 ### P1: <Brief Title> (<Library>)            <!-- (<Library>) only on compute tier -->
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E), OR "Not quantifiable from trace data"]   <!-- compute tier only -->
+<!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]   <!-- compute tier only -->
+<!-- impact-end -->
 ```
 
-- **Compute tier**: include all three fields. Pull `**Impact**` from `impact_estimates` in the metrics JSON.
-- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix.
+- **Compute tier**: include all three fields. Pull `**Impact**` from `category_data/<category>_metrics.json::category_findings[i]`, ordered by `rank` (one card per entry).
+- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix. System-tier P-items still wrap `**Impact**` in `kind=p_item` markers when they choose to emit one (typically as `Not quantifiable from trace data`); see § Impact markers (REQUIRED) below.
 - **Field labels are exact** — always `**Insight**`, `**Action**`, `**Impact**`.
-- **`(<Library>)` suffix**: comma-separated list of unique non-null `library` values across the bottleneck operations. If all are `null`, omit the parenthetical entirely.
+- **`(<Library>)` suffix**: the single `category_findings[i].library` for this card (one library per finding by construction). Omit the parenthetical when the value is `Unknown`.
+- **Marker required** — see § Impact markers (REQUIRED). The `low`/`mid`/`high` attributes carry the raw `impact_score_low/impact_score/impact_score_high` values from `category_findings[i]`. For non-quantifiable cards (system tier) use `low=null mid=null high=null`.
 
 ---
 
@@ -69,7 +72,7 @@ with an HTML comment and an `####` heading:
 | Field | Values | Meaning |
 |-------|--------|---------|
 | `tier` | `compute` \| `system` | Must match the findings directory (`category_findings/` → compute, `system_findings/` → system). |
-| `rank` | Integer ≥ 1 | Agent-local priority within this file (1 = highest). |
+| `rank` | Integer ≥ 1 | Compute tier: `category_findings[i].rank`. System tier: agent-local priority within this file (1 = highest). |
 
 ### Required labels
 
@@ -82,13 +85,53 @@ blank line between them. The validator checks for these as substring matches.
 | `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
-| `**Impact estimate:**` | Rendered from `metadata/*.json → impact_estimates[]`. Quantifiable entries use the three-bullet format (see § Impact estimate rendering); non-quantifiable entries use: `Impact estimate is not quantifiable from trace data.` |
+| `**Impact estimate:**` | Compute tier: rendered from `category_findings[i]` (matched by `rank`), two-bullet low/high `impact_score` format (see § Impact estimate rendering). System tier: `Impact estimate is not quantifiable from trace data.` |
 
 ### Sentence quality
 
 - Each sentence should convey **one main idea**. Do not chain independent
   observations with em-dashes, semicolons, or "while" bridges. Avoid run-on
   sentences.
+
+### Trace observability (compute tier)
+
+This is the single source of truth for what compute-tier sub-agents can and
+cannot infer from a kernel-level PyTorch trace. Ground every claim in
+**Reasoning for Slowdown** / **Resolution** in a **CAN Infer** row; for any
+property in the **CANNOT Infer** rows, use the listed fallback prose instead
+of speculating.
+
+#### CAN Infer (universal — all compute categories)
+
+| Observable | Source |
+|------------|--------|
+| Kernel names | `trunc_kernel_details` column |
+| Kernel durations | Trace events |
+| Achieved TFLOPS/s or TB/s | Calculated from duration + FLOPs/bytes |
+| Efficiency % vs roofline | Achieved / resolved peak (MAF or HBM BW) |
+| Invocation counts | Number of trace events per signature |
+| Library / backend | `library` column / kernel-name heuristics |
+| Bound type | `efficiency.bound_type` (compute / memory) |
+| Input shape dimensions | `Input Dims` column (semantics per category — e.g. M/N/K for GEMM, B/H/S/D for SDPA, expert/token counts for MoE, NCHW for convolution) |
+
+#### CANNOT Infer (universal — all compute categories)
+
+These require hardware counters or profiler tools, not a trace.
+
+| NOT Observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Bank conflicts | Requires hardware counters | "Low efficiency — profile with hardware counters to diagnose." |
+| Cache hit rates | Requires hardware counters | "Large working set may exceed cache." |
+| Wave / SM occupancy | Requires hardware counters | "Kernel running slower than expected — profile occupancy with hardware counters." |
+| Shared-memory / LDS usage | Requires hardware counters | "Shared-memory usage not visible — profile with hardware counters." |
+| Intra-warp shuffle efficiency | Requires hardware counters | "Warp-shuffle efficiency not visible — profile with hardware counters." |
+| Root causes generally | Traces show WHAT, not WHY | "Bottleneck identified — generate reproducer for kernel team." |
+
+#### CANNOT Infer (category-specific)
+
+Each analyzer owns its own category-specific blind spots under a
+`## Trace observability (category-specific)` section in its `*-analyzer.md` file.
+The universal rows above always apply on top of those.
 
 ---
 
@@ -133,85 +176,80 @@ Do not look up peaks independently from the metadata dict.
 
 ## Impact Estimates
 
-Sub-agents write an **`impact_estimates` array** into
-`metadata/<category>_metadata.json`, then render impact bullets in their
-`## Detailed Analysis` block.
+Compute-tier sub-agents READ their P-items from `category_data/<category>_metrics.json::category_findings[]`, one card per entry ordered by `rank`. The analyzer script has already grouped per-op estimates by `(bound_type, library)`, summed impact, and dropped sub-threshold groups; the sub-agent renders one card per surviving entry.
 
-### Rules
+The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPACT_SCORE` already gated upstream. **Per-category efficiency tables, expected-band thresholds, and Common Patterns in analyzer files are interpretation context for the prose** (cite in **Reasoning for Slowdown** when a member matches the band/symptom); they MUST NOT be used to add or drop P-items.
 
-- Exactly **one array element per `<!-- reasoning-candidate -->` block** in the
-  same findings file, ordered by `rank` ascending.
-- Each entry sums only the operations that its candidate covers (not the entire
-  category).
-- No insights → empty array `[]`.
-- **Compute tier only:** use `kernel_tuning` estimates from the pre-computed
-  metrics JSON (`savings_ms_low`–`savings_ms_high`, `e2e_pct_low`–`e2e_pct_high`).
-  Do NOT manually estimate algorithmic, fusion, or system savings.
-- **Confidence:** `high` = clear, measurable gap to peak; `medium` = likely
-  opportunity but outcome depends on implementation; `low` = rough estimate.
+### Reading category_findings[]
 
-### JSON schema
+| Field | Use |
+|-------|-----|
+| `rank` | Card order within your category (1 = highest impact). Also the `rank=` value in `<!-- reasoning-candidate -->`. |
+| `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
+| `library` | One per finding. Drives the `(<Library>)` title suffix. |
+| `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
+| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, …) — rows of the `**Data:**` table. |
 
-Element shape (quantifiable):
+### Empty category_findings
 
-```json
-{
-  "impact_estimates": [
-    {
-      "low_e2e_ms": <number>,
-      "high_e2e_ms": <number>,
-      "low_e2e_percent": <number>,
-      "high_e2e_percent": <number>,
-      "quantifiable": true
-    }
-  ]
-}
-```
+If `category_findings[]` is empty, emit `## Recommendations` with no P-items
+and `## Detailed Analysis` with no candidates. Do not manufacture sub-threshold
+cards to fill the section — that is the honest "no actionable issues" answer.
 
-Non-quantifiable entries use `null` values with `"quantifiable": false`:
+### Rendering in `## Detailed Analysis` (compute tier)
 
-```json
-{
-  "impact_estimates": [
-    {
-      "low_e2e_ms": null,
-      "high_e2e_ms": null,
-      "low_e2e_percent": null,
-      "high_e2e_percent": null,
-      "quantifiable": false
-    }
-  ]
-}
-```
-
-### Rendering in `## Detailed Analysis`
-
-**Quantifiable:**
+Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
+§ Impact markers).
 
 ```markdown
-- Low end (75% roofline target): <low_e2e_ms> ms savings (<low_e2e_percent>% E2E)
-- High end (100% roofline target): <high_e2e_ms> ms savings (<high_e2e_percent>% E2E)
-- Range: <low_e2e_ms>–<high_e2e_ms> ms (<low_e2e_percent>–<high_e2e_percent>% E2E)
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
+- Low end impact_score (75% roofline target): <impact_score_low>
+- High end impact_score (100% roofline target): <impact_score_high>
+<!-- impact-end -->
 ```
 
-**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
 
-### Write impact estimates to metadata
+## Impact markers (REQUIRED)
 
-```bash
-# Compute tier
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', '<category>', 'compute')"
+Every block whose contents depend on `impact_score*` values must be wrapped in
+a paired HTML-comment marker. The markers carry the underlying numeric data as
+key=value attributes so that optional downstream tooling can re-process the
+block deterministically without re-parsing prose.
 
-# System tier
-<prefix> python3 -c "from TraceLens.AgenticMode.Standalone.utils.report_utils import write_impact_estimates; write_impact_estimates('<output_dir>', '<category>', 'system')"
+### Marker shape
+
 ```
+<!-- impact-begin kind=KIND attr1=value1 attr2=value2 -->
+...rendered markdown content for this block...
+<!-- impact-end -->
+```
+
+The block between them is exactly the `impact_score`-based markdown you would otherwise emit.
+
+### `kind` values you must emit
+
+| `kind` | Where | Required attributes | Optional attributes |
+|--------|-------|--------------------|---------------------|
+| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` for non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
+| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip for non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
+
+### Value-source rule
+
+The numbers in marker attributes (`low`, `mid`, `high`) **must** be transcribed
+verbatim from `category_data/<category>_metrics.json::category_findings[i]`
+(`impact_score_low`, `impact_score`, `impact_score_high` respectively), matched
+by `rank`. Do not re-derive, round, or scale them. Do not pull them from any
+other source.
 
 ---
 
 ## Validate findings (required before returning)
 
 After writing the findings file and impact estimates, run the programmatic
-validator. This replaces the previous manual self-check.
+validator. This replaces the previous manual self-check. The validator also
+enforces marker structure (pairing, `kind=`, per-kind required attrs,
+mandatory `kind=p_item` for category/system findings unless exempt) per
+§ Impact markers above.
 
 ```bash
 <prefix> python3 -c "

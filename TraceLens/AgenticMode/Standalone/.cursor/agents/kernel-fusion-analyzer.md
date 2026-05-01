@@ -64,10 +64,10 @@ Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.j
   --output-dir <output_dir>
 ```
 
-Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_estimates` array is the **authoritative candidate list** for findings — `kernel_fusion_analysis.py` has already gated it on `MIN_E2E_PCT` and perf-model coverage, so every entry is a quantifiable, above-threshold opportunity. Each estimate has:
+Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_estimates` array is the **authoritative candidate list** for findings — `kernel_fusion_analysis.py` has already gated it on `MIN_IMPACT_SCORE` and perf-model coverage, so every entry is a quantifiable, above-threshold opportunity. Each estimate has:
 
 - `operation`: Module base name (matches `base_name` in `fusion_candidates.json`)
-- `savings_ms`, `savings_ms_low`, `savings_ms_high`: Savings range (75-100% of roofline)
+- `impact_score`, `impact_score_low`, `impact_score_high`: % of E2E recoverable by fusing (mid / 75% / 100% roofline target)
 - `bound_type`: "compute" or "memory"
 - `fusion_type`: "matrix_compute" or "memory_bound"
 - `confidence`: "high" or "medium"
@@ -132,7 +132,9 @@ Then look for novel patterns:
 
 Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command prefix.
 
-Number findings P1, P2, P3... sequentially by savings (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
+**Pay particular attention to § Impact markers (REQUIRED) in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md).** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `category_data/kernel_fusion_metrics.json::impact_estimates[]`.
+
+Number findings P1, P2, P3... sequentially by impact_score (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
 
 | Confidence | Icon |
 |------------|------|
@@ -150,7 +152,7 @@ Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`
 ## Overview
 Found N kernel fusion opportunities across M module types.
 
-> **Methodology:** Savings projections use a roofline model with 85% memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual savings may vary with workload and hardware.
+> **Methodology:** impact_score projections use a roofline model with 85% memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual recoverable time may vary with workload and hardware.
 
 ## Findings
 
@@ -160,7 +162,9 @@ Found N kernel fusion opportunities across M module types.
 
 **Action:** <Specific recommendation>
 
-**Impact:** ~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) with all N kernels modelled
+<!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
+**Impact:** impact_score: X.X (with all N kernels modelled)
+<!-- impact-end -->
 
 **Confidence:** High -- <brief reason from fusion pattern classification>
 
@@ -181,17 +185,15 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 
 **Impact estimate:**
 
-- Low end (75% roofline): X.XXX ms savings (X.XX% E2E)
-- High end (100% roofline): X.XXX ms savings (X.XX% E2E)
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
+- Low end impact_score (75% roofline target): X.XX
+- High end impact_score (100% roofline target): X.XX
+<!-- impact-end -->
 - Coverage: M of N kernels modelled
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
 - Confidence: High/Medium/Low — <brief reason>
 
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 If no fusion opportunities detected:
@@ -199,10 +201,6 @@ If no fusion opportunities detected:
 # Kernel Fusion Analysis Summary (Experimental)
 
 No kernel fusion opportunities detected.
-
-## Impact Summary
-| Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |
-|---------------|------|----------------------|-------------------------------|------------|
 ```
 
 ### Step 4.1: Validate Findings
@@ -230,7 +228,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 ## Key Principles
 
 1. **`kernel_fusion_metrics.json.impact_estimates` is the candidate list.** Every finding maps 1:1 to an entry there. Do not derive findings from candidates absent from that list -- they were dropped by the deterministic threshold gate.
-2. **Include pre-computed savings** from `kernel_fusion_metrics.json` -- do NOT re-derive savings yourself, use the values from the metrics JSON.
+2. **Include pre-computed impact_score** from `kernel_fusion_metrics.json` -- do NOT re-derive impact_score yourself, use the values from the metrics JSON.
 3. **Let the data speak** -- classify based on module names AND kernel composition, not just one signal.
 4. **Reject confidently** -- not every multi-kernel module is a fusion opportunity; independent operations under a container module are not fusable. Use Step 2's Decision 1 to drop candidates from `impact_estimates` that turn out to be containers, all-GEMM groups, or already-fused subtrees.
 5. **Explain reasoning** -- especially for novel patterns, state why you believe the kernels are fusable.
@@ -248,7 +246,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 | Instance count | `instance_count` field |
 | Architecture context | `parent_chain` field |
 | Already-fused status | `has_fused_kernel` field |
-| Savings estimates | `kernel_fusion_metrics.json` `impact_estimates[]` (when available) |
+| impact_score estimates | `kernel_fusion_metrics.json` `impact_estimates[]` (when available) |
 
 ## What You CANNOT Infer
 

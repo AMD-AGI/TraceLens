@@ -5,11 +5,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Kernel Fusion Analysis - Performance Savings Estimation
+"""Kernel Fusion Analysis - impact_score Estimation
 
-Computes savings estimates for kernel fusion candidates by cross-referencing
-fusion_candidates.json with unified_perf_summary.csv and projecting fused
-kernel time via roofline model.
+Computes ``impact_score`` (% of E2E GPU time recoverable by fusion) for kernel
+fusion candidates by cross-referencing fusion_candidates.json with
+unified_perf_summary.csv and projecting fused kernel time via roofline model.
 """
 
 import argparse
@@ -42,7 +42,9 @@ MAX_FUSION_KERNEL_COUNT = (
     15  # Skip candidates with more kernels than this (too complex to fuse reliably)
 )
 
-MIN_E2E_PCT = 2.0  # Drop estimates whose best-case E2E impact is below this threshold
+MIN_IMPACT_SCORE = (
+    2.0  # Drop estimates whose best-case impact_score is below this threshold
+)
 OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
 _MATRIX_SPECS = frozenset(
@@ -279,10 +281,11 @@ def compute_fusion_impact_estimates(
     baseline_ms: float = 0,
 ) -> List[dict]:
     """
-    Deterministically compute kernel_fusion savings via roofline projection.
+    Deterministically compute kernel_fusion ``impact_score`` via roofline
+    projection. ``impact_score`` privdes an estimate of impact on gpu runtime.
 
     Multi-GEMM candidates are split at GEMM boundaries into sub-groups:
-      - GEMM + elementwise: savings = sum of elementwise dur_us (epilogue fusion)
+      - GEMM + elementwise: recoverable us = sum of elementwise dur_us (epilogue fusion)
       - Elementwise-only: roofline projection using data_in/data_out
       - Single GEMM: no fusion benefit (skipped)
 
@@ -292,7 +295,18 @@ def compute_fusion_impact_estimates(
     Each estimate includes a deterministic ``confidence`` level (high / medium /
     low) and the list of GPU kernel names (``affected_gpu_kernels``) so that
     downstream compute-category scripts can skip fusion-covered operations.
+
+    If ``baseline_ms`` is missing or non-positive, ``impact_score`` is undefined;
+    this function returns an empty list and emits a stderr warning.
     """
+    if baseline_ms is None or baseline_ms <= 0:
+        print(
+            f"[kernel_fusion_analysis.compute_fusion_impact_estimates] "
+            f"baseline_ms={baseline_ms!r} is invalid; skipping impact_score "
+            f"computation",
+            file=sys.stderr,
+        )
+        return []
 
     vector_maf = peak_maf_tflops.get(
         "vector_bf16", peak_maf_tflops.get("matrix_bf16", 1)
@@ -384,14 +398,22 @@ def compute_fusion_impact_estimates(
         else:
             bound_type = "memory"
 
-        savings_high = total_savings_us * instance_count / 1000
-        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
-        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
+        gap_high = total_savings_us / current_per_instance_us
+        gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
+        gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
 
-        if savings_high < min_savings_ms:
+        savings_high_ms = total_savings_us * instance_count / 1000
+        if savings_high_ms < min_savings_ms:
             continue
 
         time_ms = current_per_instance_us * instance_count / 1000
+        impact_score_high = gap_high * time_ms / baseline_ms * 100
+        impact_score_low = gap_low * time_ms / baseline_ms * 100
+        impact_score_mid = gap_mid * time_ms / baseline_ms * 100
+
+        if impact_score_high < MIN_IMPACT_SCORE:
+            continue
+
         estimation = "full" if len(modeled) == len(enriched) else "partial"
 
         estimate: Dict[str, Any] = {
@@ -400,9 +422,9 @@ def compute_fusion_impact_estimates(
             ),
             "category": "kernel_fusion",
             "type": "kernel_fusion",
-            "savings_ms": round(savings_mid, 3),
-            "savings_ms_low": round(savings_low, 3),
-            "savings_ms_high": round(savings_high, 3),
+            "impact_score": round(impact_score_mid, 2),
+            "impact_score_low": round(impact_score_low, 2),
+            "impact_score_high": round(impact_score_high, 2),
             "estimation": estimation,
             "bound_type": bound_type,
             "time_ms": round(time_ms, 3),
@@ -422,19 +444,12 @@ def compute_fusion_impact_estimates(
         if unmodeled_count > 0:
             estimate["warning"] = (
                 f"{unmodeled_count} of {len(kernels)} kernels lack perf models; "
-                f"savings estimate uses trace time for unmodeled kernels"
+                f"impact_score uses trace time for unmodeled kernels"
             )
-
-        if baseline_ms > 0:
-            e2e_pct_high = savings_high / baseline_ms * 100
-            if e2e_pct_high < MIN_E2E_PCT:
-                continue
-            estimate["e2e_pct_low"] = round(savings_low / baseline_ms * 100, 2)
-            estimate["e2e_pct_high"] = round(e2e_pct_high, 2)
 
         estimates.append(estimate)
 
-    return sorted(estimates, key=lambda x: x["savings_ms"], reverse=True)
+    return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
 
 def load_fusion_data(output_dir: str):
@@ -486,7 +501,7 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
 def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:
     """Filter by kernel count cap, drop tiny candidates, and deduplicate.
 
-    Candidates whose total time can't reach MIN_E2E_PCT of baseline are
+    Candidates whose total time can't reach MIN_IMPACT_SCORE of baseline are
     dropped early to avoid expensive downstream enrichment.
     """
     filtered = [
@@ -494,7 +509,7 @@ def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:
     ]
 
     if baseline_ms > 0:
-        min_time_us = baseline_ms * 10 * MIN_E2E_PCT
+        min_time_us = baseline_ms * 10 * MIN_IMPACT_SCORE
         filtered = [
             c for c in filtered if c.get("total_kernel_time_us", 0) >= min_time_us
         ]
@@ -582,7 +597,7 @@ def main():
     )
 
     total_time_us = sum(c.get("total_kernel_time_us", 0) for c in candidates)
-    total_savings_ms = sum(e["savings_ms"] for e in impact_estimates)
+    total_impact_score = sum(e["impact_score"] for e in impact_estimates)
     warnings = [e["warning"] for e in impact_estimates if e.get("warning")]
 
     metrics = {
@@ -591,7 +606,7 @@ def main():
         "total_time_ms": round(total_time_us / 1000, 3),
         "candidate_count": len(candidates),
         "estimated_count": len(impact_estimates),
-        "total_savings_ms": round(total_savings_ms, 3),
+        "total_impact_score": round(total_impact_score, 2),
         "platform": platform,
         "peak_hbm_bw_tbs": peak_bw_tbs,
         "impact_estimates": impact_estimates,
@@ -613,7 +628,7 @@ def main():
     print(f"Kernel fusion analysis complete:")
     print(f"  Candidates: {len(candidates)}")
     print(f"  With estimates: {len(impact_estimates)}")
-    print(f"  Total savings (mid): {total_savings_ms:.3f} ms")
+    print(f"  Total impact_score (mid): {total_impact_score:.2f}")
     high_count = sum(1 for e in impact_estimates if e.get("confidence") == "high")
     print(
         f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}"
