@@ -11,17 +11,6 @@ import pandas as pd
 
 from ..util import TraceEventUtils
 
-_SYNC_PATTERNS = frozenset(
-    {
-        "cudadevicesynchronize",
-        "cudastreamsynchronize",
-        "cudaeventsynchronize",
-        "hipdevicesynchronize",
-        "hipstreamsynchronize",
-        "hipeventsynchronize",
-    }
-)
-
 _STREAM_WAIT_PATTERNS = frozenset(
     {
         "cudastreamwaitevent",
@@ -55,7 +44,6 @@ _MEMORY_PATTERNS = frozenset(
     }
 )
 
-REASON_EXPLICIT_SYNC = "explicit_sync"
 REASON_CROSS_STREAM_DEP = "cross_stream_dep"
 REASON_CPU_BOTTLENECK = "cpu_bottleneck"
 REASON_LAUNCH_OVERHEAD = "launch_overhead"
@@ -209,10 +197,9 @@ class IdleTimeAnalyser:
         """True if two events share the same (pid, tid)."""
         if event_a is None or event_b is None:
             return False
-        return (
-            event_a.get("pid") == event_b.get("pid")
-            and event_a.get("tid") == event_b.get("tid")
-        )
+        return event_a.get("pid") == event_b.get("pid") and event_a.get(
+            "tid"
+        ) == event_b.get("tid")
 
     def _classify_gap(self, gap_info):
         """Classify a single gap by examining CPU-side context.
@@ -267,9 +254,7 @@ class IdleTimeAnalyser:
             )
 
         launch_ts = launch_event.get("ts", 0)
-        launch_end = launch_event.get(
-            "t_end", launch_ts + launch_event.get("dur", 0)
-        )
+        launch_end = launch_event.get("t_end", launch_ts + launch_event.get("dur", 0))
         prev_event_end = prev_event.get("t_end", prev_event.get("ts", 0))
 
         # Was the launch already issued before this gap started?
@@ -329,26 +314,11 @@ class IdleTimeAnalyser:
         # ------------------------------------------------------------------
         # PATH B: Launch was NOT pipelined (CPU issued it after the gap
         # started → launch_ts > gap_start).  The CPU was late.
-        # Investigate WHY: sync, memory op, or general CPU work.
+        # Investigate WHY: memory op, stream wait, or general CPU work.
         # ------------------------------------------------------------------
-        runtime_during_gap = self._find_runtime_events_in_interval(
-            gap_start, gap_end
-        )
+        runtime_during_gap = self._find_runtime_events_in_interval(gap_start, gap_end)
 
-        # B1. Explicit synchronization on the launch thread.
-        for rt_evt in runtime_during_gap:
-            nl = _name_lower(rt_evt)
-            if _matches_any(nl, _SYNC_PATTERNS):
-                if self._same_thread(rt_evt, launch_event):
-                    return self._build_result(
-                        gap_info,
-                        REASON_EXPLICIT_SYNC,
-                        f"Sync API '{rt_evt.get('name')}' blocked launch thread during gap",
-                        launch_event,
-                        cpu_op_ancestor,
-                    )
-
-        # B2. Cross-stream dependency (GPU-side wait).
+        # B1. Cross-stream dependency (GPU-side wait).
         for rt_evt in runtime_during_gap:
             nl = _name_lower(rt_evt)
             if _matches_any(nl, _STREAM_WAIT_PATTERNS):
@@ -360,7 +330,7 @@ class IdleTimeAnalyser:
                     cpu_op_ancestor,
                 )
 
-        # B3. Memory operation stall on the launch thread.
+        # B2. Memory operation stall on the launch thread.
         for rt_evt in runtime_during_gap:
             nl = _name_lower(rt_evt)
             if _matches_any(nl, _MEMORY_PATTERNS):
@@ -376,7 +346,7 @@ class IdleTimeAnalyser:
                         cpu_op_ancestor,
                     )
 
-        # B4. General CPU bottleneck: the launch was late but no specific
+        # B3. General CPU bottleneck: the launch was late but no specific
         #     blocking API was found — CPU was busy with other work.
         cpu_delay = launch_ts - prev_event_end
         if cpu_op_ancestor:
@@ -430,7 +400,7 @@ class IdleTimeAnalyser:
         """
         self._build_runtime_event_index()
         raw_gaps = self._get_per_stream_gaps(stream_id=stream_id)
-        classified = [self._classify_gap(g) for g in raw_gaps]
+        classified = [r for g in raw_gaps if (r := self._classify_gap(g)) is not None]
         if not classified:
             return pd.DataFrame(
                 columns=[

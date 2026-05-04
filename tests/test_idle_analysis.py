@@ -21,7 +21,6 @@ from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from TraceLens.TreePerf.idle_time_analysis import (
     IdleTimeAnalyser,
     REASON_LAUNCH_OVERHEAD,
-    REASON_EXPLICIT_SYNC,
     REASON_CROSS_STREAM_DEP,
     REASON_CPU_BOTTLENECK,
     REASON_MEMORY_OP_STALL,
@@ -135,39 +134,6 @@ class TestLaunchOverhead:
         assert len(df) == 1
         assert df.iloc[0]["reason"] == REASON_LAUNCH_OVERHEAD
         assert df.iloc[0]["duration_us"] == 5.0  # 1105 - 1100
-
-
-class TestExplicitSync:
-    def test_sync_blocks_launch_thread(self):
-        """Sync API on the same thread as the launch → explicit_sync."""
-        # Sync blocks the launch thread for 500us after kernel_A ends.
-        events = _two_kernel_trace(
-            1, k1_ts=1000, k1_dur=100,
-            corr2=2, launch2_ts=1560, launch2_dur=5, k2_ts=1600, k2_dur=100,
-            extra_events=[
-                _ev("cuda_runtime", "hipEventSynchronize", ts=1050, dur=500),
-            ],
-        )
-        perf = _build(events)
-        df = perf.get_df_idle_analysis()
-        assert len(df) == 1
-        assert df.iloc[0]["reason"] == REASON_EXPLICIT_SYNC
-
-    def test_sync_on_different_thread_not_blamed(self):
-        """Sync on a different thread should NOT be blamed."""
-        events = _two_kernel_trace(
-            1, k1_ts=1000, k1_dur=100,
-            corr2=2, launch2_ts=1200, launch2_dur=5, k2_ts=1300, k2_dur=100,
-            extra_events=[
-                # Sync on a DIFFERENT thread (tid=999).
-                _ev("cuda_runtime", "hipEventSynchronize", ts=1050, dur=500, tid=999),
-            ],
-        )
-        perf = _build(events)
-        df = perf.get_df_idle_analysis()
-        assert len(df) == 1
-        # Should be cpu_bottleneck, NOT explicit_sync.
-        assert df.iloc[0]["reason"] == REASON_CPU_BOTTLENECK
 
 
 class TestCrossStreamDep:
