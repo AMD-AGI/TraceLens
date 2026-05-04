@@ -15,6 +15,8 @@ import argparse
 import sys
 import os
 
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
@@ -124,7 +126,13 @@ def main():
     }
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(ops_df, metadata, config)
+
+    callstacks_df = None
+    cs_path = os.path.join(args.output_dir, "perf_report_csvs", "unified_perf_callstacks.csv")
+    if os.path.exists(cs_path):
+        callstacks_df = pd.read_csv(cs_path)
+
+    operations = build_operation_metrics(ops_df, metadata, config, callstacks_df=callstacks_df)
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
 
     baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)

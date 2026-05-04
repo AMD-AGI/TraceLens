@@ -141,13 +141,14 @@ Standard column schema for operations breakdown tables and the `**Data:**` table
 inside `## Detailed Analysis` blocks.
 
 ```markdown
-| Operation | Args | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-|-----------|------|-----------|------|-------|------------|------------|-------|
+| Operation |  Args  |            Kernel Path                  | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
+|-----------|--------|-----------------------------------------|-----------|------|-------|----------|------------|-------|
 ```
 
 **Column mappings** (source: `metrics['operations']`):
 - **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
-- **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. Omit the column if every row is missing this field.
+- **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. `—` when absent.
+- **Kernel Path**: `operations[i].launcher_path`. Relative Python path that launched the kernel (e.g. `sglang/srt/layers/quantization/fp8_utils.py(549): aiter_w8a8_block_fp8_linear`). **Copy the value exactly as-is — do NOT truncate, shorten, or extract just the function name.** `—` when absent.
 - **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
 - **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `null` ⇒ omit the column. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
 - **Count**: `operations[i].count` — total invocations, not unique signatures.
