@@ -61,6 +61,8 @@ vllm serve $MODEL --port $PORT \
     "torch_profiler_with_stack": "True",
     "torch_profiler_with_flops": "False",
     "torch_profiler_use_gzip": "True",
+    "capture_torch_profiler_dir": "./vllm_profile/capture_traces",
+    "detailed_trace_annotation": "True",
     "delay_iterations" : 819,
     "max_iterations" : 208
     }' \

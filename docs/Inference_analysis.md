@@ -55,16 +55,18 @@ pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 
 ##### vLLM Script
 
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, or `v18`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, or `v20`) as the first argument, followed by the path to your local TraceLens-internal clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
-| Version | Base Image                                                    | vLLM Version |
-| ------- | ------------------------------------------------------------- | ------------ |
-| `v14`   | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120`        | v0.14.0      |
-| `v15`   | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130`        | v0.15.0      |
-| `v16`   | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0      |
-| `v17`   | `vllm/vllm-openai-rocm:v0.17.0`                               | v0.17.0      |
-| `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      |
+| Version | Base Image                                                    | vLLM Version | Patch File                    |
+| ------- | ------------------------------------------------------------- | ------------ | ----------------------------- |
+| `v14`   | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120`        | v0.14.0      | `config_vllm_v0.14.0.patch`   |
+| `v15`   | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130`        | v0.15.0      | `config_vllm_v0.15.0.patch`   |
+| `v16`   | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0      | `config_vllm_v0.16.0.patch`   |
+| `v17`   | `vllm/vllm-openai-rocm:v0.17.0`                               | v0.17.0      | `config_vllm_v0.17.0.patch`   |
+| `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      | `config_vllm_v0.18.0.patch`   |
+| `v19`   | `vllm/vllm-openai-rocm:v0.19.0`                               | v0.19.0      | `config_vllm_v0.19.0.patch`   |
+| `v20`   | `rocm/vllm-dev:preview_v0.20.0_20260429`                      | v0.20.0      | `config_vllm_v0.20.0.patch`   |
 
 
 ```bash
@@ -136,7 +138,10 @@ If you prefer to patch an existing environment instead of building a new image, 
 **Steps:**
 
 1. **Locate your inference engine:**
-  For vllm: 
+  For vLLM: 
+  ```bash
+   python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
+  ```
   For SGLang:
   ```bash
    python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
@@ -146,11 +151,11 @@ If you prefer to patch an existing environment instead of building a new image, 
    python -c "import atom; import os; print(os.path.dirname(os.path.dirname(atom.__file__)))"
   ```
 2. **Find and apply the relevant patch:**
-  - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
+  - vLLM patches are in [vllm_patches](../examples/custom_workflows/inference_analysis/vllm_patches/)
+  - SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
+  - Atom patches are in [atom_roofline_patches](../examples/custom_workflows/inference_analysis/atom_roofline_patches/)
   - Select by framework and version
   - Apply: `cd /path/to/framework/../ && git apply /path/to/patchfile`
-  SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
-  Atom patches are in [atom_roofline_patches](../examples/custom_workflows/inference_analysis/atom_roofline_patches/)
 
 #### Collection Parameters
 
@@ -159,6 +164,28 @@ If you prefer to patch an existing environment instead of building a new image, 
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. An example script to run GPT-OSS using InferenceX can be [found here](../examples/custom_workflows/inference_analysis/gptoss_fp4_mi355_vllm_docker.sh), an example to run the DSR-1 model using SGLang can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp8_mi355x_sglang_eager.sh), and an example to run DSR-1 using Atom can be found [here](../examples/custom_workflows/inference_analysis/dsr1_fp4_mi355x_atom.sh).
 
 #### Trace collection options
+##### vLLM
+The `config_vllm_v*.patch` patches add two `ProfilerConfig` flags that control graph-capture profiling and trace annotation detail. These patches are available for v0.14–v0.20. Pass the flags as server arguments:
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Absolute path to a directory where a PyTorch profiler trace of the CUDA graph capture phase will be saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph capture profiling. |
+| `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When `True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for both context and generation requests. When `False`, annotations record only request counts and token counts. Enable this for full roofline analysis; leave disabled for lighter-weight traces. |
+
+**Example** — enable both flags alongside a standard steady-state window profile:
+
+```bash
+--profiler-config.profiler torch \
+--profiler-config.torch_profiler_dir /workspace/torch_trace \
+--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces \
+--profiler-config.detailed_trace_annotation True \
+--profiler-config.delay_iterations 5402 \
+--profiler-config.max_iterations 256 \
+--profiler-config.ignore_frontend True
+```
+
+> **Note:** `capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch` is set. The capture trace is written once at server startup during CUDA graph construction; the steady-state replay trace is written to `torch_profiler_dir` during the benchmark run. Pass both paths to `generate_perf_report_pytorch_inference` via `--capture_folder` and `--profile_json_path` respectively.
+
 ##### SGLang
 1. While doing the profiling of the execution step, pass the parameter `shape_discovery=True` in the profile request to enable shape discovery and registration for operations which are not covered in default SGLang profile.
 
@@ -175,7 +202,7 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
 
-Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14 or higher, SGLang v0.5.9, and Atom 0.1.1; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
+Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14–v0.20, SGLang v0.5.9, and Atom 0.1.1; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -o ./steady_state_analysis \
@@ -684,7 +711,7 @@ delay_iters = ( ((R+1)/2) * 5 * OSL ) - (max_iters/2) # The execution step where
 
 #### Trace Splitting
 
-The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher, or use of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
+The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher (tested through v0.20), or use of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
 
 1. **Split into individual execution steps:** Decompose the entire trace into per-step files, extracting batch size from annotations or kernels for shape-focused analysis and comparison.
 2. **Identify steady-state region:** Detect execution steps with near-maximum concurrency. The algorithm identifies large windows with concurrency close to peak levels and selects a representative steady-state region based on prefill-decode and decode-only step composition. When benchmark parameters are known, pass `--CONC`, `--OSL`, and `--R` to `split_inference_trace_annotation` to override the empirical reference ratio with the analytically derived ideal PD ratio — see [Step 3](#step-3-trace-preparation-optional) for details.
@@ -712,6 +739,6 @@ Balancing complete trace capture versus analysis complexity.
 
 ---
 
-**Last Updated:** February 2026
+**Last Updated:** May 2026
 **Maintainers:** AMD-AGI Performance and Optimization Team
 **Repository:** [github.com/AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)

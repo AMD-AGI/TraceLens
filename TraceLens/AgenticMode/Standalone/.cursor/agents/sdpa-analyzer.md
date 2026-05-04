@@ -97,7 +97,7 @@ Read `category_data/<sdpa>_metrics.json::category_findings`. Per [`utils/templat
 
 **Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
 ---
 
@@ -171,6 +171,24 @@ Short sequences naturally show lower efficiency — do NOT call low efficiency a
 #### GQA (Grouped Query Attention)
 - **Detection:** `gqa_ratio > 1` (e.g. 8:1 means 8 query heads per KV head).
 - **Reasoning:** GQA reduces KV-cache memory but may slightly lower kernel efficiency vs. MHA — note this in **Identification** before recommending tuning.
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, SDPA analysis cannot observe:
+
+**Flash / Standard Attention:**
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Internal block / tile size of the Flash kernel | Tile selection is internal to the Flash backend | "Flash tile size not visible — profile the kernel for tile-size tuning." |
+
+**Paged Attention (vLLM):**
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Per-request KV-cache hit rate | Cache hits/misses are not surfaced as kernel events | "Per-request KV-cache hit rate not visible from trace data." |
 
 ---
 

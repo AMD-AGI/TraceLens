@@ -102,7 +102,7 @@ Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md),
 
 **Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
 ---
 
@@ -128,6 +128,16 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 - **Symptoms:** >1000 invocations of similar elementwise ops.
 - **Reasoning:** Per-launch overhead dominates; batching or fusion likely available.
 - **Algorithmic:** Restructure to batch operations; chains in the same parent module → defer to kernel fusion analysis.
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, elementwise analysis cannot observe:
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Per-launch overhead vs. memory-stall split | Both contribute to kernel time; the trace shows only the sum | "Cannot separate per-launch overhead from memory stalls — high invocation count is a strong signal of launch-overhead dominance." |
 
 ---
 

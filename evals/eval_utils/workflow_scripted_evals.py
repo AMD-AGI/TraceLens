@@ -661,10 +661,10 @@ def _check_model_id(output_dir):
         if not value or value.lower() == "cannot be inferred from trace":
             rows.append(
                 _make_row(
-                f"workflow_eval_13_{field}",
-                f"Model ID: {field}",
-                "PASS",
-                f"Field not determined ('{value}') — skipped",
+                    f"workflow_eval_13_{field}",
+                    f"Model ID: {field}",
+                    "PASS",
+                    f"Field not determined ('{value}') — skipped",
                     "",
                     "",
                 )

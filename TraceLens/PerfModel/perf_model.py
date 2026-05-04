@@ -136,14 +136,20 @@ class GEMM:
             N=self.K,
             K=self.N,
             bias=False,
-            bytes_per_element=bytes_per_element,
+            bpe_mat1=bytes_per_element,
+            bpe_mat2=bytes_per_element,
+            bpe_bias=bytes_per_element,
+            bpe_output=bytes_per_element,
         )
         bytes_weight_grad = self.bytes_func(
             M=self.N,
             N=self.K,
             K=self.M,
             bias=False,
-            bytes_per_element=bytes_per_element,
+            bpe_mat1=bytes_per_element,
+            bpe_mat2=bytes_per_element,
+            bpe_bias=bytes_per_element,
+            bpe_output=bytes_per_element,
         )
         bytes_bias_grad = self.M * self.N if self.bias else 0
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
@@ -3691,6 +3697,15 @@ class GroupedGemm:
         return self.bytes_bwd_func(
             self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
         )
+
+    def get_compute_precision(self):
+        """Return the compute precision for this operation."""
+        dtype = self.event.get("args", {}).get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        """Return the MAF type for this operation (matrix for grouped GEMM)."""
+        return "matrix"
 
 
 def _collect_2d_shapes(obj):

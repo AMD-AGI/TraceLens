@@ -87,7 +87,7 @@ Read `category_data/gemm_metrics.json::category_findings`. Per [`utils/templates
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**.
 - **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
-**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
 ---
 
@@ -118,6 +118,17 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 - **Symptoms:** Huge `count`, tiny M/N/K (e.g. 1000+ GEMMs with M=8, N=16).
 - **Issue:** GPU can't efficiently parallelize; per-launch overhead dominates.
 - **Algorithmic:** Batch GEMMs together (`torch.bmm`, grouped operations).
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, GEMM analysis cannot observe:
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Split-K / stream-K decomposition | Only the final kernel name + duration are in the trace; the GEMM library's partitioning choice is not exposed | "Decomposition strategy not visible — profile the kernel for tiling layout." |
+| Autotuned tile / block size | Selected tile is internal to the GEMM library | "Tile size not visible — profile the kernel for tile-size tuning." |
 
 ---
 

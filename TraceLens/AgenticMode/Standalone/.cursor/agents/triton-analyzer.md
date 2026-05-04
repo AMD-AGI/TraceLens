@@ -132,6 +132,18 @@ This analyzer does not emit `kind=p_item` or `kind=detail_estimate` markers beca
 
 ---
 
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, Triton custom-kernel analysis cannot observe:
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| FLOPs per kernel | TraceLens has no analytical performance model for user-written Triton kernels | "FLOPs not computable for Triton custom kernels — report time and counts only." |
+| Bytes moved per kernel | TraceLens has no analytical performance model for user-written Triton kernels | "Bytes not computable for Triton custom kernels — report time and counts only." |
+| Roofline % / efficiency % / impact_score | All three derive from FLOPs and Bytes, which are not available for Triton | "No efficiency or impact estimate available — Triton is informational only." |
+
+---
+
 ## Key Principles
 
 1. **Informational only** -- no performance model exists for user-written Triton kernels (see [Performance Model Limitation](#performance-model-limitation)); report time and operation data without drawing efficiency conclusions

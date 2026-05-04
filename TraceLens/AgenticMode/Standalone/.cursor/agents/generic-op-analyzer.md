@@ -99,7 +99,7 @@ For each surviving entry:
 
 **Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the **CANNOT Infer** rows, use the listed fallback prose instead of speculating.
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
 ---
 
@@ -131,6 +131,17 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 - **Reasoning:** Memory-bound; should approach peak HBM BW.
 - **Algorithmic:** Fusion opportunities → defer to kernel fusion analysis.
 - **Kernel:** Optimize memory access patterns if below expected bandwidth.
+
+---
+
+## Trace observability (category-specific)
+
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, uncategorized-op analysis cannot observe:
+
+| NOT observable | Why | Fallback prose |
+|----------------|-----|----------------|
+| Sub-category attribution accuracy | Sub-category is a heuristic over op names; some ops are misattributed | "Sub-category is heuristic — verify against op semantics before acting on it." |
+| Cross-category fusion potential | Fusion candidates that cross category boundaries are owned by the kernel-fusion analyzer | "Cross-category fusion potential not assessed here — defer to the kernel fusion analysis." |
 
 ---
 
