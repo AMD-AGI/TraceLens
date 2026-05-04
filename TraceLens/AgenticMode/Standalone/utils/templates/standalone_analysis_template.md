@@ -139,7 +139,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- impact-end -->
 
 <!-- === COMPARATIVE Top Operations === -->
-`Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]`; use — if no match.
+`Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match.
 <!-- impact-begin kind=top_ops -->
 | Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) | Potential improvement (time, E2E %) |
 |------|----------|-------------------|-------------------|-------------------|-----|-----------------|-------------------------------------|
@@ -376,7 +376,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 7 exact columns-->
 <!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = lca_total_kernel_time_trace2_us / 1000.
-     Count T1/T2 = operation_count / lca_kernel_count_trace2 when present.
+     Count T1/T2 = operation_count / lca_count_trace2 when present.
      Difference (ms) = delta_us (trace2 - trace1) / 1000 (positive ⇒ more time on Trace 2), or —. -->
 
 <a id="detailed-analysis-compute-p1"></a>

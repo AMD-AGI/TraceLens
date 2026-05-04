@@ -1,0 +1,368 @@
+{
+  "baseline_ms": 121.2672041015625,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "gemm",
+      "display_name": "GEMM",
+      "impact_score": 13.97,
+      "impact_score_low": 11.97,
+      "impact_score_high": 15.97,
+      "source": "findings_rollup"
+    },
+    {
+      "rank": 2,
+      "category": "other",
+      "display_name": "Other",
+      "impact_score": null,
+      "gpu_kernel_time_ms": 43.396,
+      "source": "manifest_fallback"
+    },
+    {
+      "rank": 3,
+      "category": "elementwise",
+      "display_name": "elementwise",
+      "impact_score": null,
+      "gpu_kernel_time_ms": 19.532,
+      "source": "manifest_fallback"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "gemm",
+      "impact_score": 13.97,
+      "impact_score_low": 11.97,
+      "impact_score_high": 15.97,
+      "type": "kernel_tuning"
+    }
+  ],
+  "findings": [
+    {
+      "bound_type": "memory",
+      "library": "Tensile",
+      "impact_score": 11.02,
+      "impact_score_low": 9.45,
+      "impact_score_high": 12.6,
+      "member_count": 2,
+      "members": [
+        {
+          "operation": "aten::bmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 9.54,
+          "impact_score_low": 8.18,
+          "impact_score_high": 10.9,
+          "confidence": "high",
+          "efficiency_pct": 3.58,
+          "bound_type": "memory",
+          "library": "Tensile",
+          "time_ms": 13.71
+        },
+        {
+          "operation": "aten::bmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 1.48,
+          "impact_score_low": 1.27,
+          "impact_score_high": 1.7,
+          "confidence": "medium",
+          "efficiency_pct": 38.75,
+          "bound_type": "memory",
+          "library": "Tensile",
+          "time_ms": 3.356
+        }
+      ],
+      "category": "gemm",
+      "category_rank": 1,
+      "global_rank": 1
+    },
+    {
+      "bound_type": "compute",
+      "library": "Tensile",
+      "impact_score": 2.95,
+      "impact_score_low": 2.52,
+      "impact_score_high": 3.37,
+      "member_count": 6,
+      "members": [
+        {
+          "operation": "aten::addmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 0.76,
+          "impact_score_low": 0.65,
+          "impact_score_high": 0.86,
+          "confidence": "medium",
+          "efficiency_pct": 65.69,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 3.057
+        },
+        {
+          "operation": "aten::addmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 0.58,
+          "impact_score_low": 0.49,
+          "impact_score_high": 0.66,
+          "confidence": "medium",
+          "efficiency_pct": 65.44,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 2.31
+        },
+        {
+          "operation": "aten::addmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 0.53,
+          "impact_score_low": 0.45,
+          "impact_score_high": 0.61,
+          "confidence": "medium",
+          "efficiency_pct": 67.26,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 2.241
+        },
+        {
+          "operation": "aten::addmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 0.43,
+          "impact_score_low": 0.37,
+          "impact_score_high": 0.49,
+          "confidence": "medium",
+          "efficiency_pct": 77.21,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 2.601
+        },
+        {
+          "operation": "aten::addmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 0.42,
+          "impact_score_low": 0.36,
+          "impact_score_high": 0.48,
+          "confidence": "medium",
+          "efficiency_pct": 65.93,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 1.706
+        },
+        {
+          "operation": "aten::addmm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "impact_score": 0.23,
+          "impact_score_low": 0.2,
+          "impact_score_high": 0.27,
+          "confidence": "medium",
+          "efficiency_pct": 63.74,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 0.891
+        }
+      ],
+      "category": "gemm",
+      "category_rank": 2,
+      "global_rank": 2
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.05,
+      "impact_score_low": 0.04,
+      "impact_score_high": 0.05,
+      "confidence": "medium",
+      "efficiency_pct": 96.61,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 1.911
+    },
+    {
+      "operation": "aten::add",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.03,
+      "impact_score_low": 0.02,
+      "impact_score_high": 0.03,
+      "confidence": "medium",
+      "efficiency_pct": 70.7,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.122
+    },
+    {
+      "operation": "aten::copy_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.01,
+      "impact_score_low": 0.01,
+      "impact_score_high": 0.01,
+      "confidence": "medium",
+      "efficiency_pct": 70.52,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.059
+    },
+    {
+      "operation": "aten::bmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 9.54,
+      "impact_score_low": 8.18,
+      "impact_score_high": 10.9,
+      "confidence": "high",
+      "efficiency_pct": 3.58,
+      "bound_type": "memory",
+      "library": "Tensile",
+      "time_ms": 13.71
+    },
+    {
+      "operation": "aten::bmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 1.48,
+      "impact_score_low": 1.27,
+      "impact_score_high": 1.7,
+      "confidence": "medium",
+      "efficiency_pct": 38.75,
+      "bound_type": "memory",
+      "library": "Tensile",
+      "time_ms": 3.356
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.76,
+      "impact_score_low": 0.65,
+      "impact_score_high": 0.86,
+      "confidence": "medium",
+      "efficiency_pct": 65.69,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 3.057
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.58,
+      "impact_score_low": 0.49,
+      "impact_score_high": 0.66,
+      "confidence": "medium",
+      "efficiency_pct": 65.44,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 2.31
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.53,
+      "impact_score_low": 0.45,
+      "impact_score_high": 0.61,
+      "confidence": "medium",
+      "efficiency_pct": 67.26,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 2.241
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.43,
+      "impact_score_low": 0.37,
+      "impact_score_high": 0.49,
+      "confidence": "medium",
+      "efficiency_pct": 77.21,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 2.601
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.42,
+      "impact_score_low": 0.36,
+      "impact_score_high": 0.48,
+      "confidence": "medium",
+      "efficiency_pct": 65.93,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 1.706
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.23,
+      "impact_score_low": 0.2,
+      "impact_score_high": 0.27,
+      "confidence": "medium",
+      "efficiency_pct": 63.74,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 0.891
+    },
+    {
+      "operation": "aten::layer_norm",
+      "category": "norm_fwd",
+      "type": "kernel_tuning",
+      "impact_score": 0.05,
+      "impact_score_low": 0.05,
+      "impact_score_high": 0.06,
+      "confidence": "medium",
+      "efficiency_pct": 90.42,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.791
+    },
+    {
+      "operation": "aten::layer_norm",
+      "category": "norm_fwd",
+      "type": "kernel_tuning",
+      "impact_score": 0.02,
+      "impact_score_low": 0.02,
+      "impact_score_high": 0.02,
+      "confidence": "medium",
+      "efficiency_pct": 96.31,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.806
+    },
+    {
+      "operation": "aten::_softmax",
+      "category": "other",
+      "type": "kernel_tuning",
+      "impact_score": 0.03,
+      "impact_score_low": 0.03,
+      "impact_score_high": 0.03,
+      "confidence": "medium",
+      "efficiency_pct": 69.17,
+      "bound_type": null,
+      "library": null,
+      "time_ms": 0.134
+    },
+    {
+      "operation": "aten::mean",
+      "category": "reduce",
+      "type": "kernel_tuning",
+      "impact_score": 0.02,
+      "impact_score_low": 0.02,
+      "impact_score_high": 0.02,
+      "confidence": "medium",
+      "efficiency_pct": 68.32,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.095
+    }
+  ]
+}

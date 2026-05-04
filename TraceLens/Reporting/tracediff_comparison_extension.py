@@ -14,7 +14,7 @@ Use with::
         --extension-args /path/to/trace2.json
 
 This runs TraceDiff in memory, then adds **speedup**, **delta**,
-**lca_kernel_count_trace2**, and LCA columns (``lca_id``, ``lca_name``,
+**lca_count_trace2**, and LCA columns (``lca_id``, ``lca_name``,
 ``lca_total_kernel_time_trace1_us``, ``lca_total_kernel_time_trace2_us``)
 to ``unified_perf_summary`` (beside ``Kernel Time (µs)_sum`` /
 ``operation_count``). Speedup and delta are always computed from the LCA-level
@@ -385,13 +385,15 @@ def _build_trace2_time_lookup(
         for key in all_keys:
             lookup[key] = lookup.get(key, 0.0) + t2_time
             lookup_uid_sets[key] = lookup_uid_sets.get(key, set()).union(t2_uid_set)
-            lca_ids_lookup.setdefault(key, []).append(lca_id)
+            lca_ids_lookup.setdefault(key, [])
+            if t2_uid_set:
+                lca_ids_lookup[key].append(lca_id)
 
-    lookup_count = {k: len(v) for k, v in lookup_uid_sets.items()}
+    lookup_count = {k: len(v) for k, v in lca_ids_lookup.items()}
     return lookup, lca_ids_lookup, lookup_count
 
 
-_TRACE2_OP_COUNT_COL = "lca_kernel_count_trace2"
+_TRACE2_OP_COUNT_COL = "lca_count_trace2"
 
 
 def _enrich_sheet_with_trace2(
@@ -576,7 +578,7 @@ def postprocess_perf_report_dataframes_extension(
         out.update(enriched)
         out["diff_stats"] = diff_stats_df
         print(
-            "[TraceDiff] Added speedup, delta, lca_kernel_count_trace2, "
+            "[TraceDiff] Added speedup, delta, lca_count_trace2, "
             "and LCA columns (lca_id, lca_name, "
             "lca_total_kernel_time_trace1_us, lca_total_kernel_time_trace2_us) "
             "to unified_perf_summary; added diff_stats sheet."

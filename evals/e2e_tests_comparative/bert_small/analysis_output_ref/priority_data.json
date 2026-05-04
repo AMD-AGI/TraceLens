@@ -1,0 +1,194 @@
+{
+  "baseline_ms": 3.49597607421875,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "sdpa_fwd",
+      "display_name": "SDPA_fwd",
+      "impact_score": 1.91,
+      "impact_score_low": 1.64,
+      "impact_score_high": 2.19,
+      "source": "findings_rollup"
+    },
+    {
+      "rank": 2,
+      "category": "gemm",
+      "display_name": "GEMM",
+      "impact_score": null,
+      "gpu_kernel_time_ms": 0.174,
+      "source": "manifest_fallback"
+    },
+    {
+      "rank": 3,
+      "category": "elementwise",
+      "display_name": "elementwise",
+      "impact_score": null,
+      "gpu_kernel_time_ms": 0.048,
+      "source": "manifest_fallback"
+    },
+    {
+      "rank": 4,
+      "category": "norm_fwd",
+      "display_name": "NORM_fwd",
+      "impact_score": null,
+      "gpu_kernel_time_ms": 0.04,
+      "source": "manifest_fallback"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "sdpa_fwd",
+      "impact_score": 1.91,
+      "impact_score_low": 1.64,
+      "impact_score_high": 2.19,
+      "type": "kernel_tuning"
+    }
+  ],
+  "findings": [
+    {
+      "bound_type": "memory",
+      "library": "Unknown",
+      "impact_score": 1.91,
+      "impact_score_low": 1.64,
+      "impact_score_high": 2.19,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::_scaled_dot_product_flash_attention",
+          "category": "sdpa_fwd",
+          "type": "kernel_tuning",
+          "impact_score": 1.91,
+          "impact_score_low": 1.64,
+          "impact_score_high": 2.19,
+          "confidence": "medium",
+          "efficiency_pct": 32.91,
+          "bound_type": "memory",
+          "library": null,
+          "time_ms": 0.114
+        }
+      ],
+      "category": "sdpa_fwd",
+      "category_rank": 1,
+      "global_rank": 1
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::gelu",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.27,
+      "impact_score_low": 0.24,
+      "impact_score_high": 0.31,
+      "confidence": "medium",
+      "efficiency_pct": 42.23,
+      "bound_type": null,
+      "library": "PyTorch Native",
+      "time_ms": 0.019
+    },
+    {
+      "operation": "aten::add",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.11,
+      "impact_score_low": 0.1,
+      "impact_score_high": 0.13,
+      "confidence": "medium",
+      "efficiency_pct": 76.37,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.019
+    },
+    {
+      "operation": "aten::eq",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.06,
+      "impact_score_low": 0.05,
+      "impact_score_high": 0.06,
+      "confidence": "medium",
+      "efficiency_pct": 43.48,
+      "bound_type": null,
+      "library": "PyTorch Native",
+      "time_ms": 0.004
+    },
+    {
+      "operation": "aten::gelu",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.03,
+      "impact_score_low": 0.03,
+      "impact_score_high": 0.04,
+      "confidence": "medium",
+      "efficiency_pct": 56.0,
+      "bound_type": null,
+      "library": "PyTorch Native",
+      "time_ms": 0.003
+    },
+    {
+      "operation": "aten::add_",
+      "category": "elementwise",
+      "type": "kernel_tuning",
+      "impact_score": 0.03,
+      "impact_score_low": 0.02,
+      "impact_score_high": 0.03,
+      "confidence": "medium",
+      "efficiency_pct": 66.12,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.003
+    },
+    {
+      "operation": "aten::addmm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "impact_score": 0.23,
+      "impact_score_low": 0.2,
+      "impact_score_high": 0.27,
+      "confidence": "medium",
+      "efficiency_pct": 72.53,
+      "bound_type": "memory",
+      "library": "Tensile",
+      "time_ms": 0.034
+    },
+    {
+      "operation": "aten::layer_norm",
+      "category": "norm_fwd",
+      "type": "kernel_tuning",
+      "impact_score": 0.22,
+      "impact_score_low": 0.19,
+      "impact_score_high": 0.25,
+      "confidence": "medium",
+      "efficiency_pct": 78.22,
+      "bound_type": "memory",
+      "library": "PyTorch Native",
+      "time_ms": 0.04
+    },
+    {
+      "operation": "aten::all",
+      "category": "reduce",
+      "type": "kernel_tuning",
+      "impact_score": 0.02,
+      "impact_score_low": 0.01,
+      "impact_score_high": 0.02,
+      "confidence": "medium",
+      "efficiency_pct": 84.27,
+      "bound_type": null,
+      "library": "PyTorch Native",
+      "time_ms": 0.004
+    },
+    {
+      "operation": "aten::_scaled_dot_product_flash_attention",
+      "category": "sdpa_fwd",
+      "type": "kernel_tuning",
+      "impact_score": 1.91,
+      "impact_score_low": 1.64,
+      "impact_score_high": 2.19,
+      "confidence": "medium",
+      "efficiency_pct": 32.91,
+      "bound_type": "memory",
+      "library": null,
+      "time_ms": 0.114
+    }
+  ]
+}

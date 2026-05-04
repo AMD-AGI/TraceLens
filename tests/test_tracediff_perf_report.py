@@ -616,7 +616,7 @@ class TestEnrichSheetWithTrace2:
         )
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-20.0)
-        assert result.iloc[0]["lca_kernel_count_trace2"] == 3.0
+        assert result.iloc[0]["lca_count_trace2"] == 3.0
         assert result.iloc[0]["lca_total_kernel_time_trace2_us"] == 80.0
 
     def test_unmatched_row_gets_nan(self):
@@ -680,12 +680,12 @@ class TestEnrichSheetWithTrace2:
         kt_idx = cols.index("Kernel Time (µs)_sum")
         assert cols[kt_idx + 1] == "speedup (trace2/trace1)"
         assert cols[kt_idx + 2] == "delta_us (trace2 - trace1)"
-        assert cols[kt_idx + 3] == "lca_kernel_count_trace2"
+        assert cols[kt_idx + 3] == "lca_count_trace2"
         assert cols[kt_idx + 4] == "lca_id"
         assert cols[kt_idx + 5] == "lca_name"
         assert cols[kt_idx + 6] == "lca_total_kernel_time_trace1_us"
         assert cols[kt_idx + 7] == "lca_total_kernel_time_trace2_us"
-        assert np.isnan(result.iloc[0]["lca_kernel_count_trace2"])
+        assert np.isnan(result.iloc[0]["lca_count_trace2"])
         assert result.iloc[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(50.0)
 
     def test_lca_id_contains_semicolon_separated_list(self):
