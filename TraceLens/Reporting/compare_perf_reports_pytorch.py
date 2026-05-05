@@ -453,9 +453,7 @@ def generate_compare_perf_reports_pytorch(
                 reports, sheet_to_load, tags, config
             )
         elif "ops_summary_by_category" in sheets:
-            raise ValueError(
-                f"ops_summary_by_category sheet not found in {reports[0]}"
-            )
+            raise ValueError(f"ops_summary_by_category sheet not found in {reports[0]}")
 
     # Perform kernel_summary if specified
     if "kernel_summary" in sheets or "all" in sheets:
