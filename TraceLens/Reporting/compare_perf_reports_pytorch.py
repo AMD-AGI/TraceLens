@@ -86,11 +86,10 @@ SHEETS_COMPARE_CONFIG = {
             "Kernel duration (µs)_mean",
             "Kernel duration (µs)_count",
         ],
-        # "Parent op category" used to be dropped here; we keep it now so the
-        # comparison output carries op-category context per kernel (issue #331).
         "cols_to_delete": [
             "Kernel duration (µs)_min",
             "Kernel duration (µs)_max",
+            "Parent op category",
         ],
         "sort_col": "Kernel duration (µs)_sum",
     },
