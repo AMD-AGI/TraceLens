@@ -443,8 +443,6 @@ def generate_compare_perf_reports_pytorch(
         results[sheet_to_load] = ops
 
     # Perform ops_summary_by_category if specified (issue #331).
-    # Older reports won't have this sheet, so we silently skip when missing
-    # under "all"; explicit selection still raises so the user sees the issue.
     if "ops_summary_by_category" in sheets or "all" in sheets:
         sheet_to_load = "ops_summary_by_category"
         if sheet_to_load in report_sheet_names:
