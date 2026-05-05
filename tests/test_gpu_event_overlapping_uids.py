@@ -24,6 +24,13 @@ overlapping_uids computation (GPUEventAnalyser):
 - Sub-microsecond overlap (<1µs) filtered as timestamp noise (Bug 1 regression)
 - Exactly 1µs overlap meets threshold and IS marked (strict < 1.0 check)
 - Above-threshold overlap (>1µs) correctly marked
+- Zero-duration GPU events do not raise (TraceLens-internal#182 regression):
+    same-UID end (0) sorts before start (1) at equal timestamps; the sweep-line
+    must skip zero-measure intervals from active_uids tracking.
+- ROCm legacy rocclr copy/fill kernels (cat=kernel with rocclr-internal names
+    used by ROCm 7.1) are rerouted to memcpy_events / comp_events to match
+    ROCm 7.2's cat=gpu_memcpy / cat=gpu_memset bucketing for cross-version
+    report comparability.
 
 overlap_pct computation (via kernel launchers and DataFrames):
 - Partial overlap between kernels from different cpu_ops
@@ -338,6 +345,147 @@ def test_above_threshold_overlap_is_marked():
     by_uid = _get_overlapping_uids_by_uid(result)
     assert by_uid[1] == {2}, "2.0µs overlap should be marked"
     assert by_uid[2] == {1}, "2.0µs overlap should be marked"
+
+
+# ── Zero-duration GPU events (TraceLens-internal#182 regression) ────────
+
+
+def test_zero_duration_memcpy_does_not_raise():
+    """Reproduces TraceLens-internal#182: ROCm 7.2 emits gpu_memcpy events
+    with dur=0 (HtoD transfers reported as zero-duration). The sweep-line
+    sort key (ts, point_type) puts end (0) before start (1) at equal ts,
+    so a same-UID end-point would be processed before its start-point and
+    raise KeyError on active_uids.remove(uid)."""
+    # Mix of normal kernels and a zero-dur memcpy (matches the bad trace shape)
+    k1 = _make_event(1, 100, 50, "kernel")
+    memcpy = _make_event(2, 200, 0, "gpu_memcpy", name="Memcpy HtoD (Host -> Device)")
+    k2 = _make_event(3, 300, 50, "kernel")
+    analyser = GPUEventAnalyser([k1, memcpy, k2])
+    # Must not raise
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    # Zero-dur event present but has empty overlaps
+    assert by_uid[2] == set()
+    # Zero-dur event is still included in the all_gpu and memcpy lists
+    assert any(e["UID"] == 2 for e in result[GPUEventAnalyser.all_gpu_key])
+    assert any(e["UID"] == 2 for e in result[GPUEventAnalyser.memcpy_key])
+
+
+def test_zero_duration_kernel_does_not_raise():
+    """Same regression but for cat==kernel; covers any future case where
+    a sub-microsecond Triton / HIP graph kernel is reported with dur=0."""
+    k1 = _make_event(1, 100, 50, "kernel")
+    zero_dur = _make_event(2, 200, 0, "kernel", name="zero_dur_triton")
+    k2 = _make_event(3, 300, 50, "kernel")
+    analyser = GPUEventAnalyser([k1, zero_dur, k2])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[2] == set()
+    assert any(e["UID"] == 2 for e in result[GPUEventAnalyser.computation_key])
+
+
+def test_zero_duration_does_not_break_other_overlaps():
+    """A zero-dur event in the middle of a stream of overlapping events
+    must not perturb overlap detection between the other events."""
+    a = _make_event(1, 0, 100, "kernel")  # [0, 100]
+    zero = _make_event(2, 50, 0, "gpu_memcpy", name="Memcpy HtoD")  # zero-dur at t=50
+    b = _make_event(3, 50, 100, "kernel")  # [50, 150] - overlaps a
+    analyser = GPUEventAnalyser([a, zero, b])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    # a and b still detected as overlapping despite the zero-dur in between
+    assert by_uid[1] == {3}
+    assert by_uid[3] == {1}
+    # zero-dur event has no overlaps (zero-measure cannot overlap anything)
+    assert by_uid[2] == set()
+
+
+def test_only_zero_duration_events_does_not_raise():
+    """Edge case: trace contains only zero-duration events. Sweep-line
+    must short-circuit cleanly without entering the active_uids loop."""
+    z1 = _make_event(1, 100, 0, "gpu_memcpy", name="Memcpy HtoD")
+    z2 = _make_event(2, 200, 0, "gpu_memcpy", name="Memcpy HtoD")
+    analyser = GPUEventAnalyser([z1, z2])
+    result = analyser.get_gpu_event_lists()
+    by_uid = _get_overlapping_uids_by_uid(result)
+    assert by_uid[1] == set()
+    assert by_uid[2] == set()
+
+
+# ── ROCm legacy rocclr kernel rerouting (7.1 → 7.2 categorization parity) ───
+#
+# In ROCm 7.1 / older Primus images, the trace producer labels memory copies
+# as cat=kernel with rocclr-internal names (MEMORY_COPY_*,
+# __amd_rocclr_copyBuffer*, __amd_rocclr_fillBuffer*). ROCm 7.2 uses
+# cat=gpu_memcpy / cat=gpu_memset matching the CUDA convention. These tests
+# pin the rerouting so a 7.1 trace's gpu_timeline buckets compute / memcpy /
+# memset the same way a 7.2 trace would. See AMD-AGI/TraceLens-internal#357.
+
+
+def test_rocm_legacy_copy_kernels_routed_to_memcpy():
+    """ROCm 7.1 names every flavour of copy lands in memcpy_events, not comp."""
+    cases = [
+        (1, "MEMORY_COPY_HOST_TO_DEVICE"),
+        (2, "MEMORY_COPY_DEVICE_TO_HOST"),
+        (3, "MEMORY_COPY_DEVICE_TO_DEVICE"),
+        (4, "__amd_rocclr_copyBuffer.kd"),
+        (5, "__amd_rocclr_copyBuffer"),  # tolerate missing .kd suffix
+        (6, "__amd_rocclr_copyBufferRect.kd"),
+        (7, "__amd_rocclr_copyBufferRectAligned.kd"),
+    ]
+    events = [_make_event(uid, uid * 100, 10, "kernel", n) for uid, n in cases]
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+
+    memcpy_uids = {e["UID"] for e in result[GPUEventAnalyser.memcpy_key]}
+    comp_uids = {e["UID"] for e in result[GPUEventAnalyser.computation_key]}
+    expected = {uid for uid, _ in cases}
+    assert memcpy_uids == expected, (
+        f"All rocclr copy kernels must route to memcpy_events; "
+        f"got memcpy={memcpy_uids}, comp={comp_uids}"
+    )
+    assert not (comp_uids & expected), "rocclr copy kernels must not stay in comp"
+
+
+def test_rocm_legacy_fill_kernels_stay_in_comp():
+    """ROCm 7.1 fill kernels stay in comp_events (matches ROCm 7.2 gpu_memset
+    bucketing — gpu_memset is dispatched to comp_events too in this file)."""
+    cases = [
+        (1, "__amd_rocclr_fillBufferAligned.kd"),
+        (2, "__amd_rocclr_fillBuffer.kd"),
+        (3, "__amd_rocclr_fillBuffer"),  # tolerate missing .kd suffix
+    ]
+    events = [_make_event(uid, uid * 100, 10, "kernel", n) for uid, n in cases]
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+
+    memcpy_uids = {e["UID"] for e in result[GPUEventAnalyser.memcpy_key]}
+    comp_uids = {e["UID"] for e in result[GPUEventAnalyser.computation_key]}
+    expected = {uid for uid, _ in cases}
+    assert comp_uids == expected, "rocclr fill kernels must stay in comp_events"
+    assert not (memcpy_uids & expected), "rocclr fill kernels must not route to memcpy"
+
+
+def test_normal_kernel_with_copy_in_name_not_rerouted():
+    """Triton kernels with '_to_copy_' or 'copy' in the name (e.g.
+    triton_per_fused__to_copy_sum_2) must NOT be misclassified — they are
+    real compute kernels. The legacy patterns are anchored to rocclr names
+    only (MEMORY_COPY_* and __amd_rocclr_*Buffer*)."""
+    benign = [
+        (1, "triton_per_fused__to_copy_sum_2.kd"),
+        (2, "at::native::detail::split_with_sizes_copy_out_contiguous_no_cast_kernel"),
+        (3, "MyCustomCopyKernel"),
+        (4, "memcpy_my_thing"),
+    ]
+    events = [_make_event(uid, uid * 100, 10, "kernel", n) for uid, n in benign]
+    analyser = GPUEventAnalyser(events)
+    result = analyser.get_gpu_event_lists()
+
+    memcpy_uids = {e["UID"] for e in result[GPUEventAnalyser.memcpy_key]}
+    comp_uids = {e["UID"] for e in result[GPUEventAnalyser.computation_key]}
+    expected = {uid for uid, _ in benign}
+    assert comp_uids == expected, "benign copy-named kernels must stay in comp"
+    assert not memcpy_uids, "no benign kernel should leak into memcpy_events"
 
 
 def _mk_event(cat, name, ts, dur, pid, tid, args=None):

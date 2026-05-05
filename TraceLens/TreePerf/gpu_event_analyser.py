@@ -72,13 +72,6 @@ class GPUEventAnalyser:
     gpu_event_keys = [all_gpu_key, computation_key, communication_key, memcpy_key]
     cpu_event_keys = [all_cpu_key]
 
-    @property
-    @staticmethod
-    def all_event_keys():
-        return itertools.chain(
-            GPUEventAnalyser.gpu_event_keys, GPUEventAnalyser.cpu_event_keys
-        )
-
     def get_gpu_event_lists(self):
         """
         Return a dictionary of lists of events, categorized by event types
@@ -108,18 +101,40 @@ class GPUEventAnalyser:
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
                 if "overlapping_uids" not in event:
-                    compute_overlapping_uids = True
-                    points.append(
-                        (event["ts"], 1, event["UID"])
-                    )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
-                    points.append((event["t_end"], 0, event["UID"]))
                     event["overlapping_uids"] = set()
+                    # Skip zero-duration GPU events from the sweep-line below.
+                    # A zero-measure interval cannot overlap anything, and the
+                    # (ts, point_type) sort ordering puts end (0) before start
+                    # (1) at equal timestamps. For a zero-dur event, ts == t_end,
+                    # so its own end-point would be processed before its
+                    # start-point and raise KeyError on active_uids.remove(uid).
+                    # Observed on ROCm 7.2 traces (gpu_memcpy events with
+                    # dur=0); see TraceLens-internal#182.
+                    if event["t_end"] > event["ts"]:
+                        compute_overlapping_uids = True
+                        points.append(
+                            (event["ts"], 1, event["UID"])
+                        )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
+                        points.append((event["t_end"], 0, event["UID"]))
                 gpu_events.append(event)
 
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if TraceEventUtils.is_communication_string(event.get("name")):
+                    name = event.get("name") or ""
+                    # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
+                    # bucket so cross-version (7.1 vs 7.2) reports compare
+                    # like-for-like; rocclr fill kernels follow gpu_memset's
+                    # existing home (comp_events). See AMD-AGI/TraceLens-internal#357.
+                    if category == "kernel" and TraceEventUtils.is_rocm_legacy_memcpy(
+                        name
+                    ):
+                        memcpy_events.append(event)
+                    elif category == "kernel" and TraceEventUtils.is_rocm_legacy_memset(
+                        name
+                    ):
+                        comp_events.append(event)
+                    elif TraceEventUtils.is_communication_string(name):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)

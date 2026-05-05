@@ -29,6 +29,7 @@ from conftest import (
     format_diff_details,
     list_perf_report_csv_sheets,
     read_perf_report_csv,
+    update_reference_csvs,
 )
 
 # ---------------------------------------------------------------------------
@@ -166,16 +167,28 @@ class TestJaxPerfReportE2E:
 @pytest.mark.parametrize(
     "trace_path", JAX_TRACES, ids=[_short_id(t) for t in JAX_TRACES]
 )
-def test_jax_perf_report_csv_regression(trace_path, tmp_path, tol=1e-6):
+def test_jax_perf_report_csv_regression(
+    trace_path, tmp_path, update_references, tol=1e-6
+):
     """
     When a sibling ``<trace_folder>_perf_report_csvs/`` directory exists under
     tests/traces, generated CSVs must match it (regression).
+
+    When ``--update-references`` is passed,
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
     """
     ref_dir = jax_ref_perf_report_csv_dir(trace_path)
-    if not os.path.isdir(ref_dir):
-        pytest.skip(f"No CSV reference directory: {ref_dir}")
     out_dir = str(tmp_path / "jax_perf_report_csvs")
     generate_perf_report_jax(profile_path=trace_path, output_csvs_dir=out_dir)
+
+    if update_references:
+        update_reference_csvs(out_dir, ref_dir)
+        pytest.skip(f"Updated reference: {ref_dir}")
+        return
+
+    if not os.path.isdir(ref_dir):
+        pytest.skip(f"No CSV reference directory: {ref_dir}")
 
     sheets = list_perf_report_csv_sheets(ref_dir)
     assert sheets, f"Reference directory has no CSV files: {ref_dir}"

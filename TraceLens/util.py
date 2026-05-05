@@ -555,8 +555,9 @@ class TraceEventUtils:
     # TODO separate util class for Jax
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(
-            TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata
+        if (
+            event.get(TraceEventUtils.TraceKeys.Phase)
+            == TraceEventUtils.TracePhases.Metadata
         ):
             return "metadata"
         elif (
@@ -645,6 +646,32 @@ class TraceEventUtils:
     def is_communication_string(text: str) -> bool:
         """Return True if *text* case-insensitively indicates a collective operation."""
         return any(x.match(text) for x in TraceEventUtils.get_communication_regexes())
+
+    # ROCm 7.1 / older Primus images label memory copies and fills as cat=kernel
+    # with rocclr-internal names (MEMORY_COPY_*, __amd_rocclr_copyBuffer*,
+    # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
+    # cat=gpu_memset matching the CUDA convention. These patterns rebucket
+    # legacy traces so cross-version reports compare like-for-like.
+    # See: AMD-AGI/TraceLens-internal#357
+    _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
+        r"^("
+        r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"
+        r"|__amd_rocclr_copyBuffer(Rect)?(Aligned)?"
+        r")(\.kd)?$"
+    )
+    _ROCM_LEGACY_MEMSET_NAMES = re.compile(
+        r"^__amd_rocclr_fillBuffer(Aligned)?(\.kd)?$"
+    )
+
+    @staticmethod
+    def is_rocm_legacy_memcpy(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy copy kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMCPY_NAMES.match(text))
+
+    @staticmethod
+    def is_rocm_legacy_memset(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy fill kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMSET_NAMES.match(text))
 
 
 class RocprofParser:
