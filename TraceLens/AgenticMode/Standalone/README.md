@@ -14,19 +14,13 @@ TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered perf
 
 ## Prerequisites
 
-### 1. Clone TraceLens-internal
 
-```bash
-git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens-internal
-```
-
-### 2. Install TraceLens
+### 1. Install TraceLens
 
 **Local (no container):**
 
 ```bash
-pip install -e .
+pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 ```
 
 **Cluster with container:**
@@ -37,7 +31,7 @@ SSH into your node, exec into the container, and install:
 ssh <node>
 docker exec -it <container> bash
 cd /path/to/TraceLens-internal
-pip install -e .
+pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 ```
 
 ### 3. Install the Cursor CLI (Optional)
@@ -59,11 +53,11 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 1. **In a Cursor (v2.5+) chat with Claude Opus 4.7 High, invoke:**
    ```
-   Run standalone analysis on <path_to_trace.json>
+   "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json>"
    ```
 
 
-2. **Provide when prompted:**
+2. **Provide if prompted:**
    - Trace file path
    - Platform (MI300X/MI325X/MI350X/MI355X/MI455X)
    - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
@@ -78,25 +72,22 @@ Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify yo
 **Cluster + container — default (training and non-vLLM/SGLang eager inference):**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang eager mode):**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang graph replay + capture):**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
