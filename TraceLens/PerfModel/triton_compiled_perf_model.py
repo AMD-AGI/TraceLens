@@ -3,6 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """
 Perf model for torch.compile-generated Triton kernels (triton_poi_*, triton_red_*,
 triton_per_*).
@@ -32,27 +33,53 @@ import re
 # Counts arithmetic operations; memory-only ops are 0.
 # ---------------------------------------------------------------------------
 _FLOPS_PER_ELEM: dict[str, int] = {
-    "aten.add": 1, "aten.sub": 1, "aten.mul": 1, "aten.div": 1,
-    "aten.pow": 2, "aten.sqrt": 2, "aten.rsqrt": 2,
-    "aten.exp": 4, "aten.log": 4,
-    "aten.sigmoid": 4, "aten.tanh": 4,
-    "aten.relu": 1, "aten.silu": 4, "aten.gelu": 8,
-    "aten.mean": 1, "aten.sum": 1, "aten.var": 2,
-    "aten.abs": 1, "aten.neg": 1, "aten.reciprocal": 2,
-    "aten.ne": 1, "aten.eq": 1, "aten.lt": 1, "aten.gt": 1,
+    "aten.add": 1,
+    "aten.sub": 1,
+    "aten.mul": 1,
+    "aten.div": 1,
+    "aten.pow": 2,
+    "aten.sqrt": 2,
+    "aten.rsqrt": 2,
+    "aten.exp": 4,
+    "aten.log": 4,
+    "aten.sigmoid": 4,
+    "aten.tanh": 4,
+    "aten.relu": 1,
+    "aten.silu": 4,
+    "aten.gelu": 8,
+    "aten.mean": 1,
+    "aten.sum": 1,
+    "aten.var": 2,
+    "aten.abs": 1,
+    "aten.neg": 1,
+    "aten.reciprocal": 2,
+    "aten.ne": 1,
+    "aten.eq": 1,
+    "aten.lt": 1,
+    "aten.gt": 1,
     # memory-only
-    "aten._to_copy": 0, "aten.copy_": 0, "aten.clone": 0, "aten.embedding": 0,
+    "aten._to_copy": 0,
+    "aten.copy_": 0,
+    "aten.clone": 0,
+    "aten.embedding": 0,
 }
 
 _PTR_DTYPE_BYTES: dict[str, int] = {
-    "*bf16": 2, "*fp16": 2, "*f16": 2,
-    "*fp32": 4, "*f32": 4,
-    "*i8": 1, "*u8": 1, "*i32": 4, "*i64": 8,
+    "*bf16": 2,
+    "*fp16": 2,
+    "*f16": 2,
+    "*fp32": 4,
+    "*f32": 4,
+    "*i8": 1,
+    "*u8": 1,
+    "*i32": 4,
+    "*i64": 8,
 }
 
 # ---------------------------------------------------------------------------
 # Inductor artifact parsing
 # ---------------------------------------------------------------------------
+
 
 def _cache_dirs() -> list[str]:
     dirs = []
@@ -84,9 +111,7 @@ def _parse_wrapper(content: str) -> dict[str, dict]:
         # ATen ops from the comment block immediately above the kernel definition
         comment_region = content[max(0, m.start() - 600) : m.start()]
         aten_m = re.search(r"Original ATen:\s*\[([^\]]+)\]", comment_region)
-        aten_ops = (
-            [o.strip() for o in aten_m.group(1).split(",")] if aten_m else []
-        )
+        aten_ops = [o.strip() for o in aten_m.group(1).split(",")] if aten_m else []
 
         # size_hints=[xnumel] for pointwise, [xnumel, rnumel] for reductions
         hints_m = re.search(r"size_hints=\[([^\]]+)\]", block)
@@ -127,9 +152,7 @@ def _lookup(name: str) -> dict | None:
         return _kernel_meta_cache[name]
 
     for cache_dir in _cache_dirs():
-        for path in glob.glob(
-            os.path.join(cache_dir, "**", "*.py"), recursive=True
-        ):
+        for path in glob.glob(os.path.join(cache_dir, "**", "*.py"), recursive=True):
             if path in _scanned_wrappers:
                 continue
             _scanned_wrappers.add(path)
@@ -150,6 +173,7 @@ def _lookup(name: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Perf model class
 # ---------------------------------------------------------------------------
+
 
 class TritonCompiledPerfModel:
     """
