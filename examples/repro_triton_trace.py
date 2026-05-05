@@ -27,8 +27,11 @@ import torch.profiler
 # ---------------------------------------------------------------------------
 # Output paths
 # ---------------------------------------------------------------------------
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "torch_trace_output_claude", "triton_repro")
+OUT_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "torch_trace_output_claude", "triton_repro"
+)
 TRACE_PATH = os.path.join(OUT_DIR, "trace.json.gz")
+
 
 # ---------------------------------------------------------------------------
 # Model: RMSNorm + hand-rolled Attention + SwiGLU MLP
@@ -49,7 +52,7 @@ class RMSNorm(nn.Module):
 class Attention(nn.Module):
     def __init__(self, dim: int, n_heads: int):
         super().__init__()
-        self.n_heads  = n_heads
+        self.n_heads = n_heads
         self.head_dim = dim // n_heads
         self.q = nn.Linear(dim, dim, bias=False)
         self.k = nn.Linear(dim, dim, bias=False)
@@ -70,20 +73,22 @@ class SwiGLUMLP(nn.Module):
     def __init__(self, dim: int, hidden_dim: int):
         super().__init__()
         self.gate_proj = nn.Linear(dim, hidden_dim, bias=False)
-        self.up_proj   = nn.Linear(dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
 
     def forward(self, x):
-        return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(
+            torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x)
+        )
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, dim: int = 2048, n_heads: int = 16, mlp_ratio: int = 4):
         super().__init__()
         self.norm1 = RMSNorm(dim)
-        self.attn  = Attention(dim, n_heads)
+        self.attn = Attention(dim, n_heads)
         self.norm2 = RMSNorm(dim)
-        self.mlp   = SwiGLUMLP(dim, dim * mlp_ratio)
+        self.mlp = SwiGLUMLP(dim, dim * mlp_ratio)
 
     def forward(self, x):
         x = x + self.attn(self.norm1(x))
@@ -96,7 +101,7 @@ class TransformerBlock(nn.Module):
 # ---------------------------------------------------------------------------
 def main():
     device = "cuda"
-    dtype  = torch.bfloat16
+    dtype = torch.bfloat16
     B, T, D = 8, 4096, 2048
 
     os.makedirs(OUT_DIR, exist_ok=True)
