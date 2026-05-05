@@ -368,6 +368,11 @@ class TreePerfAnalyzer:
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
+        if perf_model_class is None:
+            name = event.get("name", "")
+            if name.startswith("triton_poi_") or name.startswith("triton_red_") or name.startswith("triton_per_"):
+                from TraceLens.PerfModel.triton_compiled_perf_model import TritonCompiledPerfModel
+                perf_model_class = TritonCompiledPerfModel
         perf_model = perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
@@ -1547,7 +1552,14 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
-        return event.get("name") in self.op_to_perf_model_class_map
+        name = event.get("name", "")
+        if name in self.op_to_perf_model_class_map:
+            return True
+        # torch.compile-generated Triton kernels have dynamic names not in the static map.
+        # TritonCompiledPerfModel handles them by parsing Inductor artifacts.
+        if name.startswith("triton_poi_") or name.startswith("triton_red_") or name.startswith("triton_per_"):
+            return True
+        return False
 
     def _is_leaf_cpu_op(self, event):
         """
