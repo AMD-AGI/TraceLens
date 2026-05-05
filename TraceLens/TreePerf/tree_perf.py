@@ -361,6 +361,7 @@ class TreePerfAnalyzer:
                 "name": kernel["name"],
                 "dur": kernel["dur"],
                 "stream": kernel.get("args", {}).get("stream", None),
+                "gpu_op_uid": kernel.get("UID"),
             }
             for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
@@ -1293,12 +1294,15 @@ class TreePerfAnalyzer:
             )
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
-        # --- CHANGE: Collect durations BY INDEX, not by name ---
+        # Collect per-position durations and gpu_op_uids across all instances.
+        # gpu_op_uids is needed by downstream tracediff matching; the template's
+        # single gpu_op_uid only points at the first instance, so without this
+        # consumers see a tiny subset of the kernels actually in the group.
         all_durations = [[] for _ in template]
+        all_gpu_op_uids = [[] for _ in template]
 
         for kernel_list in series_of_kernel_lists:
             if isinstance(kernel_list, list):
-                # Basic validation to prevent errors and warn about inconsistencies
                 if len(kernel_list) != len(template):
                     warnings.warn(
                         f"Inconsistent kernel list length found. Skipping a row.",
@@ -1308,7 +1312,6 @@ class TreePerfAnalyzer:
 
                 for i, kernel in enumerate(kernel_list):
                     try:
-                        # Append the duration to the list corresponding to its position
                         all_durations[i].append(kernel["dur"])
                     except (KeyError, IndexError):
                         warnings.warn(
@@ -1316,31 +1319,31 @@ class TreePerfAnalyzer:
                             UserWarning,
                         )
                         continue
+                    uid = kernel.get("gpu_op_uid")
+                    if uid is None:
+                        uid = kernel.get("UID")
+                    if uid is not None:
+                        all_gpu_op_uids[i].append(uid)
 
-        # --- CHANGE: Create a deep copy to avoid modifying original data ---
         summary_list = copy.deepcopy(template)
 
-        # Now, compute statistics and populate the summary list
         for i, kernel_summary in enumerate(summary_list):
             durations_for_this_index = all_durations[i]
             dur_arr = np.array(durations_for_this_index)
 
-            # --- CHANGE: Use consistent naming and clear up original 'dur' key ---
             del kernel_summary["dur"]
+            kernel_summary.pop("gpu_op_uid", None)
 
             kernel_summary["count"] = len(dur_arr)
-            kernel_summary["total_duration_us"] = np.sum(
-                dur_arr
-            )  # Use consistent key name
+            kernel_summary["total_duration_us"] = np.sum(dur_arr)
+            kernel_summary["gpu_op_uids"] = list(all_gpu_op_uids[i])
 
             if not durations_for_this_index:
-                # If no durations were collected (e.g., all rows skipped), skip metric calculation
                 continue
 
             for metric in agg_metrics:
                 if metric in METRIC_MAP:
                     metric_name, agg_func = METRIC_MAP[metric]
-                    # --- CHANGE: Use the consistent metric name directly ---
                     kernel_summary[metric_name] = agg_func(dur_arr)
 
         summary_list.sort(
@@ -1823,9 +1826,7 @@ class TreePerfAnalyzer:
                 continue
             if evt["UID"] in collected_gpu_uids:
                 continue
-            if not include_nccl and TraceEventUtils.is_communication_string(
-                evt.get("name", "")
-            ):
+            if not include_nccl and "nccl" in evt.get("name", "").lower():
                 continue
 
             has_cpu_op = False
@@ -1985,6 +1986,7 @@ class TreePerfAnalyzer:
                                 "name": gpu_event.get("name"),
                                 "dur": gpu_event.get("dur"),
                                 "stream": gpu_event.get("args", {}).get("stream"),
+                                "gpu_op_uid": gpu_event.get("UID"),
                             }
                         )
                 row["kernel_details"] = kernel_details if kernel_details else None
@@ -2028,6 +2030,17 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
+                    gpu_event_uids = event.get("gpu_events", [])
+                    if gpu_event_uids:
+                        gpu_events_list = [
+                            self.tree.get_UID2event(uid)
+                            for uid in gpu_event_uids
+                            if self.tree.get_UID2event(uid)
+                        ]
+                        if gpu_events_list:
+                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                                gpu_events_list
+                            ).compute_metrics()["busy_time"]
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
                 fwd_event, _ = self._get_linked_fwd_event(event)
@@ -2049,6 +2062,17 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
+                    gpu_event_uids = event.get("gpu_events", [])
+                    if gpu_event_uids:
+                        gpu_events_list = [
+                            self.tree.get_UID2event(uid)
+                            for uid in gpu_event_uids
+                            if self.tree.get_UID2event(uid)
+                        ]
+                        if gpu_events_list:
+                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                                gpu_events_list
+                            ).compute_metrics()["busy_time"]
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
                 row["perf_params"] = None
