@@ -1332,6 +1332,7 @@ class TreePerfAnalyzer:
             dur_arr = np.array(durations_for_this_index)
 
             del kernel_summary["dur"]
+            kernel_summary.pop("gpu_op_uid", None)
 
             kernel_summary["count"] = len(dur_arr)
             kernel_summary["total_duration_us"] = np.sum(dur_arr)
