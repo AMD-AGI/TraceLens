@@ -82,7 +82,7 @@ blank line between them. The validator checks for these as substring matches.
 | Label | Purpose |
 |-------|---------|
 | `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). Omit columns that have no data. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
+| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Compute tier: rendered from `category_findings[i]` (matched by `rank`), two-bullet low/high `impact_score` format (see § Impact estimate rendering). System tier: `Impact estimate is not quantifiable from trace data.` |
@@ -145,20 +145,20 @@ inside `## Detailed Analysis` blocks.
 |-----------|--------|-----------------------------------------|-----------|------|-------|----------|------------|-------|
 ```
 
+**All nine columns above are mandatory.** Never drop a column because some or all of its values are missing — render `—` in any cell whose value is null/absent and keep the column. The header row of every `**Data:**` table must contain exactly these nine column names in this order. (Agents may append extra columns at the end when needed, e.g. `Sub-Category` in the generic-op analyzer, but must not remove or reorder the nine standard columns.)
+
 **Column mappings** (source: `metrics['operations']`):
 - **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
 - **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. `—` when absent.
 - **Kernel Path**: `operations[i].launcher_path`. Relative Python path that launched the kernel (e.g. `sglang/srt/layers/quantization/fp8_utils.py(549): aiter_w8a8_block_fp8_linear`). **Copy the value exactly as-is — do NOT truncate, shorten, or extract just the function name.** `—` when absent.
 - **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
-- **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `null` ⇒ omit the column. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
-- **Count**: `operations[i].count` — total invocations, not unique signatures.
-- **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte`
+- **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `—` when null. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
+- **Count**: `operations[i].count` — total invocations, not unique signatures. `—` when absent.
+- **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte` — note the nested path under `efficiency`, NOT a top-level field. `—` when null.
 - **Efficiency**: `operations[i].efficiency.efficiency_percent`, formatted by `bound_type`:
   - `compute-bound`: `X.XX% of Y TFLOPS` (Y = `resolved_peak_maf`)
   - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_hbm_bw`)
 - **Bound**: `operations[i].efficiency.bound_type` + `-bound` suffix (e.g., `memory-bound`). Must reflect compute/memory bound type — never use `classification.gemm_type` or similar.
-
-Agents may add extra columns when needed (e.g. `Sub-Category` in the generic-op analyzer).
 
 ---
 
