@@ -3,6 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """
 Repro script: capture a Chrome trace of a torch.compile-generated Triton kernel
 workload, then run TraceLens to expose the blank GFLOPS/TFLOPS/TB/s rows.
