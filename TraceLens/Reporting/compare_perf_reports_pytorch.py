@@ -67,6 +67,18 @@ SHEETS_COMPARE_CONFIG = {
         "cols_to_delete": ["total_direct_kernel_time_sum"],
         "sort_col": "total_direct_kernel_time_ms",
     },
+    # Per-category aggregation produced by
+    # TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category.
+    # Source columns: "op category", "Count", "total_direct_kernel_time_ms",
+    # "Percentage (%)", "Cumulative Percentage (%)" (and optionally
+    # "is_recompute", "time ms per gpu"). The us-scale "_sum" col is dropped
+    # upstream, so nothing extra to clean up here.
+    "ops_summary_by_category": {
+        "keys": ["op category"],
+        "diff_cols": ["total_direct_kernel_time_ms", "Count"],
+        "cols_to_delete": [],
+        "sort_col": "total_direct_kernel_time_ms",
+    },
     "kernel_summary": {
         "keys": ["Kernel name"],
         "diff_cols": [
@@ -74,10 +86,11 @@ SHEETS_COMPARE_CONFIG = {
             "Kernel duration (µs)_mean",
             "Kernel duration (µs)_count",
         ],
+        # "Parent op category" used to be dropped here; we keep it now so the
+        # comparison output carries op-category context per kernel (issue #331).
         "cols_to_delete": [
             "Kernel duration (µs)_min",
             "Kernel duration (µs)_max",
-            "Parent op category",
         ],
         "sort_col": "Kernel duration (µs)_sum",
     },
@@ -430,6 +443,21 @@ def generate_compare_perf_reports_pytorch(
         ops = process_summary_sheet(reports, sheet_to_load, tags, config)
         results[sheet_to_load] = ops
 
+    # Perform ops_summary_by_category if specified (issue #331).
+    # Older reports won't have this sheet, so we silently skip when missing
+    # under "all"; explicit selection still raises so the user sees the issue.
+    if "ops_summary_by_category" in sheets or "all" in sheets:
+        sheet_to_load = "ops_summary_by_category"
+        if sheet_to_load in report_sheet_names:
+            config = SHEETS_COMPARE_CONFIG[sheet_to_load]
+            results[sheet_to_load] = process_summary_sheet(
+                reports, sheet_to_load, tags, config
+            )
+        elif "ops_summary_by_category" in sheets:
+            raise ValueError(
+                f"ops_summary_by_category sheet not found in {reports[0]}"
+            )
+
     # Perform kernel_summary if specified
     if "kernel_summary" in sheets or "all" in sheets:
         if "kernel_summary" not in report_sheet_names:
@@ -644,6 +672,7 @@ def main() -> None:
         choices=(
             "gpu_timeline",
             "ops_summary",
+            "ops_summary_by_category",
             "kernel_summary",
             "ops_all",
             "roofline",
