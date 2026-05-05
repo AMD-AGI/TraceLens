@@ -8,13 +8,14 @@ import ast
 import gzip
 import os
 import json
-import pandas as pd
-import warnings
-import gzip
 import logging
+import warnings
+
+import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..util import DataLoader
+from ..util import DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
 from ..util import TraceEventUtils
 
 
@@ -49,31 +50,7 @@ def _parse_split_sizes(value):
     return None
 
 
-import re
-
-DEFAULT_CUSTOM_COLLECTIVE_PATTERNS = [
-    (r"cross_device_reduce", "allreduce"),
-]
-
-_DEFAULT_FILTER_PATTERNS = TraceEventUtils.get_communication_regexes() + [
-    re.compile(p, re.IGNORECASE) for p, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-]
-
-_DEFAULT_INFERENCE_RULES = [
-    (re.compile(p, re.IGNORECASE), collective)
-    for p, collective in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-]
-
-
-def _build_filter_and_inference_rules(custom_patterns):
-    """Build compiled regex lists from user-provided (pattern, collective) tuples."""
-    filter_patterns = TraceEventUtils.get_communication_regexes()
-    inference_rules = []
-    for pattern, collective in custom_patterns:
-        compiled = re.compile(pattern, re.IGNORECASE)
-        filter_patterns.append(compiled)
-        inference_rules.append((compiled, collective))
-    return filter_patterns, inference_rules
+_DEFAULT_FILTER_PATTERNS = TraceEventUtils.get_communication_regexes()
 
 
 def _infer_collective_name(kernel_name, inference_rules):
@@ -139,7 +116,8 @@ class NcclAnalyser:
             collective kernels (e.g. vLLM's ``cross_device_reduce``).
             When a kernel matches and has no ``Collective name`` in its
             trace metadata, *collective_name* is used as the inferred type.
-            Defaults to ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS``.
+            If omitted, uses ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` from
+            ``TraceLens.util`` (same list as :meth:`TraceEventUtils.build_collective_filter_and_inference_rules`).
         """
         self.logger = logging.getLogger(__name__)
         self.list_profile_filepaths = list_profile_filepaths
@@ -150,15 +128,12 @@ class NcclAnalyser:
             max_workers if max_workers is not None else (os.cpu_count() or 8)
         )
 
-        patterns = (
-            custom_collective_patterns
-            if custom_collective_patterns is not None
-            else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-        )
         (
             self._filter_patterns,
             self._inference_rules,
-        ) = _build_filter_and_inference_rules(patterns)
+        ) = TraceEventUtils.build_collective_filter_and_inference_rules(
+            custom_collective_patterns
+        )
 
         # Byte sizes per dtype
         self.dtype2bytes = {
