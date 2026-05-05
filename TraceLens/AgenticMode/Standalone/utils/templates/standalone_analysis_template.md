@@ -153,7 +153,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 ## Kernel Fusion Opportunities (Experimental)
 
-> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Each finding shows both a **Confidence** (fusion pattern quality) and perf model coverage in the **Impact** line. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Actual recoverable time depends on implementation feasibility and interaction effects.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
@@ -168,7 +168,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 **Action**: [1-2 sentences - which kernels to fuse and how]
 
 <!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[0].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[0].impact_score> high=<kernel_fusion_metrics.impact_estimates[0].impact_score_high> -->
-**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+**Impact**: [impact_score: X.X (perf-model coverage Y/Z kernels)]
 <!-- impact-end -->
 
 **Confidence**: [high / medium / low - fusion pattern quality]
@@ -184,7 +184,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 **Action**: [1-2 sentences]
 
 <!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[1].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[1].impact_score> high=<kernel_fusion_metrics.impact_estimates[1].impact_score_high> -->
-**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+**Impact**: [impact_score: X.X (perf-model coverage Y/Z kernels)]
 <!-- impact-end -->
 
 **Confidence**: [high / medium / low]
@@ -200,7 +200,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 **Action**: [1-2 sentences]
 
 <!-- impact-begin kind=p_item low=<kernel_fusion_metrics.impact_estimates[2].impact_score_low> mid=<kernel_fusion_metrics.impact_estimates[2].impact_score> high=<kernel_fusion_metrics.impact_estimates[2].impact_score_high> -->
-**Impact**: [impact_score: X.X at 75–100% of roofline (perf-model coverage Y/Z kernels)]
+**Impact**: [impact_score: X.X (perf-model coverage Y/Z kernels)]
 <!-- impact-end -->
 
 **Confidence**: [high / medium / low]
@@ -291,7 +291,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 
-> **Note:** Kernel fusion analysis is experimental. impact_score projections use a roofline projection model (75-100% of peak) with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->

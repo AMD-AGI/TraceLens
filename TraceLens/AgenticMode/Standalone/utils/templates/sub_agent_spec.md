@@ -82,7 +82,7 @@ blank line between them. The validator checks for these as substring matches.
 | Label | Purpose |
 |-------|---------|
 | `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
+| `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Compute tier: rendered from `category_findings[i]` (matched by `rank`), two-bullet low/high `impact_score` format (see § Impact estimate rendering). System tier: `Impact estimate is not quantifiable from trace data.` |
@@ -204,8 +204,8 @@ Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 
 ```markdown
 <!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
-- Low end impact_score (75% roofline target): <impact_score_low>
-- High end impact_score (100% roofline target): <impact_score_high>
+- Low end impact_score: <impact_score_low>
+- High end impact_score: <impact_score_high>
 <!-- impact-end -->
 ```
 

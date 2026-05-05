@@ -67,7 +67,7 @@ Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.j
 Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_estimates` array is the **authoritative candidate list** for findings — `kernel_fusion_analysis.py` has already gated it on `MIN_IMPACT_SCORE` and perf-model coverage, so every entry is a quantifiable, above-threshold opportunity. Each estimate has:
 
 - `operation`: Module base name (matches `base_name` in `fusion_candidates.json`)
-- `impact_score`, `impact_score_low`, `impact_score_high`: % of E2E recoverable by fusing (mid / 75% / 100% roofline target)
+- `impact_score`, `impact_score_low`, `impact_score_high`: % of E2E recoverable by fusing (mid / low / high)
 - `bound_type`: "compute" or "memory"
 - `fusion_type`: "matrix_compute" or "memory_bound"
 - `confidence`: "high" or "medium"
@@ -152,7 +152,7 @@ Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`
 ## Overview
 Found N kernel fusion opportunities across M module types.
 
-> **Methodology:** impact_score projections use a roofline model with 85% memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual recoverable time may vary with workload and hardware.
+> **Methodology:** impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual recoverable time may vary with workload and hardware.
 
 ## Findings
 
@@ -163,7 +163,7 @@ Found N kernel fusion opportunities across M module types.
 **Action:** <Specific recommendation>
 
 <!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
-**Impact:** impact_score: X.X (with all N kernels modelled)
+**Impact**: [impact_score: X.X (perf-model coverage Y/Z kernels)]
 <!-- impact-end -->
 
 **Confidence:** High -- <brief reason from fusion pattern classification>
@@ -186,8 +186,8 @@ kernel pattern, instance count, has_fused_kernel status. Must end with
 **Impact estimate:**
 
 <!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
-- Low end impact_score (75% roofline target): X.XX
-- High end impact_score (100% roofline target): X.XX
+- Low end impact_score: X.XX
+- High end impact_score: X.XX
 <!-- impact-end -->
 - Coverage: M of N kernels modelled
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
