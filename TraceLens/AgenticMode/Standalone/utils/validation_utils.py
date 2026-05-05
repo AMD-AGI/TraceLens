@@ -69,6 +69,8 @@ _NOT_QUANTIFIABLE_SENTINEL = re.compile(
 # with `|` and has `Args` as one of the column names.
 _TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args\s*\|.*\|\s*$", re.MULTILINE)
 
+_KP_TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Kernel Path\s*\|.*\|\s*$", re.MULTILINE)
+
 # Level 2: cross-cutting batch checks
 _TIME_DISCREPANCY_THRESHOLD = 15  # percent
 
@@ -195,9 +197,10 @@ def validate_findings_file(filepath, tier):
             f"reasoning-candidate count ({len(candidates)})"
         )
 
-    # Compute tier only: Args column cells must match operations[].args verbatim
+    # Compute tier only: Args and Kernel Path cells must match metrics JSON verbatim
     if tier == "compute":
         errors.extend(_validate_args_column(content, filepath))
+        errors.extend(_validate_kernel_path_column(content, filepath))
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -274,6 +277,64 @@ def _validate_args_column(content, findings_path):
         f"{cat}_metrics.json (paste verbatim, keep <br>): {cell}"
         for ln, cell in _scan_args_cells(content)
         if cell not in valid_args
+    ]
+
+
+def _scan_kernel_path_cells(content):
+    """Yield (line_no, cell) for every non-empty Kernel Path cell in markdown tables."""
+    lines = content.splitlines()
+    for header_idx, header_line in enumerate(lines):
+        if not _KP_TABLE_HEADER_RE.match(header_line):
+            continue
+        cols = [c.strip() for c in header_line.strip("|").split("|")]
+        try:
+            kp_col = cols.index("Kernel Path")
+        except ValueError:
+            continue
+        for row_idx in range(header_idx + 2, len(lines)):
+            row = lines[row_idx]
+            if not row.strip().startswith("|"):
+                break
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            if kp_col < len(cells) and cells[kp_col]:
+                yield row_idx + 1, cells[kp_col]
+
+
+def _load_valid_launcher_paths(*metrics_paths):
+    """Build set of operations[].launcher_path strings from one or more metrics JSONs."""
+    valid = set()
+    for p in metrics_paths:
+        try:
+            with open(p) as f:
+                d = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        valid.update(
+            op["launcher_path"]
+            for op in d.get("operations", [])
+            if isinstance(op.get("launcher_path"), str) and op["launcher_path"]
+        )
+    return valid
+
+
+def _validate_kernel_path_column(content, findings_path):
+    """Level-1 check: every Kernel Path cell in a compute findings file must match
+    operations[].launcher_path verbatim in the matching `<cat>_metrics.json`.
+
+    Mirrors _validate_args_column. Skips silently if the metrics JSON is absent
+    or has no launcher_path fields.
+    """
+    output_dir = os.path.dirname(os.path.dirname(findings_path))
+    cat = os.path.basename(findings_path).replace("_findings.md", "")
+    metrics_path = os.path.join(output_dir, "category_data", f"{cat}_metrics.json")
+    valid_paths = _load_valid_launcher_paths(metrics_path)
+    if not valid_paths:
+        return []
+    return [
+        f"Kernel Path cell on line {ln} does not match operations[].launcher_path in "
+        f"{cat}_metrics.json (paste verbatim): {cell}"
+        for ln, cell in _scan_kernel_path_cells(content)
+        if cell not in valid_paths
     ]
 
 

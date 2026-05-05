@@ -152,7 +152,8 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --enable_pseudo_ops \
-  --group_by_num_kernels
+  --group_by_num_kernels \
+  --include_call_stack
 ```
 
 **Inference eager mode** (analysis_mode = `inference`, inference_exec_mode = `eager`):
@@ -165,7 +166,8 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --group_by_parent_module \
   --enable_pseudo_ops \
-  --group_by_num_kernels
+  --group_by_num_kernels \
+  --include_call_stack
 ```
 
 **Inference graph replay + capture mode** (analysis_mode = `inference`, inference_exec_mode = `graph_capture`):
@@ -179,7 +181,8 @@ Use the analysis mode selected in Step 0 to determine which CLI tool to run.
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --group_by_parent_module \
   --enable_pseudo_ops \
-  --group_by_num_kernels
+  --group_by_num_kernels \
+  --include_call_stack
 ```
 
 This generates:
@@ -489,7 +492,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 ## Step 11: Generate Final Report (<output_dir>/standalone_analysis.md)
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/standalone_analysis.md` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 will use to read and modify it.
+2. **Write** the filled-in report to `<output_dir>/standalone_analysis.md` using `<prefix> tee <output_dir>/standalone_analysis.md << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
@@ -498,7 +501,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping.
    - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
-   - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
+   - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Follow the template for formatting.
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
 The report at `<output_dir>/standalone_analysis.md` must use these exact `##` headers — do NOT rename them:
