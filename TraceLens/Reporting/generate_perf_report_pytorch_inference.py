@@ -400,6 +400,16 @@ def apply_extension(perf_analyzer, extension_path):
     extension_path = os.path.abspath(extension_path)
     extension_name = os.path.splitext(os.path.basename(extension_path))[0]
 
+    from TraceLens.PerfModel.op_categories import (
+        register_dict_cat2names_extension,
+        register_op_categories,
+        register_perf_model_categories,
+    )
+    from TraceLens.PerfModel.torch_op_mapping import (
+        OP_CATEGORY_REGISTRY,
+        dict_base_class2category,
+    )
+
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
@@ -418,6 +428,24 @@ def apply_extension(perf_analyzer, extension_path):
                 f"Expected perf_model_extension to be a dict, got {type(perf_model_extension)}"
             )
         perf_analyzer.op_to_perf_model_class_map.update(perf_model_extension)
+        register_perf_model_categories(
+            perf_model_extension,
+            dict_base_class2category,
+            OP_CATEGORY_REGISTRY,
+            perf_analyzer.dict_cat2names,
+        )
+    if hasattr(extension, "op_category_extension"):
+        print(f"Applying op category extension from {extension_path}")
+        op_category_extension = getattr(extension, "op_category_extension")
+        if not isinstance(op_category_extension, dict):
+            raise ValueError(
+                f"Expected op_category_extension to be a dict, got {type(op_category_extension)}"
+            )
+        register_op_categories(
+            op_category_extension,
+            OP_CATEGORY_REGISTRY,
+            perf_analyzer.dict_cat2names,
+        )
     if hasattr(extension, "dict_cat2names_extension"):
         print(f"Updating dict_cat2names with extension from {extension_path}")
         if not isinstance(extension.dict_cat2names_extension, dict):
@@ -425,13 +453,11 @@ def apply_extension(perf_analyzer, extension_path):
                 f"Expected dict_cat2names_extension to be a dict, got {type(extension.dict_cat2names_extension)}"
             )
 
-        # defaultdict(<class 'list'>,
-        for cat, names in extension.dict_cat2names_extension.items():
-            if cat not in perf_analyzer.dict_cat2names:
-                perf_analyzer.dict_cat2names[cat] = []
-            if not isinstance(names, list):
-                raise ValueError(f"Expected names to be a list, got {type(names)}")
-            perf_analyzer.dict_cat2names[cat].extend(names)
+        register_dict_cat2names_extension(
+            extension.dict_cat2names_extension,
+            OP_CATEGORY_REGISTRY,
+            perf_analyzer.dict_cat2names,
+        )
 
 
 def trunc_kernel_details(row, kernel_detail_col, trunc_length=64):
