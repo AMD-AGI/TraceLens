@@ -125,8 +125,14 @@ class InferenceAttention:
         except (ValueError, IndexError):
             return None
         return {
-            "c_sq": c_sq, "c_sk": c_sk, "c_sqsq": c_sqsq, "c_sqsk": c_sqsk,
-            "g_sq": g_sq, "g_sk": g_sk, "g_sqsq": g_sqsq, "g_sqsk": g_sqsk,
+            "c_sq": c_sq,
+            "c_sk": c_sk,
+            "c_sqsq": c_sqsq,
+            "c_sqsk": c_sqsk,
+            "g_sq": g_sq,
+            "g_sk": g_sk,
+            "g_sqsq": g_sqsq,
+            "g_sqsk": g_sqsk,
         }
 
     @staticmethod
@@ -151,7 +157,11 @@ class InferenceAttention:
 
             # dtype_KV priority: perf_meta.KCache_dtype -> Input type[1] -> dtype_Q.
             propagated_kv = (event.get("perf_meta") or {}).get("KCache_dtype")
-            dtype_KV = propagated_kv if propagated_kv else (input_types[1] if len(input_types) > 1 else dtype_Q)
+            dtype_KV = (
+                propagated_kv
+                if propagated_kv
+                else (input_types[1] if len(input_types) > 1 else dtype_Q)
+            )
             return {
                 "B": 1,
                 "N_Q": N_Q,
@@ -210,8 +220,17 @@ class InferenceAttention:
 
     @staticmethod
     def bytes_func(
-        B, H_Q, H_KV, d_h_qk, d_h_v, c_sq, c_sk, g_sq, g_sk,
-        bytes_per_element, bytes_per_element_KV=None,
+        B,
+        H_Q,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        c_sq,
+        c_sk,
+        g_sq,
+        g_sk,
+        bytes_per_element,
+        bytes_per_element_KV=None,
     ):
         """Calculate bytes moved for attention (context + generation).
 
@@ -249,13 +268,11 @@ class InferenceAttention:
             + B * g_sq * H_KV * d_h_v  # V read (current token, Q-dtype)
         )
         gen_elems_kv = (
-            B * (g_sk - g_sq) * H_KV * d_h_qk
-            + B * (g_sk - g_sq) * H_KV * d_h_v
+            B * (g_sk - g_sq) * H_KV * d_h_qk + B * (g_sk - g_sq) * H_KV * d_h_v
         )
-        return (
-            (ctx_elems_q + gen_elems_q) * bytes_per_element
-            + (ctx_elems_kv + gen_elems_kv) * bytes_per_element_KV
-        )
+        return (ctx_elems_q + gen_elems_q) * bytes_per_element + (
+            ctx_elems_kv + gen_elems_kv
+        ) * bytes_per_element_KV
 
     # ------------------------------------------------------------------
     # Instance methods – work for any subclass with valid param_details
@@ -373,11 +390,7 @@ class aiter_paged_attention_v1(InferenceAttention):
             args = event["args"]
             dims = args["Input Dims"]
             types = args.get("Input type") or []
-            concrete = (
-                args.get("Concrete Inputs")
-                or event.get("Concrete Inputs")
-                or []
-            )
+            concrete = args.get("Concrete Inputs") or event.get("Concrete Inputs") or []
             q_shape, k_shape, v_shape = dims[2], dims[3], dims[4]
             N_Q, H_Q, d_h_qk = q_shape
             d_h_v = v_shape[-1]
