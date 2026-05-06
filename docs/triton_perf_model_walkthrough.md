@@ -5,7 +5,7 @@
 TraceLens scans `*.py` files under the TorchInductor cache directory (e.g. `/tmp/torchinductor_<user>/`) and finds the wrapper file containing `async_compile.triton(...)`.
 
 ```
-/tmp/torchinductor_janmatai/ic/cic4cqnjedth7ryeosrme7a4qey5aevllpplux6ybzqmjlditm5y.py
+/tmp/torchinductor_<user>/<hash_prefix>/<hash>.py
 ```
 
 ## Step 2: Extract three fields via regex
