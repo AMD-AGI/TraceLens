@@ -7,6 +7,11 @@
 from . import perf_model
 from collections import defaultdict
 from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
+from .op_categories import (
+    LEGACY_CATEGORIZE_EXTRAS,
+    build_op_category_registry,
+    categorize_torch_op_v2 as _categorize_v2,
+)
 
 op_to_perf_model_class_map = {
     "aten::mm": perf_model.aten_mm,
@@ -399,3 +404,25 @@ def categorize_torch_op(row):
                 return "multi_tensor_apply"
     # if none of the above cases match, return 'other'
     return "other"
+
+
+# ---------------------------------------------------------------------------
+# Registry-based v2 categorizer (introduced in PR A; runs alongside the
+# legacy ``categorize_torch_op`` chain above). The parity test
+# ``tests/test_categorize_torch_op_parity.py`` asserts both produce the same
+# output for every reachable name. PR B will swap v2 in and delete v1.
+# ---------------------------------------------------------------------------
+OP_CATEGORY_REGISTRY = build_op_category_registry(
+    op_to_perf_model_class_map,
+    dict_base_class2category,
+    extras=LEGACY_CATEGORIZE_EXTRAS,
+)
+
+
+def categorize_torch_op_v2(row):
+    """Registry-based replacement for :func:`categorize_torch_op`.
+
+    Equivalent in behavior to the legacy if/elif chain (verified by the
+    parity test). See ``op_categories.py`` for the design rationale.
+    """
+    return _categorize_v2(row, OP_CATEGORY_REGISTRY)
