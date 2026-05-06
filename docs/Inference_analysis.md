@@ -18,7 +18,7 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 
 | Feature               | Description                                                                                                                      |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **Agentic Analysis**  | Agentic workflows for single-trace analysis analysis for performance improvement recommendations |
+| **Agentic Analysis**  | Agentic workflows for single-trace analysis for performance improvement recommendations |
 | **TraceDiff**         | Extended to support inference traces with Lowest Common Ancestor (LCA) analysis for kernel correlation across platforms          |
 | **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations.      |
 | **Trace Splitting**   | Splitting of large tracefiles into steady-state regions, per-iteration traces, and phase-specific analyses                       |
