@@ -46,6 +46,7 @@ def get_pseudo_op_mappings():
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
+        "aiter::paged_attention_v1": attention_perf_model_extensions.aiter_paged_attention_v1,
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd_586": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops

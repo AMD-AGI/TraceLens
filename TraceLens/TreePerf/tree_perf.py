@@ -1547,6 +1547,8 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
+        if event.get("perf_meta", {}).get("exclude_perf_model"):
+            return False
         return event.get("name") in self.op_to_perf_model_class_map
 
     def _is_leaf_cpu_op(self, event):

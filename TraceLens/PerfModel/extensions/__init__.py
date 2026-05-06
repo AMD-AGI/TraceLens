@@ -24,6 +24,7 @@ from .attention_perf_model_extensions import (
     aiter_fmha_v3_varlen_fwd,
     vllm_unified_attention_with_output,
     gdn_attention_core,
+    aiter_paged_attention_v1,
 )
 
 from .perf_model_extensions import (
@@ -65,6 +66,7 @@ __all__ = [
     "aiter_fmha_v3_varlen_fwd",
     "vllm_unified_attention_with_output",
     "gdn_attention_core",
+    "aiter_paged_attention_v1",
     "gemm_a8w8_blockscale",
     "aiter_gelu_and_mul",
     "aiter_gelu_tanh_and_mul",
