@@ -8,39 +8,83 @@ See LICENSE for license information.
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode for Standalone Analysis is a Cursor-based AI-powered performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. LLMs have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability.
+TraceLens Agentic Mode for Standalone Analysis is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability.
 
 ---
 
 ## Prerequisites
 
-### 1. Clone TraceLens-internal
 
-```bash
-git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens-internal
-```
-
-### 2. Install TraceLens
+### 1. Install TraceLens
 
 **Local (no container):**
 
 ```bash
-pip install -e .
+pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
 ```
 
 **Cluster with container:**
 
-SSH into your node, exec into the container, and install:
+SSH into your node, exec into the container, and install.
+
+Option 1: pip install
 
 ```bash
 ssh <node>
 docker exec -it <container> bash
-cd /path/to/TraceLens-internal
+pip install git+https://github.com/AMD-AGI/TraceLens-internal.git
+```
+
+Option 2: pip install from source
+
+```bash
+ssh <node>
+docker exec -it <container> bash
+git clone https://github.com/AMD-AGI/TraceLens-internal.git
+cd TraceLens-internal
 pip install -e .
 ```
 
-### 3. Install the Cursor CLI (Optional)
+---
+
+## Quick Start - How to Use
+
+> **Note**: The instructions below use the Cursor IDE and CLI (`agent`), but the orchestrator skills are portable. They also work with Claude Code CLI (`claude`) and other agentic runners that support skill file discovery.
+
+### To run via Cursor chat:
+
+1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
+   - Standalone (single trace):
+    ```
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json>"
+    ```
+   - Comparative (two traces):
+    ```
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> and and <path_to_trace2.json>"
+    ```
+    **NOTE**: Always pass **baseline** trace as trace1
+
+
+2. **Provide if prompted:**
+   - Trace file path
+   - Platform
+   - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
+   - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
+   - Node name / container name / venv name
+   - Output directory (optional)
+
+
+3. **Results:**
+   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with Compute Kernel Insights, Kernel Fusion Insights and System-Level Insights.
+   - **Intermidate outputs** (Review not recommended):
+     - `system_findings/` - System-level and kernel fusion analysis intermediates
+     - `category_findings/` - Per-category compute kernel analysis intermediates
+
+### To run via CLI (headless):
+
+Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
+
+#### Install the Cursor CLI
 
 The `agent` CLI is required for headless (non-interactive) runs:
 
@@ -48,70 +92,31 @@ The `agent` CLI is required for headless (non-interactive) runs:
 curl https://cursor.com/install -fsS | bash
 ```
 
-This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step.
+This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step. 
 
----
-
-## Quick Start - How to Use
-
-
-### To run via Cursor chat:
-
-1. **In a Cursor (v2.5+) chat with Claude Opus 4.7 High, invoke one of:**
-   - Standalone (single trace):
-     ```
-     Run standalone analysis on <path_to_trace.json>
-     ```
-   - Comparative (two traces):
-     ```
-     Run comparative analysis on <path_to_trace1.json> and <path_to_trace2.json>
-     ```
-     **NOTE**: Always pass **baseline** trace as trace1
-
-2. **Provide when prompted:**
-   - Trace file path(s)
-   - Platform (MI300X/MI325X/MI350X/MI355X/MI455X) of first trace
-   - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
-   - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
-   - Node name / container name / venv name
-   - Output directory (optional)
-
-### To run via CLI (headless):
-
-Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
 
 **Cluster + container — default (training and eager inference non-vLLM/SGLang), assuming standalone:**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang eager mode):**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang graph replay + capture):**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run standalone analysis on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
+    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
-
-
-3. **Get results:**
-   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with Compute Kernel Insights, Kernel Fusion Insights (three-label format: Identification, Data, Impact estimate), and System-Level Insights (five-label format).
-   - **Additional outputs:**
-     - `system_findings/` - System-level and kernel fusion analysis
-     - `category_findings/` - Per-category compute kernel analysis
 
 ---
 
@@ -176,14 +181,14 @@ analysis_output/
 The analysis is split into three independent tiers that can be composed separately:
 
 - **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
-- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings via a roofline projection model with 85% memory/compute pipeline overlap. Uses `utils/orchestrator_prepare.py` (Step 4b) for candidate extraction and `kernel_fusion_analysis.py` for deterministic metrics, then invokes `kernel-fusion-analyzer` to generate findings.
+- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
 - **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
 
 Each tier writes to a separate findings directory and produces an independently composable report section.
 
 ```mermaid
 flowchart TD
-    Prep["Steps 0-5: TraceLens Perf Report"]
+    Prep["Steps 0-5: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
     Prep --> Step6["Step 6: System-Level Analysis"]
     Prep --> Step7["Step 7: Compute Kernel Analysis"]
 
@@ -242,13 +247,13 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 |-------|---------|
 | `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
 | `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
-| `elementwise-analyzer` | Analyzes elementwise operations (add, mul, copy, etc.) |
-| `reduce-analyzer` | Analyzes reduction operations (mean, sum, softmax) |
+| `elementwise-analyzer` | Analyzes elementwise operations |
+| `reduce-analyzer` | Analyzes reduction operations |
 | `triton-analyzer` | Analyzes Triton-compiled kernels |
 | `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
 | `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
 | `convolution-analyzer` | Analyzes convolution operations |
-| `generic-op-analyzer` | Analyzes uncategorized operations (communication, graph, misc.) |
+| `generic-op-analyzer` | Analyzes uncategorized operations or operations without dedicated sub-agent |
 
 ### Sub-agent model tiers
 
@@ -276,51 +281,21 @@ The orchestrator supports three execution environments. During Step 0, you are a
 
 | Environment | When to use | What happens |
 |-------------|-------------|--------------|
-| **Local** | TraceLens is installed on the machine running Cursor | Commands run directly (no SSH, no Docker) |
+| **Local** | TraceLens is installed on the local machine | Commands run directly (no SSH, no Docker) |
 | **Local + venv** | TraceLens is installed in a virtual environment on the local machine | Commands are prefixed with `source <venv>/bin/activate` |
 | **Cluster (no container)** | TraceLens is installed natively on a remote node | Commands are wrapped with `ssh <node>` |
 | **Cluster + venv** | TraceLens is installed in a venv on a remote node | Commands are wrapped with `ssh <node> "source <venv>/bin/activate && ..."` |
 | **Cluster + container** | TraceLens is installed inside a Docker container on a remote node | Commands are wrapped with `ssh <node> "docker exec <container> ..."` 
-
-## Extending Capability
-
-Any step in the workflow can be overridden or contextualized by adding instructions to the initial prompt. The normal analysis flow continues after the override.
-
-## Best Practices for Evolving the Agent
-
-Any major change to the agent -- orchestrator logic, sub-agent skills, pattern libraries, or analysis thresholds -- must be validated before merging. Because the pipeline uses LLMs, outputs are non-deterministic, so both correctness and consistency must be verified.
-
-### 1. Run Evals
-
-After making a change, run the eval suite against the test cases in `evals/unit_test_traces.csv` (unit tests) or `evals/e2e_test_traces.csv` (full-model end-to-end traces). The suite validates **workflow correctness** (directory structure, required files, report formatting) and **output quality** (comparison against reference reports).
-
-See [evals/README.md](../../../evals/README.md) for full documentation on the eval harness, adding test cases, and interpreting results.
-
-### 2. Run the Repeatability Study Before Merging
-
-The repeatability study runs each test case multiple times (default: 5) and aggregates pass rates across runs. Use `run_repeatability_parallel.sh` for concurrent execution with configurable `TEST_TRACES_CSV`, `SUITE_NAME`, and `MAX_PARALLEL`. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results, classify failures, and generate reports (`pr_report.md`, `fix_ticket_report.md`) with reproducer packages. This surfaces flaky behavior that a single eval pass would miss and is essential for robustness.
-
-## Continual Learning
-
-After an analysis run, if you identify a missed issue, ask Cursor to study why a particular issue was missed. Then, invoke the **Continual Learning** skill to update the relevant sub-agent's pattern library. It proposes minimal, append-only additions to the "Common Patterns" section of the appropriate analyzer so future runs catch similar issues automatically.
 
 ## Bug Reporting
 
 Please include the following details when reporting an issue. Please use the TraceLens-internal private repo to share sensitive data.
 
 - Description
-- Software Version (PyTorch, Primus, vLLM, SGLang)
+- Software Version
 - Hardware (e.g., GPU model)
 - Issue Observed
 - Expected Behavior
 - Scripts/Commands Used
 - Error/Unexpected Behavior
 - Trace Files Used for Analysis
-
-## 🗺️ Roadmap
-
-TraceLens Standalone Agentic analysis is currently an **experimental** feature.
-
-### 🔄 In Progress
-
-- Improving the performance and reliability of the agentic analysis pipeline.

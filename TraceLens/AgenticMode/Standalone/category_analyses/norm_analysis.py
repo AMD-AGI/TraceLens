@@ -36,12 +36,18 @@ def main():
         help=(
             "standalone: roofline efficiency in operations[].efficiency; "
             "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
-        ),
+        )
+    ),
+    
+    parser.add_argument(
+        "--category",
+        default="norm",
+        help="Category name prefix used for input/output files (default: norm)",
     )
     args = parser.parse_args()
 
     run_category_analysis(
-        category="norm",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,

@@ -52,7 +52,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze Convolution operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
-
+    
     parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),
@@ -61,11 +61,17 @@ def main():
             "standalone: roofline efficiency in operations[].efficiency; "
             "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
         ),
+    ),
+    
+    parser.add_argument(
+        "--category",
+        default="convolution",
+        help="Category name prefix used for input/output files (default: convolution)",
     )
     args = parser.parse_args()
 
     run_category_analysis(
-        category="convolution",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,

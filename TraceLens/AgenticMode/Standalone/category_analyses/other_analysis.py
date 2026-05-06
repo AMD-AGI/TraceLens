@@ -15,6 +15,8 @@ import argparse
 import sys
 import os
 
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
@@ -109,24 +111,28 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    comm_mask = ops_df["name"].apply(
-        lambda n: classify_other_operation(str(n)) == "communication"
-    )
-    comm_ops_df = ops_df[comm_mask]
-    skipped_comm_ops = {
-        "count": len(comm_ops_df),
-        "op_names": comm_ops_df["name"].tolist(),
-        "message": (
-            "Communication kernels detected. Use TraceLens's NCCL Analyzer "
-            "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
-        ),
-    }
-    if skipped_comm_ops["count"] > 0:
-        print(
-            f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
-            f"use TraceLens's NCCL Analyzer instead."
+    # Strip communication kernels from the "other" bucket only; other categories
+    # (e.g. customcollective) reuse this script and must keep those ops.
+    skipped_comm_ops = None
+    if category == "other":
+        comm_mask = ops_df["name"].apply(
+            lambda n: classify_other_operation(str(n)) == "communication"
         )
-    ops_df = ops_df[~comm_mask]
+        comm_ops_df = ops_df[comm_mask]
+        skipped_comm_ops = {
+            "count": len(comm_ops_df),
+            "op_names": comm_ops_df["name"].tolist(),
+            "message": (
+                "Communication kernels detected. Use TraceLens's NCCL Analyzer "
+                "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
+            ),
+        }
+        if skipped_comm_ops["count"] > 0:
+            print(
+                f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
+                f"use TraceLens's NCCL Analyzer instead."
+            )
+        ops_df = ops_df[~comm_mask]
 
     config = {
         "extra_fields": ["Input Dims", "Input type"],
@@ -134,8 +140,20 @@ def main():
     }
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
+    
+    callstacks_df = None
+    cs_path = os.path.join(
+        perf_report_csv_dir(args.output_dir), "unified_perf_callstacks.csv"
+    )
+    if os.path.exists(cs_path):
+        callstacks_df = pd.read_csv(cs_path)
+
     operations = build_operation_metrics(
-        ops_df, metadata, config, comparison_scope=args.comparison_scope
+        ops_df,
+        metadata,
+        config,
+        callstacks_df=callstacks_df,
+        comparison_scope=args.comparison_scope,
     )
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
 

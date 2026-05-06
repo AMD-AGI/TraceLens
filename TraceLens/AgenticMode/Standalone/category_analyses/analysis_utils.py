@@ -77,6 +77,22 @@ def perf_report_csv_dir(output_dir: str) -> str:
             return os.path.join(output_dir, "perf_report_trace1_csvs")
     return os.path.join(output_dir, "perf_report_csvs")
 
+_SKIP_PY_PATTERNS = (
+    "torch/",
+    "_functorch/",
+    "_dynamo/",
+    "torch/cuda/",
+    "torch/utils/",
+    "vllm/compilation/",
+    "/tmp/torchinductor",
+    "kernel_shape_profiler",
+)
+
+_KNOWN_PKG_ANCHORS = (
+    "sglang/", "vllm/", "aiter/", "fbgemm_gpu/", "sgl_kernel/",
+    "torchrec/", "components/", "megatron/",
+)
+
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
@@ -410,11 +426,39 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
+def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
+    """Return the first non-infrastructure .py frame from a call stack, relativized.
+
+    Absolute container prefixes are stripped using ``_KNOWN_PKG_ANCHORS``; unknown
+    roots fall back to the last 3 path segments.  ``aten::`` ops always return "".
+    """
+    if op_name.startswith("aten::"):
+        return ""
+    if not call_stack_str or call_stack_str == "nan":
+        return ""
+    frames = [f.strip() for f in call_stack_str.split(" => ")]
+    for i, frame in enumerate(frames):
+        if i == 0:
+            continue
+        if ".py" not in frame:
+            continue
+        if any(p in frame for p in _SKIP_PY_PATTERNS):
+            continue
+        for anchor in _KNOWN_PKG_ANCHORS:
+            idx = frame.rfind(anchor)
+            if idx > 0:
+                return frame[idx:]
+        if frame.startswith("/") or frame.startswith("./"):
+            parts = frame.lstrip("./").split("/")
+            if len(parts) > 3:
+                return "/".join(parts[-4:])
+        return frame
+    return ""
+
+
 def build_operation_metrics(
-    ops_df: pd.DataFrame,
-    metadata: dict,
-    category_config: dict,
-    comparison_scope: str = "standalone",
+    ops_df: pd.DataFrame, metadata: dict, category_config: dict,
+    callstacks_df: Optional[pd.DataFrame] = None, comparison_scope: str = "standalone"
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
@@ -529,6 +573,17 @@ def build_operation_metrics(
             if matched:
                 op_metric["fusion_flagged"] = True
                 op_metric["fusion_candidate_name"] = matched
+
+        cs_str = ""
+        if callstacks_df is not None:
+            match = callstacks_df[
+                (callstacks_df["name"] == op_name)
+                & (callstacks_df["op category"] == row.get("op category", ""))
+            ]
+            if len(match) > 0:
+                cs_str = str(match.iloc[0].get("call_stack", ""))
+        launcher = _extract_launcher_path(cs_str, op_name)
+        op_metric["launcher_path"] = launcher if launcher else "—"
 
         operations.append(op_metric)
 
@@ -826,9 +881,15 @@ def run_category_analysis(
         ops_df, extra = pre_process_fn(ops_df, metadata)
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    operations = build_operation_metrics(
-        ops_df, metadata, config, comparison_scope=comparison_scope
+    
+    callstacks_df = None
+    cs_path = os.path.join(
+        perf_report_csv_dir(output_dir), "unified_perf_callstacks.csv"
     )
+    if os.path.exists(cs_path):
+        callstacks_df = pd.read_csv(cs_path)
+
+    operations = build_operation_metrics(ops_df, metadata, config, callstacks_df=callstacks_df, comparison_scope=comparison_scope)
     category_specific = extract_fn(ops_df, metadata)
 
     if compute_impact:

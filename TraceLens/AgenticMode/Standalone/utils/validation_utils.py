@@ -28,51 +28,35 @@ import re
 
 from .report_utils import load_manifest, _scan_findings_dir
 
-# ---------------------------------------------------------------------------
-# Constants — all validation thresholds and patterns in one place
-# ---------------------------------------------------------------------------
+# Constants
 
-
-def _metrics_json_for_findings(filepath):
-    """Path to category_data/<stem>_metrics.json for a *_findings.md under category_findings/."""
-    output_dir = os.path.dirname(os.path.dirname(filepath))
-    stem = os.path.basename(filepath).replace("_findings.md", "")
-    return os.path.join(output_dir, "category_data", f"{stem}_metrics.json")
-
-
-def _category_findings_empty(filepath):
-    """True when metrics JSON exists and category_findings is an empty list (sub_agent_spec § empty)."""
-    mp = _metrics_json_for_findings(filepath)
-    try:
-        with open(mp) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-    cf = data.get("category_findings")
-    return isinstance(cf, list) and len(cf) == 0
-
-
-# Level 1: findings file structure
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
-# Optional icon / prefix before P<N>: (e.g. kernel fusion `### 🟢 P1:`).
-_P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
-
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
+# Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
+_P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
 )
-
-# Markdown table header containing an "Args" column. Match line that starts
-# with `|` and has `Args` as one of the column names.
+# Header matcher for the report-wide Args verbatim check (Level 3).
 _TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args\s*\|.*\|\s*$", re.MULTILINE)
-
-# Level 2: cross-cutting batch checks
-_TIME_DISCREPANCY_THRESHOLD = 15  # percent
-
-# Level 3: report structure
+# Mandatory columns of the compute-tier **Data:** Operations Table, in spec
+# order (sub_agent_spec.md § Operations Table Schema). Agents may append
+# extra columns at the end but must not drop or reorder these.
+_COMPUTE_DATA_REQUIRED_COLS = (
+    "Operation",
+    "Args",
+    "Kernel Path",
+    "Time (ms)",
+    "%E2E",
+    "Count",
+    "FLOPS/Byte",
+    "Efficiency",
+    "Bound",
+)
+_TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
@@ -99,9 +83,27 @@ _KNOWN_REPORT_PLACEHOLDERS = {
     "<precision>",
 }
 
-# ---------------------------------------------------------------------------
+
 # Level 1: per-file findings validation (called within each sub-agent)
-# ---------------------------------------------------------------------------
+
+
+def _metrics_json_for_findings(filepath):
+    """Path to category_data/<stem>_metrics.json for a *_findings.md under category_findings/."""
+    output_dir = os.path.dirname(os.path.dirname(filepath))
+    stem = os.path.basename(filepath).replace("_findings.md", "")
+    return os.path.join(output_dir, "category_data", f"{stem}_metrics.json")
+
+
+def _category_findings_empty(filepath):
+    """True when metrics JSON exists and category_findings is an empty list (sub_agent_spec § empty)."""
+    mp = _metrics_json_for_findings(filepath)
+    try:
+        with open(mp) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    cf = data.get("category_findings")
+    return isinstance(cf, list) and len(cf) == 0
 
 
 def validate_findings_file(filepath, tier):
@@ -113,7 +115,8 @@ def validate_findings_file(filepath, tier):
     - At least one reasoning-candidate block in Detailed Analysis
       (unless compute tier and ``category_findings`` is ``[]`` in ``*_metrics.json``)
     - P-item count matches reasoning-candidate count
-    - Compute tier only: Args column cells match operations[].args verbatim
+    - Compute tier only: per-block Data table shape + Args/Kernel Path cells
+      verbatim vs <cat>_metrics.json (see _validate_compute_data_tables)
     - Marker structure: pairing, kind= attribute, per-kind required attrs,
       no mixed null/numeric values, mandatory kind=p_item (except for
       triton_findings.md)
@@ -196,9 +199,10 @@ def validate_findings_file(filepath, tier):
             f"reasoning-candidate count ({len(candidates)})"
         )
 
-    # Compute tier only: Args column cells must match operations[].args verbatim
+    # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
+    # scoped to <!-- reasoning-candidate tier=compute --> blocks.
     if tier == "compute":
-        errors.extend(_validate_args_column(content, filepath))
+        errors.extend(_validate_compute_data_tables(content, filepath))
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -257,30 +261,121 @@ def _load_valid_args(*metrics_paths):
     return valid
 
 
-def _validate_args_column(content, findings_path):
-    """Level-1 check: every Args cell in a compute findings file must match
-    operations[].args verbatim in the matching `<cat>_metrics.json`.
+def _load_compute_data_metrics(metrics_path):
+    """Return (args_set, launcher_paths_set) from one metrics JSON; empty on read failure."""
+    try:
+        with open(metrics_path) as f:
+            d = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set(), set()
+    ops = d.get("operations", [])
+    args = {op["args"] for op in ops if isinstance(op.get("args"), str)}
+    paths = {
+        op["launcher_path"]
+        for op in ops
+        if isinstance(op.get("launcher_path"), str) and op["launcher_path"]
+    }
+    return args, paths
 
-    Catches reformat (e.g. `<br>` -> `,` or `x`), summarization, or content
-    drift. Skips silently if the metrics JSON is absent or has no `args` field.
-    """
-    output_dir = os.path.dirname(os.path.dirname(findings_path))
-    cat = os.path.basename(findings_path).replace("_findings.md", "")
-    metrics_path = os.path.join(output_dir, "category_data", f"{cat}_metrics.json")
-    valid_args = _load_valid_args(metrics_path)
-    if not valid_args:
-        return []
-    return [
-        f"Args cell on line {ln} does not match operations[].args in "
-        f"{cat}_metrics.json (paste verbatim, keep <br>): {cell}"
-        for ln, cell in _scan_args_cells(content)
-        if cell not in valid_args
+
+def _iter_compute_candidate_blocks(content):
+    """Yield (start, end) line-index range for each tier=compute candidate block."""
+    lines = content.splitlines()
+    starts = [
+        (idx, _CANDIDATE_RE.search(line))
+        for idx, line in enumerate(lines)
+        if _CANDIDATE_RE.search(line)
     ]
+    for i, (idx, m) in enumerate(starts):
+        if "tier=compute" not in m.group(0):
+            continue
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
+        yield idx, end
 
 
-# ---------------------------------------------------------------------------
+def _find_data_table(lines, start, end):
+    """Locate the first markdown table after **Data:** in lines[start:end].
+
+    Returns (header_line_1based, header_cols, row_iter) or None. row_iter
+    yields (line_no_1based, cells) per body row.
+    """
+    data_idx = next(
+        (i for i in range(start, end) if lines[i].strip() == "**Data:**"),
+        None,
+    )
+    if data_idx is None:
+        return None
+    header_idx = next(
+        (
+            i
+            for i in range(data_idx + 1, end)
+            if lines[i].lstrip().startswith("|") and lines[i].rstrip().endswith("|")
+        ),
+        None,
+    )
+    if header_idx is None or header_idx + 1 >= end:
+        return None
+    header_cols = [c.strip() for c in lines[header_idx].strip().strip("|").split("|")]
+
+    def rows():
+        for row_idx in range(header_idx + 2, end):
+            row = lines[row_idx]
+            if not row.strip().startswith("|"):
+                break
+            yield row_idx + 1, [c.strip() for c in row.strip().strip("|").split("|")]
+
+    return header_idx + 1, header_cols, rows()
+
+
+def _validate_compute_data_tables(content, findings_path):
+    """For each <!-- reasoning-candidate tier=compute --> block: shape check
+    (Args column required), Args cells verbatim vs operations[].args, and
+    Kernel Path cells verbatim vs operations[].launcher_path when present.
+    Skips silently when the metrics JSON is absent.
+    """
+    metrics_path = _metrics_json_for_findings(findings_path)
+    cat_metrics_basename = os.path.basename(metrics_path)
+    valid_args, valid_paths = _load_compute_data_metrics(metrics_path)
+    lines = content.splitlines()
+    errors = []
+    for start, end in _iter_compute_candidate_blocks(content):
+        table = _find_data_table(lines, start, end)
+        if table is None:
+            errors.append(
+                f"compute-tier reasoning-candidate block at line {start + 1}: "
+                f"no **Data:** table found"
+            )
+            continue
+        header_line, header_cols, row_iter = table
+        if tuple(header_cols[: len(_COMPUTE_DATA_REQUIRED_COLS)]) != _COMPUTE_DATA_REQUIRED_COLS:
+            errors.append(
+                f"compute Data table at line {header_line}: header must start "
+                f"with the {len(_COMPUTE_DATA_REQUIRED_COLS)} canonical columns "
+                f"in order {list(_COMPUTE_DATA_REQUIRED_COLS)}; got {header_cols} "
+                f"(sub_agent_spec.md § Operations Table Schema)"
+            )
+            continue
+        args_idx = _COMPUTE_DATA_REQUIRED_COLS.index("Args")
+        kp_idx = _COMPUTE_DATA_REQUIRED_COLS.index("Kernel Path")
+        for row_line, cells in row_iter:
+            if valid_args and args_idx < len(cells) and cells[args_idx]:
+                if cells[args_idx] not in valid_args:
+                    errors.append(
+                        f"Args cell on line {row_line} does not match "
+                        f"operations[].args in {cat_metrics_basename} "
+                        f"(paste verbatim, keep <br>): {cells[args_idx]}"
+                    )
+            if valid_paths and kp_idx < len(cells) and cells[kp_idx]:
+                if cells[kp_idx] not in valid_paths:
+                    errors.append(
+                        f"Kernel Path cell on line {row_line} does not match "
+                        f"operations[].launcher_path in {cat_metrics_basename} "
+                        f"(paste verbatim): {cells[kp_idx]}"
+                    )
+    return errors
+
+
 # Level 2: cross-cutting batch checks (called at Step 8)
-# ---------------------------------------------------------------------------
 
 
 def validate_subagent_outputs(output_dir):
@@ -382,9 +477,7 @@ def _check_priority_consistency(manifest):
     }
 
 
-# ---------------------------------------------------------------------------
 # Level 3: final report validation (called at Step 11.1)
-# ---------------------------------------------------------------------------
 
 
 def validate_report(output_dir, report_filename: str = "standalone_analysis.md"):
@@ -492,15 +585,6 @@ def _validate_report_args_column(
         for ln, cell in _scan_args_cells(content)
         if cell not in valid_args
     ]
-
-
-# ---------------------------------------------------------------------------
-# MarkerValidator
-#
-# Owns all `<!-- impact-begin ... -->` / `<!-- impact-end -->` marker config
-# and checks. Used by validate_findings_file (per-file findings markers) and
-# validate_report (report markers). .
-# ---------------------------------------------------------------------------
 
 
 class MarkerValidator:

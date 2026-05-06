@@ -182,7 +182,8 @@ Do **not** pass `--extension_*` on the trace2 command.
   --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --enable_pseudo_ops \
-  --group_by_num_kernels
+  --group_by_num_kernels \
+  --include_call_stack
 ```
 
 **Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
@@ -195,7 +196,8 @@ Do **not** pass `--extension_*` on the trace2 command.
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --group_by_parent_module \
   --enable_pseudo_ops \
-  --group_by_num_kernels
+  --group_by_num_kernels \
+  --include_call_stack
 ```
 
 When `<comparison_scope>` = `comparative`, append the same `--extension_file` / `--extension_args <trace2_path>` pair as in the default-mode example (inference generator supports `--extension_args` for TraceDiff).
@@ -211,7 +213,8 @@ When `<comparison_scope>` = `comparative`, append the same `--extension_file` / 
   --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
   --group_by_parent_module \
   --enable_pseudo_ops \
-  --group_by_num_kernels
+  --group_by_num_kernels \
+  --include_call_stack
 ```
 
 This generates: 
@@ -545,16 +548,16 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 **CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
 
 1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Copy** it to `<output_dir>/<report_filename>` using `<prefix>` (e.g., via `<prefix> cp ...` or `<prefix> tee ...`). Do **not** use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 will use to read and modify it.
+2. **Write** the filled-in report to `<output_dir>/<report_filename>` using `<prefix> tee <output_dir>/<report_filename> << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
    - `system_findings/*.md` (system-level P-items)
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
-   - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping.
+   - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping. Render exactly one P-item per entry in `findings[]` — never merge entries.
    - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
-   - **Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting.
+   - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
    - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds." Do **not** rely on `<!-- no-actionable-findings -->` markers — validation uses the metrics JSON, not markers (`sub_agent_spec.md` § No actionable findings).
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
