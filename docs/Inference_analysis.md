@@ -58,10 +58,15 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v18`, or `v19`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
-| Version | Base Image                      | vLLM Version |
-| ------- | ------------------------------- | ------------ |
-| `v18`   | `vllm/vllm-openai-rocm:v0.18.0` | v0.18.0      |
-| `v19`   | `vllm/vllm-openai-rocm:v0.19.0` | v0.19.0      |
+| Version | Base Image                                                    | vLLM Version | Patch File                    |
+| ------- | ------------------------------------------------------------- | ------------ | ----------------------------- |
+| `v14`   | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120`        | v0.14.0      | `config_vllm_v0.14.0.patch`   |
+| `v15`   | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130`        | v0.15.0      | `config_vllm_v0.15.0.patch`   |
+| `v16`   | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` | v0.16.0      | `config_vllm_v0.16.0.patch`   |
+| `v17`   | `vllm/vllm-openai-rocm:v0.17.0`                               | v0.17.0      | `config_vllm_v0.17.0.patch`   |
+| `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      | `config_vllm_v0.18.0.patch`   |
+| `v19`   | `vllm/vllm-openai-rocm:v0.19.0`                               | v0.19.0      | `config_vllm_v0.19.0.patch`   |
+| `v20`   | `rocm/vllm-dev:preview_v0.20.0_20260429`                      | v0.20.0      | `config_vllm_v0.20.0.patch`   |
 
 
 ```bash
@@ -114,15 +119,17 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 1. **Locate your inference engine:**
   For vLLM: 
+  ```bash
+   python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
+  ```
   For SGLang:
   ```bash
    python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
   ```
 2. **Find and apply the relevant patch:**
-  - Browse available patches: [inference patches](../examples/custom_workflows/inference_analysis/)
   - Select by framework and version
   - Apply: `cd /path/to/framework/../ && git apply /path/to/patchfile`
-  vLLM patches are in [vllm_roofline_patches](../examples/custom_workflows/inference_analysis/)
+  vLLM patches are in [vllm_roofline_patches](../examples/custom_workflows/inference_analysis/vllm_patches)
   SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
 
 #### Collection Parameters
@@ -132,6 +139,28 @@ If you prefer to patch an existing environment instead of building a new image, 
 - **Profiler Setup:** Enable CPU-side call-stack and shape capture. For example, vLLM supports `profiler-config.torch_profiler_record_shapes` and `profiler-config.torch_profiler_with_stack`.
 
 #### Trace collection options
+##### vLLM
+The `config_vllm_v*.patch` patches add two `ProfilerConfig` flags that control graph-capture profiling and trace annotation detail. These patches are available for v0.14–v0.20. Pass the flags as server arguments:
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Absolute path to a directory where a PyTorch profiler trace of the CUDA graph capture phase will be saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph capture profiling. |
+| `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When `True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for both context and generation requests. When `False`, annotations record only request counts and token counts. Enable this for full roofline analysis; leave disabled for lighter-weight traces. |
+
+**Example** — enable both flags alongside a standard steady-state window profile:
+
+```bash
+--profiler-config.profiler torch \
+--profiler-config.torch_profiler_dir /workspace/torch_trace \
+--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces \
+--profiler-config.detailed_trace_annotation True \
+--profiler-config.delay_iterations 5402 \
+--profiler-config.max_iterations 256 \
+--profiler-config.ignore_frontend True
+```
+
+> **Note:** `capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch` is set. The capture trace is written once at server startup during CUDA graph construction; the steady-state replay trace is written to `torch_profiler_dir` during the benchmark run. Pass both paths to `generate_perf_report_pytorch_inference` via `--capture_folder` and `--profile_json_path` respectively.
+
 ##### SGLang
 1. While doing the profiling of the execution step, pass the parameter `shape_discovery=True` in the profile request to enable shape discovery and registration for operations which are not covered in default SGLang profile.
 
