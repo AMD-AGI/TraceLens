@@ -2080,6 +2080,7 @@ class TreePerfAnalyzer:
                             if k.startswith("param: ")
                         }
                         row["perf_params"] = perf_params if perf_params else None
+                        row["has_perf_model"] = True
                     except Exception:
                         row["perf_params"] = None
                 else:
