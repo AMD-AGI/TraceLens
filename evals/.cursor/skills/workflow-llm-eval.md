@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: Workflow LLM Eval
-description: Run LLM-based workflow eval (eval 12 only) on a standalone analysis output and produce a results CSV.
+description: Run LLM-based workflow eval (eval 12 only) on an analysis output and produce a results CSV.
 triggers:
   - workflow LLM eval
   - run workflow LLM eval
@@ -17,7 +17,7 @@ tools:
 
 # Workflow LLM Eval
 
-Evaluate the standalone analysis report's Appendix for correct hardware reference values.
+Evaluate the analysis report's Appendix for correct hardware reference values.
 
 **Note:** Evals 9, 10, 11, 13, and 14 have been converted to deterministic Python
 checks in `workflow_scripted_evals.py`. This skill now only handles eval 12 (Hardware
@@ -33,7 +33,7 @@ When triggered, the prompt will specify:
 
 Read these before evaluating:
 
-- `<output_dir>/standalone_analysis.md`
+- `<output_dir>/analysis.md`
 
 ## Scoring Rubric
 
@@ -60,7 +60,7 @@ Eval 12 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval 
 **Category:** Workflow
 **Issue Summary:** Hardware Reference in Appendix
 
-In `standalone_analysis.md`, find the `## Appendix` section. Verify it contains:
+In `analysis.md`, find the `## Appendix` section. Verify it contains:
 
 - Platform name
 - Peak HBM BW value

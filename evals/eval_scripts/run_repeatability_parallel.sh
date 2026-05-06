@@ -14,7 +14,7 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
+ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
@@ -68,9 +68,9 @@ run_single_job() {
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$STANDALONE_DIR"
+            cd "$ANALYSIS_DIR"
             timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                "Run analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_RESULTS/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
@@ -159,7 +159,7 @@ expand_archive unit_tests
 expand_archive e2e_tests
 
 echo "========================================="
-echo "  Standalone Analysis Repeatability Test"
+echo "  Analysis Repeatability Test"
 echo "  Node:         $(hostname)"
 echo "  Container:    $CONTAINER"
 echo "  Repeats:      $NUM_REPEATS"

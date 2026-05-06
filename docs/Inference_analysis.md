@@ -18,7 +18,7 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 
 | Feature               | Description                                                                                                                      |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **Agentic Analysis**  | Agentic workflows for standalone trace (single trace) and comparative trace analysis for performance improvement recommendations |
+| **Agentic Analysis**  | Agentic workflows for single-trace analysis and comparative trace analysis for performance improvement recommendations |
 | **TraceDiff**         | Extended to support inference traces with Lowest Common Ancestor (LCA) analysis for kernel correlation across platforms          |
 | **Roofline Analysis** | Custom roofline models for key inference operations (fused MoE, unified attention) with prefill/decode request annotations.      |
 | **Trace Splitting**   | Splitting of large tracefiles into steady-state regions, per-iteration traces, and phase-specific analyses                       |
@@ -29,7 +29,7 @@ TraceLens-internal extends the open-source TraceLens tooling to provide comprehe
 TraceLens features for inference analysis have been primarily tested with vLLM, with active efforts underway to extend support to other frameworks such as SGLang and Atom. Here is a summary of the different execution modes and supported features.
 
 
-| Mode                                | Shapes/Roofline analysis | Standalone Analysis                                                                              | Comparative Analysis | Limitations                                                                                                                                                |
+| Mode                                | Shapes/Roofline analysis | Analysis                                                                                          | Comparative Analysis | Limitations                                                                                                                                                |
 | ----------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Eager only                          | Yes                      | Supported; proposed patches are recommended to include roofline information for attention operations | Yes                  | Eager mode execution may employ different compilation strategies, which can result in differences in kernels and fusions compared to graph execution mode. |
 | Graph execution only                | Non‑graph kernels        | Limited                                                                                          | Limited              | Categorization, call stacks, and shapes are available only for attention kernels if full_and_piecewise mode is used                                          |
@@ -322,8 +322,8 @@ print("✅ Pruned TraceDiff reports (GPU only) written to rprt_diff_pruned/")
 
 Generate a performance analysis and comparison report (if comparing two traces), along with optimization opportunity analysis, automatically using an LLM agent.
 
-- Standalone performance analysis: This is the recommended first step, and it leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/AgenticMode/Standalone/README.md).
-- Comparative analysis: This is an optional step for comparing two traces. Please follow [these instructions](../TraceLens/AgenticMode/Comparative/README.md).
+- Performance analysis: This is the recommended first step, and it leverages TraceLens roofline models for performance bridge gap analysis. Please follow [these instructions](../TraceLens/Agent/Analysis/README.md).
+- Comparative analysis: This is an optional step for comparing two traces. Please follow [these instructions](../TraceLens/Agent/Comparative/README.md).
 
 ---
 

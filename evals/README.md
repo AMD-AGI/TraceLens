@@ -4,9 +4,9 @@ Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Standalone Analysis Evals
+# Analysis Agent Evals
 
-Evaluation harness for the TraceLens Standalone Analysis pipeline. Validates both **workflow correctness** (directory structure, file existence, report formatting) and **output quality** (comparison against reference reports).
+Evaluation harness for the TraceLens Analysis Agent pipeline. Validates both **workflow correctness** (directory structure, file existence, report formatting) and **output quality** (comparison against reference reports).
 
 The framework uses a hybrid approach:
 - **Deterministic scripted evals** (Python) for structural and factual checks — pre-check gates, per-item sub-scoring, root-cause metadata
@@ -53,7 +53,7 @@ Verify with `agent --version`
 
 The `agent` invocations in this repo require model `claude-opus-4-7-high`. The eval shell scripts under `eval_scripts/` pass `--model claude-opus-4-7-high` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
 
-Sub-agents invoked by the standalone-analysis orchestrator are split across two tiers: judgment-heavy ones (`kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`) inherit `claude-opus-4-7-high`; the other ten run on `claude-4.6-sonnet-medium-thinking`. See `[../docs/sub_agent_model_audit.md](../docs/sub_agent_model_audit.md)`.
+Sub-agents invoked by the analysis orchestrator are split across two tiers: judgment-heavy ones (`kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`) inherit `claude-opus-4-7-high`; the other ten run on `claude-4.6-sonnet-medium-thinking`. See `[../docs/sub_agent_model_audit.md](../docs/sub_agent_model_audit.md)`.
 
 ## Running Scripts
 
@@ -65,7 +65,7 @@ All scripts run **on the node** from the repo root. They use `docker exec` to ru
 CONTAINER=my_container bash evals/eval_scripts/run_evals.sh
 ```
 
-Runs standalone analysis on each test case, then runs workflow + quality evals, and merges results. Output goes to `evals/results/`.
+Runs analysis on each test case, then runs workflow + quality evals, and merges results. Output goes to `evals/results/`.
 
 ### Repeatability Study (serial)
 
@@ -121,7 +121,7 @@ SKIP_POST_PROCESSING=1 CONTAINER=my_container \
 
 ### Generate Golden References
 
-Generates `analysis_output_ref/` for test cases listed in `unit_test_traces.csv`. Runs standalone analysis, copies the output as the reference, and strips intermediate files (keeps only `standalone_analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
+Generates `analysis_output_ref/` for test cases listed in `unit_test_traces.csv`. Runs analysis, copies the output as the reference, and strips intermediate files (keeps only `analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
 
 ```bash
 CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
@@ -137,11 +137,11 @@ MAX_PARALLEL=5 CONTAINER=my_container bash evals/eval_scripts/generate_golden_re
 
 You can run each stage independently using the `agent` CLI. Examples:
 
-**Standalone Analysis:**
+**Analysis:**
 
 ```bash
-cd TraceLens/AgenticMode/Standalone
-agent --model claude-opus-4-7-high --force "Run standalone analysis on <trace_path> with platform <platform>, node <node>, container <container>, output to <output_dir>"
+cd TraceLens/Agent/Analysis
+agent --model claude-opus-4-7-high --force "Run analysis on <trace_path> with platform <platform>, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Workflow Eval:**
@@ -200,7 +200,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 Each test case lives under `evals/unit_tests/<category>/` and must contain:
 
 - The profiling trace JSON file.
-- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `standalone_analysis.md` and `perf_report_csvs/`. Generate this with `generate_golden_refs.sh`.
+- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `analysis.md` and `perf_report_csvs/`. Generate this with `generate_golden_refs.sh`.
 
 ### 2. Add a row to `unit_test_traces.csv`
 
@@ -226,7 +226,7 @@ gemm_01_compute_few_tiles,gemm,evals/unit_tests/gemm/gemm_01_compute_few_tiles_a
 
 For each test case in the traces CSV, the scripts run two phases:
 
-1. **Phase 1 -- Standalone Analysis:** Invokes the Standalone Analysis agent on the trace file. Output is written to `analysis_output/`. Agent output is logged as stream JSON (`.ndjson`). The orchestrator includes targeted subagent retry (1 retry per failed subagent in Steps 6, 7, and 9) to reduce flaky pipeline failures.
+1. **Phase 1 -- Analysis:** Invokes the Analysis agent on the trace file. Output is written to `analysis_output/`. Agent output is logged as stream JSON (`.ndjson`). The orchestrator includes targeted subagent retry (1 retry per failed subagent in Steps 6, 7, and 9) to reduce flaky pipeline failures.
 2. **Phase 2 -- Workflow + Quality Evals (4 parallel tasks):** Launches four tasks concurrently:
    - Scripted workflow evals — 13 evals with per-item sub-scoring (via `docker exec`)
    - LLM workflow eval — 1 eval with multi-dimensional weighted scoring (via `agent`)
@@ -257,7 +257,7 @@ The remaining two skills define the per-case eval logic:
 
 Scripted evals (1–11, 13–14) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (12) runs via `.cursor/skills/workflow-llm-eval.md`.
 
-All scripted evals include **pre-check gates** that immediately FAIL all evals with a clear message if the output directory is missing, `standalone_analysis.md` is absent/garbled, or other fundamental prerequisites are unmet.
+All scripted evals include **pre-check gates** that immediately FAIL all evals with a clear message if the output directory is missing, `analysis.md` is absent/garbled, or other fundamental prerequisites are unmet.
 
 **quality-eval** -- 3 evals (1 scripted + 2 LLM):
 
@@ -273,7 +273,7 @@ LLM evals (2–3) run via `.cursor/skills/quality-llm-eval.md`. System-level P-i
 
 Results are written to `evals/results/<id>/` (single run) or `evals/repeatability_results/<id>/run_<n>/` (repeatability) and include:
 
-- `analysis_stream.ndjson` -- stream JSON output from the standalone analysis agent.
+- `analysis_stream.ndjson` -- stream JSON output from the analysis agent.
 - `workflow_scripted_eval.log` / `workflow_scripted_results.csv` -- scripted workflow eval output.
 - `workflow_llm_eval.ndjson` / `workflow_llm_results.csv` -- LLM workflow eval output.
 - `quality_scripted_eval.log` / `quality_scripted_results.csv` -- scripted quality eval output.
@@ -326,6 +326,6 @@ The `stability_summary.csv` classifies each (trace, eval) pair across repeated r
 - **Overall pass rate** should not regress compared to the baseline on `main`.
 - **STABLE_FAIL entries** in `stability_summary.csv` — these are deterministic bugs that need pipeline code fixes. Check the `root_cause` column to understand whether it's a `pipeline`, `template`, or `data` issue.
 - **FLAKY_PASS / FLAKY_FAIL entries** — indicate LLM scoring variability or edge-case inconsistency. Check if the LLM eval scores hover near the 7.0 threshold (visible in the `details` column scoring breakdown).
-- **Pre-check gate failures** — if many evals show `"Pre-check gate: ..."` in the details column, the standalone analysis pipeline itself failed to produce output. Focus on fixing the pipeline before investigating individual eval failures.
+- **Pre-check gate failures** — if many evals show `"Pre-check gate: ..."` in the details column, the analysis pipeline itself failed to produce output. Focus on fixing the pipeline before investigating individual eval failures.
 - **Stream diagnostics regressions** -- runs where the report was not written or the last step reached regressed (e.g., stuck at Step 7 instead of reaching Step 11) signal a reliability problem.
 - **Reproducer packages** -- assign the `.tar.gz` for a specific issue to a developer. They can extract it, load the stream JSON into Cursor, and debug the root cause.
