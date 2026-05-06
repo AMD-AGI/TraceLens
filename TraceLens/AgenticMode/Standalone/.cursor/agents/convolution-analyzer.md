@@ -23,14 +23,15 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `cat`: `conv_fwd` or `conv_bwd`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/convolution_ops.csv` - Filtered Convolution operations
-2. `<output_dir>/metadata/convolution_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/convolution_tree_data.json` - Pre-computed parent chains
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered Convolution operations
+2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
+3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
-- `<output_dir>/category_findings/convolution_findings.md`
+- `<output_dir>/category_findings/<cat>_findings.md`
 
 ---
 
@@ -63,13 +64,15 @@ Use vendor-agnostic terminology:
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/convolution_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --category <cat> \
+  --comparison_scope <comparison_scope>
 ```
 
 ### Step 2: Read metrics
 
 ```bash
-cat <output_dir>/category_data/convolution_metrics.json
+cat <output_dir>/category_data/<cat>_metrics.json
 ```
 
 `category_specific.transpose_overhead_percent` flags memory-layout mismatch (NCHW vs NHWC); reference it in **Identification** for any memory-bound finding when it exceeds ~10%.
@@ -173,7 +176,7 @@ if not passed:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/convolution_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.

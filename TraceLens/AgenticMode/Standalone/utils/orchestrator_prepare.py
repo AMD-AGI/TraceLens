@@ -41,6 +41,8 @@ CATEGORY_SKILL_MAP = {
     "triton": "triton-analysis",
     "norm": "norm-analysis",
     "convolution": "convolution-analysis",
+    "conv_fwd": "convolution-analysis",
+    "conv_bwd": "convolution-analysis",
     "other": "generic-op-analysis",
 }
 
