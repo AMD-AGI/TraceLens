@@ -20,7 +20,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
-from typing import List, Dict, Callable, Iterable, Tuple
+from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +392,11 @@ class JaxProfileProcessor:
 # inside the nested JaxOpKeys class (outer class name is not bound yet during nested exec).
 COMMUNICATION_KEYS = ["rccl", "nccl"]
 
+# (kernel-name regex fragment, canonical collective name for inference)
+DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
+    (r"cross_device_reduce", "allreduce"),
+]
+
 
 class TraceEventUtils:
     class JaxOpKeys:
@@ -639,13 +644,88 @@ class TraceEventUtils:
             )
 
     @staticmethod
-    def get_communication_regexes() -> List[re.Pattern]:
-        return [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+    def get_communication_regexes(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> List[re.Pattern]:
+        """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
+
+        When *custom_collective_patterns* is ``None``, built-in defaults from
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
+        are included. Pass an explicit list (possibly empty) to override that
+        set while keeping NCCL/RCCL markers.
+        """
+        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+        custom = (
+            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+            if custom_collective_patterns is None
+            else custom_collective_patterns
+        )
+        for pattern, _ in custom:
+            regexes.append(re.compile(pattern, re.IGNORECASE))
+        return regexes
+
+    @staticmethod
+    def build_collective_filter_and_inference_rules(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> Tuple[List[re.Pattern], List[Tuple[re.Pattern, str]]]:
+        """Compile NCCL/RCCL/custom kernel match patterns and collective inference rules.
+
+        Same *custom_collective_patterns* semantics as
+        :meth:`get_communication_regexes`: ``None`` uses
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS``; otherwise the given list
+        replaces that default set (use ``[]`` for no custom kernels).
+        """
+        effective = (
+            custom_collective_patterns
+            if custom_collective_patterns is not None
+            else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+        )
+        filter_patterns = TraceEventUtils.get_communication_regexes(
+            custom_collective_patterns=effective
+        )
+        inference_rules = [
+            (re.compile(pattern, re.IGNORECASE), collective)
+            for pattern, collective in effective
+        ]
+        return filter_patterns, inference_rules
 
     @staticmethod
     def is_communication_string(text: str) -> bool:
-        """Return True if *text* case-insensitively indicates a collective operation."""
-        return any(x.match(text) for x in TraceEventUtils.get_communication_regexes())
+        """Return True if *text* matches NCCL/RCCL or default custom collective patterns.
+
+        Uses substring search (``Pattern.search``), not start-anchored ``match``,
+        so demangled names like ``void rcclGenericKernel<...>(...)`` match.
+        Custom kernels use the same defaults as :meth:`get_communication_regexes`.
+        """
+        if not text:
+            return False
+        return any(x.search(text) for x in TraceEventUtils.get_communication_regexes())
+
+    # ROCm 7.1 / older Primus images label memory copies and fills as cat=kernel
+    # with rocclr-internal names (MEMORY_COPY_*, __amd_rocclr_copyBuffer*,
+    # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
+    # cat=gpu_memset matching the CUDA convention. These patterns rebucket
+    # legacy traces so cross-version reports compare like-for-like.
+    # See: AMD-AGI/TraceLens-internal#357
+    _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
+        r"^("
+        r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"
+        r"|__amd_rocclr_copyBuffer(Rect)?(Aligned)?"
+        r")(\.kd)?$"
+    )
+    _ROCM_LEGACY_MEMSET_NAMES = re.compile(
+        r"^__amd_rocclr_fillBuffer(Aligned)?(\.kd)?$"
+    )
+
+    @staticmethod
+    def is_rocm_legacy_memcpy(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy copy kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMCPY_NAMES.match(text))
+
+    @staticmethod
+    def is_rocm_legacy_memset(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy fill kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMSET_NAMES.match(text))
 
 
 class RocprofParser:

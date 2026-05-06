@@ -33,8 +33,8 @@ YAML_HEADER = """###############################################################
 
 """
 
-# Copyright line must use one of these year forms (order: longest ranges first).
-_COPYRIGHT_YEAR_RE = r"(?:2024 - 2025|2024 - 2026|2025|2026)"
+# Copyright line must use one of these year forms (longer/more specific first).
+_COPYRIGHT_YEAR_RE = r"(?:2024 - 2025|2024 - 2026|2025-2026|2024|2025|2026)"
 
 _PYTHON_YAML_HEADER_RE = re.compile(
     r"^###############################################################################\n"
