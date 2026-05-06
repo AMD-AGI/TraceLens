@@ -676,6 +676,7 @@ def generate_perf_report_pytorch(
                 event
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
+                and not event.get("perf_meta", {}).get("exclude_perf_model")
             ]
             if len(op_events) == 0:
                 continue

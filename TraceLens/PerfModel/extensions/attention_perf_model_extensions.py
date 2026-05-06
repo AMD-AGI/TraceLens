@@ -387,6 +387,12 @@ class aiter_paged_attention_v1(InferenceAttention):
             chunk = InferenceAttention._parse_chunk_stats(event)
             if chunk is None:
                 return InferenceAttention.no_perf_param_details()
+            # paged_attention_v1 only services the decode portion of an
+            # iteration; any context tokens in the parent's annotation belong
+            # to the prefill kernel (e.g. aiter::fmha_v3_varlen_fwd) running
+            # alongside, not to this op.
+            for k in ("c_sq", "c_sk", "c_sqsq", "c_sqsk"):
+                chunk[k] = 0
             args = event["args"]
             dims = args["Input Dims"]
             types = args.get("Input type") or []
