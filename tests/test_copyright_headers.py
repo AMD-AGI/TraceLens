@@ -34,9 +34,7 @@ YAML_HEADER = """###############################################################
 """
 
 # Copyright line must use one of these year forms (longer/more specific first).
-_COPYRIGHT_YEAR_RE = (
-    r"(?:2024 - 2025|2024 - 2026|2025-2026|2024|2025|2026)"
-)
+_COPYRIGHT_YEAR_RE = r"(?:2024 - 2025|2024 - 2026|2025-2026|2024|2025|2026)"
 
 _PYTHON_YAML_HEADER_RE = re.compile(
     r"^###############################################################################\n"
@@ -311,4 +309,4 @@ def test_notebooks_have_valid_copyright():
 
     if error_msgs:
         error_msgs.append("\nRun 'python add_copyright_headers.py' to fix.")
-        assert False, "\n".join(error_msgs))
+        assert False, "\n".join(error_msgs)
