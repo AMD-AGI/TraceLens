@@ -100,15 +100,6 @@ cmake-build-*/
 .output/
 
 # Large binaries / artifacts (archives, ML weights, dumps)
-*.7z
-*.dmg
-*.iso
-*.jar
-*.rar
-*.tar
-*.zip
-*.tar.gz
-*.tgz
 *.pt
 *.pth
 *.ckpt
