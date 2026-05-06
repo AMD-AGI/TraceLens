@@ -40,6 +40,8 @@ CATEGORY_SKILL_MAP = {
     "reduce": "reduce-analysis",
     "triton": "triton-analysis",
     "norm": "norm-analysis",
+    "norm_fwd": "norm-analysis",
+    "norm_bwd": "norm-analysis",
     "convolution": "convolution-analysis",
     "conv_fwd": "convolution-analysis",
     "conv_bwd": "convolution-analysis",
