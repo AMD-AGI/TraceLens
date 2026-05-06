@@ -59,25 +59,9 @@ Sub-agents invoked by the standalone-analysis orchestrator are split across two 
 
 All scripts run **on the node** from the repo root. They use `docker exec` to run Python scripts inside the container, while `agent` commands run directly on the node. The `CONTAINER` environment variable is required for all scripts.
 
-### Full Eval Run (single pass)
+### Repeatability Study
 
-```bash
-CONTAINER=my_container bash evals/eval_scripts/run_evals.sh
-```
-
-Runs standalone analysis on each test case, then runs workflow + quality evals, and merges results. Output goes to `evals/results/`.
-
-### Repeatability Study (serial)
-
-```bash
-CONTAINER=my_container bash evals/eval_scripts/run_repeatability.sh
-```
-
-Runs each test case `NUM_REPEATS` times (default: 5) serially. Results go to `evals/repeatability_results/`.
-
-### Repeatability Study (parallel)
-
-Recommended for repeatability testing. Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)).
+Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). For a single-pass eval, set `NUM_REPEATS=1`.
 
 ```bash
 CONTAINER=my_container bash evals/eval_scripts/run_repeatability_parallel.sh
@@ -91,21 +75,18 @@ Environment variables:
 | `MAX_PARALLEL` | 5 | Max concurrent jobs |
 | `NUM_REPEATS` | 5 | Repeats per test case |
 | `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
-| `TEST_TRACES_CSV` | `evals/unit_test_traces.csv` | Path to the trace CSV to use |
+| `TEST_TRACES_CSV` | `evals/standalone_tests/combined_traces.csv` | Path to the trace CSV to use |
 | `RESULTS_ROOT` | `evals/repeatability_results` | Where per-run results are written |
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
 | `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
-Full example (e2e suite, 3 repeats, 2 parallel):
+Example (subset of traces, 3 repeats, 2 parallel):
 
 ```bash
 CONTAINER=my_container \
-SUITE_NAME=e2e \
-TEST_TRACES_CSV=evals/e2e_test_traces.csv \
-RESULTS_ROOT=evals/eval_reports/my_run/results/e2e_repeatability_results \
-REPORT_DIR=evals/eval_reports/my_run/reports \
+TEST_IDS="qwen1.5_mi300 06_llama3_2_mi300" \
 NUM_REPEATS=3 MAX_PARALLEL=2 \
     bash evals/eval_scripts/run_repeatability_parallel.sh
 ```
@@ -121,16 +102,16 @@ SKIP_POST_PROCESSING=1 CONTAINER=my_container \
 
 ### Generate Golden References
 
-Generates `analysis_output_ref/` for test cases listed in `unit_test_traces.csv`. Runs standalone analysis, copies the output as the reference, and strips intermediate files (keeps only `standalone_analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
+Generates `analysis_output_ref/` for test cases listed in `standalone_tests/combined_traces.csv`. Runs standalone analysis, copies the output as the reference, and strips intermediate files (keeps only `standalone_analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
 
 ```bash
-CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
+CONTAINER=my_container bash evals/eval_scripts/generate_ref.sh
 ```
 
 Or with more parallelism:
 
 ```bash
-MAX_PARALLEL=5 CONTAINER=my_container bash evals/eval_scripts/generate_golden_refs.sh
+MAX_PARALLEL=5 CONTAINER=my_container bash evals/eval_scripts/generate_ref.sh
 ```
 
 ### Individual Manual Runs
@@ -184,7 +165,7 @@ Example:
 ```bash
 cd evals
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run eval post processing on results_root=evals/eval_reports/my_run/results/e2e_repeatability_results suite=e2e test_traces_csv=evals/e2e_test_traces.csv report_dir=evals/eval_reports/my_run/reports container=modular_evals"
+    "Run eval post processing on results_root=evals/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=evals/standalone_tests/combined_traces.csv report_dir=evals/eval_reports/my_run/reports container=modular_evals"
 ```
 
 ### Error handling
@@ -197,12 +178,12 @@ agent --model claude-opus-4-7-high --print --force --trust \
 
 ### 1. Create the test case directory
 
-Each test case lives under `evals/unit_tests/<category>/` and must contain:
+Each test case lives under `evals/standalone_tests/unit_tests/<category>/` and must contain:
 
 - The profiling trace JSON file.
 - `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `standalone_analysis.md` and `perf_report_csvs/`. Generate this with `generate_golden_refs.sh`.
 
-### 2. Add a row to `unit_test_traces.csv`
+### 2. Add a row to `standalone_tests/combined_traces.csv`
 
 The CSV has the following columns:
 
@@ -217,7 +198,7 @@ The CSV has the following columns:
 Example row:
 
 ```
-gemm_01_compute_few_tiles,gemm,evals/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/gemm_01_compute_few_tiles.json,evals/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/analysis_output_ref,MI300X
+gemm_01_compute_few_tiles,gemm,evals/standalone_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/gemm_01_compute_few_tiles.json,evals/standalone_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/analysis_output_ref,MI300X
 ```
 
 ## Eval Pipeline Summary
@@ -236,9 +217,7 @@ For each test case in the traces CSV, the scripts run two phases:
 
 ### Eval Skills
 
-Four Cursor agent skills in `.cursor/skills/` define the eval and pipeline logic:
-
-**full-eval-pipeline** -- End-to-end orchestrator that chains all steps (extract, golden refs, ProfileLens, repeatability, re-archive) with interactive input prompts and progress logging. See [Full Eval Pipeline](#full-eval-pipeline-end-to-end) above.
+Three Cursor agent skills in `.cursor/skills/` define the eval and pipeline logic:
 
 **eval-post-processing** -- Aggregates repeatability results, classifies failures using `report_section_rules.yaml`, and generates PR + fix-ticket reports with reproducer packages. Invoked automatically by `run_repeatability_parallel.sh` or manually on existing results.
 
@@ -271,7 +250,7 @@ LLM evals (2–3) run via `.cursor/skills/quality-llm-eval.md`. System-level P-i
 
 ## Results
 
-Results are written to `evals/results/<id>/` (single run) or `evals/repeatability_results/<id>/run_<n>/` (repeatability) and include:
+Results are written to `evals/repeatability_results/<id>/run_<n>/` and include:
 
 - `analysis_stream.ndjson` -- stream JSON output from the standalone analysis agent.
 - `workflow_scripted_eval.log` / `workflow_scripted_results.csv` -- scripted workflow eval output.
