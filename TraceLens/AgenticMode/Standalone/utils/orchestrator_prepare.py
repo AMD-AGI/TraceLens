@@ -33,19 +33,23 @@ from TraceLens.AgenticMode.SemanticComparison.trace_breakdown.classify_kernels i
 CATEGORY_SKILL_MAP = {
     "cpu_idle": "cpu-idle-analysis",
     "gemm": "gemm-analysis",
+    "groupedgemm_fwd": "gemm-analysis",
+    "groupedgemm_bwd": "gemm-analysis",
     "moe_fused": "moe-analysis",
+    "moe_unfused": "moe-analysis",
     "sdpa_fwd": "sdpa-analysis",
     "sdpa_bwd": "sdpa-analysis",
+    "inferenceattention": "sdpa-analysis",
     "elementwise": "elementwise-analysis",
     "reduce": "reduce-analysis",
     "triton": "triton-analysis",
     "norm": "norm-analysis",
     "norm_fwd": "norm-analysis",
     "norm_bwd": "norm-analysis",
+    "rmsnorm": "norm-analysis",
     "convolution": "convolution-analysis",
     "conv_fwd": "convolution-analysis",
     "conv_bwd": "convolution-analysis",
-    "other": "generic-op-analysis",
 }
 
 FUSION_EXCLUDED_KERNELS = ["nccl", "rccl", "memcpy", "memset"]
@@ -70,36 +74,13 @@ _NORM_KERNEL_PATTERNS = [
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
 
-def get_enhanced_category(row):
-    """Trust upstream `op category`; name-based heuristics only for `other` rows."""
-    op_name = row.get("name", "")
+def _normalize_category(row):
+    """Normalize upstream ``op category`` to a filesystem-safe key."""
     category = row.get("op category", "")
-
-    if not pd.isna(category) and category not in ("", "other"):
-        category_name = category.replace(" ", "_").replace("/", "_").lower()
-        return category_name, category
-
-    if "moe" in op_name.lower() or "fused_moe" in op_name.lower():
-        return "moe_fused", "MoE Fused"
-    elif any(
-        n in op_name.lower()
-        for n in [
-            "batch_norm",
-            "batchnorm",
-            "layer_norm",
-            "layernorm",
-            "group_norm",
-            "groupnorm",
-            "instance_norm",
-        ]
-    ):
-        return "norm", "Norm"
-    elif "conv" in op_name.lower() and (
-        "aten::" in op_name or "backward" in op_name.lower()
-    ):
-        return "convolution", "Convolution"
-
-    return "other", "Other"
+    if pd.isna(category) or category == "":
+        return "other", "Other"
+    category_name = category.replace(" ", "_").replace("/", "_").lower()
+    return category_name, category
 
 
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
@@ -867,7 +848,7 @@ def main():
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
-        *unified_df.apply(get_enhanced_category, axis=1)
+        *unified_df.apply(_normalize_category, axis=1)
     )
 
     categories = unified_df["enhanced_category"].unique()
