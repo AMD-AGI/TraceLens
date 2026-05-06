@@ -82,15 +82,13 @@ _PTR_DTYPE_BYTES: dict[str, int] = {
 
 
 def _cache_dirs() -> list[str]:
-    dirs = []
     env = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
     if env:
-        dirs.append(env)
-    dirs.append(os.path.expanduser("~/.cache/torchinductor"))
-    try:
-        dirs.append(f"/tmp/torchinductor_{getpass.getuser()}")
-    except Exception:
-        pass
+        return [env] if os.path.isdir(env) else []
+    dirs = [
+        os.path.expanduser("~/.cache/torchinductor"),
+        f"/tmp/torchinductor_{getpass.getuser()}",
+    ]
     return [d for d in dirs if os.path.isdir(d)]
 
 
