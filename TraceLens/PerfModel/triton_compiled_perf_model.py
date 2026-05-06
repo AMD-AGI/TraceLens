@@ -120,20 +120,24 @@ def _parse_wrapper(content: str) -> dict[str, dict]:
         else:
             xnumel, rnumel = 0, 1
 
-        # Pointer element sizes from triton_meta signature
+        # Pointer element sizes and dtype from triton_meta signature
         sig_m = re.search(r"'signature':\s*\{([^}]+)\}", block)
         ptr_bytes: list[int] = []
+        dtype: str | None = None
         if sig_m:
             for dm in re.finditer(r"'(\*\w+)'", sig_m.group(1)):
                 b = _PTR_DTYPE_BYTES.get(dm.group(1))
                 if b is not None:
                     ptr_bytes.append(b)
+                    if dtype is None:
+                        dtype = dm.group(1)[1:]  # strip leading '*', e.g. 'bf16'
 
         results[name] = {
             "aten_ops": aten_ops,
             "xnumel": xnumel,
             "rnumel": rnumel,
             "ptr_bytes": ptr_bytes,
+            "dtype": dtype,
         }
 
     return results
@@ -217,6 +221,14 @@ class TritonCompiledPerfModel:
         if rnumel > 1:
             return float((n - 1) * xnumel * rnumel * bpe + xnumel * bpe)
         return float(n * xnumel * bpe)
+
+    def get_maf_type(self):
+        return "vector" if self._meta is not None else None
+
+    def get_compute_precision(self):
+        if self._meta is None:
+            return None
+        return self._meta.get("dtype")
 
     def flops_bwd(self) -> float:
         raise NotImplementedError
