@@ -204,7 +204,7 @@ class TritonCompiledPerfModel:
         if self._meta is None:
             raise NotImplementedError(f"No Inductor artifacts found for {self.name}")
         total = self._meta["xnumel"] * self._meta["rnumel"]
-        fpe = sum(_FLOPS_PER_ELEM.get(op, 1) for op in self._meta["aten_ops"])
+        fpe = sum(_FLOPS_PER_ELEM.get(op, 0) for op in self._meta["aten_ops"])
         return float(fpe * total)
 
     def bytes(self) -> float:
@@ -215,12 +215,10 @@ class TritonCompiledPerfModel:
         ptr_bytes = self._meta["ptr_bytes"]
         if not ptr_bytes:
             return 0.0
-        bpe = ptr_bytes[0]
-        n = len(ptr_bytes)
-        # Reduction: (n-1) inputs span xnumel*rnumel; 1 output spans xnumel
+        # Reduction: inputs span xnumel*rnumel; last pointer (output) spans xnumel
         if rnumel > 1:
-            return float((n - 1) * xnumel * rnumel * bpe + xnumel * bpe)
-        return float(n * xnumel * bpe)
+            return float(sum(ptr_bytes[:-1]) * xnumel * rnumel + ptr_bytes[-1] * xnumel)
+        return float(sum(ptr_bytes) * xnumel)
 
     def get_maf_type(self):
         return "vector" if self._meta is not None else None
