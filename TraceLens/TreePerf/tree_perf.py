@@ -368,6 +368,18 @@ class TreePerfAnalyzer:
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
+        if perf_model_class is None:
+            name = event.get("name", "")
+            if (
+                name.startswith("triton_poi_")
+                or name.startswith("triton_red_")
+                or name.startswith("triton_per_")
+            ):
+                from TraceLens.PerfModel.triton_compiled_perf_model import (
+                    TritonCompiledPerfModel,
+                )
+
+                perf_model_class = TritonCompiledPerfModel
         perf_model = perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
@@ -2051,7 +2063,30 @@ class TreePerfAnalyzer:
                     row["perf_params"] = None
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
-                row["perf_params"] = None
+                # Opportunistically try TritonCompiledPerfModel for torch.compile kernels.
+                # If Inductor artifacts are absent, this silently leaves metrics blank.
+                name = event.get("name", "")
+                if include_perf_metrics and (
+                    name.startswith("triton_poi_")
+                    or name.startswith("triton_red_")
+                    or name.startswith("triton_per_")
+                ):
+                    try:
+                        metrics = self.compute_perf_metrics(event, bwd=False)
+                        for col in perf_cols:
+                            if col in metrics:
+                                row[col] = metrics[col]
+                        perf_params = {
+                            k.replace("param: ", ""): v
+                            for k, v in metrics.items()
+                            if k.startswith("param: ")
+                        }
+                        row["perf_params"] = perf_params if perf_params else None
+                        row["has_perf_model"] = True
+                    except Exception:
+                        row["perf_params"] = None
+                else:
+                    row["perf_params"] = None
 
                 gpu_event_uids = event.get("gpu_events", [])
                 if gpu_event_uids:
