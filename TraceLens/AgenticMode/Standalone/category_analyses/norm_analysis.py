@@ -28,10 +28,15 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze normalization operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument(
+        "--category",
+        default="norm",
+        help="Category name prefix used for input/output files (default: norm)",
+    )
     args = parser.parse_args()
 
     run_category_analysis(
-        category="norm",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,

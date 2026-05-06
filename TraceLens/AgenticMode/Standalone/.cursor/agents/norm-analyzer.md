@@ -23,14 +23,15 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `cat`: `norm_fwd` or `norm_bwd`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/norm_ops.csv` - Filtered normalization operations
-2. `<output_dir>/metadata/norm_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/norm_tree_data.json` - Pre-computed parent chains
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered normalization operations
+2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
+3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
-- `<output_dir>/category_findings/norm_findings.md`
+- `<output_dir>/category_findings/<cat>_findings.md`
 
 ---
 
@@ -63,13 +64,14 @@ Use vendor-agnostic terminology:
 ```bash
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/norm_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --category <cat>
 ```
 
 ### Step 2: Read metrics
 
 ```bash
-cat <output_dir>/category_data/norm_metrics.json
+cat <output_dir>/category_data/<cat>_metrics.json
 ```
 
 ### Step 3: Classify members by name
@@ -151,7 +153,7 @@ if not passed:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/norm_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
