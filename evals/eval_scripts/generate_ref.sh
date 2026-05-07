@@ -9,7 +9,7 @@ MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
+ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/standalone_tests/combined_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
@@ -60,15 +60,15 @@ generate_single_ref() {
     log_status "  $tag [$(ts)] Generating golden reference..."
     $DEXEC bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
 
-    # Run standalone analysis with retry + backoff
+    # Run analysis with retry + backoff
     local agent_success=false
     local agent_attempts=0
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$STANDALONE_DIR" || exit
+            cd "$ANALYSIS_DIR" || exit
             agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                "Run analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_DIR/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
@@ -86,8 +86,8 @@ generate_single_ref() {
     fi
 
     # Verify output was generated
-    if [ ! -f "$OUTPUT_DIR/standalone_analysis.md" ]; then
-        log_status "  $tag WARNING: standalone_analysis.md not found in output."
+    if [ ! -f "$OUTPUT_DIR/analysis.md" ]; then
+        log_status "  $tag WARNING: analysis.md not found in output."
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
     fi
@@ -96,7 +96,7 @@ generate_single_ref() {
     rm -rf "$REF_DIR"
     cp -r "$OUTPUT_DIR" "$REF_DIR"
 
-    # Remove unwanted files from reference dir (keep only standalone_analysis.md + perf_report_csvs/)
+    # Remove unwanted files from reference dir (keep only analysis.md + perf_report_csvs/)
     rm -rf "$REF_DIR/category_data" \
            "$REF_DIR/category_findings" \
            "$REF_DIR/system_findings" \

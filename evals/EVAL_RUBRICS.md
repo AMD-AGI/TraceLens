@@ -41,9 +41,9 @@ workflow evals are set to FAIL with `root_cause=pipeline`.
 | Gate | Condition | Implemented in |
 |------|-----------|----------------|
 | 1 | `output_dir` does not exist | `workflow_scripted_evals.py` |
-| 2 | `standalone_analysis.md` missing or < 100 bytes | `workflow_scripted_evals.py` |
-| 3 | `standalone_analysis.md` is garbled (> 50% non-ASCII) | `workflow_scripted_evals.py` |
-| 4 | `standalone_analysis.md` contains raw JSON instead of markdown | `workflow_scripted_evals.py` |
+| 2 | `analysis.md` missing or < 100 bytes | `workflow_scripted_evals.py` |
+| 3 | `analysis.md` is garbled (> 50% non-ASCII) | `workflow_scripted_evals.py` |
+| 4 | `analysis.md` contains raw JSON instead of markdown | `workflow_scripted_evals.py` |
 | 5 | `output_dir` or `reference_dir` missing | `quality_scripted_evals.py` |
 | 6 | `perf_report_csvs/` directory missing (generated or reference) | `quality_scripted_evals.py` |
 
@@ -70,7 +70,7 @@ All binary PASS/FAIL. Root cause is always `pipeline`.
 
 **Type:** Scripted, per-header. **Root cause on fail:** `template`.
 
-Checks `standalone_analysis.md` for required `##` section headers and a metrics table.
+Checks `analysis.md` for required `##` section headers and a metrics table.
 
 | Sub-index | Pass Criteria |
 |-----------|---------------|
