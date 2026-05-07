@@ -11,19 +11,19 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/standalone_tests/combined_traces.csv}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 STATUS_FILE="$(mktemp)"
 
 # ---------------------------------------------------------------------------
 # Auto-extract test archives if trace CSV references them
 # ---------------------------------------------------------------------------
-for archive in "$EVALS_DIR"/standalone_tests/e2e_tests.tar.gz "$EVALS_DIR"/standalone_tests/unit_tests.tar.gz; do
+for archive in "$EVALS_DIR"/analysis_tests/e2e_tests.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests.tar.gz; do
     [ -f "$archive" ] || continue
     target_dir="${archive%.tar.gz}"
     if [ ! -d "$target_dir" ]; then
         echo "Extracting $(basename "$archive")..."
-        tar -xzf "$archive" -C "$EVALS_DIR/standalone_tests/"
+        tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests/"
     fi
 done
 

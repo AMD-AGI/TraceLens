@@ -17,7 +17,7 @@ REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/standalone_tests/combined_traces.csv}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces.csv}"
 REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 
@@ -33,12 +33,12 @@ log_status() {
 
 expand_archive() {
     local name="$1"
-    local archive="$EVALS_DIR/standalone_tests/${name}.tar.gz"
-    local target="$EVALS_DIR/standalone_tests/$name"
+    local archive="$EVALS_DIR/analysis_tests/${name}.tar.gz"
+    local target="$EVALS_DIR/analysis_tests/$name"
     if [[ -f "$archive" ]]; then
         if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
             echo "Expanding ${name}.tar.gz..."
-            tar xzf "$archive" -C "$EVALS_DIR/standalone_tests"
+            tar xzf "$archive" -C "$EVALS_DIR/analysis_tests"
             echo "Done."
         fi
     fi
