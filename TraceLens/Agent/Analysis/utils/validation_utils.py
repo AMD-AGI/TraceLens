@@ -348,7 +348,10 @@ def _validate_compute_data_tables(content, findings_path):
             )
             continue
         header_line, header_cols, row_iter = table
-        if tuple(header_cols[: len(_COMPUTE_DATA_REQUIRED_COLS)]) != _COMPUTE_DATA_REQUIRED_COLS:
+        if (
+            tuple(header_cols[: len(_COMPUTE_DATA_REQUIRED_COLS)])
+            != _COMPUTE_DATA_REQUIRED_COLS
+        ):
             errors.append(
                 f"compute Data table at line {header_line}: header must start "
                 f"with the {len(_COMPUTE_DATA_REQUIRED_COLS)} canonical columns "
@@ -513,9 +516,7 @@ def _check_priority_consistency(output_dir, manifest):
             continue
         cat = p.get("category")
         expected = sum(
-            f.get("impact_score", 0)
-            for f in findings
-            if f.get("category") == cat
+            f.get("impact_score", 0) for f in findings if f.get("category") == cat
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
@@ -731,7 +732,8 @@ def _validate_report_priority_consistency(content, output_dir):
         n_rows = sum(
             1
             for ln in body.splitlines()
-            if ln.lstrip().startswith("|") and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
+            if ln.lstrip().startswith("|")
+            and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
         )
         n_data_rows = max(0, n_rows - 1)
         if n_data_rows != len(priorities):

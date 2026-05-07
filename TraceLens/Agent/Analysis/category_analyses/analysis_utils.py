@@ -70,8 +70,14 @@ _SKIP_PY_PATTERNS = (
 )
 
 _KNOWN_PKG_ANCHORS = (
-    "sglang/", "vllm/", "aiter/", "fbgemm_gpu/", "sgl_kernel/",
-    "torchrec/", "components/", "megatron/",
+    "sglang/",
+    "vllm/",
+    "aiter/",
+    "fbgemm_gpu/",
+    "sgl_kernel/",
+    "torchrec/",
+    "components/",
+    "megatron/",
 )
 
 
@@ -365,7 +371,9 @@ def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
 
 
 def build_operation_metrics(
-    ops_df: pd.DataFrame, metadata: dict, category_config: dict,
+    ops_df: pd.DataFrame,
+    metadata: dict,
+    category_config: dict,
     callstacks_df: Optional[pd.DataFrame] = None,
 ) -> List[dict]:
     """
@@ -779,11 +787,15 @@ def run_category_analysis(
     time_metrics = calculate_time_metrics(ops_df, metadata)
 
     callstacks_df = None
-    cs_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_callstacks.csv")
+    cs_path = os.path.join(
+        output_dir, "perf_report_csvs", "unified_perf_callstacks.csv"
+    )
     if os.path.exists(cs_path):
         callstacks_df = pd.read_csv(cs_path)
 
-    operations = build_operation_metrics(ops_df, metadata, config, callstacks_df=callstacks_df)
+    operations = build_operation_metrics(
+        ops_df, metadata, config, callstacks_df=callstacks_df
+    )
     category_specific = extract_fn(ops_df, metadata)
 
     if compute_impact:

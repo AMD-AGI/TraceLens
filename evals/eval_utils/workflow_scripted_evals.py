@@ -57,7 +57,9 @@ def _pre_check_gates(output_dir: str) -> str | None:
 
     non_ascii = sum(1 for c in content if ord(c) > 127)
     if len(content) > 0 and non_ascii / len(content) > _GARBLED_THRESHOLD:
-        return f"analysis.md appears garbled ({non_ascii}/{len(content)} non-ASCII chars)"
+        return (
+            f"analysis.md appears garbled ({non_ascii}/{len(content)} non-ASCII chars)"
+        )
 
     stripped = content.strip()
     if stripped.startswith("{") and stripped.endswith("}"):

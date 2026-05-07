@@ -106,7 +106,9 @@ CMD ["bash"]
 
 
 # Matches python:3.12-slim + pip install TraceLens in the embedded Dockerfile
-DEFAULT_ARCH_SITE = "/usr/local/lib/python3.12/site-packages/TraceLens/Agent/Analysis/utils/arch"
+DEFAULT_ARCH_SITE = (
+    "/usr/local/lib/python3.12/site-packages/TraceLens/Agent/Analysis/utils/arch"
+)
 
 
 def _repo_root() -> str:

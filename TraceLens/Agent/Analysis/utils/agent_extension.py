@@ -662,9 +662,7 @@ def main():
             "(reverses the impact_score convention to pre-Phase-1 ms savings)."
         )
     )
-    parser.add_argument(
-        "--output-dir", required=True, help="Analysis output directory"
-    )
+    parser.add_argument("--output-dir", required=True, help="Analysis output directory")
     parser.add_argument("--title", required=True, help="Plot suptitle")
     args = parser.parse_args()
 
