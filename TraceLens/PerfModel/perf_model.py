@@ -5368,3 +5368,119 @@ class mamba_ssd_fwd(MambaSSD):
     """MambaSplitConv1dScanCombinedFn forward pass."""
 
     pass
+
+
+# ---------------------------------------------------------------------------
+# primus_turbo FP8 ops (#626)
+# ---------------------------------------------------------------------------
+
+
+class hipblaslt_gemm_fp8(GEMM):
+    """
+    primus_turbo_cpp_extension::hipblaslt_gemm_fp8 — FP8 GEMM via hipBLASLt.
+
+    9-slot input layout (from Primus-Turbo C++ binding):
+      hipblaslt_gemm_fp8(A, scaleA_inv, B, scaleB_inv,
+                         out_dtype, transA, transB, transC, granularity)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (), (B0, B1), (), (), (), (), (), ())
+      Input type:  (fp8, float, fp8, float, Scalar, ...)
+      Concrete Inputs: ('', '', '', '', '<dtype_enum>', '<transA>', '<transB>', '<transC>', '')
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        # Concrete Inputs may be missing (older traces) or present-but-None
+        # (some kineto exporters); normalize to [] for both cases.
+        concrete = event["args"].get("Concrete Inputs") or []
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[2])
+
+        trans_a = (concrete[5] == "True") if len(concrete) > 5 else False
+        trans_b = (concrete[6] == "True") if len(concrete) > 6 else False
+        trans_c = (concrete[7] == "True") if len(concrete) > 7 else False
+
+        # Replicate C++ transC swap (hipblaslt_gemm.cpp)
+        if trans_c:
+            A_shape, B_shape = B_shape, A_shape
+            trans_a, trans_b = not trans_b, not trans_a
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K = A_shape[0] if trans_a else A_shape[1]
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        dtype_A_B = (event["args"]["Input type"][0], event["args"]["Input type"][2])
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][2])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpeA = name2bpe(dtype_A_B[0])
+        bpeB = name2bpe(dtype_A_B[1])
+        assert (
+            bpeA is not None and bpeB is not None
+        ), f"Data types of A and B are not supported: {dtype_A_B}"
+        self.bpe = bpeA
+        # FP8 inputs (1 byte), BF16/FP16 output (2 bytes)
+        out_bpe = 2 if self.bpe == 1 else self.bpe
+        return super().bytes(
+            bpe_mat1=self.bpe,
+            bpe_mat2=bpeB,
+            bpe_bias=self.bpe,
+            bpe_output=out_bpe,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp8 is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp8 is not defined."
+        )
+
+
+class primus_turbo_quantize_fp8(UnaryElementwise):
+    """
+    primus_turbo_cpp_extension::quantize_fp8_tensorwise
+
+    BF16 → FP8 per-tensor quantize for delayed-scaling tensorwise recipe.
+    Trace arg layout: (tensor, scale_inv, amax) where tensor is BF16 2-D,
+    scale_inv and amax are scalars.
+
+    Memory-bandwidth bound: reads 2·M·N bytes (BF16), writes M·N bytes (FP8).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, "c10::Float8_e4m3fnuz"),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
