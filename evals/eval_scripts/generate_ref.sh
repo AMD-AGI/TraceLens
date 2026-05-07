@@ -11,19 +11,19 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 STATUS_FILE="$(mktemp)"
 
 # ---------------------------------------------------------------------------
 # Auto-extract test archives if trace CSV references them
 # ---------------------------------------------------------------------------
-for archive in "$EVALS_DIR"/e2e_tests.tar.gz "$EVALS_DIR"/unit_tests.tar.gz; do
+for archive in "$EVALS_DIR"/analysis_tests/e2e_tests.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests.tar.gz; do
     [ -f "$archive" ] || continue
     target_dir="${archive%.tar.gz}"
     if [ ! -d "$target_dir" ]; then
         echo "Extracting $(basename "$archive")..."
-        tar -xzf "$archive" -C "$EVALS_DIR/"
+        tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests/"
     fi
 done
 
@@ -46,7 +46,8 @@ generate_single_ref() {
     local tag="[$id]"
 
     local REF_DIR="$REPO_ROOT/$reference_dir"
-    local CASE_DIR="$(dirname "$REF_DIR")"
+    local CASE_DIR
+    CASE_DIR="$(dirname "$REF_DIR")"
     local OUTPUT_DIR="$CASE_DIR/analysis_output"
 
     # Verify trace file exists
@@ -65,7 +66,7 @@ generate_single_ref() {
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$ANALYSIS_DIR"
+            cd "$ANALYSIS_DIR" || exit
             agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                 "Run analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
@@ -143,10 +144,10 @@ echo ""
 
 setup_semaphore
 
-while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
+while IFS=, read -r id _sub_category trace_path reference_dir platform <&3; do
     [[ -z "$id" ]] && continue
 
-    read -u4  # acquire semaphore slot
+    read -r -u4  # acquire semaphore slot
     (
         generate_single_ref "$id" "$trace_path" "$reference_dir" "$platform" || true
         sleep "$SLEEP_BETWEEN"
