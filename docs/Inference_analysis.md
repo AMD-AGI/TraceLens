@@ -151,11 +151,10 @@ If you prefer to patch an existing environment instead of building a new image, 
    python -c "import atom; import os; print(os.path.dirname(os.path.dirname(atom.__file__)))"
   ```
 2. **Find and apply the relevant patch:**
-  - vLLM patches are in [vllm_patches](../examples/custom_workflows/inference_analysis/vllm_patches/)
-  - SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
-  - Atom patches are in [atom_roofline_patches](../examples/custom_workflows/inference_analysis/atom_roofline_patches/)
   - Select by framework and version
   - Apply: `cd /path/to/framework/../ && git apply /path/to/patchfile`
+  vLLM patches are in [vllm_roofline_patches](../examples/custom_workflows/inference_analysis/vllm_patches)
+  SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
 
 #### Collection Parameters
 

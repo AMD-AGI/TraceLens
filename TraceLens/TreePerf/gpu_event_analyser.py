@@ -121,7 +121,20 @@ class GPUEventAnalyser:
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if TraceEventUtils.is_communication_string(event.get("name")):
+                    name = event.get("name") or ""
+                    # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
+                    # bucket so cross-version (7.1 vs 7.2) reports compare
+                    # like-for-like; rocclr fill kernels follow gpu_memset's
+                    # existing home (comp_events). See AMD-AGI/TraceLens-internal#357.
+                    if category == "kernel" and TraceEventUtils.is_rocm_legacy_memcpy(
+                        name
+                    ):
+                        memcpy_events.append(event)
+                    elif category == "kernel" and TraceEventUtils.is_rocm_legacy_memset(
+                        name
+                    ):
+                        comp_events.append(event)
+                    elif TraceEventUtils.is_communication_string(name):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)
@@ -154,7 +167,7 @@ class GPUEventAnalyser:
 
             for _, point_type, uid in points:
                 if point_type == 0:
-                    active_uids.remove(uid)
+                    active_uids.discard(uid)
                 else:
                     event = event_map[uid]
                     my_cpu_op = uid_to_cpu_op[uid]
