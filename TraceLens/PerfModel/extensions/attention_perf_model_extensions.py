@@ -30,6 +30,9 @@ class InferenceAttention:
     ``params.get("_no_perf")`` is true.
     """
 
+    category = "InferenceAttention"
+    bwd_category = None
+
     REQUIRED_PARAM_KEYS = (
         "B",
         "N_Q",

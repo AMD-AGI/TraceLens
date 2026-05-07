@@ -12,7 +12,6 @@ import pytest
 
 from TraceLens.PerfModel.op_categories import (
     category_from_sheet_view,
-    register_dict_cat2names_extension,
     register_op_categories,
 )
 from TraceLens.PerfModel.torch_op_mapping import (
@@ -99,6 +98,7 @@ def test_dict_cat2names_keeps_sheet_compatibility_view():
     assert "aten::convolution" in dict_cat2names["CONV"]
     assert "aten::convolution_backward" in dict_cat2names["CONV"]
     assert "FlashAttnFuncBackward" not in dict_cat2names["SDPA"]
+    assert "TokenPermuteMaskMap" not in dict_cat2names["MoE_comm"]
 
 
 def test_dict_cat2names_dynamic_fallback_for_legacy_callers():
@@ -109,30 +109,12 @@ def test_dict_cat2names_dynamic_fallback_for_legacy_callers():
     )
 
 
-def test_register_op_category_extension_updates_registry_and_sheet_view():
+def test_register_op_category_extension_updates_registry_only():
     registry = {}
-    sheet_view = {}
 
     register_op_categories(
         {"MyCategoryOnlyBackward": "SDPA_bwd"},
         registry,
-        sheet_view,
     )
 
     assert registry["MyCategoryOnlyBackward"] == "SDPA_bwd"
-    assert sheet_view["SDPA"] == ["MyCategoryOnlyBackward"]
-
-
-def test_register_dict_cat2names_extension_updates_registry_and_sheet_view():
-    registry = {}
-    sheet_view = {}
-
-    register_dict_cat2names_extension(
-        {"GroupedGEMM": ["GroupedGemm", "GroupedGemmBackward"]},
-        registry,
-        sheet_view,
-    )
-
-    assert registry["GroupedGemm"] == "GroupedGEMM_fwd"
-    assert registry["GroupedGemmBackward"] == "GroupedGEMM_bwd"
-    assert sheet_view["GroupedGEMM"] == ["GroupedGemm", "GroupedGemmBackward"]

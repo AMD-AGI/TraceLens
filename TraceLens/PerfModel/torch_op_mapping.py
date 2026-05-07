@@ -5,9 +5,10 @@
 ###############################################################################
 
 from . import perf_model
-from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
+from .extensions import get_pseudo_op_mappings
 from .op_categories import (
-    OP_CATEGORY_OVERRIDES,
+    CATEGORY_ONLY_OP_CATEGORIES,
+    build_dict_base_class2category,
     build_dict_cat2names,
     build_op_category_registry,
     categorize_torch_op_from_registry,
@@ -178,34 +179,15 @@ for op_name, op_class in norm_ops.items():
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
 
-dict_base_class2category = {
-    perf_model.GEMM: "GEMM",
-    perf_model.GroupedGemm: "GroupedGEMM",
-    perf_model.CONV: "CONV",
-    perf_model.SDPA: "SDPA",
-    perf_model.UnaryElementwise: "UnaryElementwise",
-    perf_model.BinaryElementwise: "BinaryElementwise",
-    perf_model.Normalization: "Normalization",
-    perf_model.Reduce: "Reduce",
-    perf_model.MoEComm: "MoE_comm",
-    perf_model.CausalConv1d: "SSM",
-    perf_model.FusedRoPE: "RoPE",
-    perf_model.CrossEntropy: "CrossEntropy",
-    perf_model.MambaSSD: "SSM",
-}
+# Compatibility view for older callers that inspect base-class categories. New
+# categorization reads ``category`` / ``bwd_category`` from perf model classes.
+dict_base_class2category = build_dict_base_class2category(op_to_perf_model_class_map)
 
-# Add pseudo-op extension categories
-dict_base_class2category.update(get_pseudo_op_categories())
-
-dict_cat2names = build_dict_cat2names(
-    op_to_perf_model_class_map,
-    dict_base_class2category,
-)
+dict_cat2names = build_dict_cat2names(op_to_perf_model_class_map)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
-    dict_base_class2category,
-    overrides=OP_CATEGORY_OVERRIDES,
+    category_only_ops=CATEGORY_ONLY_OP_CATEGORIES,
 )
 
 

@@ -4,13 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""
-Registry-based categorization of CPU torch ops.
+"""Registry-based categorization of CPU torch ops.
 
-The source of truth is a flat ``op_name -> final category`` registry used by
-``categorize_torch_op``. ``dict_cat2names`` remains as a compatibility view for
-legacy per-category sheets such as ``GEMM``, ``CONV_fwd`` / ``CONV_bwd``, and
-``GroupedGEMM_fwd`` / ``GroupedGEMM_bwd``.
+Perf model classes declare their own output categories via ``category`` and,
+when linked-forward backward metrics are intentionally supported,
+``bwd_category``. Category-only ops that do not have a perf model live in
+``CATEGORY_ONLY_OP_CATEGORIES``.
 """
 
 import re
@@ -19,27 +18,11 @@ from typing import DefaultDict, Dict, Iterable, List, Mapping, MutableMapping
 from typing import Optional, Pattern, Tuple
 
 
-SDPA_BWD_OPS = frozenset(
-    {
-        "FlashAttnFuncBackward",
-        "FusedAttnFuncBackward",
-        "flash_attn::_flash_attn_backward",
-        "flash_attn::_flash_attn_varlen_backward",
-        "aten::_scaled_dot_product_cudnn_attention_backward",
-        "aten::_scaled_dot_product_efficient_attention_backward",
-        "aten::_scaled_dot_product_flash_attention_backward",
-        "aiter::_flash_attn_backward",
-        "aiter::wrapper_fmha_v3_bwd",
-        "aiter::mha_bwd",
-    }
-)
-
-
-OP_CATEGORY_OVERRIDES: Dict[str, str] = {
+CATEGORY_ONLY_OP_CATEGORIES: Dict[str, str] = {
     # CONV ops not present in op_to_perf_model_class_map.
     "aten::miopen_convolution": "CONV_fwd",
     "aten::cudnn_convolution": "CONV_fwd",
-    # SDPA backward ops that do not all have perf models in core TraceLens.
+    # SDPA backward ops without direct perf models in core TraceLens.
     "FlashAttnFuncBackward": "SDPA_bwd",
     "FusedAttnFuncBackward": "SDPA_bwd",
     "aten::_scaled_dot_product_cudnn_attention_backward": "SDPA_bwd",
@@ -119,33 +102,20 @@ def is_backward_op(op_name: str) -> bool:
         op_name.endswith("_backward")
         or op_name.endswith("Backward")
         or op_name.endswith("_bwd")
-        or op_name in SDPA_BWD_OPS
     )
 
 
-def resolve_base_category(op_name: str, base_category: str) -> str:
-    """Return the final category for an op in a base/sheet category."""
-    if base_category == "SDPA":
-        return "SDPA_bwd" if is_backward_op(op_name) else "SDPA_fwd"
-    if base_category == "Normalization":
-        return "NORM_bwd" if is_backward_op(op_name) else "NORM_fwd"
-    if base_category == "CONV":
-        return "CONV_bwd" if is_backward_op(op_name) else "CONV_fwd"
-    if base_category == "GroupedGEMM":
-        return "GroupedGEMM_bwd" if is_backward_op(op_name) else "GroupedGEMM_fwd"
-    if base_category == "SSM":
-        return "SSM_bwd" if is_backward_op(op_name) else "SSM_fwd"
-    if base_category == "MoE_comm":
-        return "MoE_comm_bwd" if is_backward_op(op_name) else "MoE_comm_fwd"
-    if base_category == "RoPE":
-        return "RoPE_bwd" if is_backward_op(op_name) else "RoPE_fwd"
-    if base_category == "CrossEntropy":
-        return "CrossEntropy_bwd" if is_backward_op(op_name) else "CrossEntropy_fwd"
-    if base_category in ("BinaryElementwise", "UnaryElementwise"):
-        return "elementwise"
-    if base_category == "Reduce":
-        return "reduce"
-    return base_category
+def get_perf_model_category(perf_model_class: type, bwd: bool = False) -> Optional[str]:
+    """Return the category declared by a perf model class."""
+    attr_name = "bwd_category" if bwd else "category"
+    category = getattr(perf_model_class, attr_name, None)
+    if bwd:
+        return category
+    if category is None:
+        raise ValueError(
+            f"perf_model_class {perf_model_class} must define a category attribute"
+        )
+    return category
 
 
 def sheet_category_from_final_category(category: str) -> str:
@@ -173,88 +143,93 @@ def sheet_category_from_final_category(category: str) -> str:
     return category_to_sheet.get(category, category)
 
 
+def category_from_sheet_category(op_name: str, sheet_category: str) -> str:
+    """Resolve a legacy sheet category to the final categorization label."""
+    sheet_to_fwd_bwd = {
+        "CONV": ("CONV_fwd", "CONV_bwd"),
+        "SDPA": ("SDPA_fwd", "SDPA_bwd"),
+        "Normalization": ("NORM_fwd", "NORM_bwd"),
+        "GroupedGEMM": ("GroupedGEMM_fwd", "GroupedGEMM_bwd"),
+        "SSM": ("SSM_fwd", "SSM_bwd"),
+        "MoE_comm": ("MoE_comm_fwd", "MoE_comm_bwd"),
+        "RoPE": ("RoPE_fwd", "RoPE_bwd"),
+        "CrossEntropy": ("CrossEntropy_fwd", "CrossEntropy_bwd"),
+    }
+    if sheet_category in sheet_to_fwd_bwd:
+        fwd_category, bwd_category = sheet_to_fwd_bwd[sheet_category]
+        return bwd_category if is_backward_op(op_name) else fwd_category
+    if sheet_category in ("BinaryElementwise", "UnaryElementwise"):
+        return "elementwise"
+    if sheet_category == "Reduce":
+        return "reduce"
+    return sheet_category
+
+
 def category_from_sheet_view(
     op_name: str, dict_cat2names: Mapping[str, List[str]]
 ) -> Optional[str]:
     """Compatibility fallback for callers that still mutate ``dict_cat2names``."""
     for sheet_category, names in dict_cat2names.items():
         if op_name in names:
-            return resolve_base_category(op_name, sheet_category)
+            return category_from_sheet_category(op_name, sheet_category)
     return None
 
 
 def build_op_category_registry(
     op_to_perf_model_class_map: Mapping[str, type],
-    dict_base_class2category: Mapping[type, str],
-    overrides: Optional[Mapping[str, str]] = None,
+    category_only_ops: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
     """Construct the flat ``op_name -> final category`` registry."""
     registry: Dict[str, str] = {}
     for op_name, perf_model_class in op_to_perf_model_class_map.items():
-        base_classes = perf_model_class.__bases__
-        if len(base_classes) != 1:
-            raise ValueError(
-                f"op_name: {op_name}, perf_model_class: {perf_model_class}, "
-                f"base_classes: {base_classes}"
-            )
-        base_category = dict_base_class2category.get(base_classes[0])
-        if base_category is None:
-            raise ValueError(
-                f"op_name: {op_name}, perf_model_class: {perf_model_class}, "
-                f"base_class: {base_classes[0]}"
-            )
-        registry[op_name] = resolve_base_category(op_name, base_category)
+        registry[op_name] = get_perf_model_category(perf_model_class)
 
-    if overrides:
-        registry.update(overrides)
+    if category_only_ops:
+        registry.update(category_only_ops)
 
     return registry
 
 
 def build_dict_cat2names(
     op_to_perf_model_class_map: Mapping[str, type],
-    dict_base_class2category: Mapping[type, str],
 ) -> DefaultDict[str, List[str]]:
     """Build the legacy ``category -> op names`` view used for report sheets."""
     dict_cat2names = defaultdict(list)  # type: DefaultDict[str, List[str]]
     for op_name, perf_model_class in op_to_perf_model_class_map.items():
+        category = get_perf_model_category(perf_model_class)
+        dict_cat2names[sheet_category_from_final_category(category)].append(op_name)
+    return dict_cat2names
+
+
+def build_dict_base_class2category(
+    op_to_perf_model_class_map: Mapping[str, type],
+) -> Dict[type, str]:
+    """Compatibility view for callers that still inspect base-class categories."""
+    base_class2category: Dict[type, str] = {}
+    for perf_model_class in op_to_perf_model_class_map.values():
         base_classes = perf_model_class.__bases__
         if len(base_classes) != 1:
-            raise ValueError(
-                f"op_name: {op_name}, perf_model_class: {perf_model_class}, "
-                f"base_classes: {base_classes}"
-            )
-        base_category = dict_base_class2category.get(base_classes[0])
-        if base_category is None:
-            raise ValueError(
-                f"op_name: {op_name}, perf_model_class: {perf_model_class}, "
-                f"base_class: {base_classes[0]}"
-            )
-        dict_cat2names[base_category].append(op_name)
-    return dict_cat2names
+            continue
+        base_class = base_classes[0]
+        category = get_perf_model_category(perf_model_class)
+        sheet_category = sheet_category_from_final_category(category)
+        existing = base_class2category.get(base_class)
+        if existing is not None and existing != sheet_category:
+            continue
+        base_class2category[base_class] = sheet_category
+    return base_class2category
 
 
 def register_perf_model_categories(
     perf_model_extension: Mapping[str, type],
-    dict_base_class2category: Mapping[type, str],
     registry: MutableMapping[str, str],
     dict_cat2names: MutableMapping[str, List[str]],
 ) -> None:
     """Register categories for extension-provided perf models."""
     for op_name, perf_model_class in perf_model_extension.items():
-        base_classes = perf_model_class.__bases__
-        if len(base_classes) != 1:
-            raise ValueError(
-                f"op_name: {op_name}, perf_model_class: {perf_model_class}, "
-                f"base_classes: {base_classes}"
-            )
-        sheet_category = dict_base_class2category.get(base_classes[0])
-        if sheet_category is None:
-            raise ValueError(
-                f"op_name: {op_name}, perf_model_class: {perf_model_class}, "
-                f"base_class: {base_classes[0]}"
-            )
-        registry[op_name] = resolve_base_category(op_name, sheet_category)
+        category = get_perf_model_category(perf_model_class)
+        sheet_category = sheet_category_from_final_category(category)
+        registry[op_name] = category
         if sheet_category not in dict_cat2names:
             dict_cat2names[sheet_category] = []
         _append_unique(dict_cat2names[sheet_category], [op_name])
@@ -263,33 +238,9 @@ def register_perf_model_categories(
 def register_op_categories(
     op_category_extension: Mapping[str, str],
     registry: MutableMapping[str, str],
-    dict_cat2names: Optional[MutableMapping[str, List[str]]] = None,
 ) -> None:
     """Register explicit category-only op labels."""
     registry.update(op_category_extension)
-    if dict_cat2names is None:
-        return
-    for op_name, category in op_category_extension.items():
-        sheet_category = sheet_category_from_final_category(category)
-        if sheet_category not in dict_cat2names:
-            dict_cat2names[sheet_category] = []
-        _append_unique(dict_cat2names[sheet_category], [op_name])
-
-
-def register_dict_cat2names_extension(
-    dict_cat2names_extension: Mapping[str, List[str]],
-    registry: MutableMapping[str, str],
-    dict_cat2names: MutableMapping[str, List[str]],
-) -> None:
-    """Support the older ``dict_cat2names_extension`` extension contract."""
-    for sheet_category, names in dict_cat2names_extension.items():
-        if not isinstance(names, list):
-            raise ValueError(f"Expected names to be a list, got {type(names)}")
-        if sheet_category not in dict_cat2names:
-            dict_cat2names[sheet_category] = []
-        _append_unique(dict_cat2names[sheet_category], names)
-        for op_name in names:
-            registry[op_name] = resolve_base_category(op_name, sheet_category)
 
 
 def categorize_torch_op_from_registry(

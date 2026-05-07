@@ -542,6 +542,8 @@ class te_layer_norm_fwd(Normalization):
       args[2] = ln_bias        (beta, may be empty)
     """
 
+    category = "NORM_fwd"
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -578,6 +580,8 @@ class te_layer_norm_bwd(Normalization):
     we default has_bias=False to stay consistent with the forward model
     which infers it from the (often empty) ln_bias dim.
     """
+
+    category = "NORM_bwd"
 
     @staticmethod
     def get_param_details(event):
@@ -670,16 +674,7 @@ perf_model_extension = {
     "LayerNormFnBackward": te_layer_norm_bwd,
 }
 
-dict_cat2names_extension = {
-    "GEMM": [
-        "_Linear_yfwd_mm",
-        "_LinearBackward_xgrad_mm",
-        "_LinearBackward_wgrad_mm",
-        "_LayerNormLinear_yfwd_mm",
-        "_LayerNormLinearBackward_xgrad_mm",
-        "_LayerNormLinearBackward_wgrad_mm",
-    ],
-    "SDPA": ["FusedAttnFunc", "FusedAttnFuncBackward"],
-    "GroupedGEMM": ["GroupedGemm", "GroupedGemmBackward"],
-    "Normalization": ["LayerNormFn", "LayerNormFnBackward"],
+op_category_extension = {
+    "FusedAttnFuncBackward": "SDPA_bwd",
+    "GroupedGemmBackward": "GroupedGEMM_bwd",
 }
