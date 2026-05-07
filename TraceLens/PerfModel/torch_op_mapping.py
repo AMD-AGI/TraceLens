@@ -70,6 +70,11 @@ op_to_perf_model_class_map = {
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
+    # Primus FP8 ops (hipBLASLt GEMM + quantize, issue #626)
+    "primus_turbo_cpp_extension::hipblaslt_gemm_fp8": perf_model.hipblaslt_gemm_fp8,
+    "primus_turbo::hipblaslt_gemm_fp8": perf_model.hipblaslt_gemm_fp8,
+    "primus_turbo_cpp_extension::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
+    "primus_turbo::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
 }
 
 # Add pseudo-op extension mappings
