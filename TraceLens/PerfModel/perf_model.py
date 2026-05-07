@@ -5392,7 +5392,9 @@ class hipblaslt_gemm_fp8(GEMM):
     @staticmethod
     def get_param_details(event):
         input_dims = event["args"]["Input Dims"]
-        concrete = event["args"].get("Concrete Inputs", [])
+        # Concrete Inputs may be missing (older traces) or present-but-None
+        # (some kineto exporters); normalize to [] for both cases.
+        concrete = event["args"].get("Concrete Inputs") or []
 
         A_shape = list(input_dims[0])
         B_shape = list(input_dims[2])

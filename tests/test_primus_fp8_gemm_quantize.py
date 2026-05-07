@@ -199,6 +199,31 @@ def test_hipblaslt_gemm_fp8_missing_concrete_inputs_defaults_to_no_transpose():
     assert (model.M, model.N, model.K) == (M, N, K)
 
 
+def test_hipblaslt_gemm_fp8_null_concrete_inputs_defaults_to_no_transpose():
+    """Some kineto exporters write Concrete Inputs as None (not absent); must not raise."""
+    M, K, N = 1024, 512, 768
+    event = {
+        "name": "primus_turbo_cpp_extension::hipblaslt_gemm_fp8",
+        "args": {
+            "Input Dims": [(M, K), (), (K, N), (), (), (), (), (), ()],
+            "Input type": [
+                "c10::Float8_e4m3fnuz",
+                "float",
+                "c10::Float8_e4m3fnuz",
+                "float",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+                "",
+            ],
+            "Concrete Inputs": None,
+        },
+    }
+    model = hipblaslt_gemm_fp8(event)
+    assert (model.M, model.N, model.K) == (M, N, K)
+
+
 # ===========================================================================
 # quantize_fp8_tensorwise
 # ===========================================================================
