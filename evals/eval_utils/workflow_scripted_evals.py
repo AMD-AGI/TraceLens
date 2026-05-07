@@ -37,31 +37,31 @@ def _pre_check_gates(output_dir: str) -> str | None:
 
     Gates (applied in order, first failure wins):
       1. output_dir does not exist
-      2. analysis.md missing or too small (< 100 bytes)
-      3. analysis.md is garbled (> 50% non-ASCII or looks like JSON)
+      2. standalone_analysis.md missing or too small (< 100 bytes)
+      3. standalone_analysis.md is garbled (> 50% non-ASCII or looks like JSON)
     """
     if not os.path.isdir(output_dir):
         return "output directory does not exist"
 
-    report = os.path.join(output_dir, "analysis.md")
+    report = os.path.join(output_dir, "standalone_analysis.md")
     if not os.path.isfile(report):
-        return "analysis.md not found"
+        return "standalone_analysis.md not found"
     size = os.path.getsize(report)
     if size < _MIN_REPORT_BYTES:
-        return f"analysis.md too small ({size} bytes)"
+        return f"standalone_analysis.md too small ({size} bytes)"
 
     with open(report, encoding="utf-8", errors="replace") as f:
         content = f.read()
     if not content.strip():
-        return "analysis.md is empty"
+        return "standalone_analysis.md is empty"
 
     non_ascii = sum(1 for c in content if ord(c) > 127)
     if len(content) > 0 and non_ascii / len(content) > _GARBLED_THRESHOLD:
-        return f"analysis.md appears garbled ({non_ascii}/{len(content)} non-ASCII chars)"
+        return f"standalone_analysis.md appears garbled ({non_ascii}/{len(content)} non-ASCII chars)"
 
     stripped = content.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        return "analysis.md contains raw JSON instead of markdown"
+        return "standalone_analysis.md contains raw JSON instead of markdown"
 
     return None
 
@@ -234,7 +234,7 @@ EVAL_REGISTRY = [
         "Directory structure created",
         _check_directories,
         "pipeline",
-        "Re-run analysis pipeline from Step 1",
+        "Re-run standalone analysis pipeline from Step 1",
     ),
     (
         "Metadata files exist on disk",
@@ -299,7 +299,7 @@ def _make_row(index, summary, result, details, root_cause, fix):
 
 
 def _read_report(output_dir):
-    path = os.path.join(output_dir, "analysis.md")
+    path = os.path.join(output_dir, "standalone_analysis.md")
     if not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -406,7 +406,7 @@ def _check_report_template(output_dir):
                 "workflow_eval_9",
                 "Report Template Rendering",
                 "FAIL",
-                "analysis.md not found",
+                "standalone_analysis.md not found",
                 "pipeline",
                 "Re-run report generation",
             )
@@ -459,7 +459,7 @@ def _check_exec_summary(output_dir):
                 "workflow_eval_10",
                 "Executive Summary has metrics table",
                 "FAIL",
-                "analysis.md not found",
+                "standalone_analysis.md not found",
                 "pipeline",
                 "Re-run report generation",
             )
@@ -538,7 +538,7 @@ def _check_issue_template(output_dir):
                 "workflow_eval_11",
                 "Issue Template rendering",
                 "FAIL",
-                "analysis.md not found",
+                "standalone_analysis.md not found",
                 "pipeline",
                 "Re-run report generation",
             )
@@ -598,7 +598,7 @@ _MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
 def _check_model_id(output_dir):
     """Eval 13 — per-field check for model_info.json values in Appendix."""
     model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
-    report_path = os.path.join(output_dir, "analysis.md")
+    report_path = os.path.join(output_dir, "standalone_analysis.md")
 
     if not os.path.isfile(model_info_path):
         return [
@@ -617,7 +617,7 @@ def _check_model_id(output_dir):
                 "workflow_eval_13",
                 "Model identification in report",
                 "FAIL",
-                "analysis.md not found",
+                "standalone_analysis.md not found",
                 "pipeline",
                 "Re-run report generation",
             )

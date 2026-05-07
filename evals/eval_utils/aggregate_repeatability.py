@@ -280,7 +280,7 @@ def _detect_steps(tc, steps):
         steps.add("step7_subagent_findings")
     if "multi_kernel_findings" in stdout or "cpu_idle" in cmd:
         steps.add("step6_system_analysis")
-    if "analysis.md" in cmd:
+    if "standalone_analysis.md" in cmd:
         steps.add("step11_report")
     rp = tc.get("readToolCall", {}).get("args", {}).get("path", "")
     if "_metrics.json" in rp:
@@ -294,13 +294,13 @@ def _detect_report_write(tc):
     shell = tc.get("shellToolCall", {})
     cmd = shell.get("args", {}).get("command", "")
     res = shell.get("result", {}).get("success", {})
-    if "analysis.md" in cmd:
+    if "standalone_analysis.md" in cmd:
         for key in ("stdout", "interleavedOutput"):
             content = res.get(key, "")
             if content and len(content) > 100:
                 return content
     wc = tc.get("writeToolCall", {})
-    if wc and "analysis.md" in wc.get("args", {}).get("path", ""):
+    if wc and "standalone_analysis.md" in wc.get("args", {}).get("path", ""):
         content = wc.get("args", {}).get("content", "")
         if content:
             return content
@@ -311,7 +311,7 @@ def _detect_report_write_from_command(tc):
     """Extract report content from heredoc in the command string (started tool_call)."""
     shell = tc.get("shellToolCall", {})
     cmd = shell.get("args", {}).get("command", "")
-    if "analysis.md" not in cmd:
+    if "standalone_analysis.md" not in cmd:
         return None
     if "tee " not in cmd and "cat >" not in cmd:
         return None

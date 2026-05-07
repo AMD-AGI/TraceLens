@@ -14,7 +14,7 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 TEST_IDS="${TEST_IDS:-}"
 
 REPO_ROOT="$(pwd)"
-ANALYSIS_DIR="TraceLens/Agent/Analysis"
+STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
 EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/results}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
@@ -46,7 +46,7 @@ expand_archive unit_tests
 expand_archive e2e_tests
 
 echo "========================================="
-echo "  Analysis Evaluation"
+echo "  Standalone Analysis Evaluation"
 echo "  Node:      $(hostname)"
 echo "  Runtime:   $RUNTIME_LABEL"
 if [[ -n "$TEST_IDS" ]]; then
@@ -71,16 +71,16 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
     "${DEXEC[@]}" bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
     "${DEXEC[@]}" bash -c "mkdir -p $CASE_RESULTS && chmod -R 777 $CASE_RESULTS"
 
-    # Phase 1: Analysis (with retry + backoff)
+    # Phase 1: Standalone Analysis (with retry + backoff)
     echo "  [$id] Analyzing $trace_path on $platform..."
     agent_attempts=0
     agent_success=false
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$ANALYSIS_DIR"
+            cd "$STANDALONE_DIR"
             agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                "Run analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), $RUNTIME_LABEL, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_RESULTS/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then

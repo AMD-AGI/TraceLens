@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: Quality LLM Eval
-description: Run LLM-based quality evals comparing analysis output against a reference and produce a results CSV.
+description: Run LLM-based quality evals comparing standalone analysis output against a reference and produce a results CSV.
 triggers:
   - quality LLM eval
   - run quality LLM eval
@@ -17,7 +17,7 @@ tools:
 
 # Quality LLM Eval
 
-Evaluate the analysis output for semantic quality by comparing against a reference report.
+Evaluate the standalone analysis output for semantic quality by comparing against a reference report.
 
 ## Inputs
 
@@ -30,8 +30,8 @@ When triggered, the prompt will specify:
 
 Read ALL of these before evaluating:
 
-- `<output_dir>/analysis.md` (generated report)
-- `<reference_dir>/analysis.md` (reference report)
+- `<output_dir>/standalone_analysis.md` (generated report)
+- `<reference_dir>/standalone_analysis.md` (reference report)
 - `<output_dir>/category_findings/*_findings.md` (generated findings)
 - `<reference_dir>/category_findings/*_findings.md` (reference findings)
 
@@ -64,7 +64,7 @@ Evaluate BOTH checks below. Write BOTH rows to the results CSV.
 **Category:** Quality
 **Issue Summary:** Compute Issue Title Alignment
 
-Compare the P-item titles in the generated `analysis.md` against the reference report. For each P-item in the reference (lines matching `### ... P1:`, `### ... P2:`, etc.):
+Compare the P-item titles in the generated `standalone_analysis.md` against the reference report. For each P-item in the reference (lines matching `### ... P1:`, `### ... P2:`, etc.):
 
 - Check if the generated report identifies the **same bottleneck** at the same or similar priority level
 - This is a **semantic** comparison, not a string match.
