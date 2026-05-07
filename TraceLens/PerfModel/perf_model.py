@@ -25,6 +25,8 @@ class GEMM:
     If you want to add a new GEMM operation, you should inherit from this class.
     """
 
+    category = "GEMM"
+    bwd_category = None
     cache_gemm_results = {}  # This is used to cache gemm results
     _origami_import_error_printed = False
 
@@ -862,6 +864,9 @@ class tev2_pseudo_gemm(GEMM):
 class CONV:
     # Conv perf model is based on: https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py
     # we will make stuff reusiable across conv1d, conv2d, and conv3d
+    category = "CONV_fwd"
+    bwd_category = "CONV_bwd"
+
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
@@ -1150,6 +1155,8 @@ class aten_conv(CONV):
 
 
 class aten_conv_bwd(CONV):
+    category = "CONV_bwd"
+
     @staticmethod
     def get_param_details(event):
         # convolution_backward signature:
@@ -1374,6 +1381,8 @@ class ConvBias_Backward(CONV):
     Uses cached forward pass parameters via sequence number linkage.
     """
 
+    category = "CONV_bwd"
+
     @staticmethod
     def get_param_details(event):
         # Try to get forward pass parameters using sequence number
@@ -1583,6 +1592,8 @@ class ConvBiasReLU_Backward(CONV):
     ReLU backward: gradient is masked where forward output was negative.
     """
 
+    category = "CONV_bwd"
+
     @staticmethod
     def get_param_details(event):
         # Try to get forward pass parameters using sequence number
@@ -1746,6 +1757,8 @@ class Softmax:
 
 # 4. Scaled Dot Product Attention
 class SDPA:
+    category = "SDPA_fwd"
+    bwd_category = "SDPA_bwd"
 
     def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         # S = QK^T
@@ -2308,6 +2321,8 @@ class flash_attention(SDPA):
 class flash_attention_backward(SDPA):
     """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
+    category = "SDPA_bwd"
+
     def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.d_h = (
@@ -2471,6 +2486,8 @@ class flash_attention_varlen_forward(SDPA):
 
 
 class flash_attention_varlen_backward(SDPA):
+    category = "SDPA_bwd"
+
     def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         super().__init__(event, arch, python_path, enable_origami=enable_origami)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
@@ -2792,6 +2809,7 @@ class aiter__flash_attn_forward(SDPA):
 
 
 class aiter__flash_attn_backward(SDPA):
+    category = "SDPA_bwd"
 
     @staticmethod
     def get_param_details(event):
@@ -2923,6 +2941,7 @@ class aiter__fmha_v3_forward(SDPA):
 
 
 class aiter__fmha_v3_backward(SDPA):
+    category = "SDPA_bwd"
 
     @staticmethod
     def get_param_details(event):
@@ -3029,6 +3048,8 @@ class aiter__fmha_v3_fwd(SDPA):
 class aiter__mha_bwd(SDPA):
     # aiter::mha_bwd(dout, q, k, v, out, softmax_lse, dropout_p, softmax_scale, is_causal, ...)
     # q[1], k[2], v[3] — raw shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
+
+    category = "SDPA_bwd"
 
     @staticmethod
     def get_param_details(event):
@@ -3202,6 +3223,8 @@ class evoformer_attention(SDPA):
 
 
 class UnaryElementwise:
+    category = "elementwise"
+    bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -3268,6 +3291,8 @@ class aten_unary_elementwise(UnaryElementwise):
 
 
 class BinaryElementwise:
+    category = "elementwise"
+    bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -3408,6 +3433,9 @@ class Reduce:
     Base class for single-GPU reduce operations (sum, mean, max, min, norm, etc.).
     Models reduction over one or more dimensions of a tensor.
     """
+
+    category = "reduce"
+    bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -3654,6 +3682,9 @@ class GroupedGemm:
                       dW       (G*K*N) * bpe_in
             - Total bytes: (2*M*N) * bpe_out + (2*M*K) * bpe_in + (2*G*K*N) * bpe_in
     """
+
+    category = "GroupedGEMM_fwd"
+    bwd_category = "GroupedGEMM_bwd"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -4226,6 +4257,9 @@ def parse_list(input: str, dtype):
 
 
 class Normalization:
+    category = "NORM_fwd"
+    bwd_category = "NORM_bwd"
+
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
@@ -4497,6 +4531,8 @@ class BatchNorm(Normalization):
 
 
 class BatchNormBwd(Normalization):
+    category = "NORM_bwd"
+
     @staticmethod
     def get_param_details(event):
         # miopen_batch_norm_backward and cudnn_batch_norm_backward have different paramters
@@ -4605,6 +4641,8 @@ class LayerNorm(Normalization):
 
 
 class LayerNormBwd(Normalization):
+    category = "NORM_bwd"
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -4703,6 +4741,8 @@ class GroupNorm(Normalization):
 
 
 class GroupNormBwd(Normalization):
+    category = "NORM_bwd"
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -4796,6 +4836,8 @@ class InstanceNorm(Normalization):
 class InstanceNormBwd(Normalization):
     # instance_norm_backward does not appear in the traces and does not even exist in
     # https://github.com/pytorch/pytorch/blob/1457786f7445fb0e72794aa98c0ebaa3bc24ced5/aten/src/ATen/native/Normalization.cpp
+    category = "NORM_bwd"
+
     @staticmethod
     def get_param_details(event):
         raise NotImplementedError(f"Backward pass for InstanceNorm is not defined.")
@@ -4866,6 +4908,8 @@ class RMSNorm(Normalization):
 
 
 class RMSNormBwd(Normalization):
+    category = "NORM_bwd"
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
@@ -4945,6 +4989,9 @@ class MoEComm:
     bytes() = num_tokens × hidden_dim × bpe (data volume moved).
     """
 
+    category = "MoE_comm_fwd"
+    bwd_category = "MoE_comm_bwd"
+
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
@@ -5014,6 +5061,9 @@ class CausalConv1d:
 
     FLOPS = 2 × batch × channels × seq_len × kernel_size (depthwise conv).
     """
+
+    category = "SSM_fwd"
+    bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -5096,6 +5146,9 @@ class FusedRoPE:
     Total = 3 × num_elements (since 6 ops per 2 elements).
     """
 
+    category = "RoPE_fwd"
+    bwd_category = None
+
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
         self.arch = arch
@@ -5157,6 +5210,9 @@ class CrossEntropy:
 
     FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
     """
+
+    category = "CrossEntropy_fwd"
+    bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -5245,6 +5301,9 @@ class MambaSSD:
       B^T@X (step 2): 2 · B · H · T · N · P
       C@h   (step 4): 2 · B · H · T · N · P
     """
+
+    category = "SSM_fwd"
+    bwd_category = "SSM_bwd"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event

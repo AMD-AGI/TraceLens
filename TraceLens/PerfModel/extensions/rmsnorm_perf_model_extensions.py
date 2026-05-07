@@ -30,6 +30,9 @@ class aiter_rms_norm(RMSNorm):
     flops/bytes are inherited from RMSNorm (affine=True, training=False).
     """
 
+    category = "RMSNorm"
+    bwd_category = None
+
     def __init__(self, event, arch=None, python_path=None):
         # Normalization.__init__ calls self.get_param_details and sets all attrs
         super().__init__(event, arch, python_path)
@@ -79,6 +82,9 @@ class aiter_rmsnorm(RMSNorm):
     get_param_details uses input at index [1] and weight length at [2][0].
     """
 
+    category = "RMSNorm"
+    bwd_category = None
+
     @staticmethod
     def get_param_details(event):
         op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
@@ -117,6 +123,9 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
     FLOPs: RMSNorm (inherited) + per-token quant (2 * num_elems: max-abs + scale).
     Bytes: read input+weight, write out (FP8) + yscale (FP32).
     """
+
+    category = "RMSNorm"
+    bwd_category = None
 
     @staticmethod
     def get_param_details(event):
@@ -174,6 +183,9 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
         super().__init__(event, arch, python_path)
         self.group_size = int(event["args"]["Concrete Inputs"][3])
 
+    category = "RMSNorm"
+    bwd_category = None
+
     @staticmethod
     def get_param_details(event):
         op_shape = tuple(event["args"]["Input Dims"][0])
@@ -227,6 +239,9 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
     FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
     Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
     """
+
+    category = "RMSNorm"
+    bwd_category = None
 
     @staticmethod
     def get_param_details(event):
@@ -310,6 +325,9 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
     def __init__(self, event, arch=None, python_path=None):
         super().__init__(event, arch, python_path)
         self.group_size = int(event["args"]["Concrete Inputs"][4])
+
+    category = "RMSNorm"
+    bwd_category = None
 
     @staticmethod
     def get_param_details(event):
@@ -403,6 +421,9 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
             )
         else:
             self.n_out = N
+
+    category = "RMSNorm"
+    bwd_category = None
 
     @staticmethod
     def get_param_details(event):

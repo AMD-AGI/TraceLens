@@ -120,14 +120,10 @@ def apply_extension(perf_analyzer, extension_path):
     extension_name = os.path.splitext(os.path.basename(extension_path))[0]
 
     from TraceLens.PerfModel.op_categories import (
-        register_dict_cat2names_extension,
         register_op_categories,
         register_perf_model_categories,
     )
-    from TraceLens.PerfModel.torch_op_mapping import (
-        OP_CATEGORY_REGISTRY,
-        dict_base_class2category,
-    )
+    from TraceLens.PerfModel.torch_op_mapping import OP_CATEGORY_REGISTRY
 
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)
@@ -149,7 +145,6 @@ def apply_extension(perf_analyzer, extension_path):
         perf_analyzer.op_to_perf_model_class_map.update(perf_model_extension)
         register_perf_model_categories(
             perf_model_extension,
-            dict_base_class2category,
             OP_CATEGORY_REGISTRY,
             perf_analyzer.dict_cat2names,
         )
@@ -163,19 +158,12 @@ def apply_extension(perf_analyzer, extension_path):
         register_op_categories(
             op_category_extension,
             OP_CATEGORY_REGISTRY,
-            perf_analyzer.dict_cat2names,
         )
     if hasattr(extension, "dict_cat2names_extension"):
-        print(f"Updating dict_cat2names with extension from {extension_path}")
-        if not isinstance(extension.dict_cat2names_extension, dict):
-            raise ValueError(
-                f"Expected dict_cat2names_extension to be a dict, got {type(extension.dict_cat2names_extension)}"
-            )
-
-        register_dict_cat2names_extension(
-            extension.dict_cat2names_extension,
-            OP_CATEGORY_REGISTRY,
-            perf_analyzer.dict_cat2names,
+        warnings.warn(
+            "dict_cat2names_extension is deprecated and ignored. Use "
+            "perf_model_extension for modeled ops or op_category_extension for "
+            "category-only ops."
         )
 
 

@@ -375,6 +375,9 @@ class GroupQuant(BinaryElementwise):
     Performance model for group quantization.
     """
 
+    category = "GroupQuant"
+    bwd_category = None
+
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch

@@ -29,6 +29,7 @@ from ..PerfModel.torch_op_mapping import (
     dict_cat2names,
     op_to_perf_model_class_map,
 )
+from ..PerfModel.op_categories import get_perf_model_category
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
@@ -1664,6 +1665,10 @@ class TreePerfAnalyzer:
         if not fwd_event or not is_sole_bwd:
             return False
 
+        fwd_perf_model_class = self.op_to_perf_model_class_map.get(fwd_event["name"])
+        if get_perf_model_category(fwd_perf_model_class, bwd=True) is None:
+            return False
+
         # Check if backward metrics are actually defined for this forward op
         try:
             self.compute_perf_metrics(fwd_event, bwd=True)
@@ -1925,6 +1930,21 @@ class TreePerfAnalyzer:
             args = event.get("args", {})
             has_own_perf_model = self._has_perf_model(event)
             is_sole_bwd = self._is_sole_bwd_with_fwd_perf_model(event)
+            linked_fwd_event = None
+            linked_bwd_category = None
+            if is_sole_bwd:
+                linked_fwd_event, _ = self._get_linked_fwd_event(event)
+                if linked_fwd_event is not None:
+                    linked_perf_model_class = self.op_to_perf_model_class_map.get(
+                        linked_fwd_event["name"]
+                    )
+                    linked_bwd_category = get_perf_model_category(
+                        linked_perf_model_class, bwd=True
+                    )
+
+            op_category = self.op_categorizer(event)
+            if not has_own_perf_model and linked_bwd_category is not None:
+                op_category = linked_bwd_category
 
             if event.get("overlap_pct") is None and event.get("gpu_events"):
                 kernels = [
@@ -1939,7 +1959,7 @@ class TreePerfAnalyzer:
 
             row = {
                 "name": event.get("name"),
-                "op category": self.op_categorizer(event),
+                "op category": op_category,
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
@@ -1955,6 +1975,13 @@ class TreePerfAnalyzer:
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
+                "metrics_source": (
+                    "own_perf_model"
+                    if has_own_perf_model
+                    else "linked_forward_bwd"
+                    if is_sole_bwd
+                    else "kernel_time_only"
+                ),
                 "overlapping_kernel_names": event.get("overlapping_kernel_names"),
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
                 "overlap_pct": event.get("overlap_pct"),
@@ -2041,9 +2068,8 @@ class TreePerfAnalyzer:
                             ).compute_metrics()["busy_time"]
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
-                fwd_event, _ = self._get_linked_fwd_event(event)
                 try:
-                    metrics = self.compute_perf_metrics(fwd_event, bwd=True)
+                    metrics = self.compute_perf_metrics(linked_fwd_event, bwd=True)
                     for col in perf_cols:
                         if col in metrics:
                             row[col] = metrics[col]
@@ -2120,6 +2146,7 @@ class TreePerfAnalyzer:
                 ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
             )
         col_order.extend(["duration_us", "has_perf_model", "is_recompute"])
+        col_order.append("metrics_source")
         if include_perf_metrics:
             col_order.extend(perf_cols)
             col_order.append("perf_params")
@@ -2168,6 +2195,7 @@ class TreePerfAnalyzer:
         grouping_cols = [
             "name",
             "op category",
+            "metrics_source",
             "process_name",
             "process_label",
             "thread_name",
