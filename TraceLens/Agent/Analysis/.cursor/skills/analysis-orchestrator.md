@@ -502,7 +502,7 @@ print('PASS: All required sections present')
 
 **If validation fails (exit code 1):**
 
-1. Read the FAIL output to identify the issue. Fix in-place, do NOT rewrite the report from scratch.
+1. Read the FAIL output to identify the issue. Fix in-place, do NOT rewrite the report from scratch. Edit sections in place and not regenerate the entire output.
 a. Check if the report contains similar but incorrectly named headers and rename them to match the exact required names. 
 b. If sections are entirely absent, add them with the correct `##` headers, keeping existing content.
 c. For "Missing metrics row" errors: add the row to the Executive Summary table using values from `category_data/category_manifest.json` (`gpu_utilization` keys) and `priority_data.json` (top bottleneck).

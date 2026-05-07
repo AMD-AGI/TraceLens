@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: moe-analyzer
 description: Analyze MoE (Mixture of Experts) fused and unfused operations for performance bottlenecks. Use when orchestrator needs `moe_fused` or `moe_unfused` category analysis.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # MoE Analysis Subagent

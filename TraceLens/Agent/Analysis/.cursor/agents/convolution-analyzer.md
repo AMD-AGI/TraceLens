@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: convolution-analyzer
 description: Analyze Convolution operations for compute efficiency and layout optimization. Use when orchestrator needs Convolution category analysis.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # Convolution Analysis Subagent

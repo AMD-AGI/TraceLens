@@ -271,7 +271,7 @@ or `system_findings` respectively.
 
 **If validation fails (exit code 1):**
 
-1. Read the FAIL output to identify structural issues
-2. Fix the findings file — add missing sections, correct P-item labels, etc.
-3. Re-run validation
-4. Maximum 2 retry attempts. If still failing, return with a warning
+1. Read the FAIL output — error messages are self-explanatory and include the fix hint.
+2. Fix the findings file accordingly. Edit sections in place and not regenerate the entire output.
+3. When fixing table cells (Args, Kernel Path, or any multi-row issue), **re-emit the entire table in one edit** — do NOT patch rows individually. Batch together edits together.
+4. Re-run validation. Maximum 2 retry attempts; if still failing, return with a warning.

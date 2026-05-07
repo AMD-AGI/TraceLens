@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: sdpa-analyzer
 description: Analyze Scaled Dot Product Attention operations (forward and backward) for performance bottlenecks. Supports Flash Attention and Paged Attention (vLLM) analysis. Handles both sdpa_fwd and sdpa_bwd categories.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # SDPA Analysis Subagent

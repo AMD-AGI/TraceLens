@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: triton-analyzer
 description: Report informational summary for Triton custom kernels. Use when orchestrator needs Triton category analysis.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # Triton Analysis Subagent
