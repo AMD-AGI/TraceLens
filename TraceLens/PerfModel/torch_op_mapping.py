@@ -149,6 +149,9 @@ norm_ops = {
     "aten::miopen_rms_norm_backward": perf_model.RMSNormBwd,
     "aten::cudnn_rms_norm_backward": perf_model.RMSNormBwd,
     "aten::_fused_rms_norm_backward": perf_model.RMSNormBwd,
+    # Primus fused LN+modulate for MM-DiT (issue #627)
+    "primus::fused_ln_modulate": perf_model.FusedLnModulate,
+    "primus::fused_ln_modulate_backward": perf_model.FusedLnModulateBackward,
 }
 
 
