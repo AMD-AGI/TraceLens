@@ -57,6 +57,8 @@ _COMPUTE_DATA_REQUIRED_COLS = (
     "Bound",
 )
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
+_ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
+_MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
 _REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
@@ -387,7 +389,7 @@ def validate_subagent_outputs(output_dir):
     results = {
         "time_check": _check_time_sanity(manifest),
         "coverage_check": _check_coverage(output_dir, manifest),
-        "priority_check": _check_priority_consistency(manifest),
+        "priority_check": _check_priority_consistency(output_dir, manifest),
     }
 
     print("=" * 60)
@@ -457,23 +459,73 @@ def _check_coverage(output_dir, manifest):
     return {"status": status, "messages": messages}
 
 
-def _check_priority_consistency(manifest):
-    """Identify top categories by GPU time for priority verification."""
-    categories = manifest.get("categories", [])
-    sorted_cats = sorted(
-        [c for c in categories if c.get("tier") == "compute_kernel"],
-        key=lambda x: x.get("gpu_kernel_time_ms", 0),
-        reverse=True,
-    )
+def _check_priority_consistency(output_dir, manifest):
+    """Verify priority_data.json invariants: findings sort, rank contiguity,
+    and per-category rollup of priorities[].impact_score vs findings[] sum.
 
-    top_names = [c["name"] for c in sorted_cats[:3]]
-    return {
-        "status": "INFO",
-        "messages": [
-            f"Top 3 by GPU time: {top_names}",
-            "Verify these receive P1-P3 in compute kernel recommendations",
-        ],
-    }
+    Non-blocking: returns WARN on any violation (preserves Step 8 semantics
+    matching _check_time_sanity / _check_coverage). manifest is accepted for
+    call-site symmetry with the other Step 8 checks.
+    """
+    del manifest  # unused; kept for signature symmetry with sibling checks
+    pd_path = os.path.join(output_dir, "priority_data.json")
+    if not os.path.exists(pd_path):
+        return {"status": "WARN", "messages": ["priority_data.json not found"]}
+    try:
+        with open(pd_path) as f:
+            pd = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return {"status": "WARN", "messages": [f"priority_data.json unreadable: {e}"]}
+
+    findings = pd.get("findings", []) or []
+    priorities = pd.get("priorities", []) or []
+    messages = []
+
+    scored = [
+        (i, f.get("impact_score"))
+        for i, f in enumerate(findings)
+        if f.get("impact_score") is not None
+    ]
+    for (i_a, s_a), (i_b, s_b) in zip(scored, scored[1:]):
+        if s_a < s_b:
+            messages.append(
+                f"INV1: findings[] not sorted desc by impact_score at index "
+                f"{i_a}->{i_b} ({s_a} < {s_b})"
+            )
+            break
+
+    for i, f in enumerate(findings):
+        if f.get("global_rank") != i + 1:
+            messages.append(
+                f"INV2: findings[{i}].global_rank={f.get('global_rank')} "
+                f"expected {i + 1}"
+            )
+            break
+    for i, p in enumerate(priorities):
+        if p.get("rank") != i + 1:
+            messages.append(
+                f"INV3: priorities[{i}].rank={p.get('rank')} expected {i + 1}"
+            )
+            break
+
+    for p in priorities:
+        if p.get("source") != "findings_rollup":
+            continue
+        cat = p.get("category")
+        expected = sum(
+            f.get("impact_score", 0)
+            for f in findings
+            if f.get("category") == cat
+        )
+        actual = p.get("impact_score", 0) or 0
+        if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
+            messages.append(
+                f"INV7': priorities[category={cat}].impact_score={actual:.4f} "
+                f"!= sum(findings[].impact_score)={expected:.4f}"
+            )
+
+    status = "WARN" if messages else "PASS"
+    return {"status": status, "messages": messages}
 
 
 # Level 3: final report validation (called at Step 11.1)
@@ -551,6 +603,8 @@ def validate_report(output_dir):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
+    missing.extend(_validate_report_priority_consistency(content, output_dir))
+
     # Report-level marker structure
     missing.extend(MarkerValidator.check_report(report_path))
 
@@ -582,6 +636,111 @@ def _validate_report_args_column(content, output_dir):
         for ln, cell in _scan_args_cells(content)
         if cell not in valid_args
     ]
+
+
+def _validate_report_priority_consistency(content, output_dir):
+    """Cross-check analysis.md against priority_data.json.
+
+    R1: Compute Kernel Optimizations P-item heading count == len(quantified findings).
+    R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
+    R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
+    R4: Top Operations marker rows == len(priorities).
+
+    Silently skips when priority_data.json is absent (Step 8 already warns).
+    Numeric attrs are compared as 2-decimal strings to match the writer's
+    rounding in generate_priority_data.
+    """
+    pd_path = os.path.join(output_dir, "priority_data.json")
+    if not os.path.exists(pd_path):
+        return []
+    try:
+        with open(pd_path) as f:
+            pd = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    findings = [
+        f for f in (pd.get("findings", []) or []) if f.get("impact_score") is not None
+    ]
+    priorities = pd.get("priorities", []) or []
+    errors = []
+
+    sec_start = content.find("## Compute Kernel Optimizations")
+    if sec_start < 0:
+        return errors
+    sec_end = content.find("\n## ", sec_start + 1)
+    section = content[sec_start:] if sec_end < 0 else content[sec_start:sec_end]
+
+    n_p = len(_P_ITEM_RE.findall(section))
+    if n_p != len(findings):
+        errors.append(
+            f"R1: Compute Kernel Optimizations has {n_p} P-item headings but "
+            f"priority_data.json has {len(findings)} quantified findings"
+        )
+
+    p_markers = []
+    for m in MarkerValidator.BEGIN_RE.finditer(section):
+        inner = m.group(1)
+        km = MarkerValidator.KIND_ATTR_RE.search(inner)
+        if not km or km.group(1) != "p_item":
+            continue
+        p_markers.append(dict(MarkerValidator.ATTR_RE.findall(inner)))
+
+    for idx, attrs in enumerate(p_markers):
+        if idx >= len(findings):
+            errors.append(
+                f"R2: extra kind=p_item marker #{idx + 1} in Compute Kernel "
+                f"Optimizations beyond {len(findings)} quantified findings"
+            )
+            break
+        f = findings[idx]
+        cat_attr = attrs.get("category")
+        if cat_attr != f.get("category"):
+            errors.append(
+                f"R2: P-item marker #{idx + 1} category={cat_attr!r} != "
+                f"findings[{idx}].category={f.get('category')!r}"
+            )
+        for attr_name, json_key in (
+            ("low", "impact_score_low"),
+            ("mid", "impact_score"),
+            ("high", "impact_score_high"),
+        ):
+            got = attrs.get(attr_name)
+            if got is None:
+                continue
+            raw = f.get(json_key)
+            try:
+                if abs(float(got) - float(raw)) > _MARKER_NUMERIC_TOL:
+                    errors.append(
+                        f"R3: P-item marker #{idx + 1} {attr_name}={got} != "
+                        f"findings[{idx}].{json_key}={raw}"
+                    )
+            except (TypeError, ValueError):
+                if got != ("null" if raw is None else str(raw)):
+                    errors.append(
+                        f"R3: P-item marker #{idx + 1} {attr_name}={got} != "
+                        f"findings[{idx}].{json_key}={raw}"
+                    )
+
+    top_match = re.search(
+        r"<!--\s*impact-begin[^>]*?\bkind=top_ops\b[^>]*?-->(.*?)<!--\s*impact-end\s*-->",
+        content,
+        re.DOTALL,
+    )
+    if top_match:
+        body = top_match.group(1)
+        n_rows = sum(
+            1
+            for ln in body.splitlines()
+            if ln.lstrip().startswith("|") and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
+        )
+        n_data_rows = max(0, n_rows - 1)
+        if n_data_rows != len(priorities):
+            errors.append(
+                f"R4: Top Operations table has {n_data_rows} data rows but "
+                f"priority_data.json::priorities has {len(priorities)} entries"
+            )
+
+    return errors
 
 
 class MarkerValidator:

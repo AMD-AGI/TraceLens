@@ -411,7 +411,7 @@ This runs four checks:
 1. **Time Sanity** -- category GPU kernel time sum vs computation time (WARN if >15% discrepancy)
 2. **Efficiency Anomalies** -- findings with efficiency >100% (measurement issues)
 3. **Coverage** -- all expected system and compute findings present
-4. **Priority Consistency** -- top 3 categories by GPU time for P1-P3 verification
+4. **Priority Consistency** -- `priority_data.json` invariants: `findings[]` sorted desc by `impact_score`, contiguous `global_rank` / `priorities[].rank`, and per-category `priorities[].impact_score` ≈ `sum(findings[].impact_score)`
 
 ---
 
@@ -510,6 +510,7 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 g. For marker errors: restore or add the missing/broken marker in place — never delete a card or block to silence an error. Source numeric values from `priority_data.json` (P-items) or `<cat>_metrics.json::impact_estimates[]` (detail estimates); use `null` or the sentinel `not quantifiable from trace data` for non-quantifiable items.
+h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order).
 2. Run validation again.
 3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
