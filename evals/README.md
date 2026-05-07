@@ -122,21 +122,24 @@ You can run each stage independently using the `agent` CLI. Examples:
 
 ```bash
 cd TraceLens/Agent/Analysis
-agent --model claude-opus-4-7-high --force "Run analysis on <trace_path> with platform <platform>, node <node>, container <container>, output to <output_dir>"
+agent --model claude-opus-4-7-high --print --force --trust \
+    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <trace_path> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Workflow Eval:**
 
 ```bash
 cd evals
-agent --model claude-opus-4-7-high --force "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
+agent --model claude-opus-4-7-high --print --force --trust \
+    "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
 ```
 
 **Quality Eval:**
 
 ```bash
 cd evals
-agent --model claude-opus-4-7-high --force "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
+agent --model claude-opus-4-7-high --print --force --trust \
+    "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
 ```
 
 ## Post-Processing Skill
