@@ -5510,3 +5510,247 @@ class mamba_ssd_fwd(MambaSSD):
     """MambaSplitConv1dScanCombinedFn forward pass."""
 
     pass
+
+
+# ---------------------------------------------------------------------------
+# primus_turbo FP8 ops (#626)
+# ---------------------------------------------------------------------------
+
+
+class hipblaslt_gemm_fp8(GEMM):
+    """
+    primus_turbo_cpp_extension::hipblaslt_gemm_fp8 — FP8 GEMM via hipBLASLt.
+
+    9-slot input layout (from Primus-Turbo C++ binding):
+      hipblaslt_gemm_fp8(A, scaleA_inv, B, scaleB_inv,
+                         out_dtype, transA, transB, transC, granularity)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (), (B0, B1), (), (), (), (), (), ())
+      Input type:  (fp8, float, fp8, float, Scalar, ...)
+      Concrete Inputs: ('', '', '', '', '<dtype_enum>', '<transA>', '<transB>', '<transC>', '')
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        # Concrete Inputs may be missing (older traces) or present-but-None
+        # (some kineto exporters); normalize to [] for both cases.
+        concrete = event["args"].get("Concrete Inputs") or []
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[2])
+
+        trans_a = (concrete[5] == "True") if len(concrete) > 5 else False
+        trans_b = (concrete[6] == "True") if len(concrete) > 6 else False
+        trans_c = (concrete[7] == "True") if len(concrete) > 7 else False
+
+        # Replicate C++ transC swap (hipblaslt_gemm.cpp)
+        if trans_c:
+            A_shape, B_shape = B_shape, A_shape
+            trans_a, trans_b = not trans_b, not trans_a
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K = A_shape[0] if trans_a else A_shape[1]
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        dtype_A_B = (event["args"]["Input type"][0], event["args"]["Input type"][2])
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][2])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpeA = name2bpe(dtype_A_B[0])
+        bpeB = name2bpe(dtype_A_B[1])
+        assert (
+            bpeA is not None and bpeB is not None
+        ), f"Data types of A and B are not supported: {dtype_A_B}"
+        self.bpe = bpeA
+        # FP8 inputs (1 byte), BF16/FP16 output (2 bytes)
+        out_bpe = 2 if self.bpe == 1 else self.bpe
+        return super().bytes(
+            bpe_mat1=self.bpe,
+            bpe_mat2=bpeB,
+            bpe_bias=self.bpe,
+            bpe_output=out_bpe,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp8 is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp8 is not defined."
+        )
+
+
+class primus_turbo_quantize_fp8(UnaryElementwise):
+    """
+    primus_turbo_cpp_extension::quantize_fp8_tensorwise
+
+    BF16 → FP8 per-tensor quantize for delayed-scaling tensorwise recipe.
+    Trace arg layout: (tensor, scale_inv, amax) where tensor is BF16 2-D,
+    scale_inv and amax are scalars.
+
+    Memory-bandwidth bound: reads 2·M·N bytes (BF16), writes M·N bytes (FP8).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, "c10::Float8_e4m3fnuz"),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# primus fused_ln_modulate (#627)
+# ---------------------------------------------------------------------------
+
+
+class FusedLnModulate(Normalization):
+    """
+    primus::fused_ln_modulate — forward
+
+    Fused LayerNorm + scale/shift modulation for MM-DiT / DiT blocks.
+    Input: x:(T,B,H), scale:(B,H), shift:(B,H), eps (scalar).
+
+    Memory-bandwidth bound:
+      fwd bytes = 2·T·B·H·bpe (read x, write y) + 2·B·H·bpe (read scale, shift)
+                  + 2·T·B·4 (write mean, rstd as float32, one per row)
+      flops ≈ T·B·H·12 (LN: subtract mean, square, sum, rsqrt, normalize ≈ 8;
+              modulate: scale + shift ≈ 2; residual: 2)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        x_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+
+        T, B, H = x_shape[0], x_shape[1], x_shape[2]
+        return {
+            "op_shape": x_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": H,
+            "has_bias": True,
+            "is_affine": True,
+            "is_training": True,
+        }
+
+    def flops(self):
+        return self.num_elems * 12
+
+    def bytes(self):
+        bpe = self.bpe_in
+        T = self.param_details["op_shape"][0]
+        B = self.param_details["op_shape"][1]
+        H = self.num_channels
+        T_B_H = self.num_elems
+        read_x = T_B_H * bpe
+        write_y = T_B_H * bpe
+        read_scale_shift = 2 * B * H * bpe
+        write_mean_rstd = 2 * T * B * 4
+        return read_x + write_y + read_scale_shift + write_mean_rstd
+
+    def flops_bwd(self):
+        raise NotImplementedError("Use FusedLnModulateBackward for the backward pass.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Use FusedLnModulateBackward for the backward pass.")
+
+
+class FusedLnModulateBackward(Normalization):
+    """
+    primus::fused_ln_modulate_backward
+
+    Backward pass of the fused LN+modulate kernel.
+    Input: grad_out:(T,B,H), x_norm:(T,B,H), mean:(B*T,), rstd:(B*T,), mod_grad:(B,H)
+
+    Memory-bandwidth bound:
+      bwd bytes = 2·T·B·H·bpe (read grad_out, x_norm) + 2·T·B·4 (read mean, rstd)
+                  + T·B·H·bpe (write x_grad) + 2·B·H·bpe (write scale_grad, shift_grad)
+                  + B·H·bpe (read modulation_grad)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        grad_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+
+        T, B, H = grad_shape[0], grad_shape[1], grad_shape[2]
+        return {
+            "op_shape": grad_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": H,
+            "has_bias": True,
+            "is_affine": True,
+            "is_training": True,
+            "output_mask": [True, True, True],
+        }
+
+    def flops(self):
+        return self.num_elems * 15
+
+    def bytes(self):
+        bpe = self.bpe_in
+        T_B_H = self.num_elems
+        B = self.param_details["op_shape"][1]
+        T = self.param_details["op_shape"][0]
+        H = self.num_channels
+        read_grad_x_norm = 2 * T_B_H * bpe
+        read_mean_rstd = 2 * B * T * 4
+        write_x_grad = T_B_H * bpe
+        write_scale_shift_grad = 2 * B * H * bpe
+        read_mod_grad = B * H * bpe
+        return (
+            read_grad_x_norm
+            + read_mean_rstd
+            + write_x_grad
+            + write_scale_shift_grad
+            + read_mod_grad
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError
+
+    def bytes_bwd(self):
+        raise NotImplementedError
