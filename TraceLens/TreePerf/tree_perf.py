@@ -1973,11 +1973,6 @@ class TreePerfAnalyzer:
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
-                "metrics_source": (
-                    "own_perf_model"
-                    if has_own_perf_model
-                    else "linked_forward_bwd" if is_sole_bwd else "kernel_time_only"
-                ),
                 "overlapping_kernel_names": event.get("overlapping_kernel_names"),
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
                 "overlap_pct": event.get("overlap_pct"),
@@ -2142,7 +2137,6 @@ class TreePerfAnalyzer:
                 ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
             )
         col_order.extend(["duration_us", "has_perf_model", "is_recompute"])
-        col_order.append("metrics_source")
         if include_perf_metrics:
             col_order.extend(perf_cols)
             col_order.append("perf_params")
@@ -2191,7 +2185,6 @@ class TreePerfAnalyzer:
         grouping_cols = [
             "name",
             "op category",
-            "metrics_source",
             "process_name",
             "process_label",
             "thread_name",
