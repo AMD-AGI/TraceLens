@@ -11,6 +11,15 @@ setup(
     version="0.1.0",
     packages=find_packages(where="."),  # Will pick up 'TraceLens' automatically
     package_dir={"": "."},
+    include_package_data=True,
+    package_data={
+        "TraceLens": [
+            "**/*.md",
+            "Agent/**/.cursor/skills/*",
+            "Agent/**/.cursor/agents/*",
+            "Agent/Analysis/utils/arch/*.json",
+        ],
+    },
     install_requires=[
         "pandas",
         "tqdm",
