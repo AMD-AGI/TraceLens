@@ -553,8 +553,10 @@ class TestFusedAttnFuncBackwardCategorization:
 
     def test_fused_attn_fwd_still_sdpa_fwd(self):
         """FusedAttnFunc (forward) must still be SDPA_fwd."""
-        from TraceLens.PerfModel.op_categories import register_perf_model_categories
-        from TraceLens.PerfModel.torch_op_mapping import OP_CATEGORY_REGISTRY
+        from TraceLens.PerfModel.torch_op_mapping import (
+            OP_CATEGORY_REGISTRY,
+            register_perf_model_categories,
+        )
 
         registry = dict(OP_CATEGORY_REGISTRY)
         register_perf_model_categories(
@@ -642,8 +644,10 @@ class TestLayerNormFnPerfModel:
 
     def test_categorize_as_norm_fwd_bwd(self):
         """Core categorizer must return NORM_fwd and NORM_bwd."""
-        from TraceLens.PerfModel.op_categories import register_perf_model_categories
-        from TraceLens.PerfModel.torch_op_mapping import OP_CATEGORY_REGISTRY
+        from TraceLens.PerfModel.torch_op_mapping import (
+            OP_CATEGORY_REGISTRY,
+            register_perf_model_categories,
+        )
 
         registry = dict(OP_CATEGORY_REGISTRY)
         register_perf_model_categories(

@@ -10,14 +10,12 @@ Tests for the registry-based torch op categorizer.
 
 import pytest
 
-from TraceLens.PerfModel.op_categories import (
-    build_sheet_category_to_op_names,
-    register_op_categories,
-)
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
+    build_sheet_category_to_op_names,
     categorize_torch_op,
     op_to_perf_model_class_map,
+    register_op_categories,
 )
 
 
@@ -87,7 +85,9 @@ def test_kernel_name_fallback(kernel_name, expected):
 
 
 def test_registry_covers_every_perf_model_op():
-    missing = [name for name in op_to_perf_model_class_map if name not in OP_CATEGORY_REGISTRY]
+    missing = [
+        name for name in op_to_perf_model_class_map if name not in OP_CATEGORY_REGISTRY
+    ]
     assert missing == []
 
 

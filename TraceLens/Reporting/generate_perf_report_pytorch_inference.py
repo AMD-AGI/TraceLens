@@ -23,7 +23,7 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
-from TraceLens.PerfModel.op_categories import build_sheet_category_to_op_names
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import request_install
 from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
@@ -401,11 +401,11 @@ def apply_extension(perf_analyzer, extension_path):
     extension_path = os.path.abspath(extension_path)
     extension_name = os.path.splitext(os.path.basename(extension_path))[0]
 
-    from TraceLens.PerfModel.op_categories import (
+    from TraceLens.PerfModel.torch_op_mapping import (
+        OP_CATEGORY_REGISTRY,
         register_op_categories,
         register_perf_model_categories,
     )
-    from TraceLens.PerfModel.torch_op_mapping import OP_CATEGORY_REGISTRY
 
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)

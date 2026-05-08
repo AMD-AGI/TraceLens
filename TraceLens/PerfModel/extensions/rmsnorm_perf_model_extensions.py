@@ -16,6 +16,7 @@ class RMSNorm(CoreRMSNorm):
 
     category = "RMSNorm"
     bwd_category = None
+    sheet_category = "RMSNorm"
 
 
 class aiter_rms_norm(RMSNorm):

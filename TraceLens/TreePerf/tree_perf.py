@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
     categorize_torch_op,
+    get_perf_model_category,
     op_to_perf_model_class_map,
 )
-from ..PerfModel.op_categories import get_perf_model_category
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
@@ -1976,9 +1976,7 @@ class TreePerfAnalyzer:
                 "metrics_source": (
                     "own_perf_model"
                     if has_own_perf_model
-                    else "linked_forward_bwd"
-                    if is_sole_bwd
-                    else "kernel_time_only"
+                    else "linked_forward_bwd" if is_sole_bwd else "kernel_time_only"
                 ),
                 "overlapping_kernel_names": event.get("overlapping_kernel_names"),
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
