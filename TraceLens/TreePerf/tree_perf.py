@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
     categorize_torch_op,
-    dict_cat2names,
     op_to_perf_model_class_map,
 )
 from ..PerfModel.op_categories import get_perf_model_category
@@ -245,7 +244,6 @@ class TreePerfAnalyzer:
 
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
-        self.dict_cat2names = dict_cat2names
 
     def check_gpu_only(self):
         for event in self.tree.events:

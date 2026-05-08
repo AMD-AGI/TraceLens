@@ -3438,6 +3438,7 @@ class Reduce:
 
     category = "reduce"
     bwd_category = None
+    sheet_category = "Reduce"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -4261,6 +4262,7 @@ def parse_list(input: str, dtype):
 class Normalization:
     category = "NORM_fwd"
     bwd_category = "NORM_bwd"
+    sheet_category = "Normalization"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event

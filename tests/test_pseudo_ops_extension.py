@@ -554,20 +554,15 @@ class TestFusedAttnFuncBackwardCategorization:
     def test_fused_attn_fwd_still_sdpa_fwd(self):
         """FusedAttnFunc (forward) must still be SDPA_fwd."""
         from TraceLens.PerfModel.op_categories import register_perf_model_categories
-        from TraceLens.PerfModel.torch_op_mapping import (
-            OP_CATEGORY_REGISTRY,
-            categorize_torch_op,
-            dict_cat2names,
-        )
+        from TraceLens.PerfModel.torch_op_mapping import OP_CATEGORY_REGISTRY
 
+        registry = dict(OP_CATEGORY_REGISTRY)
         register_perf_model_categories(
             {"FusedAttnFunc": perf_model_extension["FusedAttnFunc"]},
-            OP_CATEGORY_REGISTRY,
-            dict_cat2names,
+            registry,
         )
 
-        result = categorize_torch_op({"name": "FusedAttnFunc"})
-        assert result == "SDPA_fwd", f"Expected SDPA_fwd, got {result}"
+        assert registry["FusedAttnFunc"] == "SDPA_fwd"
 
 
 class TestLayerNormFnPerfModel:
@@ -648,23 +643,19 @@ class TestLayerNormFnPerfModel:
     def test_categorize_as_norm_fwd_bwd(self):
         """Core categorizer must return NORM_fwd and NORM_bwd."""
         from TraceLens.PerfModel.op_categories import register_perf_model_categories
-        from TraceLens.PerfModel.torch_op_mapping import (
-            OP_CATEGORY_REGISTRY,
-            categorize_torch_op,
-            dict_cat2names,
-        )
+        from TraceLens.PerfModel.torch_op_mapping import OP_CATEGORY_REGISTRY
 
+        registry = dict(OP_CATEGORY_REGISTRY)
         register_perf_model_categories(
             {
                 "LayerNormFn": te_layer_norm_fwd,
                 "LayerNormFnBackward": te_layer_norm_bwd,
             },
-            OP_CATEGORY_REGISTRY,
-            dict_cat2names,
+            registry,
         )
 
-        assert categorize_torch_op({"name": "LayerNormFn"}) == "NORM_fwd"
-        assert categorize_torch_op({"name": "LayerNormFnBackward"}) == "NORM_bwd"
+        assert registry["LayerNormFn"] == "NORM_fwd"
+        assert registry["LayerNormFnBackward"] == "NORM_bwd"
 
     def test_perf_model_extension_registration(self):
         """LayerNormFn/LayerNormFnBackward must be registered in perf_model_extension."""

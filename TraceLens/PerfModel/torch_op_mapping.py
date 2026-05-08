@@ -7,11 +7,9 @@
 from . import perf_model
 from .extensions import get_pseudo_op_mappings
 from .op_categories import (
-    CATEGORY_ONLY_OP_CATEGORIES,
-    build_dict_base_class2category,
-    build_dict_cat2names,
+    CATEGORY_ONLY_OP_MAPPING,
+    _categorize_torch_op_from_registry,
     build_op_category_registry,
-    categorize_torch_op_from_registry,
 )
 
 op_to_perf_model_class_map = {
@@ -179,15 +177,9 @@ for op_name, op_class in norm_ops.items():
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
 
-# Compatibility view for older callers that inspect base-class categories. New
-# categorization reads ``category`` / ``bwd_category`` from perf model classes.
-dict_base_class2category = build_dict_base_class2category(op_to_perf_model_class_map)
-
-dict_cat2names = build_dict_cat2names(op_to_perf_model_class_map)
-
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
-    category_only_ops=CATEGORY_ONLY_OP_CATEGORIES,
+    category_only_ops=CATEGORY_ONLY_OP_MAPPING,
 )
 
 
@@ -212,7 +204,7 @@ def categorize_torch_op(row):
         Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
         are categorization-only (timing without GFLOPS or TB/s).
     """
-    return categorize_torch_op_from_registry(
+    return _categorize_torch_op_from_registry(
         row,
         OP_CATEGORY_REGISTRY,
     )
