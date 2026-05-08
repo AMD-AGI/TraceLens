@@ -215,5 +215,4 @@ def categorize_torch_op(row):
     return categorize_torch_op_from_registry(
         row,
         OP_CATEGORY_REGISTRY,
-        dict_cat2names=dict_cat2names,
     )

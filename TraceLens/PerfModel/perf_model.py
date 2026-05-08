@@ -3225,6 +3225,7 @@ class evoformer_attention(SDPA):
 class UnaryElementwise:
     category = "elementwise"
     bwd_category = None
+    sheet_category = "UnaryElementwise"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -3293,6 +3294,7 @@ class aten_unary_elementwise(UnaryElementwise):
 class BinaryElementwise:
     category = "elementwise"
     bwd_category = None
+    sheet_category = "BinaryElementwise"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
