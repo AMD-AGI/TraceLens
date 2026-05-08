@@ -10,10 +10,7 @@ Tests for the registry-based torch op categorizer.
 
 import pytest
 
-from TraceLens.PerfModel.op_categories import (
-    category_from_sheet_view,
-    register_op_categories,
-)
+from TraceLens.PerfModel.op_categories import register_op_categories
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     categorize_torch_op,
@@ -99,14 +96,6 @@ def test_dict_cat2names_keeps_sheet_compatibility_view():
     assert "aten::convolution_backward" in dict_cat2names["CONV"]
     assert "FlashAttnFuncBackward" not in dict_cat2names["SDPA"]
     assert "TokenPermuteMaskMap" not in dict_cat2names["MoE_comm"]
-
-
-def test_dict_cat2names_dynamic_fallback_for_legacy_callers():
-    local_sheet_view = {"SDPA": ["MyCustomAttentionBackward"]}
-    assert (
-        category_from_sheet_view("MyCustomAttentionBackward", local_sheet_view)
-        == "SDPA_bwd"
-    )
 
 
 def test_register_op_category_extension_updates_registry_only():

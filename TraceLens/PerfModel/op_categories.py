@@ -143,36 +143,12 @@ def sheet_category_from_final_category(category: str) -> str:
     return category_to_sheet.get(category, category)
 
 
-def category_from_sheet_category(op_name: str, sheet_category: str) -> str:
-    """Resolve a legacy sheet category to the final categorization label."""
-    sheet_to_fwd_bwd = {
-        "CONV": ("CONV_fwd", "CONV_bwd"),
-        "SDPA": ("SDPA_fwd", "SDPA_bwd"),
-        "Normalization": ("NORM_fwd", "NORM_bwd"),
-        "GroupedGEMM": ("GroupedGEMM_fwd", "GroupedGEMM_bwd"),
-        "SSM": ("SSM_fwd", "SSM_bwd"),
-        "MoE_comm": ("MoE_comm_fwd", "MoE_comm_bwd"),
-        "RoPE": ("RoPE_fwd", "RoPE_bwd"),
-        "CrossEntropy": ("CrossEntropy_fwd", "CrossEntropy_bwd"),
-    }
-    if sheet_category in sheet_to_fwd_bwd:
-        fwd_category, bwd_category = sheet_to_fwd_bwd[sheet_category]
-        return bwd_category if is_backward_op(op_name) else fwd_category
-    if sheet_category in ("BinaryElementwise", "UnaryElementwise"):
-        return "elementwise"
-    if sheet_category == "Reduce":
-        return "reduce"
-    return sheet_category
-
-
-def category_from_sheet_view(
-    op_name: str, dict_cat2names: Mapping[str, List[str]]
-) -> Optional[str]:
-    """Compatibility fallback for callers that still mutate ``dict_cat2names``."""
-    for sheet_category, names in dict_cat2names.items():
-        if op_name in names:
-            return category_from_sheet_category(op_name, sheet_category)
-    return None
+def get_perf_model_sheet_category(perf_model_class: type) -> str:
+    """Return the legacy sheet category for a perf model class."""
+    sheet_category = getattr(perf_model_class, "sheet_category", None)
+    if sheet_category is not None:
+        return sheet_category
+    return sheet_category_from_final_category(get_perf_model_category(perf_model_class))
 
 
 def build_op_category_registry(
@@ -196,8 +172,7 @@ def build_dict_cat2names(
     """Build the legacy ``category -> op names`` view used for report sheets."""
     dict_cat2names = defaultdict(list)  # type: DefaultDict[str, List[str]]
     for op_name, perf_model_class in op_to_perf_model_class_map.items():
-        category = get_perf_model_category(perf_model_class)
-        dict_cat2names[sheet_category_from_final_category(category)].append(op_name)
+        dict_cat2names[get_perf_model_sheet_category(perf_model_class)].append(op_name)
     return dict_cat2names
 
 
@@ -211,8 +186,7 @@ def build_dict_base_class2category(
         if len(base_classes) != 1:
             continue
         base_class = base_classes[0]
-        category = get_perf_model_category(perf_model_class)
-        sheet_category = sheet_category_from_final_category(category)
+        sheet_category = get_perf_model_sheet_category(perf_model_class)
         existing = base_class2category.get(base_class)
         if existing is not None and existing != sheet_category:
             continue
@@ -228,7 +202,7 @@ def register_perf_model_categories(
     """Register categories for extension-provided perf models."""
     for op_name, perf_model_class in perf_model_extension.items():
         category = get_perf_model_category(perf_model_class)
-        sheet_category = sheet_category_from_final_category(category)
+        sheet_category = get_perf_model_sheet_category(perf_model_class)
         registry[op_name] = category
         if sheet_category not in dict_cat2names:
             dict_cat2names[sheet_category] = []
@@ -246,7 +220,6 @@ def register_op_categories(
 def categorize_torch_op_from_registry(
     row,
     registry: Mapping[str, str],
-    dict_cat2names: Optional[Mapping[str, List[str]]] = None,
     patterns: Iterable[Tuple[Pattern, str]] = OP_CATEGORY_PATTERNS,
 ) -> str:
     """Return the category for ``row`` using explicit registry data."""
@@ -255,11 +228,6 @@ def categorize_torch_op_from_registry(
     category = registry.get(name)
     if category is not None:
         return category
-
-    if dict_cat2names is not None:
-        category = category_from_sheet_view(name, dict_cat2names)
-        if category is not None:
-            return category
 
     for pattern, category in patterns:
         if pattern.match(name):
