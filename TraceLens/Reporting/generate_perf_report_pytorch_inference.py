@@ -23,6 +23,7 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens.PerfModel.op_categories import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import request_install
 from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
@@ -427,7 +428,6 @@ def apply_extension(perf_analyzer, extension_path):
         register_perf_model_categories(
             perf_model_extension,
             OP_CATEGORY_REGISTRY,
-            perf_analyzer.dict_cat2names,
         )
     if hasattr(extension, "op_category_extension"):
         print(f"Applying op category extension from {extension_path}")
@@ -687,8 +687,11 @@ def generate_perf_report_pytorch(
             )
         # Dictionary to hold the op-specific DataFrames
         perf_metrics_dfs = {}
-        for op_cat, op_names in perf_analyzer.dict_cat2names.items():
-            # Filter events belonging to the current category
+        sheet_category_to_op_names = build_sheet_category_to_op_names(
+            perf_analyzer.op_to_perf_model_class_map
+        )
+        for sheet_category, op_names in sheet_category_to_op_names.items():
+            # Filter events belonging to the current legacy sheet category
             op_events = [
                 event
                 for event in perf_analyzer.tree.events
@@ -697,7 +700,7 @@ def generate_perf_report_pytorch(
             if len(op_events) == 0:
                 continue
             # Skip categories with no events
-            if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
+            if sheet_category in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
                 # For GEMM: create a single table that covers both fwd and bwd.
                 df_ops_raw = perf_analyzer.build_df_perf_metrics(
                     op_events, bwd=False, include_kernel_details=True, include_args=True
@@ -713,7 +716,7 @@ def generate_perf_report_pytorch(
                     new_col_name="trunc_kernel_details",
                 )
                 if not df_ops.empty:
-                    perf_metrics_dfs[op_cat] = df_ops
+                    perf_metrics_dfs[sheet_category] = df_ops
                 if include_overlap_info:
                     df_ops_overlapping_kernels = (
                         perf_analyzer.summarize_df_perf_metrics(
@@ -734,7 +737,7 @@ def generate_perf_report_pytorch(
                         new_col_name="trunc_overlapping_kernels_details",
                     )
                     if not df_ops_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_kl_overlap"] = (
                             df_ops_overlapping_kernels
                         )
             else:
@@ -790,9 +793,9 @@ def generate_perf_report_pytorch(
                     if filtered_df_bwd_ops is not None:
                         df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
                     if not df_ops_bwd.empty:
-                        perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+                        perf_metrics_dfs[f"{sheet_category}_bwd"] = df_ops_bwd
                 if not df_ops_fwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
+                    perf_metrics_dfs[f"{sheet_category}_fwd"] = df_ops_fwd
 
                 if include_overlap_info:
                     df_ops_fwd_overlapping_kernels = (
@@ -862,11 +865,11 @@ def generate_perf_report_pytorch(
                                 ]
                             )
                     if not df_ops_bwd_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_bwd_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_bwd_kl_overlap"] = (
                             df_ops_bwd_overlapping_kernels
                         )
                     if not df_ops_fwd_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_fwd_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_fwd_kl_overlap"] = (
                             df_ops_fwd_overlapping_kernels
                         )
 

@@ -10,11 +10,13 @@ Tests for the registry-based torch op categorizer.
 
 import pytest
 
-from TraceLens.PerfModel.op_categories import register_op_categories
+from TraceLens.PerfModel.op_categories import (
+    build_sheet_category_to_op_names,
+    register_op_categories,
+)
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     categorize_torch_op,
-    dict_cat2names,
     op_to_perf_model_class_map,
 )
 
@@ -89,13 +91,17 @@ def test_registry_covers_every_perf_model_op():
     assert missing == []
 
 
-def test_dict_cat2names_keeps_sheet_compatibility_view():
-    assert "aten::mm" in dict_cat2names["GEMM"]
-    assert "primus_turbo::grouped_gemm" in dict_cat2names["GroupedGEMM"]
-    assert "aten::convolution" in dict_cat2names["CONV"]
-    assert "aten::convolution_backward" in dict_cat2names["CONV"]
-    assert "FlashAttnFuncBackward" not in dict_cat2names["SDPA"]
-    assert "TokenPermuteMaskMap" not in dict_cat2names["MoE_comm"]
+def test_sheet_category_to_op_names_keeps_legacy_sheet_view():
+    sheet_category_to_op_names = build_sheet_category_to_op_names(
+        op_to_perf_model_class_map
+    )
+
+    assert "aten::mm" in sheet_category_to_op_names["GEMM"]
+    assert "primus_turbo::grouped_gemm" in sheet_category_to_op_names["GroupedGEMM"]
+    assert "aten::convolution" in sheet_category_to_op_names["CONV"]
+    assert "aten::convolution_backward" in sheet_category_to_op_names["CONV"]
+    assert "FlashAttnFuncBackward" not in sheet_category_to_op_names["SDPA"]
+    assert "TokenPermuteMaskMap" not in sheet_category_to_op_names["MoE_comm"]
 
 
 def test_register_op_category_extension_updates_registry_only():
