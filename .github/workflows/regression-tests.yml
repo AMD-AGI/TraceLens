@@ -79,6 +79,11 @@ jobs:
           . .venv/bin/activate
           pytest tests/test_detect_recompute.py
 
+      - name: Run idle time classification tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_classify_idle_time.py
+
       - name: Run copyright header checks
         run: |
           . .venv/bin/activate

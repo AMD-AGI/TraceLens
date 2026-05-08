@@ -16,7 +16,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
+from TraceLens import DataLoader, GPUEventAnalyser, NcclAnalyser, TraceToTree, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
 
 
@@ -256,6 +256,9 @@ def generate_perf_report_pytorch(
     enable_origami: bool = False,
     # activation recompute detection
     detect_recompute: bool = False,
+    # idle time analysis
+    enable_idle_analysis: bool = False,
+    enable_augmented_trace: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
@@ -750,6 +753,37 @@ def generate_perf_report_pytorch(
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
 
+    # Built-in idle time analysis
+    if enable_idle_analysis:
+        from TraceLens.IdleTimeAnalyser import IdleTimeAnalyser
+
+        idle_analyser = IdleTimeAnalyser(
+            perf_analyzer.tree,
+            micro_thresh_us=micro_idle_thresh_us or 5.0,
+        )
+        gpu_metrics = GPUEventAnalyser(perf_analyzer.tree.events).compute_metrics()
+        idle_dfs = idle_analyser.get_dataframes(
+            gpu_busy_time_us=gpu_metrics.get("busy_time"),
+        )
+        dict_name2df.update(idle_dfs)
+        print(f"Added idle time analysis sheets: {list(idle_dfs.keys())}")
+
+        if enable_augmented_trace:
+            from TraceLens.IdleTimeAnalyser.classify import find_gpu_pid
+
+            raw_data = DataLoader.load_data(profile_json_path)
+            gpu_pid = find_gpu_pid(raw_data["traceEvents"])
+            aug_events = idle_analyser.get_augmented_events(gpu_pid)
+            raw_data["traceEvents"].extend(aug_events)
+
+            import gzip as _gzip
+
+            base_path = profile_json_path.rsplit(".json", 1)[0]
+            aug_path = base_path + "_idle_augmented.json.gz"
+            with _gzip.open(aug_path, "wt") as f:
+                json.dump(raw_data, f)
+            print(f"Wrote augmented trace for Perfetto: {aug_path}")
+
     # Get additional DataFrames from extension if available
     if extension_file:
         extension_path = os.path.abspath(extension_file)
@@ -941,6 +975,20 @@ def main():
         "when overlap sheets are enabled): earliest launcher timestamp per group, "
         "relative to the minimum in the table.",
     )
+    parser.add_argument(
+        "--enable_idle_analysis",
+        action="store_true",
+        default=False,
+        help="Add GPU idle time classification sheets (idle_overview, idle_summary, "
+        "idle_intervals) to the report.",
+    )
+    parser.add_argument(
+        "--enable_augmented_trace",
+        action="store_true",
+        default=False,
+        help="Write an augmented trace JSON with idle time annotations for visual "
+        "analysis in Perfetto. Requires --enable_idle_analysis.",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -966,6 +1014,8 @@ def main():
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
+        enable_idle_analysis=args.enable_idle_analysis,
+        enable_augmented_trace=args.enable_augmented_trace,
     )
 
 
