@@ -151,4 +151,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Generate test
     main()
