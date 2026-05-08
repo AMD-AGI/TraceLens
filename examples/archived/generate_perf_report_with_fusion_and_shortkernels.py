@@ -9,7 +9,7 @@ import json
 import pandas as pd
 import numpy as np
 from TraceLens import TreePerfAnalyzer
-from TraceLens.PerfModel.op_categories import build_sheet_category_to_op_names
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 
 
 def get_next_host_op(perf_analyzer, host_op):

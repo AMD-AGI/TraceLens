@@ -9,7 +9,7 @@ import json
 import pandas as pd
 from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
-from TraceLens.PerfModel.op_categories import build_sheet_category_to_op_names
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 
 from TraceLens.PerfModel import SDPA
 

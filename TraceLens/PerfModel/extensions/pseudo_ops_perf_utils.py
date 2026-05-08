@@ -100,4 +100,3 @@ def get_pseudo_op_mappings():
     }
 
     return pseudo_op_mappings
-
