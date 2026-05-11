@@ -33,75 +33,72 @@ jobs:
           . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
-          mkdir -p junit
+
+      - name: Configure runtime recording
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p .github/runtimes
+          echo "JUNIT_FLAGS=--junitxml" >> $GITHUB_ENV
 
       - name: Run function-based tests
         run: |
           . .venv/bin/activate
           pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py \
-            --junitxml=junit/function-based.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/function-based.xml}
 
       - name: Run rocprof report tests
         run: |
           . .venv/bin/activate
           pytest tests/test_rocprof_perf_report.py \
-            --junitxml=junit/rocprof-report.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/rocprof-report.xml}
 
       - name: Run perf report regression tests
         run: |
           . .venv/bin/activate
           pytest tests/test_perf_report_regression.py \
-            --junitxml=junit/perf-report-regression.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/perf-report-regression.xml}
 
       - name: Run compare perf reports tests
         run: |
           . .venv/bin/activate
           pytest tests/test_compare_perf_reports.py \
-            --junitxml=junit/compare-perf-reports.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/compare-perf-reports.xml}
 
       - name: Run pytest on inference perf report tests
         run: |
           . .venv/bin/activate
           pytest tests/test_inference_perf_report.py \
-            --junitxml=junit/inference-perf-report.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/inference-perf-report.xml}
 
       - name: Run collective analysis tests
         run: |
           . .venv/bin/activate
           pytest tests/test_collective_analysis.py \
-            --junitxml=junit/collective-analysis.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/collective-analysis.xml}
 
       - name: Run all2allv summary tests
         run: |
           . .venv/bin/activate
           pytest tests/test_all2allv_summary.py \
-            --junitxml=junit/all2allv-summary.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/all2allv-summary.xml}
 
       - name: Run JAX perf report tests
         run: |
           . .venv/bin/activate
           pytest tests/test_jax_perf_report.py \
-            --junitxml=junit/jax-perf-report.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/jax-perf-report.xml}
 
       - name: Run detect recompute tests
         run: |
           . .venv/bin/activate
           pytest tests/test_detect_recompute.py \
-            --junitxml=junit/detect-recompute.xml
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/detect-recompute.xml}
 
       - name: Run copyright header checks
         run: |
           . .venv/bin/activate
           pytest tests/test_copyright_headers.py \
-            --junitxml=junit/copyright-headers.xml
-
-      - name: Upload JUnit XML artifacts
-        if: always() && github.event_name == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: junit-xml-results
-          path: junit/
-          retention-days: 30
+            ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/copyright-headers.xml}
 
       - name: Push metrics to Grafana Cloud
         if: always() && github.event_name == 'push'
@@ -114,4 +111,4 @@ jobs:
           pip install \
             opentelemetry-sdk \
             opentelemetry-exporter-otlp-proto-http
-          python3 .github/scripts/push_metrics.py junit/
+          python3 .github/scripts/push_metrics.py .github/runtimes/

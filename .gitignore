@@ -5,3 +5,4 @@
 **.egg-info/
 *.SSTABLE
 *.hlo_proto.pb
+.github/runtimes/

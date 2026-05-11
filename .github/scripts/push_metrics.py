@@ -50,7 +50,7 @@ def parse_junit_xml_dir(junit_dir):
             suites = root.findall(".//testsuite")
 
         for suite in suites:
-            suite_name = suite.get("name", os.path.basename(xml_path))
+            suite_name = os.path.splitext(os.path.basename(xml_path))[0]
             for tc in suite.findall("testcase"):
                 name = tc.get("name", "unknown")
                 try:
@@ -83,22 +83,12 @@ def push_metrics(results, endpoint, token_raw, branch, commit_sha):
     )
     from opentelemetry.metrics import Observation
     from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
     auth_value = "Basic " + base64.b64encode(token_raw.encode()).decode()
 
-    exporter = OTLPMetricExporter(
-        endpoint=endpoint.rstrip("/") + "/v1/metrics",
-        headers={"Authorization": auth_value},
-        timeout=30,
-    )
-
-    reader = PeriodicExportingMetricReader(
-        exporter=exporter,
-        export_interval_millis=5_000,
-        export_timeout_millis=30_000,
-    )
+    reader = InMemoryMetricReader()
 
     resource = Resource(
         attributes={
@@ -133,11 +123,20 @@ def push_metrics(results, endpoint, token_raw, branch, commit_sha):
         description="Per-test duration from pytest JUnit XML results",
     )
 
+    metrics_data = reader.get_metrics_data()
+
+    exporter = OTLPMetricExporter(
+        endpoint=endpoint.rstrip("/") + "/v1/metrics",
+        headers={"Authorization": auth_value},
+        timeout=30,
+    )
+
     print(
-        f"[push_metrics] Flushing {len(snapshot)} metric observations to {endpoint}",
+        f"[push_metrics] Exporting {len(snapshot)} metric observations to {endpoint}",
         file=sys.stderr,
     )
-    provider.force_flush(timeout_millis=30_000)
+    exporter.export(metrics_data)
+    exporter.shutdown()
     provider.shutdown()
     print("[push_metrics] Done.", file=sys.stderr)
 
