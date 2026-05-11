@@ -33,53 +33,85 @@ jobs:
           . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
+          mkdir -p junit
 
       - name: Run function-based tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
+          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py \
+            --junitxml=junit/function-based.xml
 
       - name: Run rocprof report tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_rocprof_perf_report.py
+          pytest tests/test_rocprof_perf_report.py \
+            --junitxml=junit/rocprof-report.xml
 
       - name: Run perf report regression tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_perf_report_regression.py
+          pytest tests/test_perf_report_regression.py \
+            --junitxml=junit/perf-report-regression.xml
 
       - name: Run compare perf reports tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_compare_perf_reports.py
+          pytest tests/test_compare_perf_reports.py \
+            --junitxml=junit/compare-perf-reports.xml
 
       - name: Run pytest on inference perf report tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_inference_perf_report.py
+          pytest tests/test_inference_perf_report.py \
+            --junitxml=junit/inference-perf-report.xml
 
       - name: Run collective analysis tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_collective_analysis.py
+          pytest tests/test_collective_analysis.py \
+            --junitxml=junit/collective-analysis.xml
 
       - name: Run all2allv summary tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_all2allv_summary.py
+          pytest tests/test_all2allv_summary.py \
+            --junitxml=junit/all2allv-summary.xml
 
       - name: Run JAX perf report tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_jax_perf_report.py
+          pytest tests/test_jax_perf_report.py \
+            --junitxml=junit/jax-perf-report.xml
 
       - name: Run detect recompute tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_detect_recompute.py
+          pytest tests/test_detect_recompute.py \
+            --junitxml=junit/detect-recompute.xml
 
       - name: Run copyright header checks
         run: |
           . .venv/bin/activate
-          pytest tests/test_copyright_headers.py
+          pytest tests/test_copyright_headers.py \
+            --junitxml=junit/copyright-headers.xml
+
+      - name: Upload JUnit XML artifacts
+        if: always() && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-xml-results
+          path: junit/
+          retention-days: 30
+
+      - name: Push metrics to Grafana Cloud
+        if: always() && github.event_name == 'push'
+        env:
+          GRAFANA_CLOUD_OTLP_ENDPOINT: ${{ secrets.GRAFANA_CLOUD_OTLP_ENDPOINT }}
+          GRAFANA_CLOUD_OTLP_TOKEN: ${{ secrets.GRAFANA_CLOUD_OTLP_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          pip install \
+            opentelemetry-sdk \
+            opentelemetry-exporter-otlp-proto-http
+          python3 .github/scripts/push_metrics.py junit/
