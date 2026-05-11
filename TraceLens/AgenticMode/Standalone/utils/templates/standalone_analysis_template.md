@@ -444,8 +444,6 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 - **Precision**: <precision>
 
 ### Hardware Reference
-
-<!-- === STANDALONE Hardware Reference === -->
 - **Platform**: <platform>
 - **Peak HBM BW**: X TB/s
 - **Peak MAF (BF16)**: Y TFLOPS

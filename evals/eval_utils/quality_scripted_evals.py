@@ -40,13 +40,12 @@ def _normalize_numpy_reprs(s: str) -> str:
     return _NUMPY_TYPE_RE.sub(r"\1", s)
 
 
-def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]:
-    gen_dir = os.path.join(output_dir, "perf_report_csvs")
-    ref_dir = os.path.join(reference_dir, "perf_report_csvs")
+def _check_csv_alignment_dirs(gen_dir: str, ref_dir: str) -> tuple[str, str]:
+    """Compare all CSVs in gen_dir against ref_dir. Returns (result, details)."""
     if not os.path.isdir(ref_dir):
-        return "FAIL", "Reference perf_report_csvs/ not found"
+        return "FAIL", f"Reference CSV directory not found: {ref_dir}"
     if not os.path.isdir(gen_dir):
-        return "FAIL", "Generated perf_report_csvs/ not found"
+        return "FAIL", f"Generated CSV directory not found: {gen_dir}"
 
     ref_files = {f for f in os.listdir(ref_dir) if f.endswith(".csv")}
     if not ref_files:
@@ -115,67 +114,83 @@ def _check_csv_alignment(output_dir: str, reference_dir: str) -> tuple[str, str]
     return "PASS", ""
 
 
-EVAL_REGISTRY = [
-    (
-        "TraceLens Perf report CSVs alignment",
-        _check_csv_alignment,
-        "data",
-        "Regenerate golden refs with current TraceLens version",
-    ),
-]
-
-
-def _pre_check_gates(output_dir: str, reference_dir: str) -> str | None:
+def _pre_check_gates(output_dir: str, reference_dir: str, comparison_scope: str) -> str | None:
     """Return a failure reason if a hard pre-check gate trips, else None."""
     if not os.path.isdir(output_dir):
         return "generated output directory does not exist"
     if not os.path.isdir(reference_dir):
         return "reference directory does not exist"
-    gen_csv_dir = os.path.join(output_dir, "perf_report_csvs")
-    ref_csv_dir = os.path.join(reference_dir, "perf_report_csvs")
-    if not os.path.isdir(gen_csv_dir):
-        return "generated perf_report_csvs/ directory not found"
-    if not os.path.isdir(ref_csv_dir):
-        return "reference perf_report_csvs/ directory not found"
+
+    if comparison_scope == "standalone":
+        if not os.path.isdir(os.path.join(output_dir, "perf_report_csvs")):
+            return "generated perf_report_csvs/ directory not found"
+        if not os.path.isdir(os.path.join(reference_dir, "perf_report_csvs")):
+            return "reference perf_report_csvs/ directory not found"
+    else:
+        if not os.path.isdir(os.path.join(output_dir, "perf_report_trace1_csvs")):
+            return "generated perf_report_trace1_csvs/ directory not found"
+        if not os.path.isdir(os.path.join(reference_dir, "perf_report_trace1_csvs")):
+            return "reference perf_report_trace1_csvs/ directory not found"
+
     return None
 
 
-def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
+def run(output_dir: str, reference_dir: str, results_path: str, comparison_scope: str = "standalone") -> list[dict]:
     rows = []
 
-    gate_fail = _pre_check_gates(output_dir, reference_dir)
+    gate_fail = _pre_check_gates(output_dir, reference_dir, comparison_scope)
     if gate_fail is not None:
-        for i, (summary, _func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
-            rows.append(
-                {
-                    "index": f"quality_eval_{i}",
-                    "category": "Quality",
-                    "issue_summary": summary,
-                    "result": "FAIL",
-                    "details": f"Pre-check gate: {gate_fail}",
-                    "root_cause": "pipeline",
-                    "recommended_fix": "Fix pre-check gate failure before running evals",
-                }
-            )
+        index = "quality_eval_1" if comparison_scope == "standalone" else "quality_eval_1_trace1"
+        rows.append(
+            {
+                "index": index,
+                "category": "Quality",
+                "issue_summary": "TraceLens Perf report CSVs alignment",
+                "result": "FAIL",
+                "details": f"Pre-check gate: {gate_fail}",
+                "root_cause": "pipeline",
+                "recommended_fix": "Fix pre-check gate failure before running evals",
+            }
+        )
         with open(results_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
             writer.writeheader()
             writer.writerows(rows)
         return rows
 
-    for i, (summary, func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
-        result, details = func(output_dir, reference_dir)
+    if comparison_scope == "standalone":
+        gen_dir = os.path.join(output_dir, "perf_report_csvs")
+        ref_dir = os.path.join(reference_dir, "perf_report_csvs")
+        result, details = _check_csv_alignment_dirs(gen_dir, ref_dir)
         rows.append(
             {
-                "index": f"quality_eval_{i}",
+                "index": "quality_eval_1",
                 "category": "Quality",
-                "issue_summary": summary,
+                "issue_summary": "TraceLens Perf report CSVs alignment",
                 "result": result,
                 "details": details,
-                "root_cause": rc if result == "FAIL" else "",
-                "recommended_fix": fix if result == "FAIL" else "",
+                "root_cause": "data" if result == "FAIL" else "",
+                "recommended_fix": "Regenerate golden refs with current TraceLens version" if result == "FAIL" else "",
             }
         )
+    else:
+        # Comparative: check trace1 and trace2 CSVs separately
+        for trace_num in (1, 2):
+            gen_dir = os.path.join(output_dir, f"perf_report_trace{trace_num}_csvs")
+            ref_dir = os.path.join(reference_dir, f"perf_report_trace{trace_num}_csvs")
+            result, details = _check_csv_alignment_dirs(gen_dir, ref_dir)
+            rows.append(
+                {
+                    "index": f"quality_eval_1_trace{trace_num}",
+                    "category": "Quality",
+                    "issue_summary": f"TraceLens Perf report CSVs alignment (trace{trace_num})",
+                    "result": result,
+                    "details": details,
+                    "root_cause": "data" if result == "FAIL" else "",
+                    "recommended_fix": "Regenerate golden refs with current TraceLens version" if result == "FAIL" else "",
+                }
+            )
+
     with open(results_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
@@ -188,9 +203,15 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--reference-dir", required=True)
     parser.add_argument("--results", required=True)
+    parser.add_argument(
+        "--comparison-scope",
+        choices=["standalone", "comparative"],
+        default="standalone",
+        help="Analysis mode (default: standalone)",
+    )
     args = parser.parse_args()
 
-    rows = run(args.output_dir, args.reference_dir, args.results)
+    rows = run(args.output_dir, args.reference_dir, args.results, args.comparison_scope)
     passed = sum(1 for r in rows if r["result"] == "PASS")
     sys.exit(0 if passed == len(rows) else 1)
 

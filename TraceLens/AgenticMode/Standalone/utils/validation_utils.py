@@ -45,7 +45,7 @@ _TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args\s*\|.*\|\s*$", re.MULTILINE)
 # Mandatory columns of the compute-tier **Data:** Operations Table, in spec
 # order (sub_agent_spec.md § Operations Table Schema). Agents may append
 # extra columns at the end but must not drop or reorder these.
-_COMPUTE_DATA_REQUIRED_COLS = (
+_COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
     "Operation",
     "Args",
     "Kernel Path",
@@ -55,6 +55,17 @@ _COMPUTE_DATA_REQUIRED_COLS = (
     "FLOPS/Byte",
     "Efficiency",
     "Bound",
+)
+# Mandatory columns for comparative-mode **Data:** tables (sub_agent_spec.md
+# § Operations Table Schema — Comparative).
+_COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
+    "Operation",
+    "Trace 1 Time (ms)",
+    "Trace 2 Time (ms)",
+    "Count (T1/T2)",
+    "Difference (ms)",
+    "FLOPS/Byte (T1)",
+    "Bound (T1)",
 )
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _REQUIRED_REPORT_HEADERS = [
@@ -106,7 +117,7 @@ def _category_findings_empty(filepath):
     return isinstance(cf, list) and len(cf) == 0
 
 
-def validate_findings_file(filepath, tier):
+def validate_findings_file(filepath, tier, comparison_scope=None):
     """Validate a single findings file against the sub-agent spec contract.
 
     Checks:
@@ -124,6 +135,8 @@ def validate_findings_file(filepath, tier):
     Args:
         filepath: Path to the *_findings.md file
         tier: "compute" or "system"
+        comparison_scope: "standalone" or "comparative". When omitted, inferred
+            from the category metrics JSON.
 
     Returns:
         Tuple of (passed: bool, errors: list of error strings)
@@ -202,7 +215,7 @@ def validate_findings_file(filepath, tier):
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
     if tier == "compute":
-        errors.extend(_validate_compute_data_tables(content, filepath))
+        errors.extend(_validate_compute_data_tables(content, filepath, comparison_scope))
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -327,14 +340,21 @@ def _find_data_table(lines, start, end):
     return header_idx + 1, header_cols, rows()
 
 
-def _validate_compute_data_tables(content, findings_path):
+def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
-    (Args column required), Args cells verbatim vs operations[].args, and
-    Kernel Path cells verbatim vs operations[].launcher_path when present.
+    (Args column required for standalone; comparative schema for comparative),
+    Args cells verbatim vs operations[].args, and Kernel Path cells verbatim
+    vs operations[].launcher_path when present.
     Skips silently when the metrics JSON is absent.
     """
     metrics_path = _metrics_json_for_findings(findings_path)
     cat_metrics_basename = os.path.basename(metrics_path)
+    is_comparative = comparison_scope == "comparative"
+    required_cols = (
+        _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
+        if is_comparative
+        else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+    )
     valid_args, valid_paths = _load_compute_data_metrics(metrics_path)
     lines = content.splitlines()
     errors = []
@@ -347,17 +367,19 @@ def _validate_compute_data_tables(content, findings_path):
             )
             continue
         header_line, header_cols, row_iter = table
-        if tuple(header_cols[: len(_COMPUTE_DATA_REQUIRED_COLS)]) != _COMPUTE_DATA_REQUIRED_COLS:
+        if tuple(header_cols[: len(required_cols)]) != required_cols:
             errors.append(
                 f"compute Data table at line {header_line}: header must start "
-                f"with the {len(_COMPUTE_DATA_REQUIRED_COLS)} canonical columns "
-                f"in order {list(_COMPUTE_DATA_REQUIRED_COLS)}; got {header_cols} "
+                f"with the {len(required_cols)} canonical columns "
+                f"in order {list(required_cols)}; got {header_cols} "
                 f"(sub_agent_spec.md § Operations Table Schema)"
             )
             continue
-        args_idx = _COMPUTE_DATA_REQUIRED_COLS.index("Args")
-        kp_idx = _COMPUTE_DATA_REQUIRED_COLS.index("Kernel Path")
+        args_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Args")
+        kp_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Path")
         for row_line, cells in row_iter:
+            if is_comparative:
+                continue
             if valid_args and args_idx < len(cells) and cells[args_idx]:
                 if cells[args_idx] not in valid_args:
                     errors.append(

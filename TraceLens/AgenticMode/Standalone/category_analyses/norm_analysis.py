@@ -28,7 +28,11 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze normalization operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
-
+    parser.add_argument(
+        "--category",
+        default="norm",
+        help="Category name prefix used for input/output files (default: norm)"
+    )
     parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),
@@ -37,12 +41,6 @@ def main():
             "standalone: roofline efficiency in operations[].efficiency; "
             "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
         )
-    ),
-    
-    parser.add_argument(
-        "--category",
-        default="norm",
-        help="Category name prefix used for input/output files (default: norm)",
     )
     args = parser.parse_args()
 

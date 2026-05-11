@@ -19,17 +19,16 @@ root-cause categories, and where the implementation lives.
 | Range | Type | Count | Engine |
 |-------|------|:-----:|--------|
 | workflow\_eval\_1–8 | Scripted (file/dir existence) | 8 | `workflow_scripted_evals.py` |
-| workflow\_eval\_9 | Scripted (per-header) | 6 sub-indices | `workflow_scripted_evals.py` |
-| workflow\_eval\_10 | Scripted (per-row + CSV cross-check) | 5 sub-indices | `workflow_scripted_evals.py` |
+| workflow\_eval\_9 | Scripted (per-header) | 6 sub-indices (standalone) / 7 (comparative) | `workflow_scripted_evals.py` |
+| workflow\_eval\_10 | Scripted (per-row + CSV cross-check) | 5 sub-indices (standalone) / 5+ arithmetic checks (comparative) | `workflow_scripted_evals.py` |
 | workflow\_eval\_11 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
 | workflow\_eval\_12 | LLM (multi-dimensional scoring) | 1 | `workflow-llm-eval.md` |
 | workflow\_eval\_13 | Scripted (per-category) | Dynamic | `workflow_scripted_evals.py` |
-| workflow\_eval\_14 | Scripted (per-field) | 4 sub-indices | `workflow_scripted_evals.py` |
-| quality\_eval\_1 | Scripted (CSV alignment) | 1 | `quality_scripted_evals.py` |
+| quality\_eval\_1 | Scripted (CSV alignment) | 1 (standalone) / 2 (comparative) | `quality_scripted_evals.py` |
 | quality\_eval\_2 | LLM (multi-dimensional scoring) | 1 | `quality-llm-eval.md` |
 | quality\_eval\_3 | LLM (multi-dimensional scoring) | 1 | `quality-llm-eval.md` |
 
-**Total:** 13 scripted evals (expanding to ~30+ sub-indices) + 3 LLM evals = 16 logical evals.
+**Total:** 12 scripted evals (expanding to ~30+ sub-indices) + 3 LLM evals = 15 logical evals.
 
 ---
 
@@ -41,11 +40,11 @@ workflow evals are set to FAIL with `root_cause=pipeline`.
 | Gate | Condition | Implemented in |
 |------|-----------|----------------|
 | 1 | `output_dir` does not exist | `workflow_scripted_evals.py` |
-| 2 | `standalone_analysis.md` missing or < 100 bytes | `workflow_scripted_evals.py` |
-| 3 | `standalone_analysis.md` is garbled (> 50% non-ASCII) | `workflow_scripted_evals.py` |
-| 4 | `standalone_analysis.md` contains raw JSON instead of markdown | `workflow_scripted_evals.py` |
+| 2 | Primary report missing or < 100 bytes | `workflow_scripted_evals.py` |
+| 3 | Primary report is garbled (> 50% non-ASCII) | `workflow_scripted_evals.py` |
+| 4 | Primary report contains raw JSON instead of markdown | `workflow_scripted_evals.py` |
 | 5 | `output_dir` or `reference_dir` missing | `quality_scripted_evals.py` |
-| 6 | `perf_report_csvs/` directory missing (generated or reference) | `quality_scripted_evals.py` |
+| 6 | `perf_report_csvs/` (standalone) or `perf_report_trace1_csvs/` (comparative) missing in generated or reference | `quality_scripted_evals.py` |
 
 ---
 
@@ -58,7 +57,7 @@ All binary PASS/FAIL. Root cause is always `pipeline`.
 | `workflow_eval_1` | Directory structure created | `metadata/`, `category_data/`, `system_findings/`, `category_findings/` all exist | — |
 | `workflow_eval_2` | Metadata files exist on disk | Every `metadata_file` listed in `category_manifest.json` exists on disk | Requires manifest |
 | `workflow_eval_3` | Model info JSON exists and valid | `metadata/model_info.json` exists, is valid JSON, has keys `{model, architecture, scale, precision}`, none empty | — |
-| `workflow_eval_4` | Unified perf report exists | `perf_report_csvs/unified_perf_summary.csv` exists | — |
+| `workflow_eval_4` | Unified perf report exists | `perf_report_csvs/unified_perf_summary.csv` exists (standalone) or `perf_report_trace1_csvs/unified_perf_summary.csv` (comparative) | — |
 | `workflow_eval_5` | Tree data files exist on disk | Every `tree_data_file` listed in `category_manifest.json` exists on disk | Requires manifest |
 | `workflow_eval_6` | Categorical findings .md files exist | For every category in manifest (except `cpu_idle` when idle ≤ 15%), the corresponding `*_findings.md` exists in the correct tier directory | — |
 | `workflow_eval_7` | All findings correctly placed | No findings file is in the wrong tier directory (`system_findings/` vs `category_findings/`) | — |
@@ -70,7 +69,7 @@ All binary PASS/FAIL. Root cause is always `pipeline`.
 
 **Type:** Scripted, per-header. **Root cause on fail:** `template`.
 
-Checks `standalone_analysis.md` for required `##` section headers and a metrics table.
+Checks the primary report for required `##` section headers and a metrics table.
 
 | Sub-index | Pass Criteria |
 |-----------|---------------|
@@ -80,6 +79,7 @@ Checks `standalone_analysis.md` for required `##` section headers and a metrics 
 | `workflow_eval_9_detailed` | `## Detailed Analysis` header present |
 | `workflow_eval_9_appendix` | `## Appendix` header present |
 | `workflow_eval_9_metrics_table` | Executive Summary section contains at least one markdown table row (`\|.*\|`) |
+| `workflow_eval_9_kernel_fusion` | `## Kernel Fusion Opportunities (Experimental)` header present — **comparative only** |
 
 ---
 
@@ -87,8 +87,11 @@ Checks `standalone_analysis.md` for required `##` section headers and a metrics 
 
 **Type:** Scripted, per-row + CSV cross-check. **Root cause on fail:** `template`.
 
-Parses the metrics table in `## Executive Summary` and optionally cross-checks
-numeric values against `perf_report_csvs/gpu_timeline.csv`.
+Parses the metrics table in `## Executive Summary` and optionally cross-checks numeric values against `gpu_timeline.csv`.
+
+### Standalone (3-column table: Metric | Value)
+
+Cross-checks against `perf_report_csvs/gpu_timeline.csv`.
 
 | Sub-index | Row Labels (synonyms) | CSV Cross-Check | Tolerance |
 |-----------|----------------------|-----------------|-----------|
@@ -98,8 +101,14 @@ numeric values against `perf_report_csvs/gpu_timeline.csv`.
 | `workflow_eval_10_comm_pct` | "Exposed Communication", "Exposed Communication %" | — | — |
 | `workflow_eval_10_bottleneck` | "Top Bottleneck Category", "Top Bottleneck" | — | — |
 
-**Pass:** Row found in table. If CSV cross-check applies, report value within tolerance of CSV value.
-**Fail:** Row not found, or numeric value exceeds tolerance.
+### Comparative (4-column table: Metric | T1 | T2 | Difference)
+
+Cross-checks T1 values against `perf_report_trace1_csvs/gpu_timeline.csv` and T2 values against `perf_report_trace2_csvs/gpu_timeline.csv`. Same 5 sub-indices as standalone apply, but fail if a T1 or T2 cell is empty for a row that has a CSV cross-check.
+
+Additionally, for every numeric row: verifies `|reported_diff − (T1 − T2)| / max(|T1|, |T2|) ≤ 0.01`. Non-numeric rows (e.g., Top Bottleneck Category) are skipped.
+
+**Pass:** Row found in table. If CSV cross-check applies, report value within tolerance. Difference column arithmetic within 1%.
+**Fail:** Row not found, numeric value exceeds tolerance, or Difference arithmetic fails.
 
 ---
 
@@ -127,17 +136,17 @@ Finds every priority item (`### ...P{N}:` headers) and checks for required bold 
 
 **Implementation:** `evals/.cursor/skills/workflow-llm-eval.md`
 
-Checks the `## Appendix` section for hardware reference values:
-- Platform name (e.g., MI300X)
-- Peak HBM BW value (e.g., 5.3 TB/s)
-- At least one Peak MAF value (e.g., 708 TFLOPS)
+Checks the `## Appendix` section for hardware reference values. Items checked per platform: platform name, Peak HBM BW, at least one Peak MAF value.
+
+- **Standalone:** one platform → 3 items total.
+- **Comparative:** two platforms (T1 and T2) → 6 items total.
 
 ### Scoring Dimensions
 
 | Dimension | Weight | Scale |
 |-----------|--------|-------|
 | **correctness** | 50% | 10 = all values correct and plausible, 7 = present but imprecise, 0 = wrong/invented |
-| **completeness** | 50% | 10 = all 3 items present, 7 = 2 of 3, 4 = 1 of 3, 0 = none |
+| **completeness** | 50% | Standalone: 10=all 3, 7=2, 4=1, 0=none. Comparative: 10=all 6, 7=5, 4=3–4, 0=<3 |
 
 ### Pass/Fail
 
@@ -178,7 +187,7 @@ the check is **skipped (PASS)** with a note in details.
 
 **Implementation:** `quality_scripted_evals.py`
 
-Compares every CSV in `perf_report_csvs/` against the reference directory.
+Compares CSVs against the reference directory. In standalone, compares `perf_report_csvs/`. In comparative, runs as two separate checks — `quality_eval_1_trace1` (trace1 csvs) and `quality_eval_1_trace2` (trace2 csvs).
 
 | Check | Criteria |
 |-------|----------|
@@ -199,8 +208,7 @@ Compares every CSV in `perf_report_csvs/` against the reference directory.
 
 **Implementation:** `evals/.cursor/skills/quality-llm-eval.md`
 
-Compares P-item titles in the generated report against the reference report.
-This is a **semantic** comparison — not a string match.
+Compares P-item titles in the generated report against the reference report. This is a **semantic** comparison — not a string match. In comparative mode, P-items describe deltas between traces (e.g., "T1 GEMM is 2× slower than T2") — correctness means the same cross-trace delta or bottleneck is identified, not an absolute single-trace bottleneck.
 
 ### Scoring Dimensions
 
@@ -237,11 +245,12 @@ For each matched compute P-item pair (from eval 2), compares content values.
 
 | Value Type | Tolerance | Special Rules |
 |-----------|-----------|---------------|
-| Performance numbers (kernel time, efficiency %) | 5% relative | — |
+| Performance numbers (kernel time, efficiency %) | 2% relative | — |
 | Shapes (matrix dimensions, batch sizes) | Exact match | — |
-| Gap to roofline (efficiency %) | 5% relative | — |
-| Estimated savings (ms) | 5% relative | If savings < 5 ms, accept ≤ 1 ms absolute diff |
+| Gap to roofline (efficiency %) | 2% relative | — |
+| Estimated savings (ms) | 2% relative | If savings < 5 ms, accept ≤ 1 ms absolute diff |
 | Non-numeric gains ("Not quantifiable") | Semantic match | Mismatch only if one side numeric, other not |
+| Diff values — cross-trace deltas (comparative only) | 2% relative | e.g., "−12.3 ms" or "2.1× slower" |
 
 ### Scoring Dimensions
 
@@ -255,10 +264,10 @@ For each matched compute P-item pair (from eval 2), compares content values.
 
 | Score | Meaning |
 |-------|---------|
-| 10 | All numeric values within 5% relative tolerance |
-| 7 | Most values within 5%; 1–2 values between 5–10% off |
-| 4 | Several values 5–10% off, or 1–2 values >10% off |
-| 0 | Most values >10% off, or systematically wrong |
+| 10 | All numeric values within 2% relative tolerance |
+| 7 | Most values within 2%; 1–2 values between 2–5% off |
+| 4 | Several values 2–5% off, or 1–2 values >5% off |
+| 0 | Most values >5% off, or systematically wrong |
 
 ### Pass/Fail
 

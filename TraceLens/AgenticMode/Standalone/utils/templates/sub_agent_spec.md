@@ -28,18 +28,12 @@ Applies to both tiers (compute → `category_findings/`, system → `system_find
 
 ## No actionable findings
 
-If analysis succeeds but identifies **no actionable bottleneck**, the subagent should write:
+**Compute tier:** There is no actionable bottleneck when the analyzer left
+`category_data/<category>_metrics.json::category_findings` as an **empty array**
+`[]`. In that case emit **empty** `## Recommendations` and **empty**
+`## Detailed Analysis` exactly as in § Empty category_findings.
 
-```markdown
-## Recommendations
-
-No actionable optimization opportunities identified for this category.
-
-## Detailed Analysis
-
-<!-- no-actionable-findings -->
-Analysis completed successfully. [Brief explanation of why no findings were generated. Do not include operations breakdown table]
-```
+**System tier:** Follow the structured output your analyzer JSON supports.
 
 ---
 
@@ -322,18 +316,19 @@ mandatory `kind=p_item` for category/system findings unless exempt) per
 <prefix> python3 -c "
 import sys
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/<subdir>/<category>_findings.md' '<tier>'
+" '<output_dir>/<subdir>/<category>_findings.md' '<tier>' '<comparison_scope>'
 ```
 
-Where `<tier>` is `compute` or `system` and `<subdir>` is `category_findings`
-or `system_findings` respectively.
+Where `<tier>` is `compute` or `system`, `<subdir>` is `category_findings`
+or `system_findings` respectively, and `<comparison_scope>` is `standalone` or
+`comparative`.
 
 **If validation fails (exit code 1):**
 

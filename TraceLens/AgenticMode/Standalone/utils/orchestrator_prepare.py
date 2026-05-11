@@ -603,7 +603,7 @@ def _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir: str) -> list:
 
     df = pd.read_csv(unified_path)
     df["enhanced_category"], df["display_name"] = zip(
-        *df.apply(get_enhanced_category, axis=1)
+        *df.apply(_normalize_category, axis=1)
     )
 
     if "Kernel Time (µs)_sum" in df.columns:

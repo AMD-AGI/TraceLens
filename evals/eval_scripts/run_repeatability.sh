@@ -15,6 +15,8 @@ EVALS_DIR="$REPO_ROOT/evals"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
+NODE_LABEL="node $(hostname)"
+RUNTIME_LABEL="container $CONTAINER"
 
 mkdir -p "$RESULTS_ROOT"
 $DEXEC bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
@@ -32,8 +34,8 @@ fi
 
 echo "========================================="
 echo "  Standalone Analysis Repeatability Test"
-echo "  Node:      $(hostname)"
-echo "  Container: $CONTAINER"
+echo "  Node:      $NODE_LABEL"
+echo "  Runtime:   $RUNTIME_LABEL"
 echo "  Repeats:   $NUM_REPEATS"
 if [[ -n "$TEST_IDS" ]]; then
     echo "  Test filter: $TEST_IDS"
@@ -72,11 +74,11 @@ while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
             while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
                 agent_attempts=$((agent_attempts + 1))
                 (
-                    cd "$STANDALONE_DIR"
                     agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                        "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                        "Run standalone analysis following the orchestrator skill on $trace_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
                 ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
+                python3 "$EVALS_DIR/eval_scripts/process_stream.py" "$CASE_RESULTS/analysis_stream.ndjson" 2>&1 || true
                 if head -c 2048 "$CASE_RESULTS/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
                     echo "  [$id] Attempt $agent_attempts/3 failed (agent unavailable). Backing off 30s..."
                     sleep 30

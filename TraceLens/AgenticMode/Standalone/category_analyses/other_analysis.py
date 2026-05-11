@@ -26,6 +26,7 @@ from analysis_utils import (
     build_operation_metrics,
     build_category_findings,
     compute_impact_estimates,
+    perf_report_csv_dir,
     write_metrics_json,
 )
 
@@ -159,7 +160,9 @@ def main():
 
     baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
     impact_estimates = compute_impact_estimates(
-        operations, category, baseline_ms=baseline_ms,
+        operations,
+        category,
+        baseline_ms=baseline_ms,
         analysis_mode=args.comparison_scope,
     )
     category_findings = build_category_findings(impact_estimates)

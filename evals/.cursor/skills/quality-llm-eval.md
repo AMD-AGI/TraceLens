@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: Quality LLM Eval
-description: Run LLM-based quality evals comparing standalone analysis output against a reference and produce a results CSV.
+description: Run LLM-based quality evals comparing standalone or comparative analysis output against a reference and produce a results CSV.
 triggers:
   - quality LLM eval
   - run quality LLM eval
@@ -17,7 +17,7 @@ tools:
 
 # Quality LLM Eval
 
-Evaluate the standalone analysis output for semantic quality by comparing against a reference report.
+Evaluate the analysis output for semantic quality by comparing against a reference report.
 
 ## Inputs
 
@@ -25,13 +25,18 @@ When triggered, the prompt will specify:
 - **output_dir**: path to the generated `analysis_output/` directory
 - **reference_dir**: path to the `analysis_output_ref/` directory
 - **results_path**: path to write the results CSV
+- **comparison_scope**: `standalone` (default) or `comparative`
 
 ## Files to Read
 
 Read ALL of these before evaluating:
 
-- `<output_dir>/standalone_analysis.md` (generated report)
-- `<reference_dir>/standalone_analysis.md` (reference report)
+- If comparison_scope=standalone:
+  - `<output_dir>/standalone_analysis.md` (generated)
+  - `<reference_dir>/standalone_analysis.md` (reference)
+- If comparison_scope=comparative:
+  - `<output_dir>/comparative_analysis.md` (generated)
+  - `<reference_dir>/comparative_analysis.md` (reference)
 - `<output_dir>/category_findings/*_findings.md` (generated findings)
 - `<reference_dir>/category_findings/*_findings.md` (reference findings)
 
@@ -64,11 +69,13 @@ Evaluate BOTH checks below. Write BOTH rows to the results CSV.
 **Category:** Quality
 **Issue Summary:** Compute Issue Title Alignment
 
-Compare the P-item titles in the generated `standalone_analysis.md` against the reference report. For each P-item in the reference (lines matching `### ... P1:`, `### ... P2:`, etc.):
+Compare the P-item titles in the generated report against the reference report. For each P-item in the reference (lines matching `### ... P1:`, `### ... P2:`, etc.):
 
 - Check if the generated report identifies the **same bottleneck** at the same or similar priority level
-- This is a **semantic** comparison, not a string match.
+- This is a **semantic** comparison, not a string match
 - A P-item in the reference that has no semantic match in the generated report is a miss
+
+**comparison_scope=comparative note:** P-items in a comparative report describe **deltas between traces**. Correctness means the same cross-trace delta or bottleneck is identified — not an absolute single-trace bottleneck. Apply the scoring guide with this context in mind.
 
 **Scoring guide:**
 - **correctness**: Do matched titles describe the same bottleneck? (10=same bottleneck e.g. both say "GEMM low CU occupancy", 7=same category and root cause but framed differently e.g. "low CU occupancy due to small tiles" vs "insufficient tile coverage on CUs", 4=same category but different root cause e.g. "occupancy" vs "memory bandwidth", 0=wrong category or fabricated bottleneck)
@@ -82,14 +89,15 @@ Compare the P-item titles in the generated `standalone_analysis.md` against the 
 **Category:** Quality
 **Issue Summary:** Compute Issue Content Alignment
 
-For each matched P-item pair (from eval 2), compare the content values. **Only compare Compute Kernel P-items** (under `## Compute Kernel Optimizations`). **Skip System-Level P-items** (under `## System-Level Optimizations`) entirely -- system P-items have no `**Impact**` field and no numeric gain to compare.
+For each matched P-item pair (from eval 2), compare the content values. **Only compare Compute Kernel P-items** (under `## Compute Kernel Optimizations`). **Skip System-Level P-items** (under `## System-Level Optimizations`) entirely — system P-items have no `**Impact**` field and no numeric gain to compare.
 
 For each matched compute P-item pair:
 
 - **Performance numbers**: kernel time, efficiency percentage, achieved bandwidth/TFLOPS. Numeric tolerance: 2% relative difference.
 - **Shapes**: matrix dimensions, batch sizes. Must match exactly.
 - **Gap to roofline**: the efficiency percentage or fraction of peak. Tolerance: 2%.
-- **Estimated gain**: savings in ms from pre-computed `kernel_tuning` estimates (format: `~X.X ms savings from closing efficiency gaps (pre-computed)` or `Not quantifiable from trace data`). Tolerance: 2%. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
+- **Estimated gain**: savings in ms or speedup factor. Tolerance: 2% relative. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
+- **Diff values** (comparison_scope=comparative only): cross-trace deltas expressed as "−12.3 ms" or "2.1× slower". Treat these like performance numbers with 2% relative tolerance.
 
 When comparing Impact/savings fields, accept format variants as equivalent: `**Estimated Savings**` tables, `**Impact** kernel_tuning` inline text, and `~X.X ms savings (pre-computed)` patterns all convey the same information. Compare the numeric values regardless of formatting. Do not flag a mismatch solely because the label or structure differs between reference and generated.
 

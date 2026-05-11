@@ -156,14 +156,14 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 <prefix> python3 -c "
 import sys
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute' '<comparison_scope>'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.

@@ -67,7 +67,7 @@ pip install -e .
 
 2. **Provide if prompted:**
    - Trace file path
-   - Platform
+   - Platform (of first trace)
    - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name

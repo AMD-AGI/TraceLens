@@ -23,11 +23,8 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
-<<<<<<< HEAD
-- `comparison_scope`: `standalone` (default) or `comparative`
-=======
 - `cat`: `conv_fwd` or `conv_bwd`
->>>>>>> origin/staging
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered Convolution operations
@@ -69,10 +66,7 @@ Use vendor-agnostic terminology:
 <prefix> python3 \
   TraceLens/AgenticMode/Standalone/category_analyses/convolution_analysis.py \
   --output-dir <output_dir> \
-<<<<<<< HEAD
-=======
   --category <cat> \
->>>>>>> origin/staging
   --comparison_scope <comparison_scope>
 ```
 
@@ -180,14 +174,14 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 <prefix> python3 -c "
 import sys
 from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute' '<comparison_scope>'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
