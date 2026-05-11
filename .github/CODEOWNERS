@@ -12,6 +12,11 @@
 /TraceLens/TraceDiff/         @spandoesai
 /docs/TraceDiff.md            @spandoesai
 
+# Extensions and experimental trace merge require Deval review
+/TraceLens/PerfModel/extensions/                         @devalshahamd
+/TraceLens/Trace2Tree/extensions/                        @devalshahamd
+/TraceLens/Trace2Tree/trace_capture_merge_experimental.py @devalshahamd
+
 # Inference reporting, docs, tests, and workflows require Deval review
 /TraceLens/Reporting/generate_perf_report_pytorch_inference.py @devalshahamd
 /TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
