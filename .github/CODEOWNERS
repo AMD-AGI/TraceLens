@@ -4,3 +4,6 @@
 # Default — every file requires project-team approval
 *                            @AMD-AGI/perf-opt
 # Stricter paths — leads must approve
+
+# TraceLens package changes require Adeem or Gabe review
+/TraceLens/                   @ajassani @gabeweisz
