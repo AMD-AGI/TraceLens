@@ -5612,3 +5612,174 @@ class FusedLnModulateBackward(Normalization):
 
     def bytes_bwd(self):
         raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# primus_turbo MXFP4 ops (#637)
+# ---------------------------------------------------------------------------
+
+
+class hipblaslt_gemm_fp4(GEMM):
+    """
+    primus_turbo_cpp_extension::hipblaslt_gemm_fp4 — MXFP4 GEMM via hipBLASLt.
+
+    9-slot input layout (from Primus-Turbo C++ binding `hipblaslt_gemm_fp4`):
+      hipblaslt_gemm_fp4(A, scaleA_inv, B, scaleB_inv,
+                         out_dtype, transA, transB, transC, granularity)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (scA0, scA1), (B0, B1), (scB0, scB1),
+                    (), (), (), (), ())
+      Input type:  (Float4_e2m1fn_x2, Float8_e8m0fnu,
+                    Float4_e2m1fn_x2, Float8_e8m0fnu, Scalar, ...)
+      Concrete Inputs: ('', '', '', '', '<dtype_enum>',
+                        '<transA>', '<transB>', '<transC>', '<granularity>')
+
+    Key differences from `hipblaslt_gemm_fp8`:
+      1. K is packed: `Float4_e2m1fn_x2` packs two FP4 values per byte. The
+         traced tensor shape uses K_packed = K/2. The perf model multiplies
+         K by 2 to recover the logical K, mirroring the C++ binding.
+      2. Scale slots 1 and 3 are 2-D E8M0 tensors of shape (M, K/32) and
+         (N, K/32) (MXFP4 block-wise, 32-element blocks). Their bytes are
+         folded into the model.
+      3. The transC swap is identical to FP8 (A↔B with transA/transB inversion).
+      4. hipBLASLt only supports the NT layout for MXFP4. The model still
+         accepts other flags so it tolerates future relaxations and avoids
+         silently failing on legacy traces.
+    """
+
+    MXFP4_BLOCK_SIZE = 32
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs") or []
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[2])
+
+        trans_a = (concrete[5] == "True") if len(concrete) > 5 else False
+        trans_b = (concrete[6] == "True") if len(concrete) > 6 else False
+        trans_c = (concrete[7] == "True") if len(concrete) > 7 else False
+
+        if trans_c:
+            A_shape, B_shape = B_shape, A_shape
+            trans_a, trans_b = not trans_b, not trans_a
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K_packed = A_shape[0] if trans_a else A_shape[1]
+        K = K_packed * 2
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        dtype_A_B = (event["args"]["Input type"][0], event["args"]["Input type"][2])
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][2])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpeA = name2bpe(dtype_A_B[0])
+        bpeB = name2bpe(dtype_A_B[1])
+        assert (
+            bpeA is not None and bpeB is not None
+        ), f"Data types of A and B are not supported: {dtype_A_B}"
+        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
+        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
+        # bypass it and compute bytes explicitly so we can fold in the
+        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
+        M, N, K = self.M, self.N, self.K
+        block = self.MXFP4_BLOCK_SIZE
+        scales_per_row = (K + block - 1) // block
+        bytes_A = M * (K // 2) * bpeA
+        bytes_B = N * (K // 2) * bpeB
+        bytes_scaleA = M * scales_per_row * 1  # E8M0, 1 byte per block
+        bytes_scaleB = N * scales_per_row * 1
+        # MXFP4 output is BF16/FP16 (2 bytes). The binding asserts a 16-bit
+        # floating-point output dtype so we hard-code 2 here.
+        bytes_out = M * N * 2
+        return bytes_A + bytes_B + bytes_scaleA + bytes_scaleB + bytes_out
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp4 is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp4 is not defined."
+        )
+
+
+class primus_turbo_quantize_mxfp4_dual(UnaryElementwise):
+    """
+    primus_turbo_cpp_extension::quantize_mxfp4_dual
+
+    Dual rowwise+colwise BF16 → MXFP4 quantize for the NT GEMM layout
+    (row-packed A for the forward pass, col-packed copy for the weight-grad
+    backward pass). Produces both packed outputs and their E8M0 block-wise
+    scales in a single kernel.
+
+    12-slot input layout (from `quantize_mxfp4_dual` C++ binding):
+      (input, dest_dtype, rowwise_use_2d_block, rowwise_use_sr, rowwise_use_rht,
+       colwise_use_2d_block, colwise_use_sr, colwise_use_rht,
+       shuffle_rowwise_scale, shuffle_rowwise,
+       shuffle_colwise_scale, shuffle_colwise)
+
+    Trace arg layout: tensor at slot 0 (BF16/FP16 2-D); all other slots are
+    scalars and contribute no extra memory traffic.
+
+    Memory-bandwidth bound (approx 3.06·M·N for the typical BF16-in case):
+      read  = M*N * bpe_in                         (BF16 input)
+      write = 2 * M*N / 2                          (rowwise + colwise FP4)
+            + M * ceil(N/32) + N * ceil(M/32)      (rowwise + colwise scales)
+    """
+
+    MXFP4_BLOCK_SIZE = 32
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, "c10::Float4_e2m1fn_x2"),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def bytes(self):
+        M, N = self.param_details["op_shape"]
+        bpe_in = self.bpe_in
+        if bpe_in is None:
+            return None
+        block = self.MXFP4_BLOCK_SIZE
+        read_in = M * N * bpe_in
+        write_rowwise_fp4 = M * N // 2  # packed FP4, 1 byte per pair
+        write_colwise_fp4 = N * M // 2
+        write_rowwise_scale = M * ((N + block - 1) // block)
+        write_colwise_scale = N * ((M + block - 1) // block)
+        return (
+            read_in
+            + write_rowwise_fp4
+            + write_colwise_fp4
+            + write_rowwise_scale
+            + write_colwise_scale
+        )

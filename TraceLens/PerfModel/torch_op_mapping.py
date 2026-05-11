@@ -75,6 +75,11 @@ op_to_perf_model_class_map = {
     "primus_turbo::hipblaslt_gemm_fp8": perf_model.hipblaslt_gemm_fp8,
     "primus_turbo_cpp_extension::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
     "primus_turbo::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
+    # Primus MXFP4 ops (hipBLASLt FP4 GEMM + dual rowwise/colwise quantize, issue #637)
+    "primus_turbo_cpp_extension::hipblaslt_gemm_fp4": perf_model.hipblaslt_gemm_fp4,
+    "primus_turbo::hipblaslt_gemm_fp4": perf_model.hipblaslt_gemm_fp4,
+    "primus_turbo_cpp_extension::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
+    "primus::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
 }
 
 # Add pseudo-op extension mappings

@@ -58,9 +58,16 @@ def name2bpe(name):
             "c10::float8_e4m3fnuz",
             "c10::float8_e4m3fn",
             "c10::float8_e5m2",
+            "c10::float8_e8m0fnu",
             "unsigned char",
             "signed char",
             "fp8",
+            # Float4_e2m1fn_x2 packs two FP4 values into one byte. Trace tensor
+            # shapes already reflect the packed layout (K_packed = K/2), so we
+            # use bpe=1 for the packed-pair element and let callers apply the
+            # ×2 K-unpacking explicitly when modelling FLOPs.
+            "c10::float4_e2m1fn_x2",
+            "fp4",
         ],
     }
     dict_dtype2bpe = {
