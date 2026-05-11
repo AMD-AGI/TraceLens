@@ -26,7 +26,7 @@ from category_analyses.analysis_utils import parse_first_shape, shape_aware_look
 from utils.arch_utils import list_platforms, load_arch
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
-from TraceLens.Agent.SemanticComparison.trace_breakdown.classify_kernels import (
+from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
 )
 
