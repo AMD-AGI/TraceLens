@@ -8,6 +8,10 @@
 # TraceLens package changes require Adeem or Gabe review
 /TraceLens/                   @ajassani @gabeweisz
 
+# TraceDiff module and docs require Spandoe review
+/TraceLens/TraceDiff/         @spandoesai
+/docs/TraceDiff.md            @spandoesai
+
 # Inference reporting, docs, tests, and workflows require Deval review
 /TraceLens/Reporting/generate_perf_report_pytorch_inference.py @devalshahamd
 /TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
