@@ -103,6 +103,12 @@ def push_metrics(results, endpoint, token_raw, branch, commit_sha):
 
     snapshot = list(results)
 
+    suite_totals = {}
+    for r in snapshot:
+        suite_totals[r["test_suite"]] = suite_totals.get(r["test_suite"], 0.0) + r["duration_s"]
+
+    total_duration = sum(r["duration_s"] for r in snapshot)
+
     def duration_callback(options):
         for r in snapshot:
             yield Observation(
@@ -116,11 +122,45 @@ def push_metrics(results, endpoint, token_raw, branch, commit_sha):
                 },
             )
 
+    def suite_duration_callback(options):
+        for suite_name, total in suite_totals.items():
+            yield Observation(
+                value=total,
+                attributes={
+                    "test_suite": suite_name,
+                    "branch": branch,
+                    "commit_sha": commit_sha,
+                },
+            )
+
+    def total_duration_callback(options):
+        yield Observation(
+            value=total_duration,
+            attributes={
+                "branch": branch,
+                "commit_sha": commit_sha,
+            },
+        )
+
     meter.create_observable_gauge(
         name="tracelens_test_duration_seconds",
         callbacks=[duration_callback],
         unit="s",
         description="Per-test duration from pytest JUnit XML results",
+    )
+
+    meter.create_observable_gauge(
+        name="tracelens_suite_duration_seconds",
+        callbacks=[suite_duration_callback],
+        unit="s",
+        description="Total duration per test suite from pytest JUnit XML results",
+    )
+
+    meter.create_observable_gauge(
+        name="tracelens_total_duration_seconds",
+        callbacks=[total_duration_callback],
+        unit="s",
+        description="Total duration of all tests from pytest JUnit XML results",
     )
 
     metrics_data = reader.get_metrics_data()
