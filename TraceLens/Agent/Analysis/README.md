@@ -62,7 +62,7 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke:**
    ```
-   "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
+   "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json>"
    ```
 
 
@@ -98,21 +98,21 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang eager mode):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang graph replay + capture):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).

@@ -70,7 +70,7 @@ run_single_job() {
         (
             cd "$ANALYSIS_DIR" || exit
             timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace_path with platform $platform, analysis mode default, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace_path with platform $platform, analysis mode default, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
         if head -c 2048 "$CASE_RESULTS/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
