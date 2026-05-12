@@ -96,9 +96,13 @@ def _parse_wrapper(content: str) -> dict[str, dict]:
     """Return {kernel_name: metadata} for every triton kernel in a wrapper file."""
     results: dict[str, dict] = {}
 
-    for m in re.finditer(
-        r"^(triton_\w+)\s*=\s*async_compile\.triton\(", content, re.MULTILINE
-    ):
+    kernel_matches = list(
+        re.finditer(
+            r"^(triton_\w+)\s*=\s*async_compile\.triton\(", content, re.MULTILINE
+        )
+    )
+
+    for i, m in enumerate(kernel_matches):
         name = m.group(1)
 
         block_end = content.find("''', device_str=", m.start())
@@ -106,19 +110,30 @@ def _parse_wrapper(content: str) -> dict[str, dict]:
             continue
         block = content[m.start() : block_end]
 
-        # ATen ops from the comment block immediately above the kernel definition
-        comment_region = content[max(0, m.start() - 600) : m.start()]
+        # ATen ops from the comment block above the kernel definition.
+        # Look back to the end of the previous kernel block (or start of file)
+        # to handle newer PyTorch versions with larger graph fragment comments.
+        prev_end = kernel_matches[i - 1].start() if i > 0 else 0
+        comment_region = content[prev_end : m.start()]
         aten_m = re.search(r"Original ATen:\s*\[([^\]]+)\]", comment_region)
         aten_ops = [o.strip() for o in aten_m.group(1).split(",")] if aten_m else []
 
-        # size_hints=[xnumel] for pointwise, [xnumel, rnumel] for reductions
-        hints_m = re.search(r"size_hints=\[([^\]]+)\]", block)
-        if hints_m:
-            nums = [int(x.strip()) for x in hints_m.group(1).split(",")]
+        # size_hints: list format [xnumel, rnumel] (older PyTorch) or
+        # dict format {'x': xnumel, 'r0_': rnumel} (PyTorch 2.7+)
+        xnumel, rnumel = 0, 1
+        hints_list_m = re.search(r"size_hints=\[([^\]]+)\]", block)
+        hints_dict_m = re.search(r"size_hints=\{([^}]+)\}", block)
+        if hints_list_m:
+            nums = [int(x.strip()) for x in hints_list_m.group(1).split(",")]
             xnumel = nums[0]
             rnumel = nums[1] if len(nums) > 1 else 1
-        else:
-            xnumel, rnumel = 0, 1
+        elif hints_dict_m:
+            hint_pairs = re.findall(r"'(\w+)':\s*(\d+)", hints_dict_m.group(1))
+            for key, val in hint_pairs:
+                if key == "x":
+                    xnumel = int(val)
+                elif key.startswith("r"):
+                    rnumel = int(val)
 
         # Pointer element sizes and dtype from triton_meta signature
         sig_m = re.search(r"'signature':\s*\{([^}]+)\}", block)
