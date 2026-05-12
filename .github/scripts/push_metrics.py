@@ -13,7 +13,6 @@ Usage:
 
 Environment variables (required):
     GRAFANA_CLOUD_OTLP_ENDPOINT  Full OTLP HTTP endpoint URL
-                                 e.g. https://otlp-gateway-prod-us-east-0.grafana.net/otlp
     GRAFANA_CLOUD_OTLP_TOKEN     Basic-auth credential as "<instance_id>:<sa_token>"
     GITHUB_SHA                   Git commit SHA (set by GitHub Actions)
     GITHUB_REF_NAME              Branch name (set by GitHub Actions)
@@ -25,6 +24,14 @@ import os
 import sys
 import traceback
 import xml.etree.ElementTree as ET
+
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+    OTLPMetricExporter,
+)
+from opentelemetry.metrics import Observation
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
 
 def parse_junit_xml_dir(junit_dir):
@@ -76,17 +83,10 @@ def parse_junit_xml_dir(junit_dir):
     return results
 
 
-def push_metrics(results, endpoint, token_raw, branch, commit_sha):
+def push_metrics(results, endpoint, token, branch, commit_sha):
     """Push test duration metrics to Grafana Cloud via OTLP/HTTP."""
-    from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
-        OTLPMetricExporter,
-    )
-    from opentelemetry.metrics import Observation
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
-    auth_value = "Basic " + base64.b64encode(token_raw.encode()).decode()
+    auth_value = "Basic " + base64.b64encode(token.encode()).decode()
 
     reader = InMemoryMetricReader()
 
@@ -188,7 +188,7 @@ def main():
 
     junit_dir = sys.argv[1]
     endpoint = os.environ.get("GRAFANA_CLOUD_OTLP_ENDPOINT", "")
-    token_raw = os.environ.get("GRAFANA_CLOUD_OTLP_TOKEN", "")
+    token = os.environ.get("GRAFANA_CLOUD_OTLP_TOKEN", "")
     branch = os.environ.get("GITHUB_REF_NAME", "unknown")
     commit_sha = os.environ.get("GITHUB_SHA", "unknown")
 
@@ -199,7 +199,7 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(0)
-        if not token_raw:
+        if not token:
             print(
                 "[push_metrics] WARNING: GRAFANA_CLOUD_OTLP_TOKEN not set, skipping.",
                 file=sys.stderr,
@@ -218,7 +218,7 @@ def main():
             f"[push_metrics] Parsed {len(results)} test cases from {junit_dir}",
             file=sys.stderr,
         )
-        push_metrics(results, endpoint, token_raw, branch, commit_sha)
+        push_metrics(results, endpoint, token, branch, commit_sha)
 
     except Exception as exc:  # noqa: BLE001
         print(f"[push_metrics] ERROR (non-fatal): {exc}", file=sys.stderr)
