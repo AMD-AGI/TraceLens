@@ -83,3 +83,8 @@ jobs:
         run: |
           . .venv/bin/activate
           pytest tests/test_copyright_headers.py
+
+      - name: Run pytest on the analysis agent tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_analysis_agent.py
