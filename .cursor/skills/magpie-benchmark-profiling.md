@@ -17,7 +17,7 @@ Run LLM inference benchmarks via the Magpie framework and collect PyTorch profil
 
 - SSH access to a GPU node with Docker and AMD/NVIDIA GPUs
 - A conda environment with Magpie installed (`pip install -e .` from the Magpie repo root)
-- TraceLens installed on the host if TraceLens analysis is desired (`pip install -e .` from `TraceLens-internal/`)
+- TraceLens installed on the host if TraceLens analysis is desired (`pip install -e .` from `TraceLens/`)
 - HuggingFace model weights cached or an `HF_TOKEN` for gated models
 
 ## Workflow
@@ -82,18 +82,18 @@ Proceed to Step 2. No changes needed.
 
 #### If the user needs a patched image
 
-Present the supported inference server and version options based on the `framework` field in the YAML config:
+Present the supported inference server and version options based on the `framework` field in the YAML config. **Do not hardcode the list of supported versions/GPU types here** — they change as new patches land. Instead, read the relevant docker build script and parse its `case` statement to discover the currently supported options, then present those to the user.
 
 **For vLLM (`framework: vllm`):**
 
+Read `examples/custom_workflows/inference_analysis/build_docker_vllm.sh` and extract each `vXX)` arm of the `case "${VLLM_VERSION}" in` block along with its `BASE_IMAGE`. Present the result as a table and ask the user to pick one, for example:
+
 > "Which vLLM version would you like to build a patched image for?
 >
-> | Option | vLLM Version | Base Image |
+> | Option | Version Tag | Base Image |
 > |--------|-------------|------------|
-> | 1 | v0.14.0 | `rocm/vllm-dev:preview_releases_rocm_v0.14.0_20260120` |
-> | 2 | v0.15.0 | `rocm/vllm-dev:preview_releases_rocm_v0.15.0_20260130` |
-> | 3 | v0.16.0 | `rocm/vllm-dev:preview_rocm70_releases_rocm_v0.16.0_20260223` |"
-> | 4 | v0.17.0 | `vllm/vllm-openai-rocm:v0.17.0` |"
+> | 1 | `vXX` | `<base image from script>` |
+> | ... | ... | ... |"
 
 Once the user selects a version, build the patched image on the remote node:
 
@@ -105,16 +105,18 @@ ssh <node> "cd <TraceLens_repo> && \
     -t tracelens-vllm"
 ```
 
-Where `<version_tag>` is `v14`, `v15`, `v16`, or `v17` based on the user's selection.
+Where `<version_tag>` is one of the `vXX` tags listed in the script's `case` statement.
 
 **For SGLang (`framework: sglang`):**
 
+Read `examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh` and extract each arm of the `case "${GPU_TYPE}" in` block along with its `BASE_IMAGE`. Present the result as a table and ask the user to pick one, for example:
+
 > "Which GPU type are you targeting?
 >
-> | Option | GPU | Base Image |
-> |--------|-----|------------|
-> | 1 | MI300X | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` |
-> | 2 | MI355X | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` |"
+> | Option | GPU Type | Base Image |
+> |--------|----------|------------|
+> | 1 | `<gpu_type>` | `<base image from script>` |
+> | ... | ... | ... |"
 
 Once the user selects, build the patched image on the remote node:
 
@@ -125,7 +127,7 @@ ssh <node> "cd <TraceLens_repo> && \
     <gpu_type>"
 ```
 
-Where `<gpu_type>` is `mi300` or `mi355` based on the user's selection. The script starts a container, applies sglang roofline patches, and installs TraceLens inside it.
+Where `<gpu_type>` is one of the tags listed in the script's `case` statement. The script starts a container, applies sglang roofline patches, and installs TraceLens inside it.
 
 **After building:** Update the `docker_image` field in the benchmark YAML config to use the newly built image:
 
@@ -251,21 +253,24 @@ Once the user confirms (or provides overrides), apply the framework-specific edi
 
 Apply **two** temporary edits:
 
-**1. Add profiler iteration args as `EXTRA_VLLM_ARGS` in the user's YAML config.**
+**1. Add profiler iteration args as `EXTRA_VLLM_ARGS` and raise `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` in the user's YAML config.**
 
 Instead of patching the benchmark shell script, add the profiler arguments to the `EXTRA_VLLM_ARGS` environment variable in the YAML config's `envs` section. The benchmark script already passes `$EXTRA_VLLM_ARGS` to the `vllm serve` command, so no script edits are needed.
 
-Edit the user's YAML config file to add (or append to) the `EXTRA_VLLM_ARGS` field under `benchmark.envs`:
+Edit the user's YAML config file to add (or append to) the `EXTRA_VLLM_ARGS` field under `benchmark.envs`, and set `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` to `1200`:
 
 ```yaml
 benchmark:
   envs:
     EXTRA_VLLM_ARGS: "--profiler-config.delay_iterations <DELAY> --profiler-config.max_iterations <MAX> --profiler-config.ignore_frontend True"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
 ```
 
 If the YAML already has an `EXTRA_VLLM_ARGS` field with existing flags, **append** the profiler flags to the existing value rather than replacing it.
 
 `ignore_frontend` must be `True` when using delay/max iterations, otherwise the AsyncLLM front-end profiler captures the entire range and adds significant overhead.
+
+`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"` is required because the torch profiler adds substantial per-iteration overhead during the targeted window. The default `execute_model` watchdog timeout is too short and will abort the engine mid-profile; raising it to 1200s gives the profiled iterations enough headroom to complete.
 
 **2. MANDATORY: Increase `num_prompts` in `benchmark_lib.sh` so the benchmark runs long enough for the profiling window.**
 
@@ -273,7 +278,7 @@ If the YAML already has an `EXTRA_VLLM_ARGS` field with existing flags, **append
 
 ```bash
 ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
-  <magpie_repo>/InferenceMAX/benchmarks/benchmark_lib.sh"
+  <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
 ```
 
 Replace `10` with a different multiplier if the user requests it.
@@ -328,14 +333,14 @@ All edits in Step 2b are temporary.
 **For vLLM:** The YAML config was modified (to add/update `EXTRA_VLLM_ARGS`). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up `benchmark_lib.sh` before patching:
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceMAX && \
+ssh <node> "cd <magpie_repo>/InferenceX && \
   cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak"
 ```
 
 After the benchmark completes, restore `benchmark_lib.sh` and remove the `EXTRA_VLLM_ARGS` profiler flags from the YAML config (or revert to the original YAML):
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceMAX && \
+ssh <node> "cd <magpie_repo>/InferenceX && \
   mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh"
 ```
 
@@ -344,7 +349,7 @@ Then edit the user's YAML config to remove the profiler flags from `EXTRA_VLLM_A
 **For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`) and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceMAX && \
+ssh <node> "cd <magpie_repo>/InferenceX && \
   cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak && \
   cp utils/bench_serving/benchmark_serving.py utils/bench_serving/benchmark_serving.py.bak"
 ```
@@ -352,14 +357,14 @@ ssh <node> "cd <magpie_repo>/InferenceMAX && \
 After the benchmark completes, restore the remote files:
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceMAX && \
+ssh <node> "cd <magpie_repo>/InferenceX && \
   mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh && \
   mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py"
 ```
 
 Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
 
-Alternatively, if InferenceMAX is a git checkout, use `git checkout -- <file>` to discard changes. Or delete the entire `InferenceMAX` directory — Magpie re-clones it on the next run.
+Alternatively, if InferenceX is a git checkout, use `git checkout -- <file>` to discard changes. Or delete the entire `InferenceX` directory — Magpie re-clones it on the next run.
 
 ### Step 3: Run the Benchmark
 
@@ -459,11 +464,11 @@ ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> &
 
 Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
 
-This produces ~3 files in `trace_split/`:
-- `*_annotation_iteration_0_*.json.gz` — full iteration (prefill + decode), ~16MB. **Use this for analysis.**
-- `prefilldecode_*_.json.gz` — prefill/decode phase only
-- `decode_*_.json.gz` — decode-only phase
-- `execution_details.json` — iteration metadata
+This produces up to 3 trace files plus metadata in `trace_split/` (a window may be skipped if no matching run exists in the largest steady-state region):
+- `mixed_steady_state_*.json.gz` — representative DO:PD mix (closest to the reference or `--CONC/--OSL/--R`-derived ideal ratio). **Use this for analysis.**
+- `prefilldecode_steady_state_*.json.gz` — longest pure prefill-decode-mix run (capped at `--num-steps`)
+- `decode_only_steady_state_*.json.gz` — longest pure decode-only run (capped at `--num-steps`)
+- `execution_details.json` / `execution_details.csv` — per-window metadata (event counts, GPU duration/busy, phase breakdown)
 
 Then construct and print the following command for the user to run manually (do **not** execute it). Fill in the absolute paths based on the workspace and split output:
 
@@ -472,7 +477,7 @@ python <TraceLens_repo>/TraceLens/Reporting/generate_perf_report_pytorch_inferen
     --capture_folder <workspace>/torch_trace/capture_traces \
     --profile_json_path <workspace>/torch_trace/trace_split/<split_trace>.json.gz \
     --output_csvs_dir <workspace>/torch_trace/analysis_output \
-    --group_by_parent_module --enable_pseudo_ops
+    --group_by_parent_module --enable_pseudo_ops --group_by_num_kernels
 ```
 
 Use absolute paths for all three arguments. The `--profile_json_path` should point to the `*_annotation_iteration_0_*.json.gz` file from the split output.
@@ -487,7 +492,7 @@ results/benchmark_{framework}_{timestamp}/
 ├── benchmark_stdout.log       # container stdout
 ├── benchmark_stderr.log       # container stderr
 ├── server.log                 # inference server log
-├── inferencemax_result.json   # raw InferenceMAX output
+├── inferencex_result.json   # raw InferenceX output
 └── torch_trace/               # PyTorch profiler traces
     ├── *-TP-0-DECODE.trace.json.gz
     ├── *-TP-0-EXTEND.trace.json.gz
