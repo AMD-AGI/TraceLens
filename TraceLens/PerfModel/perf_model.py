@@ -5413,6 +5413,9 @@ class hipblaslt_gemm_fp8(GEMM):
         N = B_shape[0] if trans_b else B_shape[1]
 
         dtype_A_B = (event["args"]["Input type"][0], event["args"]["Input type"][2])
+        input_types = event["args"]["Input type"]
+        dtype_scaleA = input_types[1] if len(input_types) > 1 else None
+        dtype_scaleB = input_types[3] if len(input_types) > 3 else None
 
         try:
             stride_A = tuple(event["args"]["Input Strides"][0])
@@ -5428,6 +5431,8 @@ class hipblaslt_gemm_fp8(GEMM):
             "stride_A": stride_A,
             "stride_B": stride_B,
             "dtype_A_B": dtype_A_B,
+            "dtype_scaleA": dtype_scaleA,
+            "dtype_scaleB": dtype_scaleB,
         }
 
     def bytes(self):
@@ -5671,7 +5676,10 @@ class hipblaslt_gemm_fp4(GEMM):
         K = K_packed * 2
         N = B_shape[0] if trans_b else B_shape[1]
 
-        dtype_A_B = (event["args"]["Input type"][0], event["args"]["Input type"][2])
+        input_types = event["args"]["Input type"]
+        dtype_A_B = (input_types[0], input_types[2])
+        dtype_scaleA = input_types[1] if len(input_types) > 1 else None
+        dtype_scaleB = input_types[3] if len(input_types) > 3 else None
 
         try:
             stride_A = tuple(event["args"]["Input Strides"][0])
@@ -5687,6 +5695,8 @@ class hipblaslt_gemm_fp4(GEMM):
             "stride_A": stride_A,
             "stride_B": stride_B,
             "dtype_A_B": dtype_A_B,
+            "dtype_scaleA": dtype_scaleA,
+            "dtype_scaleB": dtype_scaleB,
         }
 
     def bytes(self):
@@ -5705,8 +5715,10 @@ class hipblaslt_gemm_fp4(GEMM):
         scales_per_row = (K + block - 1) // block
         bytes_A = M * (K // 2) * bpeA
         bytes_B = N * (K // 2) * bpeB
-        bytes_scaleA = M * scales_per_row * 1  # E8M0, 1 byte per block
-        bytes_scaleB = N * scales_per_row * 1
+        bpe_scaleA = name2bpe(self.param_details.get("dtype_scaleA")) or 1
+        bpe_scaleB = name2bpe(self.param_details.get("dtype_scaleB")) or 1
+        bytes_scaleA = M * scales_per_row * bpe_scaleA
+        bytes_scaleB = N * scales_per_row * bpe_scaleB
         # MXFP4 output is BF16/FP16 (2 bytes). The binding asserts a 16-bit
         # floating-point output dtype so we hard-code 2 here.
         bytes_out = M * N * 2
@@ -5772,8 +5784,10 @@ class primus_turbo_quantize_mxfp4_dual(UnaryElementwise):
             return None
         block = self.MXFP4_BLOCK_SIZE
         read_in = M * N * bpe_in
-        write_rowwise_fp4 = M * N // 2  # packed FP4, 1 byte per pair
-        write_colwise_fp4 = N * M // 2
+        write_rowwise_fp4 = (
+            M * N + 1
+        ) // 2  # packed FP4, ceil-div for odd element counts
+        write_colwise_fp4 = (N * M + 1) // 2
         write_rowwise_scale = M * ((N + block - 1) // block)
         write_colwise_scale = N * ((M + block - 1) // block)
         return (

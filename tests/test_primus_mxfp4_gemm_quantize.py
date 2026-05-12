@@ -305,6 +305,7 @@ def test_hipblaslt_gemm_fp4_k_unpacked_factor_of_2():
 def test_quantize_mxfp4_dual_mapping():
     ops = [
         "primus_turbo_cpp_extension::quantize_mxfp4_dual",
+        "primus_turbo::quantize_mxfp4_dual",
         "primus::quantize_mxfp4_dual",
     ]
     for op in ops:
@@ -331,8 +332,8 @@ def test_quantize_mxfp4_dual_bytes_dual_output():
     model = primus_turbo_quantize_mxfp4_dual(_mxfp4_quantize_event(M=M, N=N))
     bpe_in = 2  # BF16
     read_in = M * N * bpe_in
-    write_rowwise_fp4 = M * N // 2
-    write_colwise_fp4 = N * M // 2
+    write_rowwise_fp4 = (M * N + 1) // 2
+    write_colwise_fp4 = (N * M + 1) // 2
     write_rowwise_scale = M * (N // 32)
     write_colwise_scale = N * (M // 32)
     expected = (
@@ -353,10 +354,25 @@ def test_quantize_mxfp4_dual_bytes_scales_use_ceil_div():
     bpe_in = 2
     expected = (
         M * N * bpe_in
-        + M * N // 2
-        + N * M // 2
+        + (M * N + 1) // 2
+        + (N * M + 1) // 2
         + M * 2  # ceil(33/32)
         + N * 1  # ceil(8/32)
+    )
+    assert model.bytes() == expected
+
+
+def test_quantize_mxfp4_dual_bytes_odd_element_count():
+    """Ceil-div for packed FP4 writes matters when M*N is odd."""
+    M, N = 1, 33
+    model = primus_turbo_quantize_mxfp4_dual(_mxfp4_quantize_event(M=M, N=N))
+    bpe_in = 2
+    expected = (
+        M * N * bpe_in
+        + (M * N + 1) // 2
+        + (N * M + 1) // 2
+        + M * ((N + 32 - 1) // 32)
+        + N * ((M + 32 - 1) // 32)
     )
     assert model.bytes() == expected
 

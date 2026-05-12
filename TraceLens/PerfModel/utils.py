@@ -73,6 +73,8 @@ def name2bpe(name):
     dict_dtype2bpe = {
         dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes
     }
+    if name is None:
+        return None
     return dict_dtype2bpe.get(name.lower(), None)
 
 

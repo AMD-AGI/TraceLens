@@ -79,6 +79,7 @@ op_to_perf_model_class_map = {
     "primus_turbo_cpp_extension::hipblaslt_gemm_fp4": perf_model.hipblaslt_gemm_fp4,
     "primus_turbo::hipblaslt_gemm_fp4": perf_model.hipblaslt_gemm_fp4,
     "primus_turbo_cpp_extension::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
+    "primus_turbo::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
     "primus::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
 }
 
