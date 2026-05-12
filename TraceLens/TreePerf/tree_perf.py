@@ -2306,7 +2306,7 @@ class TreePerfAnalyzer:
                     )
                     return re.sub(r"_\d+", "", cs)
                 except Exception:
-                    return ""
+                    return "Not found"
 
             df_summary["call_stack"] = df_summary["ex_UID"].apply(_get_call_stack)
         elif include_call_stack and tree is None:

@@ -538,7 +538,9 @@ def generate_perf_report_pytorch(
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-    add_python_func = True if group_by_parent_module else False
+    add_python_func = (
+        True if (group_by_parent_module or include_call_stack is True) else False
+    )
     if augmented_tree is not None:
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
