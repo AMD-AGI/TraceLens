@@ -103,7 +103,9 @@ def push_metrics(results, endpoint, token, commit_sha):
 
     suite_totals = {}
     for r in snapshot:
-        suite_totals[r["test_suite"]] = suite_totals.get(r["test_suite"], 0.0) + r["duration_s"]
+        suite_totals[r["test_suite"]] = (
+            suite_totals.get(r["test_suite"], 0.0) + r["duration_s"]
+        )
 
     total_duration = sum(r["duration_s"] for r in snapshot)
 
@@ -191,15 +193,23 @@ def main():
     commit_sha = os.environ.get("GITHUB_SHA", "unknown")
 
     if not endpoint:
-        print("[push_metrics] ERROR: GRAFANA_CLOUD_OTLP_ENDPOINT not set.", file=sys.stderr)
+        print(
+            "[push_metrics] ERROR: GRAFANA_CLOUD_OTLP_ENDPOINT not set.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if not token:
-        print("[push_metrics] ERROR: GRAFANA_CLOUD_OTLP_TOKEN not set.", file=sys.stderr)
+        print(
+            "[push_metrics] ERROR: GRAFANA_CLOUD_OTLP_TOKEN not set.", file=sys.stderr
+        )
         sys.exit(1)
 
     results = parse_junit_xml_dir(junit_dir)
     if not results:
-        print(f"[push_metrics] ERROR: No test results found in {junit_dir}.", file=sys.stderr)
+        print(
+            f"[push_metrics] ERROR: No test results found in {junit_dir}.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(
