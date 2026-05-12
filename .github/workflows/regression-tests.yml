@@ -11,6 +11,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   regression-tests:
@@ -35,7 +36,7 @@ jobs:
           pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
 
       - name: Configure runtime recording
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p .github/runtimes
           echo "JUNIT_FLAGS=--junitxml" >> $GITHUB_ENV
@@ -101,7 +102,7 @@ jobs:
             ${JUNIT_FLAGS:+$JUNIT_FLAGS=.github/runtimes/copyright-headers.xml}
 
       - name: Push metrics to Grafana Cloud
-        if: always() && github.event_name == 'push'
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           GRAFANA_CLOUD_OTLP_ENDPOINT: ${{ secrets.GRAFANA_CLOUD_OTLP_ENDPOINT }}
           GRAFANA_CLOUD_OTLP_TOKEN: ${{ secrets.GRAFANA_CLOUD_OTLP_TOKEN }}
