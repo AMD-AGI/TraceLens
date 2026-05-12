@@ -22,7 +22,6 @@ import base64
 import glob
 import os
 import sys
-import traceback
 import xml.etree.ElementTree as ET
 
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
@@ -171,9 +170,13 @@ def push_metrics(results, endpoint, token, commit_sha):
         f"[push_metrics] Exporting {len(snapshot)} metric observations to {endpoint}",
         file=sys.stderr,
     )
-    exporter.export(metrics_data)
+    from opentelemetry.sdk.metrics.export import MetricExportResult
+
+    result = exporter.export(metrics_data)
     exporter.shutdown()
     provider.shutdown()
+    if result != MetricExportResult.SUCCESS:
+        raise RuntimeError(f"OTLP export failed with result: {result}")
     print("[push_metrics] Done.", file=sys.stderr)
 
 
@@ -187,39 +190,23 @@ def main():
     token = os.environ.get("GRAFANA_CLOUD_OTLP_TOKEN", "")
     commit_sha = os.environ.get("GITHUB_SHA", "unknown")
 
-    try:
-        if not endpoint:
-            print(
-                "[push_metrics] WARNING: GRAFANA_CLOUD_OTLP_ENDPOINT not set, skipping.",
-                file=sys.stderr,
-            )
-            sys.exit(0)
-        if not token:
-            print(
-                "[push_metrics] WARNING: GRAFANA_CLOUD_OTLP_TOKEN not set, skipping.",
-                file=sys.stderr,
-            )
-            sys.exit(0)
+    if not endpoint:
+        print("[push_metrics] ERROR: GRAFANA_CLOUD_OTLP_ENDPOINT not set.", file=sys.stderr)
+        sys.exit(1)
+    if not token:
+        print("[push_metrics] ERROR: GRAFANA_CLOUD_OTLP_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
 
-        results = parse_junit_xml_dir(junit_dir)
-        if not results:
-            print(
-                f"[push_metrics] No test results found in {junit_dir}, skipping.",
-                file=sys.stderr,
-            )
-            sys.exit(0)
+    results = parse_junit_xml_dir(junit_dir)
+    if not results:
+        print(f"[push_metrics] ERROR: No test results found in {junit_dir}.", file=sys.stderr)
+        sys.exit(1)
 
-        print(
-            f"[push_metrics] Parsed {len(results)} test cases from {junit_dir}",
-            file=sys.stderr,
-        )
-        push_metrics(results, endpoint, token, commit_sha)
-
-    except Exception as exc:  # noqa: BLE001
-        print(f"[push_metrics] ERROR (non-fatal): {exc}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-
-    sys.exit(0)
+    print(
+        f"[push_metrics] Parsed {len(results)} test cases from {junit_dir}",
+        file=sys.stderr,
+    )
+    push_metrics(results, endpoint, token, commit_sha)
 
 
 if __name__ == "__main__":
