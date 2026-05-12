@@ -109,6 +109,7 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
+          . .venv/bin/activate
           pip install \
             opentelemetry-sdk \
             opentelemetry-exporter-otlp-proto-http
