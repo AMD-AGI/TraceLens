@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Manual-only Docker experiment: TraceLens wheel + Cursor CLI + standalone agent.
+"""Manual-only Docker experiment: TraceLens wheel + Cursor CLI + analysis agent.
 
 This module is **not** collected by pytest (filename does not match ``test_*.py``).
 Run from the TraceLens-internal repo root::
@@ -106,7 +106,9 @@ CMD ["bash"]
 
 
 # Matches python:3.12-slim + pip install TraceLens in the embedded Dockerfile
-DEFAULT_ARCH_SITE = "/usr/local/lib/python3.12/site-packages/TraceLens/AgenticMode/Standalone/utils/arch"
+DEFAULT_ARCH_SITE = (
+    "/usr/local/lib/python3.12/site-packages/TraceLens/Agent/Analysis/utils/arch"
+)
 
 
 def _repo_root() -> str:
@@ -361,7 +363,7 @@ def _run_experiment(args: argparse.Namespace) -> None:
         f"{capture_clause}, with all artifacts under /output."
     )
     prompt = (
-        "Follow the Standalone Analysis Orchestrator installed with TraceLens "
+        "Follow the Analysis Orchestrator installed with TraceLens "
         "and run the full workflow "
         f"{trace_and_platform}\n\n"
     )
@@ -394,9 +396,9 @@ exec > >(tee "$LOG") 2>&1
 {shell_xtrace}
 echo "=== manual_test_wheel_agent_install begin ==="
 date -u
-STANDALONE_DIR=$(python3 -c "import os, TraceLens; print(os.path.join(os.path.dirname(TraceLens.__file__), 'AgenticMode', 'Standalone'))")
-echo "STANDALONE_DIR=$STANDALONE_DIR"
-cd "$STANDALONE_DIR"
+ANALYSIS_DIR=$(python3 -c "import os, TraceLens; print(os.path.join(os.path.dirname(TraceLens.__file__), 'Agent', 'Analysis'))")
+echo "ANALYSIS_DIR=$ANALYSIS_DIR"
+cd "$ANALYSIS_DIR"
 echo "PWD=$(pwd)"
 {login_block}echo "TRACE={inner_trace}"
 echo "PLATFORM={platform}"
@@ -442,7 +444,7 @@ date -u
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Manual Docker experiment: agentic standalone analysis with bounded mounts."
+        description="Manual Docker experiment: agentic analysis with bounded mounts."
     )
     p.add_argument(
         "--input-dir",

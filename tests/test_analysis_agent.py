@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tests for TraceLens AgenticMode Standalone Analysis.
+"""Tests for TraceLens Agent Analysis.
 
 - Unit tests for category_analyses/analysis_utils (efficiency, impact estimates, plot data, helpers).
 - Integration test for utils/orchestrator_prepare.py with minimal perf_report_csvs fixtures
@@ -19,13 +19,12 @@ import sys
 import pandas as pd
 import pytest
 
-# Add repo root and Standalone for imports
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-STANDALONE = os.path.join(REPO_ROOT, "TraceLens", "AgenticMode", "Standalone")
+ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, os.path.join(STANDALONE, "category_analyses"))
+sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     validate_efficiency,
     calculate_efficiency_with_validation,
     compute_impact_estimates,
@@ -34,20 +33,20 @@ from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
 )
-from TraceLens.AgenticMode.Standalone.category_analyses.gemm_analysis import (
+from TraceLens.Agent.Analysis.category_analyses.gemm_analysis import (
     detect_quantized_gemm,
 )
-from TraceLens.AgenticMode.Standalone.category_analyses.sdpa_analysis import (
+from TraceLens.Agent.Analysis.category_analyses.sdpa_analysis import (
     detect_flash_attention,
     detect_paged_attention,
 )
-from TraceLens.AgenticMode.Standalone.category_analyses.reduce_analysis import (
+from TraceLens.Agent.Analysis.category_analyses.reduce_analysis import (
     detect_softmax,
 )
-from TraceLens.AgenticMode.Standalone.category_analyses.other_analysis import (
+from TraceLens.Agent.Analysis.category_analyses.other_analysis import (
     classify_other_operation,
 )
-from TraceLens.AgenticMode.Standalone.utils.report_utils import (
+from TraceLens.Agent.Analysis.utils.report_utils import (
     generate_priority_data,
 )
 
@@ -700,7 +699,7 @@ def test_other_analysis_customcollective_keeps_communication_classified_ops(
     output_dir_other_and_customcollective_nccl,
 ):
     """Regression: do not apply the communication pre-filter when category != other."""
-    script = os.path.join(STANDALONE, "category_analyses", "other_analysis.py")
+    script = os.path.join(ANALYSIS_DIR, "category_analyses", "other_analysis.py")
     if not os.path.isfile(script):
         pytest.skip("other_analysis.py not found")
 
@@ -741,7 +740,7 @@ def test_other_analysis_customcollective_keeps_communication_classified_ops(
 def test_other_analysis_other_category_still_skips_communication_ops(
     output_dir_other_and_customcollective_nccl,
 ):
-    script = os.path.join(STANDALONE, "category_analyses", "other_analysis.py")
+    script = os.path.join(ANALYSIS_DIR, "category_analyses", "other_analysis.py")
     if not os.path.isfile(script):
         pytest.skip("other_analysis.py not found")
 
@@ -880,7 +879,7 @@ def test_orchestrator_prepare_steps_2_3_require_csvs(minimal_perf_report_csvs):
 
 def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     """Run gemm_analysis.py --output-dir <dir> with pre-created gemm_ops.csv + metadata."""
-    script = os.path.join(STANDALONE, "category_analyses", "gemm_analysis.py")
+    script = os.path.join(ANALYSIS_DIR, "category_analyses", "gemm_analysis.py")
     if not os.path.isfile(script):
         pytest.skip("gemm_analysis.py not found")
 

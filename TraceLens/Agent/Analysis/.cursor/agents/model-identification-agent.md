@@ -1,18 +1,18 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
 
 ---
 name: model-identification-agent
-description: Infer model name, architecture, scale, and precision from perf report data for standalone analysis appendix. Invoked by orchestrator after category data preparation.
+description: Infer model name, architecture, scale, and precision from perf report data for analysis appendix. Invoked by orchestrator after category data preparation.
 model: claude-opus-4-7-high
 ---
 
 # Model Identification Subagent
 
-Infer model architecture information from the performance report so the standalone analysis report can include a **Model Architecture** section in the appendix and use the model name in the report title and plot.
+Infer model architecture information from the performance report so the analysis report can include a **Model Architecture** section in the appendix and use the model name in the report title and plot.
 
 ---
 
@@ -56,7 +56,7 @@ Execute the Python script to extract the **name**, **Input type**, and **Input D
 ```bash
 <prefix> python3 -c "
 import sys
-from TraceLens.AgenticMode.Standalone.utils.report_utils import extract_condensed_op_info
+from TraceLens.Agent.Analysis.utils.report_utils import extract_condensed_op_info
 if not extract_condensed_op_info('<output_dir>', '<comparison_scope>'):
     sys.exit(1)
 "

@@ -1,12 +1,12 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""AgenticMode utilities package."""
+"""Agent utilities package."""
 
-from TraceLens.AgenticMode.Standalone.category_analyses.analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     build_category_findings,
 )
 

@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -61,8 +61,8 @@ Use vendor-agnostic terminology in all narrative text (Insight, Action, Impact):
 Run the deterministic fusion analysis script to produce `kernel_fusion_metrics.json`:
 
 ```bash
-<prefix> python TraceLens/AgenticMode/Standalone/category_analyses/kernel_fusion_analysis.py \
-  --output-dir <output_dir> \
+<prefix> python TraceLens/Agent/Analysis/category_analyses/kernel_fusion_analysis.py \
+  --output-dir <output_dir>
   --comparison-scope <comparison_scope>
 ```
 
@@ -263,7 +263,7 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 ```bash
 <prefix> python3 -c "
 import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
 passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')

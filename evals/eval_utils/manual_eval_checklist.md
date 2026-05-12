@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -7,7 +7,7 @@ See LICENSE for license information.
 # Manual Evaluation Checklist
 
 Checks **not** covered by `validate_report()`.
-Run these against every generated `standalone_analysis.md` after the programmatic validator passes.
+Run these against every generated `analysis.md` after the programmatic validator passes.
 
 ## Link / Anchor Integrity
 

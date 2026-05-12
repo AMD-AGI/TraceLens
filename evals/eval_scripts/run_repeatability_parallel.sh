@@ -30,7 +30,7 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
+ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
 
 if [[ -n "$CONTAINER" ]]; then
@@ -43,14 +43,8 @@ else
     NODE_LABEL="local"
 fi
 
-if [[ "$MODE" == "comparative" ]]; then
-    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces_comparative.csv}"
-    RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_comparative}"
-else
-    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
-    RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results}"
-fi
-
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${MODE}.csv}"
+RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${MODE}}"
 REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${MODE}}"
 
 # ---------------------------------------------------------------------------
@@ -65,12 +59,12 @@ log_status() {
 
 expand_archive() {
     local name="$1"
-    local archive="$EVALS_DIR/${name}.tar.gz"
-    local target="$EVALS_DIR/$name"
+    local archive="$EVALS_DIR/analysis_tests/${name}.tar.gz"
+    local target="$EVALS_DIR/analysis_tests/$name"
     if [[ -f "$archive" ]]; then
         if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
             echo "Expanding ${name}.tar.gz..."
-            tar xzf "$archive" -C "$EVALS_DIR"
+            tar xzf "$archive" -C "$EVALS_DIR/analysis_tests"
             echo "Done."
         fi
     fi
@@ -104,10 +98,10 @@ run_single_job() {
         (
             if [[ "$MODE" == "comparative" ]]; then
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Run comparative analysis following the orchestrator skill on $trace1_path and $trace2_path with platform $platform (baseline is trace1), $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Run standalone analysis following the orchestrator skill on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 
@@ -139,7 +133,7 @@ run_single_job() {
     eval_pids+=($!)
 
     (
-        cd "$EVALS_DIR"
+        cd "$EVALS_DIR" || exit
         agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
             "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id mode=$MODE. Write results to $CASE_RESULTS/workflow_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/workflow_llm_eval.ndjson" 2>&1 &
@@ -153,7 +147,7 @@ run_single_job() {
     eval_pids+=($!)
 
     (
-        cd "$EVALS_DIR"
+        cd "$EVALS_DIR" || exit
         agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
             "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id mode=$MODE. Write results to $CASE_RESULTS/quality_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/quality_llm_eval.ndjson" 2>&1 &
@@ -228,7 +222,7 @@ _spawn_jobs() {
     fi
 
     for ((i = 0; i < NUM_REPEATS; i++)); do
-        read -u4  # acquire semaphore slot
+        read -r -u4  # acquire semaphore slot
         (
             run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" || true
             echo >&4  # release semaphore slot
@@ -244,13 +238,13 @@ if [[ "$MODE" == "comparative" ]]; then
     # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform
     while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform <&3; do
         [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$REPO_ROOT/$trace1_path" "$REPO_ROOT/$trace2_path" "$REPO_ROOT/$reference_dir" "$platform"
+        _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform"
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
     while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
         [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$REPO_ROOT/$trace_path" "" "$REPO_ROOT/$reference_dir" "$platform"
+        _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform"
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 fi
 
@@ -279,7 +273,7 @@ else
     echo "========================================="
 
     (
-        cd "$EVALS_DIR"
+        cd "$EVALS_DIR" || exit
         agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
             "Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL"
     ) < /dev/null > "$REPORT_DIR/post_processing.ndjson" 2>&1

@@ -22,38 +22,38 @@ MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-STANDALONE_DIR="TraceLens/AgenticMode/Standalone"
+ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
 DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
 STATUS_FILE="$(mktemp)"
 
 if [[ "$MODE" == "comparative" ]]; then
-    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces_comparative.csv}"
+    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_comparative.csv}"
 else
-    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/unit_test_traces.csv}"
+    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_standalone.csv}"
 fi
 
 # ---------------------------------------------------------------------------
 # Auto-extract test archives if trace CSV references them
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "standalone" ]]; then
-    for archive in "$EVALS_DIR"/e2e_tests.tar.gz "$EVALS_DIR"/unit_tests.tar.gz; do
+    for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_standalone.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_standalone.tar.gz; do
         [ -f "$archive" ] || continue
         target_dir="${archive%.tar.gz}"
         if [ ! -d "$target_dir" ]; then
             echo "Extracting $(basename "$archive")..."
-            tar -xzf "$archive" -C "$EVALS_DIR/"
+            tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests"
         fi
     done
 fi
 
 if [[ "$MODE" == "comparative" ]]; then
-    for archive in "$EVALS_DIR"/unit_tests_comparative.tar.gz "$EVALS_DIR"/e2e_tests_comparative.tar.gz; do
+    for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_comparative.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_comparative.tar.gz; do
         [ -f "$archive" ] || continue
         target_dir="${archive%.tar.gz}"
         if [ ! -d "$target_dir" ]; then
             echo "Extracting $(basename "$archive")..."
-            tar -xzf "$archive" -C "$EVALS_DIR/"
+            tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests"
         fi
     done
 fi
@@ -105,13 +105,13 @@ generate_single_ref() {
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$STANDALONE_DIR"
+            cd "$ANALYSIS_DIR" || exit
             if [[ "$MODE" == "comparative" ]]; then
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Run comparative analysis following the orchestrator skill on $REPO_ROOT/$trace1_path and $REPO_ROOT/$trace2_path with platform $platform (baseline is trace1), node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), analysis mode default, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
             else
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Run standalone analysis following the orchestrator skill on $REPO_ROOT/$trace1_path with platform $platform, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
@@ -129,15 +129,9 @@ generate_single_ref() {
         return 1
     fi
 
-    # Verify primary output file was generated
-    local primary_report
-    if [[ "$MODE" == "comparative" ]]; then
-        primary_report="$OUTPUT_DIR/comparative_analysis.md"
-    else
-        primary_report="$OUTPUT_DIR/standalone_analysis.md"
-    fi
-    if [ ! -f "$primary_report" ]; then
-        log_status "  $tag WARNING: $(basename "$primary_report") not found in output."
+    # Verify output was generated
+    if [ ! -f "$OUTPUT_DIR/analysis.md" ]; then
+        log_status "  $tag WARNING: analysis.md not found in output."
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
     fi
@@ -146,8 +140,13 @@ generate_single_ref() {
     rm -rf "$REF_DIR"
     cp -r "$OUTPUT_DIR" "$REF_DIR"
 
-    # Remove cache and large intermediate files from reference dir
-    rm -rf "$REF_DIR/cache" \
+    # Remove unwanted files from reference dir (keep only analysis.md + perf_report_csvs/)
+    rm -rf "$REF_DIR/category_data" \
+           "$REF_DIR/category_findings" \
+           "$REF_DIR/system_findings" \
+           "$REF_DIR/metadata" \
+           "$REF_DIR/cache" \
+           "$REF_DIR/perf_improvement.png" \
            "$REF_DIR/perf_improvement_base64.txt" \
            "$REF_DIR/plot_data.json"
 

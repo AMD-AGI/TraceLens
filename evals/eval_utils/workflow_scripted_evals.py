@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -44,32 +44,33 @@ def _pre_check_gates(output_dir: str, comparison_scope: str = "standalone") -> s
 
     Gates (applied in order, first failure wins):
       1. output_dir does not exist
-      2. <report>.md missing or too small (< 100 bytes)
-      3. <report>.md is garbled (> 50% non-ASCII or looks like JSON)
+      2. analysis.md missing or too small (< 100 bytes)
+      3. analysis.md is garbled (> 50% non-ASCII or looks like JSON)
     """
     if not os.path.isdir(output_dir):
         return "output directory does not exist"
 
-    report_filename = _REPORT_FILENAME[comparison_scope]
-    report = os.path.join(output_dir, report_filename)
+    report = os.path.join(output_dir, "analysis.md")
     if not os.path.isfile(report):
-        return f"{report_filename} not found"
+        return "analysis.md not found"
     size = os.path.getsize(report)
     if size < _MIN_REPORT_BYTES:
-        return f"{report_filename} too small ({size} bytes)"
+        return f"analysis.md too small ({size} bytes)"
 
     with open(report, encoding="utf-8", errors="replace") as f:
         content = f.read()
     if not content.strip():
-        return f"{report_filename} is empty"
+        return "analysis.md is empty"
 
     non_ascii = sum(1 for c in content if ord(c) > 127)
     if len(content) > 0 and non_ascii / len(content) > _GARBLED_THRESHOLD:
-        return f"{report_filename} appears garbled ({non_ascii}/{len(content)} non-ASCII chars)"
+        return (
+            f"analysis.md appears garbled ({non_ascii}/{len(content)} non-ASCII chars)"
+        )
 
     stripped = content.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        return f"{report_filename} contains raw JSON instead of markdown"
+        return "analysis.md contains raw JSON instead of markdown"
 
     return None
 
@@ -322,8 +323,8 @@ def _make_row(index, summary, result, details, root_cause, fix):
     }
 
 
-def _read_report(output_dir, comparison_scope="standalone"):
-    path = os.path.join(output_dir, _REPORT_FILENAME[comparison_scope])
+def _read_report(output_dir):
+    path = os.path.join(output_dir, "analysis.md")
     if not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -737,8 +738,7 @@ _MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
 def _check_model_id(output_dir, comparison_scope="standalone"):
     """Eval 13 — per-field check for model_info.json values in Appendix."""
     model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
-    report_filename = _REPORT_FILENAME[comparison_scope]
-    report_path = os.path.join(output_dir, report_filename)
+    report_path = os.path.join(output_dir, "analysis.md")
 
     if not os.path.isfile(model_info_path):
         return [
@@ -757,7 +757,7 @@ def _check_model_id(output_dir, comparison_scope="standalone"):
                 "workflow_eval_13",
                 "Model identification in report",
                 "FAIL",
-                f"{report_filename} not found",
+                "analysis.md not found",
                 "pipeline",
                 "Re-run report generation",
             )

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 """
-TraceLens AgenticMode - Orchestrator Preparation Script
+TraceLens Agent - Orchestrator Preparation Script
 Steps 2-5: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
 """
 
@@ -26,30 +26,30 @@ from category_analyses.analysis_utils import parse_first_shape, shape_aware_look
 from utils.arch_utils import list_platforms, load_arch
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
-from TraceLens.AgenticMode.SemanticComparison.trace_breakdown.classify_kernels import (
+from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
 )
 
 CATEGORY_SKILL_MAP = {
-    "cpu_idle": "cpu-idle-analysis",
-    "gemm": "gemm-analysis",
-    "groupedgemm_fwd": "gemm-analysis",
-    "groupedgemm_bwd": "gemm-analysis",
-    "moe_fused": "moe-analysis",
-    "moe_unfused": "moe-analysis",
-    "sdpa_fwd": "sdpa-analysis",
-    "sdpa_bwd": "sdpa-analysis",
-    "inferenceattention": "sdpa-analysis",
-    "elementwise": "elementwise-analysis",
-    "reduce": "reduce-analysis",
-    "triton": "triton-analysis",
-    "norm": "norm-analysis",
-    "norm_fwd": "norm-analysis",
-    "norm_bwd": "norm-analysis",
-    "rmsnorm": "norm-analysis",
-    "convolution": "convolution-analysis",
-    "conv_fwd": "convolution-analysis",
-    "conv_bwd": "convolution-analysis",
+    "cpu_idle": "cpu-idle-analyzer",
+    "gemm": "gemm-analyzer",
+    "groupedgemm_fwd": "gemm-analyzer",
+    "groupedgemm_bwd": "gemm-analyzer",
+    "moe_fused": "moe-analyzer",
+    "moe_unfused": "moe-analyzer",
+    "sdpa_fwd": "sdpa-analyzer",
+    "sdpa_bwd": "sdpa-analyzer",
+    "inferenceattention": "sdpa-analyzer",
+    "elementwise": "elementwise-analyzer",
+    "reduce": "reduce-analyzer",
+    "triton": "triton-analyzer",
+    "norm": "norm-analyzer",
+    "norm_fwd": "norm-analyzer",
+    "norm_bwd": "norm-analyzer",
+    "rmsnorm": "norm-analyzer",
+    "convolution": "convolution-analyzer",
+    "conv_fwd": "convolution-analyzer",
+    "conv_bwd": "convolution-analyzer",
 }
 
 FUSION_EXCLUDED_KERNELS = ["nccl", "rccl", "memcpy", "memset"]
@@ -824,7 +824,7 @@ def main():
     )
 
     print("=" * 80)
-    print("TRACELENS AGENTICMODE - ORCHESTRATOR PREPARATION")
+    print("TRACELENS AGENT - ORCHESTRATOR PREPARATION")
     print("=" * 80)
     print(f"Platform: {platform}")
     print(f"Trace: {trace_path}")
@@ -1302,7 +1302,7 @@ def main():
             {
                 "name": category_name,
                 "display_name": display_name,
-                "skill": CATEGORY_SKILL_MAP.get(category_name, "generic-op-analysis"),
+                "skill": CATEGORY_SKILL_MAP.get(category_name, "generic-op-analyzer"),
                 "tier": "compute_kernel",
                 "ops_count": len(category_df),
                 "csv_file": csv_file,
@@ -1343,7 +1343,7 @@ def main():
         {
             "name": "cpu_idle",
             "display_name": "CPU/Idle Analysis",
-            "skill": "cpu-idle-analysis",
+            "skill": "cpu-idle-analyzer",
             "tier": "system",
             "ops_count": 0,
             "csv_file": cpu_idle_csv,
@@ -1395,7 +1395,7 @@ def main():
             {
                 "name": "multi_kernel",
                 "display_name": "Multi-Kernel Issues",
-                "skill": "multi-kernel-analysis",
+                "skill": "multi-kernel-analyzer",
                 "tier": "system",
                 "ops_count": 0,
                 "csv_file": None,

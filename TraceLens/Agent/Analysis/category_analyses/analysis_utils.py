@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -89,8 +89,14 @@ _SKIP_PY_PATTERNS = (
 )
 
 _KNOWN_PKG_ANCHORS = (
-    "sglang/", "vllm/", "aiter/", "fbgemm_gpu/", "sgl_kernel/",
-    "torchrec/", "components/", "megatron/",
+    "sglang/",
+    "vllm/",
+    "aiter/",
+    "fbgemm_gpu/",
+    "sgl_kernel/",
+    "torchrec/",
+    "components/",
+    "megatron/",
 )
 
 
@@ -889,7 +895,9 @@ def run_category_analysis(
     if os.path.exists(cs_path):
         callstacks_df = pd.read_csv(cs_path)
 
-    operations = build_operation_metrics(ops_df, metadata, config, callstacks_df=callstacks_df, comparison_scope=comparison_scope)
+    operations = build_operation_metrics(
+        ops_df, metadata, config, callstacks_df=callstacks_df, comparison_scope=comparison_scope
+    )
     category_specific = extract_fn(ops_df, metadata)
 
     if compute_impact:

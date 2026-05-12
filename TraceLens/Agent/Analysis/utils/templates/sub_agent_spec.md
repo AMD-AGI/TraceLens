@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 Canonical reference for the output that sub-agents write into their findings
 files. The orchestrator extracts these sections when composing the final
-report.
+`analysis.md` report.
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
 > schema. Replace `<category>` with the actual category name.
@@ -315,8 +315,8 @@ mandatory `kind=p_item` for category/system findings unless exempt) per
 ```bash
 <prefix> python3 -c "
 import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
 if not passed:
     print('FAIL:')
     for e in errors:
@@ -332,7 +332,7 @@ or `system_findings` respectively, and `<comparison_scope>` is `standalone` or
 
 **If validation fails (exit code 1):**
 
-1. Read the FAIL output to identify structural issues
-2. Fix the findings file — add missing sections, correct P-item labels, etc.
-3. Re-run validation
-4. Maximum 2 retry attempts. If still failing, return with a warning
+1. Read the FAIL output — error messages are self-explanatory and include the fix hint.
+2. Fix the findings file accordingly. Edit sections in place and not regenerate the entire output.
+3. When fixing table cells (Args, Kernel Path, or any multi-row issue), **re-emit the entire table in one edit** — do NOT patch rows individually. Batch together edits together.
+4. Re-run validation. Maximum 2 retry attempts; if still failing, return with a warning.

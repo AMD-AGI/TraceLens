@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: convolution-analyzer
 description: Analyze Convolution operations for compute efficiency and layout optimization. Use when orchestrator needs Convolution category analysis.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # Convolution Analysis Subagent
@@ -64,7 +64,7 @@ Use vendor-agnostic terminology:
 
 ```bash
 <prefix> python3 \
-  TraceLens/AgenticMode/Standalone/category_analyses/convolution_analysis.py \
+  TraceLens/Agent/Analysis/category_analyses/convolution_analysis.py \
   --output-dir <output_dir> \
   --category <cat> \
   --comparison_scope <comparison_scope>
@@ -173,7 +173,7 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 ```bash
 <prefix> python3 -c "
 import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
 passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')

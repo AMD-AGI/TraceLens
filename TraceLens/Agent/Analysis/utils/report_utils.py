@@ -1,14 +1,14 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""Report aggregation utilities for TraceLens AgenticMode.
+"""Report aggregation utilities for TraceLens Agent.
 
 Provides functions for reading and aggregating findings from system-level
 and compute kernel subagents, and for extracting model-identification data
-for the standalone report pipeline.
+for the analysis report pipeline.
 """
 
 import json

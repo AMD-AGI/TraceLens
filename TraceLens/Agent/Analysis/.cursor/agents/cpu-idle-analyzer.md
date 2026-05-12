@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: cpu-idle-analyzer
 description: Report GPU idle time percentage and utilization breakdown. Invoked when idle_time_percent exceeds 15%.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # CPU/Idle Analysis Subagent
@@ -67,7 +67,7 @@ Execute the analysis script using the command prefix:
 
 ```bash
 <prefix> python3 \
-  TraceLens/AgenticMode/Standalone/category_analyses/cpu_idle_analysis.py \
+  TraceLens/Agent/Analysis/category_analyses/cpu_idle_analysis.py \
   --output-dir <output_dir>
 ```
 
@@ -140,7 +140,7 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 ```bash
 <prefix> python3 -c "
 import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_findings_file
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
 passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')

@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -7,7 +7,7 @@ See LICENSE for license information.
 ---
 name: triton-analyzer
 description: Report informational summary for Triton custom kernels. Use when orchestrator needs Triton category analysis.
-model: claude-4.6-sonnet-medium-thinking
+model: claude-opus-4-7-high
 ---
 
 # Triton Analysis Subagent
@@ -78,8 +78,8 @@ Execute the analysis script using the command prefix:
 
 ```bash
 <prefix> python3 \
-  TraceLens/AgenticMode/Standalone/category_analyses/triton_analysis.py \
-  --output-dir <output_dir> \
+  TraceLens/Agent/Analysis/category_analyses/triton_analysis.py \
+  --output-dir <output_dir>
   --comparison_scope <comparison_scope>
 ```
 

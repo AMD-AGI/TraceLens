@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -24,9 +24,9 @@ import numpy as np
 import pandas as pd
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_STANDALONE_DIR = os.path.dirname(_THIS_DIR)
+_ANALYSIS_DIR = os.path.dirname(_THIS_DIR)
 sys.path.insert(0, _THIS_DIR)
-sys.path.insert(0, _STANDALONE_DIR)
+sys.path.insert(0, _ANALYSIS_DIR)
 
 from analysis_utils import (
     TARGET_HIGH,

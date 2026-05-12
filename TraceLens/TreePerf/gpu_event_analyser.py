@@ -167,7 +167,7 @@ class GPUEventAnalyser:
 
             for _, point_type, uid in points:
                 if point_type == 0:
-                    active_uids.remove(uid)
+                    active_uids.discard(uid)
                 else:
                     event = event_map[uid]
                     my_cpu_op = uid_to_cpu_op[uid]

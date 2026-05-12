@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -40,9 +40,9 @@ workflow evals are set to FAIL with `root_cause=pipeline`.
 | Gate | Condition | Implemented in |
 |------|-----------|----------------|
 | 1 | `output_dir` does not exist | `workflow_scripted_evals.py` |
-| 2 | Primary report missing or < 100 bytes | `workflow_scripted_evals.py` |
-| 3 | Primary report is garbled (> 50% non-ASCII) | `workflow_scripted_evals.py` |
-| 4 | Primary report contains raw JSON instead of markdown | `workflow_scripted_evals.py` |
+| 2 | `analysis.md` missing or < 100 bytes | `workflow_scripted_evals.py` |
+| 3 | `analysis.md` is garbled (> 50% non-ASCII) | `workflow_scripted_evals.py` |
+| 4 | `analysis.md` contains raw JSON instead of markdown | `workflow_scripted_evals.py` |
 | 5 | `output_dir` or `reference_dir` missing | `quality_scripted_evals.py` |
 | 6 | `perf_report_csvs/` (standalone) or `perf_report_trace1_csvs/` (comparative) missing in generated or reference | `quality_scripted_evals.py` |
 
@@ -69,7 +69,7 @@ All binary PASS/FAIL. Root cause is always `pipeline`.
 
 **Type:** Scripted, per-header. **Root cause on fail:** `template`.
 
-Checks the primary report for required `##` section headers and a metrics table.
+Checks `analysis.md` for required `##` section headers and a metrics table.
 
 | Sub-index | Pass Criteria |
 |-----------|---------------|

@@ -1,10 +1,10 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""Plot generation and report embedding utilities for TraceLens AgenticMode.
+"""Plot generation and report embedding utilities for TraceLens Agent.
 
 Public API:
 
@@ -24,7 +24,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from TraceLens.AgenticMode.Standalone.utils.report_utils import (
+from TraceLens.Agent.Analysis.utils.report_utils import (
     generate_priority_data,
     load_manifest,
 )
@@ -170,7 +170,7 @@ def generate_perf_plot(
 
 def embed_plot_in_report(
     output_dir: str,
-    report_filename: str = "standalone_analysis.md",
+    report_filename: str = "analysis.md",
     placeholder: str = "{{PERF_PLOT}}",
 ) -> bool:
     """

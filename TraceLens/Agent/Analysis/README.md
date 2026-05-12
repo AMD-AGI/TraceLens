@@ -1,14 +1,14 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
 
-# TraceLens Agentic Mode: Standalone + Comparative Trace Analysis
+# TraceLens Agent: Trace Analysis
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-TraceLens Agentic Mode for Standalone Analysis is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability.
+The TraceLens Agentic Analysis module is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability.
 
 ---
 
@@ -56,11 +56,11 @@ pip install -e .
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
    - Standalone (single trace):
     ```
-    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json>"
+    "Follow the Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json>"
     ```
    - Comparative (two traces):
     ```
-    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> and and <path_to_trace2.json>"
+    "Follow the Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> and <path_to_trace2.json>"
     ```
     **NOTE**: Always pass **baseline** trace as trace1
 
@@ -75,7 +75,7 @@ pip install -e .
 
 
 3. **Results:**
-   - **Primary output**: `standalone_analysis.md` - Stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with Compute Kernel Insights, Kernel Fusion Insights and System-Level Insights.
+   - **Primary output**: `analysis.md` - Stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with Compute Kernel Insights, Kernel Fusion Insights and System-Level Insights.
    - **Intermidate outputs** (Review not recommended):
      - `system_findings/` - System-level and kernel fusion analysis intermediates
      - `category_findings/` - Per-category compute kernel analysis intermediates
@@ -99,21 +99,21 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang eager mode):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
+    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang graph replay + capture):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Standalone Analysis Orchestrator installed with TraceLens and run the full workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
+    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `evals/generate_golden_refs.sh` for an example).
@@ -126,7 +126,7 @@ All parameters are passed inline so no interactive prompts are needed. This is u
 
 ```
 analysis_output/
-├── standalone_analysis.md          # Stakeholder report
+├── analysis.md                     # Stakeholder report
 ├── perf_report.xlsx                # Excel performance report
 ├── perf_report_csvs/               # CSV exports (gpu_timeline, ops_summary, etc.)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data
@@ -150,7 +150,7 @@ analysis_output/
 
 ```
 analysis_output/
-├── standalone_analysis.md          # Stakeholder report
+├── analysis.md
 ├── perf_report_trace1.xlsx         # Excel performance report for primary trace
 ├── perf_report_trace1_csvs/        # Trace 1 CSV exports
 ├── perf_report_trace2.xlsx         # Excel performance report for comparison trace
@@ -214,7 +214,7 @@ flowchart TD
 
 ### Orchestrator
 
-The **Standalone Analysis Orchestrator** skill coordinates the entire analysis workflow.
+The **Analysis Orchestrator** skill coordinates the entire analysis workflow.
 It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it validates outputs, aggregates findings, and generates a prioritized stakeholder report.
 
 ### Workflow Steps
@@ -228,7 +228,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 7.   Compute Kernel Subagents (PARALLEL) → category_findings/
 8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
 9.   Aggregate Results: System-Level + Kernel Fusion + Compute Kernel Recommendations
-10.  Generate Final Report (standalone_analysis.md)
+10.  Generate Final Report (analysis.md)
 ```
 
 ### Sub-Agents

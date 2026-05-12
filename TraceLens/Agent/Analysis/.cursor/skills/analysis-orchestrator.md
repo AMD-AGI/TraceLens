@@ -1,28 +1,26 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
 
 ---
-name: Standalone Analysis Orchestrator
-description: Orchestrate two-tier PyTorch trace performance analysis - system-level (CPU/idle, multi-kernel) and compute kernel tiers with independently composable reports
+name: Analysis Orchestrator
+description: Analyze a PyTorch trace end-to-end and produce a prioritized performance report with system-level and compute-kernel optimization recommendations.
 triggers:
-  - standalone analysis
-  - comparative analysis
-  - analyze trace standalone
-  - compare two traces
-  - performance analysis single platform
+  - follow the analysis orchestrator
+  - agentic analysis workflow
+  - analyze trace
 tools:
   - terminal
   - file_read
   - file_write
 ---
 
-# Standalone Analysis Orchestrator
+# Analysis Orchestrator
 
 Orchestrate modular PyTorch trace analysis using a **two-tier architecture**:
-- **System-Level Analysis** (Step 6): CPU/idle time + multi-kernel issues (memcpy, NCCL blocking, overlap)
+- **System-Level Analysis** (Step 6): CPU/idle time + Kernel Fusion + Multi-kernel issues (memcpy, communication blocking, overlap)
 - **Compute Kernel Analysis** (Step 7): Per-category kernel efficiency (GEMM, SDPA, elementwise, etc.)
 
 **Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
@@ -45,7 +43,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 0. Query User Inputs (Platform, Trace Path(s), Analysis Mode, Environment Setup)
 1. Generate Performance Report (branches on analysis mode: training vs inference then, comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
-6. System-Level Analysis (CPU/Idle + Multi-Kernel, PARALLEL) → system_findings/
+6. System-Level Analysis (PARALLEL, CPU/Idle + Kernel Fusion + Multi-Kernel) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL, read category_findings[] from _metrics.json) → category_findings/
    7.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted)
 8. Validate Subagent Outputs (system_findings/ + category_findings/)
@@ -98,7 +96,6 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
-     - Example: `/home/user/traces/capture_traces/`
 
 4. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -130,7 +127,7 @@ ssh <node> "find / -maxdepth 5 -type d -name 'TraceLens' 2>/dev/null | head -5"
 ssh <node> "docker exec <container> bash -c 'find / -maxdepth 5 -type d -name TraceLens 2>/dev/null | head -5'"
 ```
 
-Pick the result containing `AgenticMode/` and strip the trailing `/TraceLens` to get `<tracelens_dir>`.
+Pick the result containing `Agent/` and strip the trailing `/TraceLens` to get `<tracelens_dir>`.
 
 Build the cluster prefix using this lookup:
 
@@ -180,7 +177,7 @@ Do **not** pass `--extension_*` on the trace2 command.
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/<platform>.json \
   --enable_pseudo_ops \
   --group_by_num_kernels \
   --include_call_stack
@@ -193,7 +190,7 @@ Do **not** pass `--extension_*` on the trace2 command.
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/<platform>.json \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
@@ -210,7 +207,7 @@ When `<comparison_scope>` = `comparative`, append the same `--extension_file` / 
   --capture_folder <capture_folder_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --gpu_arch_json_path TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json \
+  --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/<platform>.json \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
@@ -231,7 +228,7 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
 
 ```bash
 <prefix> python3 \
-  TraceLens/AgenticMode/Standalone/utils/orchestrator_prepare.py \
+  TraceLens/Agent/Analysis/utils/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir>
@@ -271,7 +268,7 @@ System-level analysis examines issues that affect the GPU pipeline as a whole --
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest_categories
+from TraceLens.Agent.Analysis.utils.report_utils import load_manifest_categories
 load_manifest_categories(sys.argv[1])
 \" '<output_dir>'"
 ```
@@ -284,7 +281,7 @@ Launch system-level sub-agents simultaneously using the Task tool. Do NOT wait b
 
 **System-Level Agent File Map:**
 
-**Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
+**Base path:** `TraceLens/Agent/Analysis/.cursor/agents/`
 
 | Category | Agent file |
 |----------|-----------|
@@ -303,7 +300,7 @@ The subagent reads its own agent file — the orchestrator does NOT read or past
 
 ```
 Read and follow the FULL instructions in:
-  TraceLens/AgenticMode/Standalone/.cursor/agents/<agent-file>.md
+  TraceLens/Agent/Analysis/.cursor/agents/<agent-file>.md
 
 **Execution Context:**
 - Comparison scope: `<comparison_scope>`
@@ -353,29 +350,7 @@ Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 
 ### 7.2 Launch Compute Kernel Subagents in PARALLEL
 
-**Compute Kernel Agent File Map:**
-
-| Category | Agent file |
-|----------|-----------|
-| `gemm` | `gemm-analyzer.md` |
-| `sdpa_fwd` | `sdpa-analyzer.md` |
-| `sdpa_bwd` | `sdpa-analyzer.md` |
-| `elementwise` | `elementwise-analyzer.md` |
-| `reduce` | `reduce-analyzer.md` |
-| `triton` | `triton-analyzer.md` |
-| `moe_fused` | `moe-analyzer.md` |
-| `moe_unfused` | `moe-analyzer.md` |
-| `norm` | `norm-analyzer.md` |
-| `convolution` | `convolution-analyzer.md` |
-| `other` | `generic-op-analyzer.md` |
-
-**Base path:** `TraceLens/AgenticMode/Standalone/.cursor/agents/`
-
-#### Subagent Selection
-
-For each category in `compute_categories`, resolve `{agent_file}`:
-- If the category is in the Agent File Map above, use the listed agent file.
-- Otherwise (unmapped category), fall back to `generic-op-analyzer.md` — it is `<cat>`-parameterized and handles any category by substitution.
+For each entry in `compute_categories` (loaded in Step 6.1), resolve `{agent_file}` as `{entry.skill}.md` and launch a subagent with agent file `TraceLens/Agent/Analysis/.cursor/agents/{agent_file}`. Fall back to `generic-op-analyzer.md` if the file is absent.
 
 Launch all subagents simultaneously in a single parallel batch.
 
@@ -428,7 +403,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 <Shared Compute Kernel Preamble>
 
 Read and follow the FULL instructions in:
-  TraceLens/AgenticMode/Standalone/.cursor/agents/{agent_file}
+  TraceLens/Agent/Analysis/.cursor/agents/{agent_file}
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
@@ -463,7 +438,7 @@ After all compute sub-agent `_metrics.json` files exist (each carrying its own `
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.report_utils import generate_priority_data
+from TraceLens.Agent.Analysis.utils.report_utils import generate_priority_data
 generate_priority_data(sys.argv[1])
 \" '<output_dir>'
 ```
@@ -477,7 +452,7 @@ Before aggregating results, validate outputs from **both** tiers (system_finding
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_subagent_outputs
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_subagent_outputs
 validate_subagent_outputs(sys.argv[1])
 \" '<output_dir>'"
 ```
@@ -486,7 +461,7 @@ This runs four checks:
 1. **Time Sanity** -- category GPU kernel time sum vs computation time (WARN if >15% discrepancy)
 2. **Efficiency Anomalies** -- findings with efficiency >100% (measurement issues) when `<comparison_scope>` = `standalone`
 3. **Coverage** -- all expected system and compute findings present
-4. **Priority Consistency** -- top 3 categories by GPU time for P1-P3 verification
+4. **Priority Consistency** -- `priority_data.json` invariants: `findings[]` sorted desc by `impact_score`, contiguous `global_rank` / `priorities[].rank`, and per-category `priorities[].impact_score` ≈ `sum(findings[].impact_score)`
 
 ---
 
@@ -495,14 +470,14 @@ This runs four checks:
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.report_utils import load_findings
+from TraceLens.Agent.Analysis.utils.report_utils import load_findings
 load_findings(sys.argv[1])
 \" '<output_dir>'"
 ```
 
 ### 9.1 Model Identification (Subagent, retry once on failure)
 
-Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/AgenticMode/Standalone/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
 
 **On failure (subagent error, timeout, or `model_info.json` not written):**
 1. **Retry exactly once** by re-launching the same subagent with the same prompt.
@@ -514,24 +489,14 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ## Step 10: Render Plot (conditional)
 
-**Important:** Plot data is sourced from `priority_data.json` (written in Step 7.5). This step only renders the PNG, when `agent_extension.py` is absent.
-
-### 10.1 Ensure matplotlib is available
+**Important:** Plot data is sourced from `priority_data.json` (written in Step 7.5). This step only renders the PNG when `agent_extension.py` is absent. If the file is present, **skip this step** — Step 11.2 will produce `perf_improvement.png` and Step 11.3 will embed it.
 
 ```bash
-<prefix> python3 -c "import matplotlib" 2>/dev/null || <prefix> pip install matplotlib
-```
-
-### 10.2 Generate Plot and Base64 File (conditional)
-
-If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` is **absent**, render the perf plot here. If the file is present, **skip this step** — Step 11.2 will produce `perf_improvement.png` and Step 11.3 will embed it.
-
-```bash
-EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+EXT='TraceLens/Agent/Analysis/utils/agent_extension.py'
 if [ ! -f "$EXT" ]; then
   <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import generate_perf_plot
+from TraceLens.Agent.Analysis.utils.plot_utils import generate_perf_plot
 generate_perf_plot(sys.argv[1], sys.argv[2])
 \" '<output_dir>' '<Model> on <Platform> — Performance Breakdown'
 fi
@@ -541,14 +506,12 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
 ---
 
-## Step 11: Generate Final Report
-
-**Output filename:** `standalone_analysis.md` when `<comparison_scope>` = `standalone`; `comparative_analysis.md` when `<comparison_scope>` = `comparative`. Referred to as `<report_filename>` below.
+## Step 11: Generate Final Report (<output_dir>/analysis.md)
 
 **CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
 
-1. **Read** the report template: `TraceLens/AgenticMode/Standalone/utils/templates/standalone_analysis_template.md`
-2. **Write** the filled-in report to `<output_dir>/<report_filename>` using `<prefix> tee <output_dir>/<report_filename> << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
+1. **Read** the report template: `TraceLens/Agent/Analysis/utils/templates/analysis_template.md`
+2. **Write** the filled-in report to `<output_dir>/analysis.md` using `<prefix> tee <output_dir>/analysis.md << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
 3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
    - `category_data/category_manifest.json` (metrics, GPU utilization)
    - `category_findings/*.md` (compute kernel P-items)
@@ -556,12 +519,12 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    - `category_data/*_metrics.json` (per-op tables, impact estimates)
    - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping. Render exactly one P-item per entry in `findings[]` — never merge entries.
    - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
-   - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/AgenticMode/Standalone/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
+   - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
    - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
    - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds." Do **not** rely on `<!-- no-actionable-findings -->` markers — validation uses the metrics JSON, not markers (`sub_agent_spec.md` § No actionable findings).
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
-The report at `<output_dir>/<report_filename>` must use these exact `##` headers — do NOT rename them:
+The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
 2. `## Compute Kernel Optimizations`
 3. `## Kernel Fusion Opportunities (Experimental)`
@@ -572,27 +535,27 @@ The report at `<output_dir>/<report_filename>` must use these exact `##` headers
 
 ### 11.1 Validate Report Structure (Retry up to 2x)
 
-After writing `<report_filename>`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
+After writing `analysis.md`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.
 
 **Validation procedure:**
 
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.validation_utils import validate_report
-passed, missing = validate_report(sys.argv[1], sys.argv[2])
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_report
+passed, missing = validate_report(sys.argv[1])
 if not passed:
     print('FAIL:')
     for m in missing:
         print('  - ' + m)
     sys.exit(1)
 print('PASS: All required sections present')
-\" '<output_dir>' '<report_filename>'
+\" '<output_dir>'
 ```
 
 **If validation fails (exit code 1):**
 
-1. Read the FAIL output to identify the issue. Fix in-place, do NOT rewrite the report from scratch.
+1. Read the FAIL output to identify the issue. Fix in-place, do NOT rewrite the report from scratch. Edit sections in place and not regenerate the entire output.
 a. Check if the report contains similar but incorrectly named headers and rename them to match the exact required names. 
 b. If sections are entirely absent, add them with the correct `##` headers, keeping existing content.
 c. For "Missing metrics row" errors: add the row to the Executive Summary table using values from `category_data/category_manifest.json` (`gpu_utilization` keys) and `priority_data.json` (top bottleneck).
@@ -600,6 +563,7 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 g. For marker errors: restore or add the missing/broken marker in place — never delete a card or block to silence an error. Source numeric values from `priority_data.json` (P-items) or `<cat>_metrics.json::impact_estimates[]` (detail estimates); use `null` or the sentinel `not quantifiable from trace data` for non-quantifiable items.
+h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order).
 2. Run validation again.
 3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 
@@ -607,12 +571,12 @@ g. For marker errors: restore or add the missing/broken marker in place — neve
 
 ### 11.2 Optional extension (auto-detected)
 
-If `TraceLens/AgenticMode/Standalone/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
+If `TraceLens/Agent/Analysis/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
 
-If the file is absent, skip this step silently. The standalone analysis is complete; the simple plot from Step 10.3 stays in place.
+If the file is absent, skip this step silently. The analysis is complete; the simple plot from Step 10 stays in place.
 
 ```bash
-EXT='TraceLens/AgenticMode/Standalone/utils/agent_extension.py'
+EXT='TraceLens/Agent/Analysis/utils/agent_extension.py'
 if [ -f "$EXT" ]; then
   <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
 fi
@@ -631,17 +595,15 @@ The PNG (`perf_improvement.png`) is already on disk from either Step 10.3 or Ste
 ```bash
 <prefix> python3 -c \"
 import sys
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import embed_plot_in_report
-embed_plot_in_report(sys.argv[1], sys.argv[2])
-\" '<output_dir>' '<report_filename>'
+from TraceLens.Agent.Analysis.utils.plot_utils import embed_plot_in_report
+embed_plot_in_report(sys.argv[1])
+\" '<output_dir>'
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
 ---
 
-## Error Handling
-
-### Unsupported Trace Features
+## Unsupported Trace Features
 
 If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
 
@@ -649,23 +611,3 @@ If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whethe
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
   - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
   - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.
-
-### After System-Level Subagents Complete (Step 6)
-- Check each file in `system_findings/` for "Status: ERROR"
-- Collect failed analyses and error summaries
-- **CRITICAL: Exclude failed analyses from aggregation**
-- **CRITICAL: Do NOT attempt to manually analyze failed system checks**
-
-### After Compute Kernel Subagents Complete (Step 7)
-- Check each file in `category_findings/` for "Status: ERROR"
-- Collect list of failed categories and their error summaries
-- **CRITICAL: Exclude failed categories from aggregation and recommendations**
-- **CRITICAL: Do NOT attempt to manually analyze failed categories**
-
-### In Final Report
-- Include Warnings section listing failed analyses from BOTH tiers (only if errors occurred)
-- Provide recommendations only for successfully analyzed categories
-- If no errors, omit the Warnings section entirely
-
-
-

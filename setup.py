@@ -15,9 +15,9 @@ setup(
     package_data={
         "TraceLens": [
             "**/*.md",
-            "AgenticMode/**/.cursor/skills/*",
-            "AgenticMode/**/.cursor/agents/*",
-            "AgenticMode/Standalone/utils/arch/*.json",
+            "Agent/**/.cursor/skills/*",
+            "Agent/**/.cursor/agents/*",
+            "Agent/Analysis/utils/arch/*.json",
         ],
     },
     install_requires=[

@@ -1,12 +1,12 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
 
 ---
 name: Workflow LLM Eval
-description: Run LLM-based workflow eval (eval 12 only) on a standalone or comparative analysis output and produce a results CSV.
+description: Run LLM-based workflow eval (eval 12 only) on an analysis output and produce a results CSV.
 triggers:
   - workflow LLM eval
   - run workflow LLM eval
@@ -34,8 +34,7 @@ When triggered, the prompt will specify:
 
 Read these before evaluating:
 
-- If comparison_scope=standalone: `<output_dir>/standalone_analysis.md`
-- If comparison_scope=comparative: `<output_dir>/comparative_analysis.md`
+- `<output_dir>/analysis.md`
 
 ## Scoring Rubric
 
@@ -62,7 +61,7 @@ Eval 12 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval 
 **Category:** Workflow
 **Issue Summary:** Hardware Reference in Appendix
 
-Find the `## Appendix` section in the report. Verify it contains:
+In `analysis.md`, find the `## Appendix` section. Verify it contains:
 
 - Platform name
 - Peak HBM BW value

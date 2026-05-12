@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 """
-TraceLens AgenticMode - Multi-Kernel Issue Analysis
+TraceLens Agent - Multi-Kernel Issue Analysis
 Analyzes cross-cutting multi-kernel patterns: memcpy (D2H/H2D), NCCL blocking,
 and compute/communication overlap deficiency.
 

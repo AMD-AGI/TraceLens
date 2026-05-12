@@ -1,14 +1,14 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""Optional standalone-analysis extension: detailed plot + ms-savings.
+"""Optional analysis extension: detailed plot + ms-savings.
 
 CLI usage:
 
-    python TraceLens/AgenticMode/Standalone/utils/agent_extension.py \\
+    python TraceLens/Agent/Analysis/utils/agent_extension.py \\
         --output-dir <dir> \\
         --title '<Model> on <Platform> -- Kernel Tuning Potential'
 """
@@ -28,15 +28,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from TraceLens.AgenticMode.Standalone.utils.plot_utils import (
+from TraceLens.Agent.Analysis.utils.plot_utils import (
     _CAT_PALETTE,
     _REST_KEY,
     _short_name,
 )
-from TraceLens.AgenticMode.Standalone.utils.report_utils import (
+from TraceLens.Agent.Analysis.utils.report_utils import (
     generate_priority_data,
 )
-from TraceLens.AgenticMode.Standalone.utils.report_utils import load_manifest
+from TraceLens.Agent.Analysis.utils.report_utils import load_manifest
 
 
 class ImpactPlot:
@@ -431,7 +431,7 @@ class MarkdownRehydrator:
         self.baseline_ms = self._load_baseline_ms(output_dir)
 
     def run(self) -> Dict[str, str]:
-        """Walk standalone markdown files and splice ms-form text in place of markers."""
+        """Walk analysis markdown files and splice ms-form text in place of markers."""
         if self.baseline_ms <= 0:
             print(
                 f"[agent_extension.rehydrate_reports_to_ms] baseline_ms={self.baseline_ms!r} "
@@ -441,9 +441,9 @@ class MarkdownRehydrator:
             return {}
 
         targets: List[str] = []
-        standalone = os.path.join(self.output_dir, "standalone_analysis.md")
-        if os.path.isfile(standalone):
-            targets.append(standalone)
+        analysis = os.path.join(self.output_dir, "analysis.md")
+        if os.path.isfile(analysis):
+            targets.append(analysis)
         targets.extend(
             sorted(
                 glob.glob(os.path.join(self.output_dir, "category_findings", "*.md"))
@@ -662,9 +662,7 @@ def main():
             "(reverses the impact_score convention to pre-Phase-1 ms savings)."
         )
     )
-    parser.add_argument(
-        "--output-dir", required=True, help="Standalone analysis output directory"
-    )
+    parser.add_argument("--output-dir", required=True, help="Analysis output directory")
     parser.add_argument("--title", required=True, help="Plot suptitle")
     args = parser.parse_args()
 
