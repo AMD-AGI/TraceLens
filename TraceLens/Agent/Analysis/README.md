@@ -62,7 +62,7 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke:**
    ```
-   "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json>"
+   "Follow the analysis orchestrator installed with TraceLens pip package and run the full agentic analysis workflow on <path_to_trace.json>"
    ```
 
 
