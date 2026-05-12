@@ -33,13 +33,8 @@ _REQUIRED_MODEL_KEYS = {"model", "architecture", "scale", "precision"}
 _MIN_REPORT_BYTES = 100
 _GARBLED_THRESHOLD = 0.50
 
-_REPORT_FILENAME = {
-    "standalone": "standalone_analysis.md",
-    "comparative": "comparative_analysis.md",
-}
 
-
-def _pre_check_gates(output_dir: str, comparison_scope: str = "standalone") -> str | None:
+def _pre_check_gates(output_dir: str) -> str | None:
     """Return a failure reason if a hard pre-check gate trips, else None.
 
     Gates (applied in order, first failure wins):
@@ -735,7 +730,7 @@ def _check_issue_template(output_dir, comparison_scope="standalone"):
 _MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
 
 
-def _check_model_id(output_dir, comparison_scope="standalone"):
+def _check_model_id(output_dir):
     """Eval 13 — per-field check for model_info.json values in Appendix."""
     model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
     report_path = os.path.join(output_dir, "analysis.md")
