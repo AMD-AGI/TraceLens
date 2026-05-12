@@ -17,46 +17,38 @@ fi
 # ---------------------------------------------------------------------------
 # Configuration (run from repo root on the node)
 # ---------------------------------------------------------------------------
-CONTAINER="${CONTAINER:?Set CONTAINER env var (e.g. CONTAINER=my_container)}"
+CONTAINER="${CONTAINER:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
-DEXEC="docker exec -w $REPO_ROOT $CONTAINER"
+if [[ -n "$CONTAINER" ]]; then
+    DEXEC=(docker exec -w "$REPO_ROOT" "$CONTAINER")
+    RUNTIME_LABEL="container $CONTAINER"
+    NODE_LABEL="node $(hostname)"
+else
+    DEXEC=()
+    RUNTIME_LABEL="host (no container)"
+    NODE_LABEL="local"
+fi
 STATUS_FILE="$(mktemp)"
 
-if [[ "$MODE" == "comparative" ]]; then
-    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_comparative.csv}"
-else
-    TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_standalone.csv}"
-fi
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${MODE}.csv}"
+
 
 # ---------------------------------------------------------------------------
 # Auto-extract test archives if trace CSV references them
 # ---------------------------------------------------------------------------
-if [[ "$MODE" == "standalone" ]]; then
-    for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_standalone.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_standalone.tar.gz; do
-        [ -f "$archive" ] || continue
-        target_dir="${archive%.tar.gz}"
-        if [ ! -d "$target_dir" ]; then
-            echo "Extracting $(basename "$archive")..."
-            tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests"
-        fi
-    done
-fi
-
-if [[ "$MODE" == "comparative" ]]; then
-    for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_comparative.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_comparative.tar.gz; do
-        [ -f "$archive" ] || continue
-        target_dir="${archive%.tar.gz}"
-        if [ ! -d "$target_dir" ]; then
-            echo "Extracting $(basename "$archive")..."
-            tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests"
-        fi
-    done
-fi
+for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_${MODE}.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_${MODE}.tar.gz; do
+    [ -f "$archive" ] || continue
+    target_dir="${archive%.tar.gz}"
+    if [ ! -d "$target_dir" ]; then
+        echo "Extracting $(basename "$archive")..."
+        tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,13 +97,12 @@ generate_single_ref() {
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$ANALYSIS_DIR" || exit
             if [[ "$MODE" == "comparative" ]]; then
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), analysis mode default, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, node $(hostname), container $CONTAINER, output to $OUTPUT_DIR"
+                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
@@ -181,8 +172,8 @@ setup_semaphore() {
 echo "========================================="
 echo "  Golden Reference Generation"
 echo "  Mode:         $MODE"
-echo "  Node:         $(hostname)"
-echo "  Container:    $CONTAINER"
+echo "  Node:         $NODE_LABEL"
+echo "  Runtime:      $RUNTIME_LABEL"
 echo "  Max parallel: $MAX_PARALLEL"
 echo "  CSV:          $TEST_TRACES_CSV"
 echo "========================================="
