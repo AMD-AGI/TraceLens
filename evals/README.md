@@ -17,11 +17,11 @@ All eval results use a 7-column CSV schema: `index, category, issue_summary, res
 
 ## Prerequisites / Setup
 
-### 1. Clone TraceLens-internal
+### 1. Clone TraceLens
 
 ```bash
-git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens-internal
+git clone https://github.com/AMD-AGI/TraceLens.git
+cd TraceLens
 ```
 
 ### 2. Install TraceLens inside your container
@@ -36,7 +36,7 @@ docker exec -it <container> bash
 Install TraceLens:
 
 ```bash
-cd /path/to/TraceLens-internal
+cd /path/to/TraceLens
 pip install -e .
 ```
 
