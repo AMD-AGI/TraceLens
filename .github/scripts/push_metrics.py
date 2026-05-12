@@ -83,7 +83,7 @@ def parse_junit_xml_dir(junit_dir):
     return results
 
 
-def push_metrics(results, endpoint, token, branch, commit_sha):
+def push_metrics(results, endpoint, token, commit_sha):
     """Push test duration metrics to Grafana Cloud via OTLP/HTTP."""
 
     auth_value = "Basic " + base64.b64encode(token.encode()).decode()
@@ -93,7 +93,6 @@ def push_metrics(results, endpoint, token, branch, commit_sha):
     resource = Resource(
         attributes={
             SERVICE_NAME: "tracelens-ci",
-            "branch": branch,
             "commit_sha": commit_sha,
         }
     )
@@ -117,7 +116,6 @@ def push_metrics(results, endpoint, token, branch, commit_sha):
                     "test_name": r["test_name"],
                     "test_suite": r["test_suite"],
                     "status": r["status"],
-                    "branch": branch,
                     "commit_sha": commit_sha,
                 },
             )
@@ -128,7 +126,6 @@ def push_metrics(results, endpoint, token, branch, commit_sha):
                 value=total,
                 attributes={
                     "test_suite": suite_name,
-                    "branch": branch,
                     "commit_sha": commit_sha,
                 },
             )
@@ -137,7 +134,6 @@ def push_metrics(results, endpoint, token, branch, commit_sha):
         yield Observation(
             value=total_duration,
             attributes={
-                "branch": branch,
                 "commit_sha": commit_sha,
             },
         )
@@ -189,7 +185,6 @@ def main():
     junit_dir = sys.argv[1]
     endpoint = os.environ.get("GRAFANA_CLOUD_OTLP_ENDPOINT", "")
     token = os.environ.get("GRAFANA_CLOUD_OTLP_TOKEN", "")
-    branch = os.environ.get("GITHUB_REF_NAME", "unknown")
     commit_sha = os.environ.get("GITHUB_SHA", "unknown")
 
     try:
@@ -218,7 +213,7 @@ def main():
             f"[push_metrics] Parsed {len(results)} test cases from {junit_dir}",
             file=sys.stderr,
         )
-        push_metrics(results, endpoint, token, branch, commit_sha)
+        push_metrics(results, endpoint, token, commit_sha)
 
     except Exception as exc:  # noqa: BLE001
         print(f"[push_metrics] ERROR (non-fatal): {exc}", file=sys.stderr)
