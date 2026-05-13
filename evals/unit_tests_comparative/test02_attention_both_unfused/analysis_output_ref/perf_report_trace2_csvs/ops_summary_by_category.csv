@@ -1,3 +1,0 @@
-op category,Count,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
-GEMM,2,0.08,66.66666666666667,66.66666666666667
-other,1,0.04,33.333333333333336,100.0

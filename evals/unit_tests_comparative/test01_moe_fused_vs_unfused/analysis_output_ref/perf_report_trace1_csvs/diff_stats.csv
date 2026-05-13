@@ -1,6 +1,0 @@
-name,cpu_op_name,cpu_op_uid,source,thread_name,Input Dims,Input Strides,Input type,Concrete Inputs,kernel_time,busy_time,lowest_common_ancestor_name,lowest_common_ancestor_id,gpu_op_uid,nn_module_stack,nn_module_parent,gpu_event_uid
-moe_sorting_kernel<BF16>,aiter::moe_sorting_fwd,2,trace1,,"((4096, 8192), (8, 8192, 22016))",,"('c10::bfloat16', 'c10::bfloat16')",,120.0,1160.0,moe_layer,0,6,root,root,6
-"ck_moe_stage1_kernel<BF16, 128, 128>",aiter::ck_moe_stage1,7,trace1,,"((4096, 8192), (8, 8192, 22016))",,"('c10::bfloat16', 'c10::bfloat16')",,480.0,1160.0,moe_layer,0,11,root,root,11
-"ck_moe_stage2_kernel<BF16, 128, 128>",aiter::ck_moe_stage2,12,trace1,,"((4096, 8192), (8, 8192, 22016))",,"('c10::bfloat16', 'c10::bfloat16')",,480.0,1160.0,moe_layer,0,16,root,root,16
-moe_sum_kernel<BF16>,aiter::moe_sum,17,trace1,,"((4096, 8192), (8, 8192, 22016))",,"('c10::bfloat16', 'c10::bfloat16')",,80.0,1160.0,moe_layer,0,21,root,root,21
-triton__moe_fused_kernel_0d1d2d3d4d5d6d7d8d9d10d,triton::fused_moe_kernel,2,trace2,,"((4096, 8192), (8, 8192, 22016), ())",,"('c10::bfloat16', 'c10::float8_e4m3fnuz', 'int')",,800.0,800.0,moe_layer,0,6,root,root,6

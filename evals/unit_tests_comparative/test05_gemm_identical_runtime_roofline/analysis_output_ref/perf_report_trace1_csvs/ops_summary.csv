@@ -1,2 +1,0 @@
-name,total_direct_kernel_time_sum,total_subtree_kernel_time_sum,total_direct_kernel_time_ms,total_subtree_kernel_time_ms,Count,Categories,Percentage (%),Cumulative Percentage (%)
-aten::mm,200.0,200.0,0.2,0.2,1,{'GEMM'},100.0,100.0

@@ -1,2 +1,0 @@
-name,total_direct_kernel_time_sum,total_subtree_kernel_time_sum,total_direct_kernel_time_ms,total_subtree_kernel_time_ms,Count,Categories,Percentage (%),Cumulative Percentage (%)
-triton::fused_moe_kernel,800.0,800.0,0.8,0.8,1,{'triton'},100.0,100.0

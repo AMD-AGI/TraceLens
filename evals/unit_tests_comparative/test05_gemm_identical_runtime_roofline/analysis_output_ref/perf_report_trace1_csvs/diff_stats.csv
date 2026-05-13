@@ -1,3 +1,0 @@
-name,cpu_op_name,cpu_op_uid,source,thread_name,Input Dims,Input Strides,Input type,Concrete Inputs,kernel_time,busy_time,lowest_common_ancestor_name,lowest_common_ancestor_id,gpu_op_uid,nn_module_stack,nn_module_parent,gpu_event_uid
-"Cijk_Ailk_Bljk_SB<BF16,BF16,float>_MT32x32x8_fallback",aten::mm,2,trace1,,"((512, 512), (512, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,200.0,200.0,aten::mm,1,6,root,root,6
-sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize256x128x64_warpgroupsize2x1x1_execute_segment_k_off_kernel,aten::mm,2,trace2,,"((512, 512), (512, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,200.0,200.0,aten::mm,1,6,root,root,6

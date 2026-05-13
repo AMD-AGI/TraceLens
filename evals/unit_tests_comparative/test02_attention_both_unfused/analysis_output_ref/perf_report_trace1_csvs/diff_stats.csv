@@ -1,7 +1,0 @@
-name,cpu_op_name,cpu_op_uid,source,thread_name,Input Dims,Input Strides,Input type,Concrete Inputs,kernel_time,busy_time,lowest_common_ancestor_name,lowest_common_ancestor_id,gpu_op_uid,nn_module_stack,nn_module_parent,gpu_event_uid
-"volta_h16gemm_<BF16,BF16,float>_tt_v1",aten::bmm,2,trace1,,"((8, 512, 64), (8, 64, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,10.0,10.0,aten::bmm,1,6,root,root,6
-sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize128x128x64_warpgroupsize1x2x1_execute_segment_k_off_kernel,aten::bmm,2,trace2,,"((8, 512, 64), (8, 64, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,10.0,10.0,aten::bmm,1,6,root,root,6
-"softmax_warp_forward<float, float, float, 4, true>",aten::softmax,7,trace1,,"((8, 512, 512),)",,"('c10::bfloat16', 'c10::bfloat16')",,110.0,110.0,aten::softmax,6,11,root,root,11
-"softmax_warp_forward<float, float, float, 4, true>",aten::softmax,7,trace2,,"((8, 512, 512),)",,"('c10::bfloat16', 'c10::bfloat16')",,40.0,40.0,aten::softmax,6,11,root,root,11
-"volta_h16gemm_<BF16,BF16,float>_nt_v1",aten::bmm,12,trace1,,"((8, 512, 64), (8, 64, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,170.0,170.0,aten::bmm,11,16,root,root,16
-sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize128x128x64_warpgroupsize1x2x1_execute_segment_k_off_kernel,aten::bmm,12,trace2,,"((8, 512, 64), (8, 64, 512))",,"('c10::bfloat16', 'c10::bfloat16')",,70.0,70.0,aten::bmm,11,16,root,root,16

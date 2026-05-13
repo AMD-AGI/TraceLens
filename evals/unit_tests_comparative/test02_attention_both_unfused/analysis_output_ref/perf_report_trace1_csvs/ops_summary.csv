@@ -1,3 +1,0 @@
-name,total_direct_kernel_time_sum,total_subtree_kernel_time_sum,total_direct_kernel_time_ms,total_subtree_kernel_time_ms,Count,Categories,Percentage (%),Cumulative Percentage (%)
-aten::bmm,180.0,180.0,0.18,0.18,2,{'GEMM'},62.06896551724138,62.06896551724138
-aten::softmax,110.0,110.0,0.11,0.11,1,{'other'},37.931034482758626,100.0
