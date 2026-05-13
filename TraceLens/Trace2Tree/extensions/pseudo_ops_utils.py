@@ -93,6 +93,7 @@ def inject_pseudo_op(
 
     set_bookkeeping_attr(tree, pseudo_evt)
 
+    pseudo_evt["parent"] = orig_cpu_evt["UID"]
     children = orig_cpu_evt["children"]
     children.remove(launcher_evt["UID"])
     children.append(pseudo_evt["UID"])
