@@ -49,12 +49,14 @@ class ImpactPlot:
         output_filename: str = "perf_improvement.png",
         write_base64: bool = False,
         show_error_bars: bool = True,
+        comparison_scope: str = "standalone",
     ):
         self.output_dir = output_dir
         self.title = title
         self.output_filename = output_filename
         self.write_base64 = write_base64
         self.show_error_bars = show_error_bars
+        self.comparison_scope = comparison_scope
 
     def run(self) -> bool:
         """Generate the figure; returns False if inputs are missing."""
@@ -381,8 +383,13 @@ class ImpactPlot:
         ax.set_xticks(range(len(proj["steps"])))
         ax.set_xticklabels(proj["steps"], fontsize=9)
         ax.set_ylabel("% Relative Throughput (Baseline = 100)", fontsize=11)
+        cone_subtitle = (
+            "75\u2013100% of gap potential"
+            if self.comparison_scope == "comparative"
+            else "75\u2013100% roofline potential"
+        )
         ax.set_title(
-            "Cumulative Throughput Improvement\n(75\u2013100% roofline potential)",
+            f"Cumulative Throughput Improvement\n({cone_subtitle})",
             fontsize=12,
             fontweight="bold",
             pad=12,
@@ -426,9 +433,10 @@ class MarkdownRehydrator:
         "-------------------------------------|"
     )
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, comparison_scope: str = "standalone"):
         self.output_dir = output_dir
         self.baseline_ms = self._load_baseline_ms(output_dir)
+        self.comparison_scope = comparison_scope
 
     def run(self) -> Dict[str, str]:
         """Walk analysis markdown files and splice ms-form text in place of markers."""
@@ -485,7 +493,7 @@ class MarkdownRehydrator:
             attrs = self._parse_attrs(begin.group(1))
             kind = attrs.pop("kind", None) or ""
             body = original[begin.end() : end.start()].strip("\n")
-            rendered = self._render_legacy(kind, attrs, body, self.baseline_ms)
+            rendered = self._render_legacy(kind, attrs, body, self.baseline_ms, self.comparison_scope)
             if rendered is None:
                 continue
             out_parts.append(original[cursor : begin.start()])
@@ -534,7 +542,7 @@ class MarkdownRehydrator:
             return None
 
     @staticmethod
-    def _render_p_item(attrs, body, baseline_ms):
+    def _render_p_item(attrs, body, baseline_ms, comparison_scope="standalone"):
         """Render a P-item Impact line in legacy ms-savings form."""
         lo = MarkdownRehydrator._attr_float(attrs, "low")
         hi = MarkdownRehydrator._attr_float(attrs, "high")
@@ -549,14 +557,20 @@ class MarkdownRehydrator:
         )
         category = attrs.get("category")
         if category:
-            rendered += (
-                f" from closing efficiency gaps to 75\u2013100% of roofline "
-                f"(pre-computed from `{category}_metrics.json` impact_estimates)."
-            )
+            if comparison_scope == "standalone":
+                rendered += (
+                    f" from closing efficiency gaps to 75\u2013100% of roofline "
+                    f"(pre-computed from `{category}_metrics.json` impact_estimates)."
+                )
+            else:
+                rendered += (
+                    f" from closing efficiency gaps to 75\u2013100% of gap "
+                    f"(pre-computed from `{category}_metrics.json` impact_estimates)."
+                )
         return rendered
 
     @staticmethod
-    def _render_detail_estimate(attrs, body, baseline_ms):
+    def _render_detail_estimate(attrs, body, baseline_ms, comparison_scope="standalone"):
         """Render the two-bullet Low/High Impact estimate block in ms+E2E% form."""
         lo = MarkdownRehydrator._attr_float(attrs, "low")
         hi = MarkdownRehydrator._attr_float(attrs, "high")
@@ -564,9 +578,15 @@ class MarkdownRehydrator:
             return body
         lo_ms = lo * baseline_ms / 100.0
         hi_ms = hi * baseline_ms / 100.0
+        if comparison_scope == "comparative":
+            lo_label = "Low end (75% gap target)"
+            hi_label = "High end (100% gap target)"
+        else:
+            lo_label = "Low end (75% roofline)"
+            hi_label = "High end (100% roofline)"
         return (
-            f"- Low end (75% roofline): {lo_ms:.3f} ms savings ({lo:.2f}% E2E)\n"
-            f"- High end (100% roofline): {hi_ms:.3f} ms savings ({hi:.2f}% E2E)"
+            f"- {lo_label}: {lo_ms:.3f} ms savings ({lo:.2f}% E2E)\n"
+            f"- {hi_label}: {hi_ms:.3f} ms savings ({hi:.2f}% E2E)"
         )
 
     @staticmethod
@@ -619,17 +639,15 @@ class MarkdownRehydrator:
         return "\n".join(out_lines)
 
     @staticmethod
-    def _render_legacy(kind, attrs, body, baseline_ms):
+    def _render_legacy(kind, attrs, body, baseline_ms, comparison_scope="standalone"):
         """Dispatch to the per-kind renderer; ``None`` for unknown kinds."""
-        renderers = {
-            "p_item": MarkdownRehydrator._render_p_item,
-            "detail_estimate": MarkdownRehydrator._render_detail_estimate,
-            "top_ops": MarkdownRehydrator._render_top_ops,
-        }
-        fn = renderers.get(kind)
-        if fn is None:
-            return None
-        return fn(attrs, body, baseline_ms)
+        if kind == "p_item":
+            return MarkdownRehydrator._render_p_item(attrs, body, baseline_ms, comparison_scope)
+        if kind == "detail_estimate":
+            return MarkdownRehydrator._render_detail_estimate(attrs, body, baseline_ms, comparison_scope)
+        if kind == "top_ops":
+            return MarkdownRehydrator._render_top_ops(attrs, body, baseline_ms)
+        return None
 
 
 # Module-level shims preserved for external callers / tests.
@@ -641,14 +659,15 @@ def generate_impact_savings_plot(
     output_filename: str = "perf_improvement.png",
     write_base64: bool = False,
     show_error_bars: bool = True,
+    comparison_scope: str = "standalone",
 ) -> bool:
     return ImpactPlot(
-        output_dir, title, output_filename, write_base64, show_error_bars
+        output_dir, title, output_filename, write_base64, show_error_bars, comparison_scope
     ).run()
 
 
-def rehydrate_reports_to_ms(output_dir: str) -> Dict[str, str]:
-    return MarkdownRehydrator(output_dir).run()
+def rehydrate_reports_to_ms(output_dir: str, comparison_scope: str = "standalone") -> Dict[str, str]:
+    return MarkdownRehydrator(output_dir, comparison_scope).run()
 
 
 _parse_attrs = MarkdownRehydrator._parse_attrs
@@ -664,6 +683,12 @@ def main():
     )
     parser.add_argument("--output-dir", required=True, help="Analysis output directory")
     parser.add_argument("--title", required=True, help="Plot suptitle")
+    parser.add_argument(
+        "--comparison-scope",
+        default="standalone",
+        choices=["standalone", "comparative"],
+        help="standalone (default) or comparative",
+    )
     args = parser.parse_args()
 
     generate_impact_savings_plot(
@@ -671,8 +696,9 @@ def main():
         args.title,
         output_filename="perf_improvement.png",
         write_base64=True,
+        comparison_scope=args.comparison_scope,
     )
-    rehydrate_reports_to_ms(args.output_dir)
+    rehydrate_reports_to_ms(args.output_dir, comparison_scope=args.comparison_scope)
 
 
 if __name__ == "__main__":
