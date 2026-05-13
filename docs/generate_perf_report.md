@@ -164,7 +164,7 @@ Pass a Python file path via `--extension_file`. The file can define one or more 
 |-----------------------------|-----------|-----------------------------------------------------------------------------|
 | `tree_postprocess_extension`| `Callable`| Called with `perf_analyzer.tree`. Use to modify the tree structure post-construction. |
 | `perf_model_extension`      | `dict`    | A mapping from op name (str) to a custom performance model class. These will override or extend existing models. |
-| `dict_cat2names_extension`  | `dict`    | Mapping from new category names to lists of op names, merged into the built-in op categories. |
+| `op_category_extension`     | `dict`    | Mapping from category-only op names to final categories, used when an op should appear in unified reports without a perf model. |
 
 #### 📄 Example Extension File for MegatronLM in the examples dir
 

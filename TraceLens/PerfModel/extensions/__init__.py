@@ -47,7 +47,7 @@ from .custom_collectives_perf_model_extensions import (
     aiter_reduce_scatter,
     aiter_all_gather_reg,
 )
-from .pseudo_ops_perf_utils import get_pseudo_op_mappings, get_pseudo_op_categories
+from .pseudo_ops_perf_utils import get_pseudo_op_mappings
 
 __all__ = [
     # Base classes
@@ -88,5 +88,4 @@ __all__ = [
     "custom_ar_qr_all_reduce",
     # Utility functions
     "get_pseudo_op_mappings",
-    "get_pseudo_op_categories",
 ]

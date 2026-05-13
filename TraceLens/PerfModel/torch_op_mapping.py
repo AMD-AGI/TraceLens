@@ -4,9 +4,180 @@
 # See LICENSE for license information.
 ###############################################################################
 
+"""Torch op-name mappings and categorization helpers."""
+
+import re
+from typing import Dict, Iterable, List, Mapping, MutableMapping
+from typing import Optional, Pattern, Tuple
+
 from . import perf_model
-from collections import defaultdict
-from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
+from .extensions import get_pseudo_op_mappings
+
+CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
+    # CONV ops not present in op_to_perf_model_class_map.
+    "aten::miopen_convolution": "CONV_fwd",
+    "aten::cudnn_convolution": "CONV_fwd",
+    # SDPA backward ops without direct perf models in core TraceLens.
+    "FlashAttnFuncBackward": "SDPA_bwd",
+    "FusedAttnFuncBackward": "SDPA_bwd",
+    "aten::_scaled_dot_product_cudnn_attention_backward": "SDPA_bwd",
+    "aten::_scaled_dot_product_efficient_attention_backward": "SDPA_bwd",
+    "aten::_scaled_dot_product_flash_attention_backward": "SDPA_bwd",
+    # SSM / Mamba category-only backward ops.
+    "MambaSplitConv1dScanCombinedFnBackward": "SSM_bwd",
+    "DaoAILab::_causal_conv1d_bwd_cpp": "SSM_bwd",
+    # MoE communication category-only ops.
+    "TokenPermuteMaskMap": "MoE_comm_fwd",
+    # Observed in MoE token-routing traces; tracked separately because the name
+    # itself is generic and may not always imply MoE communication.
+    "_OperationFuserAutogradFunction": "MoE_comm_fwd",
+    "MoEDispatchBackward": "MoE_comm_bwd",
+    "MoECombineBackward": "MoE_comm_bwd",
+    "TokenPermuteMaskMapBackward": "MoE_comm_bwd",
+    "_OperationFuserAutogradFunctionBackward": "MoE_comm_bwd",
+    # RoPE / CrossEntropy category-only backward ops.
+    "FusedRoPEFuncBackward": "RoPE_bwd",
+    "CrossEntropyFunctionBackward": "CrossEntropy_bwd",
+    # MoE auxiliary ops.
+    "aiter::moe_sorting_fwd": "MoE_aux",
+    "aiter::moe_sorting_opus_fwd": "MoE_aux",
+    "aiter::moe_align_block_size": "MoE_aux",
+    "_moe_C::moe_align_block_size": "MoE_aux",
+    "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)": "MoE_aux",
+    "aiter::moe_sum": "MoE_aux",
+    "aiter::topk_softmax": "MoE_aux",
+    "aiter::topk_softmax_asm": "MoE_aux",
+    "aiter::topk_sigmoid": "MoE_aux",
+    "aiter::biased_grouped_topk_hip": "MoE_aux",
+    "aiter::grouped_topk": "MoE_aux",
+    "aiter::moe_fused_gate": "MoE_aux",
+    # InferenceAttention extras (KV-cache writes).
+    "_C_cache_ops::reshape_and_cache_flash": "InferenceAttention",
+    "_C_cache_ops::concat_and_cache_mla": "InferenceAttention",
+}
+
+
+OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
+    (re.compile(r"^triton"), "triton"),
+    (re.compile(r"^record_param_comms"), "record_param_comms"),
+]
+
+
+_KERNEL_NAME_PREFIX = "void at::native"
+_KERNEL_NAME_FALLBACK_RULES: Tuple[Tuple[str, str], ...] = (
+    ("elementwise", "elementwise"),
+    ("reduce", "reduce"),
+    ("multi_tensor_apply", "multi_tensor_apply"),
+)
+
+
+def _kernel_name_fallback(row) -> Optional[str]:
+    kernel_details = row.get("kernel_details")
+    if not kernel_details:
+        return None
+    kernel_name = kernel_details[0].get("name", "")
+    if not kernel_name.startswith(_KERNEL_NAME_PREFIX):
+        return None
+    for needle, category in _KERNEL_NAME_FALLBACK_RULES:
+        if needle in kernel_name:
+            return category
+    return None
+
+
+def get_perf_model_category(perf_model_class: type, bwd: bool = False) -> Optional[str]:
+    """Return the category declared by a perf model class."""
+    attr_name = "bwd_category" if bwd else "category"
+    category = getattr(perf_model_class, attr_name, None)
+    if bwd:
+        return category
+    if category is None:
+        raise ValueError(
+            f"perf_model_class {perf_model_class} must define a category attribute"
+        )
+    return category
+
+
+def sheet_category_from_final_category(category: str) -> str:
+    """Return the legacy sheet family for a final categorization label."""
+    for suffix in ("_fwd", "_bwd"):
+        if category.endswith(suffix):
+            return category[: -len(suffix)]
+    return category
+
+
+def get_perf_model_sheet_category(perf_model_class: type) -> str:
+    """Return the legacy sheet category for a perf model class."""
+    sheet_category = getattr(perf_model_class, "sheet_category", None)
+    if sheet_category is not None:
+        return sheet_category
+    return sheet_category_from_final_category(get_perf_model_category(perf_model_class))
+
+
+def build_op_category_registry(
+    op_to_perf_model_class_map: Mapping[str, type],
+    category_only_ops: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """Construct the flat ``op_name -> final category`` registry."""
+    registry: Dict[str, str] = {}
+    for op_name, perf_model_class in op_to_perf_model_class_map.items():
+        registry[op_name] = get_perf_model_category(perf_model_class)
+
+    if category_only_ops:
+        registry.update(category_only_ops)
+
+    return registry
+
+
+def build_sheet_category_to_op_names(
+    op_to_perf_model_class_map: Mapping[str, type],
+) -> Dict[str, List[str]]:
+    """Build the legacy ``category -> op names`` view used for report sheets."""
+    sheet_category_to_op_names = {}  # type: Dict[str, List[str]]
+    for op_name, perf_model_class in op_to_perf_model_class_map.items():
+        sheet_category = get_perf_model_sheet_category(perf_model_class)
+        sheet_category_to_op_names.setdefault(sheet_category, []).append(op_name)
+    return sheet_category_to_op_names
+
+
+def register_perf_model_categories(
+    perf_model_extension: Mapping[str, type],
+    registry: MutableMapping[str, str],
+) -> None:
+    """Register categories for extension-provided perf models."""
+    for op_name, perf_model_class in perf_model_extension.items():
+        registry[op_name] = get_perf_model_category(perf_model_class)
+
+
+def register_op_categories(
+    op_category_extension: Mapping[str, str],
+    registry: MutableMapping[str, str],
+) -> None:
+    """Register explicit category-only op labels."""
+    registry.update(op_category_extension)
+
+
+def _categorize_torch_op_from_registry(
+    row,
+    registry: Mapping[str, str],
+    patterns: Iterable[Tuple[Pattern, str]] = OP_CATEGORY_PATTERNS,
+) -> str:
+    """Return the category for ``row`` using explicit registry data."""
+    name = row["name"]
+
+    category = registry.get(name)
+    if category is not None:
+        return category
+
+    for pattern, category in patterns:
+        if pattern.match(name):
+            return category
+
+    fallback = _kernel_name_fallback(row)
+    if fallback is not None:
+        return fallback
+
+    return "other"
+
 
 op_to_perf_model_class_map = {
     "aten::mm": perf_model.aten_mm,
@@ -181,38 +352,10 @@ for op_name, op_class in norm_ops.items():
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
 
-dict_base_class2category = {
-    perf_model.GEMM: "GEMM",
-    perf_model.GroupedGemm: "GEMM",
-    perf_model.CONV: "CONV",
-    perf_model.SDPA: "SDPA",
-    perf_model.UnaryElementwise: "UnaryElementwise",
-    perf_model.BinaryElementwise: "BinaryElementwise",
-    perf_model.Normalization: "Normalization",
-    perf_model.Reduce: "Reduce",
-    perf_model.MoEComm: "MoE_comm",
-    perf_model.CausalConv1d: "SSM",
-    perf_model.FusedRoPE: "RoPE",
-    perf_model.CrossEntropy: "CrossEntropy",
-    perf_model.MambaSSD: "SSM",
-}
-
-# Add pseudo-op extension categories
-dict_base_class2category.update(get_pseudo_op_categories())
-
-dict_cat2names = defaultdict(list)
-for op_name, perf_model_class in op_to_perf_model_class_map.items():
-    base_classes = perf_model_class.__bases__
-    assert (
-        len(base_classes) == 1
-    ), f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_classes: {base_classes}"
-    base_class = base_classes[0]
-    cat = dict_base_class2category.get(base_class)
-    if cat is None:
-        raise ValueError(
-            f"op_name: {op_name}, perf_model_class: {perf_model_class}, base_class: {base_classes}"
-        )
-    dict_cat2names[cat].append(op_name)
+OP_CATEGORY_REGISTRY = build_op_category_registry(
+    op_to_perf_model_class_map,
+    category_only_ops=CATEGORY_ONLY_OP_MAPPING,
+)
 
 
 def categorize_torch_op(row):
@@ -226,7 +369,8 @@ def categorize_torch_op(row):
 
     Returns:
         str: One of 'GEMM', 'CONV_fwd', 'CONV_bwd', 'NORM_fwd', 'NORM_bwd',
-             'SDPA_fwd', 'SDPA_bwd', 'MoE_fused', 'MoE_unfused',
+             'SDPA_fwd', 'SDPA_bwd', 'GroupedGEMM_fwd', 'GroupedGEMM_bwd',
+             'MoE_fused', 'MoE_unfused',
              'SSM_fwd', 'SSM_bwd', 'MoE_comm_fwd', 'MoE_comm_bwd',
              'RoPE_fwd', 'RoPE_bwd', 'CrossEntropy_fwd', 'CrossEntropy_bwd',
              'elementwise', 'triton', 'reduce', 'multi_tensor_apply',
@@ -235,153 +379,7 @@ def categorize_torch_op(row):
         Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
         are categorization-only (timing without GFLOPS or TB/s).
     """
-
-    debug = False
-    if row["name"] in dict_cat2names["GEMM"]:
-        return "GEMM"
-    elif row["name"] in [
-        "aten::convolution",
-        "aten::miopen_convolution",
-        "aten::cudnn_convolution",
-        "ConvBias_",
-        "ConvBiasReLU_",
-    ]:
-        return "CONV_fwd"
-    elif row["name"] in [
-        "aten::convolution_backward",
-        "ConvBias_Backward",
-        "ConvBiasReLU_Backward",
-    ]:
-        return "CONV_bwd"
-    elif row["name"] in norm_ops.keys() or row["name"] in dict_cat2names.get(
-        "Normalization", []
-    ):
-        if row["name"].endswith("_backward") or row["name"].endswith("Backward"):
-            return "NORM_bwd"
-        else:
-            return "NORM_fwd"
-    # SDPA ops: distinguish forward and backward
-    sdpa_bwd_names = [
-        "FlashAttnFuncBackward",
-        "FusedAttnFuncBackward",
-        "flash_attn::_flash_attn_backward",
-        "flash_attn::_flash_attn_varlen_backward",
-        "aten::_scaled_dot_product_cudnn_attention_backward",
-        "aten::_scaled_dot_product_efficient_attention_backward",
-        "aten::_scaled_dot_product_flash_attention_backward",
-        "aiter::_flash_attn_backward",
-        "aiter::wrapper_fmha_v3_bwd",
-        "aiter::mha_bwd",
-    ]
-    if row["name"] in dict_cat2names["SDPA"]:
-        if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
-            return "SDPA_bwd"
-        else:
-            return "SDPA_fwd"
-    elif row["name"] in dict_cat2names.get("GroupedGEMM", []):
-        if row["name"].endswith("Backward"):
-            return "GroupedGEMM_bwd"
-        else:
-            return "GroupedGEMM_fwd"
-    elif row["name"] in dict_cat2names.get("MoE_fused", []):
-        return "MoE_fused"
-    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
-        return "MoE_unfused"
-    elif row["name"] in dict_cat2names.get("SSM", []) or row["name"] in [
-        "MambaSplitConv1dScanCombinedFn",
-    ]:
-        return "SSM_fwd"
-    elif row["name"] in [
-        "MambaSplitConv1dScanCombinedFnBackward",
-        "DaoAILab::_causal_conv1d_bwd_cpp",
-    ]:
-        return "SSM_bwd"
-    elif row["name"] in dict_cat2names.get("MoE_comm", []) or row["name"] in [
-        "TokenPermuteMaskMap",
-        "_OperationFuserAutogradFunction",
-    ]:
-        return "MoE_comm_fwd"
-    elif row["name"] in [
-        "MoEDispatchBackward",
-        "MoECombineBackward",
-        "TokenPermuteMaskMapBackward",
-        "_OperationFuserAutogradFunctionBackward",
-    ]:
-        return "MoE_comm_bwd"
-    elif row["name"] in dict_cat2names.get("RoPE", []):
-        return "RoPE_fwd"
-    elif row["name"] in ["FusedRoPEFuncBackward"]:
-        return "RoPE_bwd"
-    elif row["name"] in dict_cat2names.get("CrossEntropy", []):
-        return "CrossEntropy_fwd"
-    elif row["name"] in ["CrossEntropyFunctionBackward"]:
-        return "CrossEntropy_bwd"
-    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
-        return "elementwise"
-    elif row["name"] in dict_cat2names.get("Reduce", []):
-        return "reduce"
-    elif row["name"].startswith("triton"):
-        return "triton"
-    elif row["name"] in [
-        "aiter::moe_sorting_fwd",
-        "aiter::moe_sorting_opus_fwd",
-        "aiter::moe_align_block_size",
-        "_moe_C::moe_align_block_size",
-        "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)",
-    ]:
-        return "MoE_aux"
-    elif row["name"] in [
-        "aiter::moe_sum",
-    ]:
-        return "MoE_aux"
-    elif row["name"] in [
-        "aiter::topk_softmax",
-        "aiter::topk_softmax_asm",
-        "aiter::topk_sigmoid",
-        "aiter::biased_grouped_topk_hip",
-        "aiter::grouped_topk",
-        "aiter::moe_fused_gate",
-    ]:
-        return "MoE_aux"
-    elif row["name"] in [
-        "_C_cache_ops::reshape_and_cache_flash",
-        "_C_cache_ops::concat_and_cache_mla",
-    ]:
-        return "InferenceAttention"
-    elif row["name"].startswith("record_param_comms"):
-        return "record_param_comms"
-    elif row["name"] in dict_cat2names.get("MoE_fused", []):
-        return "MoE_fused"
-    elif row["name"] in dict_cat2names.get("MoE_unfused", []):
-        return "MoE_unfused"
-    elif row["name"] in dict_cat2names.get("InferenceAttention", []):
-        return "InferenceAttention"
-    elif row["name"] in dict_cat2names.get("RMSNorm", []):
-        return "RMSNorm"
-    elif row["name"] in dict_cat2names.get("CustomCollective", []):
-        return "CustomCollective"
-    elif row["name"] in dict_cat2names.get("GroupQuant", []):
-        return "GroupQuant"
-    elif row["name"] in dict_cat2names.get("BinaryElementwise", []):
-        return "elementwise"
-    elif row["name"] in dict_cat2names.get("UnaryElementwise", []):
-        return "elementwise"
-    elif row["name"] in dict_cat2names.get("Reduce", []):
-        return "reduce"
-    if "kernel_details" in row and len(row["kernel_details"]) > 0:
-        kernel_name = row["kernel_details"][0]["name"]
-        # else:
-        #     raise ValueError(
-        #         f"Row does not contain 'kernel_names' or 'kernel_details' with a valid name. Row: {row}"
-        #     )
-        if kernel_name.startswith("void at::native"):
-            if debug:
-                print("Found ATen native kernel:", kernel_name[:64])
-            if "elementwise" in kernel_name:
-                return "elementwise"
-            elif "reduce" in kernel_name:
-                return "reduce"
-            elif "multi_tensor_apply" in kernel_name:
-                return "multi_tensor_apply"
-    # if none of the above cases match, return 'other'
-    return "other"
+    return _categorize_torch_op_from_registry(
+        row,
+        OP_CATEGORY_REGISTRY,
+    )

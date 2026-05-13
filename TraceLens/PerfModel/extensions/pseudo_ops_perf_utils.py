@@ -100,31 +100,3 @@ def get_pseudo_op_mappings():
     }
 
     return pseudo_op_mappings
-
-
-def get_pseudo_op_categories():
-    """
-    Return a dictionary mapping pseudo-op base classes to their performance categories.
-
-    Returns:
-        dict: Mapping of base classes to category names
-    """
-
-    pseudo_op_categories = {
-        moe_perf_model_extensions.FusedMoE: "MoE_fused",
-        moe_perf_model_extensions.UnfusedMoE_Up: "MoE_unfused",
-        moe_perf_model_extensions.UnfusedMoE_Down: "MoE_unfused",
-        attention_perf_model_extensions.InferenceAttention: "InferenceAttention",
-        perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
-        perf_model_extensions.batched_gemm_a16wfp4: "GEMM",
-        attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
-        perf_model_extensions.GroupQuant: "GroupQuant",
-        perf_model_extensions.gemm_a16w16_atomic_: "GEMM",
-        perf_model_extensions.batched_gemm_a8w8: "GEMM",
-        rmsnorm_perf_model_extensions.RMSNorm: "RMSNorm",
-        custom_collectives_perf_model_extensions.CustomCollective: "CustomCollective",
-        custom_collectives_perf_model_extensions.custom_ar_all_reduce: "CustomCollective",
-        perf_model_extensions.aiter_silu_and_mul: "UnaryElementwise",
-    }
-
-    return pseudo_op_categories
