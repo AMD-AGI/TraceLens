@@ -155,6 +155,10 @@ If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not 
 
 Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
 
+For all of these scripts below, look at the environment variable TL_EXTENSION to recursively search for a file called <platform>.json
+If it is not found also look in TraceLens/Agent/Analysis/utils/arch/<platform>.json.
+Use <platform_file> to represent the location of this file
+
 **Output paths:**
 **`standalone`** — one run: `--output_xlsx_path <output_dir>/perf_report.xlsx`, `--output_csvs_dir <output_dir>/perf_report_csvs`.
 **`comparative`** — two runs: trace1 → `<output_dir>/perf_report_trace1.xlsx`, `<output_dir>/perf_report_trace1_csvs`; trace2 → `--profile_json_path <trace2_path>`, `<output_dir>/perf_report_trace2.xlsx`, `<output_dir>/perf_report_trace2_csvs`.
@@ -177,7 +181,7 @@ Do **not** pass `--extension_*` on the trace2 command.
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/<platform>.json \
+  --gpu_arch_json_path <platform_file> \
   --enable_pseudo_ops \
   --group_by_num_kernels \
   --include_call_stack
@@ -190,7 +194,7 @@ Do **not** pass `--extension_*` on the trace2 command.
   --profile_json_path <trace_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/<platform>.json \
+  --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
@@ -207,7 +211,7 @@ When `<comparison_scope>` = `comparative`, append the same `--extension_file` / 
   --capture_folder <capture_folder_path> \
   --output_xlsx_path <output_dir>/perf_report.xlsx \
   --output_csvs_dir <output_dir>/perf_report_csvs \
-  --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/<platform>.json \
+  --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
@@ -489,10 +493,14 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ## Step 10: Render Plot (conditional)
 
-**Important:** Plot data is sourced from `priority_data.json` (written in Step 7.5). This step only renders the PNG when `agent_extension.py` is absent. If the file is present, **skip this step** — Step 11.2 will produce `perf_improvement.png` and Step 11.3 will embed it.
+**Important:** Plot data is sourced from `priority_data.json` (written in Step 7.5). This step only renders the PNG when `agent_extension.py` is absent.
+Look at the environment variable TL_EXTENSION to find python packages and directories to recursively search for `agent_extension.py`.
+If this environment variable is not present or the it is not found look in TraceLens/Agent/Analysis/utils/.
+If the file is present, **skip this step** — Step 11.2 will produce `perf_improvement.png` and Step 11.3 will embed it.
+Use <agent_extension_file> to represent the location of this file.
 
 ```bash
-EXT='TraceLens/Agent/Analysis/utils/agent_extension.py'
+EXT='<agent_extension_file>'
 if [ ! -f "$EXT" ]; then
   <prefix> python3 -c \"
 import sys
@@ -571,12 +579,12 @@ h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category
 
 ### 11.2 Optional extension (auto-detected)
 
-If `TraceLens/Agent/Analysis/utils/agent_extension.py` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
+If `<agent_extension_file>` exists, run it as shown below. Its behavior is documented in the extension itself; the orchestrator does not need to inspect or reason about it.
 
 If the file is absent, skip this step silently. The analysis is complete; the simple plot from Step 10 stays in place.
 
 ```bash
-EXT='TraceLens/Agent/Analysis/utils/agent_extension.py'
+EXT='<agent_extension_file>'
 if [ -f "$EXT" ]; then
   <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
 fi

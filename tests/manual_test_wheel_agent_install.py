@@ -363,7 +363,8 @@ def _run_experiment(args: argparse.Namespace) -> None:
         f"{capture_clause}, with all artifacts under /output."
     )
     prompt = (
-        "Follow the Analysis Orchestrator installed with TraceLens "
+        "Follow the analysis orchestrator installed with the TraceLens pip package "
+        "(look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) "
         "and run the full workflow "
         f"{trace_and_platform}\n\n"
     )

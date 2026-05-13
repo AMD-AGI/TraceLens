@@ -3,7 +3,7 @@ set -e
 
 usage() {
     echo "Usage: $0 <tracelens_path> [gpu_type] [docker build args...]"
-    echo "  tracelens_path: Path to the TraceLens-internal repository"
+    echo "  tracelens_path: Path to the TraceLens repository"
     echo "  gpu_type:       'mi300' or 'mi350/mi355' (default: mi350)"
     exit 1
 }
@@ -43,15 +43,15 @@ echo "  TraceLens  : ${TRACELENS_PATH}"
 docker build "$@" -f - "${TRACELENS_PATH}" <<DOCKERFILE
 FROM ${BASE_IMAGE}
 
-COPY . /tmp/TraceLens-internal
+COPY . /tmp/TraceLens
 
 RUN SGLANG_DIR=\$(pip show sglang | grep "Editable project location" | cut -d' ' -f4 | xargs dirname) && \\
     cd "\${SGLANG_DIR}" && \\
-    for patch in /tmp/TraceLens-internal/examples/custom_workflows/inference_analysis/sglang_roofline_patches/*.patch; do \\
+    for patch in /tmp/TraceLens/examples/custom_workflows/inference_analysis/sglang_roofline_patches/*.patch; do \\
         [ -f "\$patch" ] && git apply "\$patch"; \\
     done && \\
-    pip install --no-deps /tmp/TraceLens-internal && \\
-    rm -rf /tmp/TraceLens-internal
+    pip install --no-deps /tmp/TraceLens && \\
+    rm -rf /tmp/TraceLens
 
 WORKDIR /workspace
 DOCKERFILE

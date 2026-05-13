@@ -2,13 +2,13 @@
 set -e
 
 usage() {
-    echo "Usage: $0 <vllm-version> <path-to-TraceLens-internal> [--base-image <image>] [docker build args...]"
+    echo "Usage: $0 <vllm-version> <path-to-TraceLens> [--base-image <image>] [docker build args...]"
     echo ""
     echo "  vllm-version    One of: v14, v15, v16, v17, v18, v19, v20 (shorthand for v0.14.0, v0.15.0, v0.16.0, v0.17.0, v0.18.0, v0.19.0, v0.20.0)"
     echo "  --base-image    Override the default base Docker image for the selected vllm version"
     echo ""
     echo "Examples:"
-    echo "  $0 v14 /home/user/TraceLens-internal -t tracelens-vllm"
+    echo "  $0 v14 /home/user/TraceLens -t tracelens-vllm"
     echo "  $0 v16 . -t tracelens-vllm:v16 --no-cache"
     echo "  $0 v18 . --base-image my-custom/vllm:latest -t tracelens-vllm:custom"
     exit 1
@@ -95,13 +95,13 @@ echo "  TraceLens  : ${TRACELENS_REPO}"
 docker build "${REMAINING_ARGS[@]}" -f - "${TRACELENS_REPO}" <<DOCKERFILE
 FROM ${BASE_IMAGE}
 
-COPY . /tmp/TraceLens-internal
+COPY . /tmp/TraceLens
 
 RUN VLLM_DIR=\$(python -c "import vllm, os; print(os.path.join(os.path.dirname(vllm.__file__), '..'))") && \\
     cd "\${VLLM_DIR}" && \\
-    (git apply /tmp/TraceLens-internal/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens-internal/${PATCH_PATH}) && \\
-    pip install --no-deps /tmp/TraceLens-internal && \\
-    rm -rf /tmp/TraceLens-internal
+    (git apply /tmp/TraceLens/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens/${PATCH_PATH}) && \\
+    pip install --no-deps /tmp/TraceLens && \\
+    rm -rf /tmp/TraceLens
 
 WORKDIR /workspace
 DOCKERFILE

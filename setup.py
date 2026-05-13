@@ -46,7 +46,7 @@ setup(
     description="A library for Automating analysis from PyTorch trace files",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/AMD-AIG-AIMA/TraceLens",
+    url="https://github.com/AMD-AGI/TraceLens",
     classifiers=[
         "Programming Language :: Python :: 3",
         # 'License :: OSI Approved :: MIT License',

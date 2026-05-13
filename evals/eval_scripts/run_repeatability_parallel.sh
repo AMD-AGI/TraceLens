@@ -96,13 +96,13 @@ run_single_job() {
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            cd "$REPO_ROOT/TraceLens/Agent/Analysis" || exit 1
+            cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
 

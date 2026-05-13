@@ -17,11 +17,11 @@ All eval results use a 7-column CSV schema: `index, category, issue_summary, res
 
 ## Prerequisites / Setup
 
-### 1. Clone TraceLens-internal
+### 1. Clone TraceLens
 
 ```bash
-git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens-internal
+git clone https://github.com/AMD-AGI/TraceLens.git
+cd TraceLens
 ```
 
 ### 2. Install TraceLens inside your container
@@ -36,7 +36,7 @@ docker exec -it <container> bash
 Install TraceLens:
 
 ```bash
-cd /path/to/TraceLens-internal
+cd /path/to/TraceLens
 pip install -e .
 ```
 
@@ -53,7 +53,7 @@ Verify with `agent --version`
 
 The `agent` invocations in this repo require model `claude-opus-4-7-high`. The eval shell scripts under `eval_scripts/` pass `--model claude-opus-4-7-high` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
 
-Sub-agents invoked by the analysis orchestrator are split across two tiers: judgment-heavy ones (`kernel-fusion-analyzer`, `generic-op-analyzer`, `model-identification-agent`) inherit `claude-opus-4-7-high`; the other ten run on `claude-4.6-sonnet-medium-thinking`. See `[../docs/sub_agent_model_audit.md](../docs/sub_agent_model_audit.md)`.
+The orchestrator and all 13 sub-agents currently inherit `claude-opus-4-7-high` (declared in each agent file's front matter under `TraceLens/Agent/Analysis/.cursor/agents/`).
 
 ## Running Scripts
 
@@ -123,7 +123,7 @@ You can run each stage independently using the `agent` CLI. Examples:
 ```bash
 cd TraceLens/Agent/Analysis
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on <trace_path> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <trace_path> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Workflow Eval:**
