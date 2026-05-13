@@ -246,13 +246,15 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
 
     # Paged attention perf-meta propagation
     if "aiter::paged_attention_v1" in tree.name2event_uids:
-        from .paged_attn_perf_meta import mark_paged_attn_v1_parents
+        from .paged_attn_perf_meta import mark_aiter_paged_attn_v1_kvcache_dtype
 
-        extensions.append(("PagedAttnV1_ExcludeParents", mark_paged_attn_v1_parents))
+        extensions.append(
+            ("AiterPagedAttnV1_KVCacheDtype", mark_aiter_paged_attn_v1_kvcache_dtype)
+        )
         if verbose:
             logger.info(
-                "Auto-detected aiter::paged_attention_v1 — will mark cpu_op parents "
-                "with perf_meta.exclude_perf_model"
+                "Auto-detected aiter::paged_attention_v1 — will propagate "
+                "perf_meta.KCache_dtype/VCache_dtype to cpu_op parents"
             )
 
     if "_rocm_C::paged_attention" in tree.name2event_uids:
