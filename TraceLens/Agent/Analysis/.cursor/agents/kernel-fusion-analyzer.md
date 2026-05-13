@@ -239,8 +239,10 @@ Found N kernel fusion opportunities across M module types.
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 
 <!-- [comparative] -->
-- Low end impact_score (75% gap target): X.XX
-- High end impact_score (100% gap target): X.XX
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
+- Low end impact_score: X.XX
+- High end impact_score: X.XX
+<!-- impact-end -->
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
 - Confidence: High/Medium/Low — <brief reason>
 

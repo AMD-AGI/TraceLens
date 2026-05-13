@@ -260,34 +260,6 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 <!-- All additional fusion P-items (P4, P5, ...) follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Kernel fusion insights > PN](#detailed-analysis-fusion-PN) for details* -->
 
-### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
-
-**Insight**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) or "Not quantifiable from trace data"]
-
-**Confidence**: [High/Medium/Low — brief justification]
-
-→ *See [Detailed Analysis: Kernel fusion insights > P1](#detailed-analysis-fusion-P1) for details*
-
----
-
-### 🔴/🟡/🟢 P2: <Candidate Name> (<time_ms> ms, <instance_count> instances)
-
-**Insight**: [1 sentence]
-
-**Action**: [1-2 sentences]
-
-**Impact**: [~X.X–Y.Y ms savings (X.X–Y.Y% of E2E) or "Not quantifiable from trace data"]
-
-**Confidence**: [High/Medium/Low — brief justification]
-
-→ *See [Detailed Analysis: Kernel fusion insights > P2](#detailed-analysis-fusion-P2) for details*
-
-<!-- All additional Kernel Fusion P-items follow the same pattern with Detailed Analysis links: → *See [Detailed Analysis: Kernel fusion insights > PN](#detailed-analysis-fusion-PN) for details* -->
-
 ---
 
 ## System-Level Optimizations

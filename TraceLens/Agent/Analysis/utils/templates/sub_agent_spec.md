@@ -250,21 +250,10 @@ cards to fill the section — that is the honest "no actionable issues" answer.
 Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 § Impact markers).
 
-**Standalone — Quantifiable:**
-
 ```markdown
 <!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
 - Low end impact_score: <impact_score_low>
 - High end impact_score: <impact_score_high>
-<!-- impact-end -->
-```
-
-**Comparative — Quantifiable:**
-
-```markdown
-<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
-- Low end impact_score (75% gap target): <impact_score_low>
-- High end impact_score (100% gap target): <impact_score_high>
 <!-- impact-end -->
 ```
 
