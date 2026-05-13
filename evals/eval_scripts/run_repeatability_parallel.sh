@@ -4,16 +4,16 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # Usage: bash run_repeatability_parallel.sh [standalone|comparative]
 #
-# MODE can also be set via the MODE environment variable.
+# COMPARISON_SCOPE can also be set via the COMPARISON_SCOPE environment variable.
 # Defaults to standalone.
 #
 # CONTAINER is optional. If set, python/setup commands run via
 # docker exec -w $REPO_ROOT $CONTAINER ... ; if unset, they run on the host.
 # ---------------------------------------------------------------------------
-MODE="${1:-${MODE:-standalone}}"
+COMPARISON_SCOPE="${1:-${COMPARISON_SCOPE:-standalone}}"
 
-if [[ "$MODE" != "standalone" && "$MODE" != "comparative" ]]; then
-    echo "ERROR: Unknown mode '$MODE'. Use 'standalone' or 'comparative'." >&2
+if [[ "$COMPARISON_SCOPE" != "standalone" && "$COMPARISON_SCOPE" != "comparative" ]]; then
+    echo "ERROR: Unknown comparison scope '$COMPARISON_SCOPE'. Use 'standalone' or 'comparative'." >&2
     exit 1
 fi
 
@@ -43,9 +43,9 @@ else
     NODE_LABEL="local"
 fi
 
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${MODE}.csv}"
-RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${MODE}}"
-REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${MODE}}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
+RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
+REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -96,7 +96,8 @@ run_single_job() {
     while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
         agent_attempts=$((agent_attempts + 1))
         (
-            if [[ "$MODE" == "comparative" ]]; then
+            cd "$REPO_ROOT/TraceLens/Agent/Analysis" || exit 1
+            if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                     "Follow the Analysis Orchestrator installed with TraceLens and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
@@ -128,28 +129,28 @@ run_single_job() {
     "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/workflow_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" \
         --results "$CASE_RESULTS/workflow_scripted_results.csv" \
-        --comparison-scope "$MODE" \
+        --comparison-scope "$COMPARISON_SCOPE" \
         > "$CASE_RESULTS/workflow_scripted_eval.log" 2>&1 &
     eval_pids+=($!)
 
     (
         cd "$EVALS_DIR" || exit
         agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-            "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id mode=$MODE. Write results to $CASE_RESULTS/workflow_llm_results.csv"
+            "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id mode=$COMPARISON_SCOPE. Write results to $CASE_RESULTS/workflow_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/workflow_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
 
     "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/quality_scripted_evals.py" \
         --output-dir "$OUTPUT_DIR" --reference-dir "$reference_dir" \
         --results "$CASE_RESULTS/quality_scripted_results.csv" \
-        --comparison-scope "$MODE" \
+        --comparison-scope "$COMPARISON_SCOPE" \
         > "$CASE_RESULTS/quality_scripted_eval.log" 2>&1 &
     eval_pids+=($!)
 
     (
         cd "$EVALS_DIR" || exit
         agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-            "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id mode=$MODE. Write results to $CASE_RESULTS/quality_llm_results.csv"
+            "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id mode=$COMPARISON_SCOPE. Write results to $CASE_RESULTS/quality_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/quality_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
 
@@ -189,7 +190,7 @@ setup_semaphore() {
 
 mkdir -p "$RESULTS_ROOT"
 "${DEXEC[@]}" bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
-if [[ "$MODE" == "comparative" ]]; then
+if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     expand_archive unit_tests_comparative
     expand_archive e2e_tests_comparative
 else
@@ -199,7 +200,7 @@ fi
 
 echo "========================================="
 echo "  Analysis Repeatability Test"
-echo "  Mode:         $MODE"
+echo "  Mode:         $COMPARISON_SCOPE"
 echo "  Node:         $NODE_LABEL"
 echo "  Runtime:      $RUNTIME_LABEL"
 echo "  Repeats:      $NUM_REPEATS"
@@ -234,7 +235,7 @@ _spawn_jobs() {
 
 setup_semaphore
 
-if [[ "$MODE" == "comparative" ]]; then
+if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform
     while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform <&3; do
         [[ -z "$id" ]] && continue
