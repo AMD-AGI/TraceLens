@@ -8,19 +8,20 @@
 Perf model for torch.compile-generated Triton kernels (triton_poi_*, triton_red_*,
 triton_per_*).
 
-Strategy (Solution A): parse the Inductor wrapper .py files that torch.compile
-writes to its cache directory.  Each wrapper contains:
-  - "Original ATen: [aten.add, aten.mul, ...]" comments  → which ops were fused
-  - size_hints=[xnumel] or [xnumel, rnumel]             → element counts
-  - triton_meta signature {0: '*bf16', ...}              → pointer dtypes
+Two strategies, tried in order:
 
-Cache dirs searched (first wins):
+  V2 (Trace-Intrinsic): extract metadata from Chrome trace event["args"].
+      Available for PyTorch 2.4+ traces.  Exact element counts (not rounded),
+      per-tensor byte calculation, no disk I/O.
+
+  V1 (Cache-Based, fallback): parse the Inductor wrapper .py files that
+      torch.compile writes to its cache directory.  Used when trace args are
+      missing (older PyTorch traces).
+
+Cache dirs searched by V1 (first wins):
   1. $TORCHINDUCTOR_CACHE_DIR
   2. ~/.cache/torchinductor
   3. /tmp/torchinductor_<username>
-
-Set TORCHINDUCTOR_CACHE_DIR to a persistent path so artifacts survive process
-exit (otherwise they live only in /tmp and are lost on reboot).
 """
 
 import getpass
@@ -76,8 +77,98 @@ _PTR_DTYPE_BYTES: dict[str, int] = {
     "*i64": 8,
 }
 
+_C10_DTYPE_BYTES: dict[str, int] = {
+    "c10::BFloat16": 2,
+    "c10::Half": 2,
+    "c10::Float": 4,
+    "c10::Double": 8,
+    "c10::Byte": 1,
+    "c10::Char": 1,
+    "c10::Int": 4,
+    "c10::Long": 8,
+}
+
+# Map bare op names (from kernel name) to their aten.* keys in _FLOPS_PER_ELEM.
+# Sorted longest-first so multi-word ops like "_unsafe_view" match before "view".
+_BARE_OPS = sorted(
+    [(op.replace("aten.", ""), op) for op in _FLOPS_PER_ELEM],
+    key=lambda x: len(x[0]),
+    reverse=True,
+)
+
+
 # ---------------------------------------------------------------------------
-# Inductor artifact parsing
+# V2: Trace-intrinsic metadata extraction (PyTorch 2.4+)
+# ---------------------------------------------------------------------------
+
+
+def _parse_kernel_name(name: str) -> list[str]:
+    """Extract fused ATen ops from a Triton kernel name."""
+    m = re.match(r"triton_(?:poi|red|per)_fused_(.+)_(\d+)$", name)
+    if not m:
+        return []
+    remaining = m.group(1)
+    ops: list[str] = []
+    while remaining:
+        for bare, full in _BARE_OPS:
+            if remaining == bare or remaining.startswith(bare + "_"):
+                ops.append(full)
+                remaining = remaining[len(bare) :].lstrip("_")
+                break
+        else:
+            remaining = remaining.split("_", 1)[-1] if "_" in remaining else ""
+    return ops
+
+
+def _meta_from_trace_args(event: dict) -> dict | None:
+    """Extract kernel metadata from trace event args (V2).
+
+    Returns the same dict schema as _lookup() so downstream code is unchanged,
+    or None if the trace event lacks the required fields.
+    """
+    args = event.get("args", {})
+    concrete = args.get("Concrete Inputs")
+    input_dims = args.get("Input Dims")
+    input_type = args.get("Input type")
+    if not concrete or not input_dims or not input_type:
+        return None
+
+    name = event.get("name", "")
+    is_reduction = name.startswith("triton_red_") or name.startswith("triton_per_")
+
+    scalars = [int(v) for v in concrete if v != ""]
+    if is_reduction and len(scalars) >= 2:
+        xnumel, rnumel = scalars[-2], scalars[-1]
+    elif scalars:
+        xnumel, rnumel = scalars[-1], 1
+    else:
+        return None
+
+    aten_ops = _parse_kernel_name(name)
+
+    ptr_bytes: list[int] = []
+    dtype: str | None = None
+    from math import prod
+
+    for dims, dt in zip(input_dims, input_type):
+        if dt == "Scalar" or not dims:
+            continue
+        bpe = _C10_DTYPE_BYTES.get(dt, 0)
+        ptr_bytes.append(bpe)
+        if dtype is None and bpe > 0:
+            dtype = dt.split("::")[-1].lower()
+
+    return {
+        "aten_ops": aten_ops,
+        "xnumel": xnumel,
+        "rnumel": rnumel,
+        "ptr_bytes": ptr_bytes,
+        "dtype": dtype,
+    }
+
+
+# ---------------------------------------------------------------------------
+# V1: Inductor cache file parsing (fallback)
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +297,9 @@ class TritonCompiledPerfModel:
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.name = event["name"]
-        self._meta = _lookup(self.name)
+        self._meta = _meta_from_trace_args(event)  # V2: trace args
+        if self._meta is None:
+            self._meta = _lookup(self.name)  # V1: cache fallback
         self.param_details: dict = {}
         if self._meta is not None:
             self.param_details = {
