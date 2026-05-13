@@ -1700,6 +1700,40 @@ class TreePerfAnalyzer:
             stack.extend(node.get("children", []))
         return False
 
+    def _all_gpu_events_have_intermediate_perf_modeled_cpu_op(self, event):
+        """
+        True if every GPU kernel in ``event``'s subtree has a perf-modeled
+        ``cpu_op`` strictly between it and ``event``.
+
+        Used by ``collect_unified_perf_events`` to skip ``event`` (which has
+        its own perf model) and recurse into children so deeper, more granular
+        perf-modeled ops are collected instead.
+        """
+        gpu_uids = event.get("gpu_events", [])
+        if not gpu_uids:
+            return False
+
+        event_uid = event.get("UID")
+        perf_modeled = {}  # ancestor UID -> bool, memoized across kernels
+
+        def is_covered(kernel_uid):
+            kernel = self.tree.get_UID2event(kernel_uid)
+            if not kernel:
+                return False
+            node = self.tree.get_parent_event(kernel)
+            while node is not None and node.get("UID") != event_uid:
+                uid = node.get("UID")
+                if uid not in perf_modeled:
+                    perf_modeled[uid] = self.event_to_category(
+                        node
+                    ) == "cpu_op" and self._has_perf_model(node)
+                if perf_modeled[uid]:
+                    return True
+                node = self.tree.get_parent_event(node)
+            return False
+
+        return all(is_covered(uid) for uid in gpu_uids)
+
     def _is_nccl_event(self, event):
         """Check if an event launches NCCL kernels."""
         gpu_event_uids = event.get("gpu_events", [])
@@ -1756,10 +1790,15 @@ class TreePerfAnalyzer:
 
             # From here, we know there's GPU work in this subtree
 
-            # Exit condition 1: Has perf model - collect and stop
+            # Exit condition 1: Has perf model - collect and stop, unless every
+            # GPU kernel in the subtree is already covered by a deeper cpu_op
+            # that owns its own perf model
             if self._has_perf_model(event):
-                collected.append(event)
-                return
+                if not self._all_gpu_events_have_intermediate_perf_modeled_cpu_op(
+                    event
+                ):
+                    collected.append(event)
+                    return
 
             # Exit condition 2: 1:1 backward op with linked forward that has perf model
             # We can compute backward metrics via forward's perf model — but prefer any

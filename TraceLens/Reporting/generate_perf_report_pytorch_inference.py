@@ -584,6 +584,7 @@ def generate_perf_report_pytorch(
             "pseudo_mla_decode_fwd",
             "vllm::gdn_attention_core",
             "aiter::fmha_v3_varlen_fwd",
+            "aiter::paged_attention_v1",
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
         ]
     )
@@ -678,6 +679,7 @@ def generate_perf_report_pytorch(
                 event
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
+                and not event.get("perf_meta", {}).get("exclude_perf_model")
             ]
             if len(op_events) == 0:
                 continue
