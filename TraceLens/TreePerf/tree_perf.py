@@ -168,6 +168,9 @@ class TreePerfAnalyzer:
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
         data = DataLoader.load_data(profile_filepath)
+        trace_metadata = {
+            key: value for key, value in data.items() if key != "traceEvents"
+        }
         data = data["traceEvents"]
 
         categorizer = (
@@ -176,7 +179,11 @@ class TreePerfAnalyzer:
             else TraceEventUtils.prepare_event_categorizer(data)
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
-        tree = TraceToTree(data, event_to_category=categorizer)
+        tree = TraceToTree(
+            data,
+            event_to_category=categorizer,
+            trace_metadata=trace_metadata,
+        )
 
         # Optionally merge capture trace into graph tree
         if capture_trace_filepath is not None:
@@ -213,6 +220,7 @@ class TreePerfAnalyzer:
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
+        self.trace_metadata = self.tree.trace_metadata
         self.detect_recompute = detect_recompute
         if detect_recompute:
             add_python_func = True
