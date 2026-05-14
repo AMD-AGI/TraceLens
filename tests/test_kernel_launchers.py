@@ -501,7 +501,9 @@ class TestShortGpuKernelSymbolForSummary:
 
     def test_plain_name_unchanged(self):
         assert (
-            TreePerfAnalyzer._short_gpu_kernel_symbol_for_summary("my_custom_hip_kernel")
+            TreePerfAnalyzer._short_gpu_kernel_symbol_for_summary(
+                "my_custom_hip_kernel"
+            )
             == "my_custom_hip_kernel"
         )
 
