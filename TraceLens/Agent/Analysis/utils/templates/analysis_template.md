@@ -78,7 +78,8 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 [1 paragraph overview + key metrics table]
 
 <!-- MANDATORY: This table must contain exactly these 5 rows:
-     Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category -->
+     Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category
+     Top Bottleneck Category V% = gpu_kernel_time_ms of top category / (gpu_utilization.total_time_ms * computation_time_percent / 100) -->
 | Metric | Value |
 |--------|-------|
 | Total Time | X ms |
@@ -90,6 +91,8 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 <!-- === COMPARATIVE Executive Summary === -->
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
 
+<!-- Top Bottleneck Category X% = top category's gpu_kernel_time_ms / (manifest.gpu_utilization.total_time_ms * manifest.gpu_utilization.computation_time_percent / 100)
+     Top Bottleneck Category Y% = top category's gpu_kernel_time_ms / (manifest.trace2_gpu_utilization.total_time_ms * manifest.trace2_gpu_utilization.computation_time_percent / 100) -->
 | Metric | Trace 1 - (<Platform1>) | Trace 2 - (<Platform2>) | Difference |
 |--------|----------------------------|-------------------------------|------------|
 | Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
@@ -346,7 +349,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Resolution:**
 **Impact estimate:**
 
-<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 7 exact columns-->
+<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 8 exact columns-->
 <!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = lca_total_kernel_time_trace2_us / 1000.
      Count T1/T2 = operation_count / lca_count_trace2 when present.
      Difference (ms) = delta_us (trace2 - trace1) / 1000 (positive ⇒ more time on Trace 2), or —. -->
@@ -356,9 +359,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
 **Data:** [1 sentence summary of table]
 
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
-|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
-| ...       | ...               | ...               | .../...       | ...             | ...             | ...        |
+| Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+| ...       | ...       | ...               | ...               | .../...       | ...             | ...             | ...        |
 
 **Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]

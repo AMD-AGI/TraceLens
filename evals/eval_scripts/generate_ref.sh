@@ -68,7 +68,7 @@ log_status() {
 # ---------------------------------------------------------------------------
 
 generate_single_ref() {
-    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5"
+    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6"
     local tag="[$id]"
 
     local REF_DIR="$REPO_ROOT/$reference_dir"
@@ -100,7 +100,7 @@ generate_single_ref() {
             cd "$ANALYSIS_DIR" || exit
             if [[ "$MODE" == "comparative" ]]; then
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
@@ -183,13 +183,13 @@ echo ""
 setup_semaphore
 
 if [[ "$MODE" == "comparative" ]]; then
-    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform
-    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform <&3; do
+    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
+    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
         [[ -z "$id" ]] && continue
 
         read -u4  # acquire semaphore slot
         (
-            generate_single_ref "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" || true
+            generate_single_ref "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" || true
             sleep "$SLEEP_BETWEEN"
             echo >&4  # release semaphore slot
         ) &
