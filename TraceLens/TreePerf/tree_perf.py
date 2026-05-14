@@ -1019,6 +1019,24 @@ class TreePerfAnalyzer:
         if event["overlapping_kernel_names"] == []:
             event["overlapping_kernel_names"] = None
 
+    @staticmethod
+    def _kernel_launcher_ops_summary_name(event: dict) -> str:
+        """Row ``name`` for ops_summary when the launcher is a GPU API stub.
+
+        Orphan launches use the runtime row (e.g. ``hipLaunchKernel``) as the launcher.
+        Summaries group by ``name``, so we substitute the actual GPU kernel name(s)
+        from ``kernel_details`` (same information unified perf uses via synthetic ops).
+        """
+        if event.get("cat") not in {"cuda_runtime", "cuda_driver"}:
+            return event["name"]
+        kd = event.get("kernel_details") or []
+        names = [k.get("name") for k in kd if k.get("name")]
+        if not names:
+            return event["name"]
+        if len(names) == 1:
+            return names[0]
+        return ", ".join(names)
+
     def get_df_kernel_launchers(
         self,
         id_cols=False,
@@ -1035,7 +1053,7 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {
-                "name": event["name"],
+                "name": self._kernel_launcher_ops_summary_name(event),
                 "op category": event["op category"],
                 "UID": event["UID"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],
