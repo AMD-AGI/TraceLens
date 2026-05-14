@@ -136,17 +136,17 @@ Finds every priority item (`### ...P{N}:` headers) and checks for required bold 
 
 **Implementation:** `evals/.cursor/skills/workflow-llm-eval.md`
 
-Checks the `## Appendix` section for hardware reference values. Items checked per platform: platform name, Peak HBM BW, at least one Peak MAF value.
-
-- **Standalone:** one platform → 3 items total.
-- **Comparative:** two platforms (T1 and T2) → 6 items total.
+Checks the `## Appendix` section for hardware reference values (only for trace1 if in comparative mode):
+- Platform name (e.g., MI300X)
+- Peak HBM BW value (e.g., 5.3 TB/s)
+- At least one Peak MAF value (e.g., 708 TFLOPS)
 
 ### Scoring Dimensions
 
 | Dimension | Weight | Scale |
 |-----------|--------|-------|
 | **correctness** | 50% | 10 = all values correct and plausible, 7 = present but imprecise, 0 = wrong/invented |
-| **completeness** | 50% | Standalone: 10=all 3, 7=2, 4=1, 0=none. Comparative: 10=all 6, 7=5, 4=3–4, 0=<3 |
+| **completeness** | 50% | 10 = all 3 items present, 7 = 2 of 3, 4 = 1 of 3, 0 = none |
 
 ### Pass/Fail
 
@@ -208,7 +208,8 @@ Compares CSVs against the reference directory. In standalone, compares `perf_rep
 
 **Implementation:** `evals/.cursor/skills/quality-llm-eval.md`
 
-Compares P-item titles in the generated report against the reference report. This is a **semantic** comparison — not a string match. In comparative mode, P-items describe deltas between traces (e.g., "T1 GEMM is 2× slower than T2") — correctness means the same cross-trace delta or bottleneck is identified, not an absolute single-trace bottleneck.
+Compares P-item titles in the generated report against the reference report.
+This is a **semantic** comparison — not a string match.
 
 ### Scoring Dimensions
 

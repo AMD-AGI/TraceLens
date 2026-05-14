@@ -2,15 +2,15 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# Usage: bash generate_golden_refs.sh [standalone|comparative]
+# Usage: bash generate_ref.sh [standalone|comparative]
 #
-# MODE can also be set via the MODE environment variable.
+# COMPARISON_SCOPE can also be set via the COMPARISON_SCOPE environment variable.
 # Defaults to standalone.
 # ---------------------------------------------------------------------------
-MODE="${1:-${MODE:-standalone}}"
+COMPARISON_SCOPE="${1:-${COMPARISON_SCOPE:-standalone}}"
 
-if [[ "$MODE" != "standalone" && "$MODE" != "comparative" ]]; then
-    echo "ERROR: Unknown mode '$MODE'. Use 'standalone' or 'comparative'." >&2
+if [[ "$COMPARISON_SCOPE" != "standalone" && "$COMPARISON_SCOPE" != "comparative" ]]; then
+    echo "ERROR: Unknown comparison scope '$COMPARISON_SCOPE'. Use 'standalone' or 'comparative'." >&2
     exit 1
 fi
 
@@ -82,7 +82,7 @@ generate_single_ref() {
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
     fi
-    if [[ "$MODE" == "comparative" ]] && [ ! -f "$REPO_ROOT/$trace2_path" ]; then
+    if [[ "$COMPARISON_SCOPE" == "comparative" ]] && [ ! -f "$REPO_ROOT/$trace2_path" ]; then
         log_status "  $tag ERROR: Trace2 file not found: $trace2_path — skipping."
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
@@ -98,7 +98,7 @@ generate_single_ref() {
         agent_attempts=$((agent_attempts + 1))
         (
             cd "$ANALYSIS_DIR" || exit
-            if [[ "$MODE" == "comparative" ]]; then
+            if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
@@ -172,7 +172,7 @@ setup_semaphore() {
 
 echo "========================================="
 echo "  Golden Reference Generation"
-echo "  Mode:         $MODE"
+echo "  Mode:         $COMPARISON_SCOPE"
 echo "  Node:         $NODE_LABEL"
 echo "  Runtime:      $RUNTIME_LABEL"
 echo "  Max parallel: $MAX_PARALLEL"
@@ -182,7 +182,7 @@ echo ""
 
 setup_semaphore
 
-if [[ "$MODE" == "comparative" ]]; then
+if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
     while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
         [[ -z "$id" ]] && continue

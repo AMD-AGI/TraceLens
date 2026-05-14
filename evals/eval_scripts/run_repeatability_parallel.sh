@@ -32,6 +32,9 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
+RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
+REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
 
 if [[ -n "$CONTAINER" ]]; then
     DEXEC=(docker exec -w "$REPO_ROOT" "$CONTAINER")
@@ -42,10 +45,6 @@ else
     RUNTIME_LABEL="host (no container)"
     NODE_LABEL="local"
 fi
-
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
-RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
-REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,11 +72,11 @@ expand_archive() {
 # ---------------------------------------------------------------------------
 # Single job: one (test_case, repeat) iteration
 #
-# Args: id repeat trace1_path trace2_path reference_dir platform (comparative mode only)
+# Args: id repeat trace1_path trace2_path reference_dir platform platform2 (comparative mode only)
 # ---------------------------------------------------------------------------
 
 run_single_job() {
-    local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6"
+    local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7"
     local tag="[$id|run_$repeat]"
 
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
@@ -99,7 +98,7 @@ run_single_job() {
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (baseline is trace1), $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
                 timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
@@ -213,7 +212,7 @@ echo "========================================="
 echo ""
 
 _spawn_jobs() {
-    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5"
+    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6"
 
     if [[ -n "$TEST_IDS" ]]; then
         case " $TEST_IDS " in
@@ -225,7 +224,7 @@ _spawn_jobs() {
     for ((i = 0; i < NUM_REPEATS; i++)); do
         read -r -u4  # acquire semaphore slot
         (
-            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" || true
+            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" || true
             echo >&4  # release semaphore slot
             sleep 2  # stagger agent startup to avoid ~/.cursor/cli-config.json rename race
         ) &
@@ -236,10 +235,10 @@ _spawn_jobs() {
 setup_semaphore
 
 if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform
-    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform <&3; do
+    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
+    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
         [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform"
+        _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2"
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
