@@ -177,12 +177,13 @@ inside `## Detailed Analysis` blocks.
 ### Comparative (`comparison_scope` = `comparative`)
 
 ```markdown
-| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
-|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+| Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
 ```
 
 **Column mappings** (T1 source: `metrics['operations']`; T2 source: `category_data/<category>_ops.csv`):
 - **Operation**: `operations[i].name`. Bare op name only.
+- **Args (T1)**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim. `—` when absent.
 - **Trace 1 Time (ms)**: `operations[i].time_ms`
 - **Trace 2 Time (ms)**: `lca_total_kernel_time_trace2_us / 1000` from the CSV row
 - **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `lca_count_trace2` from the CSV row. Format `T1 / T2` (use `—` for missing T2).
