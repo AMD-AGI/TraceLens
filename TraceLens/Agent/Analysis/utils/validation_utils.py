@@ -70,6 +70,13 @@ _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
+_KF_IMPACT_STANDALONE_RE = re.compile(
+    r"impact_score:\s*[\d.]+\s*\(perf-model coverage \d+/\d+ kernels\)"
+)
+_KF_IMPACT_COMPARATIVE_RE = re.compile(
+    r"impact_score:\s*[\d.]+\s*$"
+)
+
 _REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
@@ -552,7 +559,7 @@ def _check_priority_consistency(output_dir, manifest):
 # Level 3: final report validation (called at Step 11.1)
 
 
-def validate_report(output_dir):
+def validate_report(output_dir, comparison_scope=None):
     """Validate analysis.md for structural issues.
 
     Checks:
@@ -560,6 +567,7 @@ def validate_report(output_dir):
     - Metrics table under Executive Summary (5 rows, no placeholders)
     - Unfilled template placeholders
     - Args column cells match operations[].args verbatim
+    - Comparison-scope-dependent formatting (kernel fusion Impact format)
     - Report-level marker structure: pairing, kind= attribute, per-kind
       required attrs, mandatory kind=top_ops
 
@@ -569,6 +577,8 @@ def validate_report(output_dir):
 
     Args:
         output_dir: Base output directory containing analysis.md
+        comparison_scope: "standalone" or "comparative". When omitted,
+            falls back to ``category_manifest.json``.
 
     Returns:
         Tuple of (passed: bool, missing: list of error/missing-section strings)
@@ -624,12 +634,58 @@ def validate_report(output_dir):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
+    missing.extend(_validate_report_comparison_scope_diffs(content, output_dir, comparison_scope))
+
     missing.extend(_validate_report_priority_consistency(content, output_dir))
 
     # Report-level marker structure
     missing.extend(MarkerValidator.check_report(report_path))
 
     return len(missing) == 0, missing
+
+
+def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scope=None):
+    """Check scope-dependent formatting in the report.
+
+    Kernel fusion Impact lines:
+      - standalone: ``impact_score: X.X (perf-model coverage Y/Z kernels)``
+      - comparative: ``impact_score: X.X`` (no parenthetical)
+
+    Silently skips when the Kernel Fusion section is absent or comparison_scope
+    cannot be determined.
+
+    Args:
+        comparison_scope: "standalone" or "comparative". When omitted,
+            falls back to ``category_manifest.json``.
+    """
+    kf_start = content.find("## Kernel Fusion Opportunities")
+    if kf_start < 0:
+        return []
+    kf_next = content.find("\n## ", kf_start + 1)
+    kf_section = content[kf_start:kf_next] if kf_next > 0 else content[kf_start:]
+
+    errors = []
+    for line_offset, line in enumerate(kf_section.splitlines()):
+        if not line.strip().startswith("**Impact**"):
+            continue
+        impact_text = line.split("**Impact**")[-1].strip().lstrip(":").strip()
+        if not impact_text:
+            continue
+        if comparison_scope == "standalone":
+            if not _KF_IMPACT_STANDALONE_RE.search(impact_text):
+                errors.append(
+                    f"Kernel Fusion Impact format error: standalone mode "
+                    f"requires 'impact_score: X.X (perf-model coverage Y/Z "
+                    f"kernels)' but got: {impact_text}"
+                )
+        else:
+            if re.search(r"\(perf-model coverage", impact_text):
+                errors.append(
+                    f"Kernel Fusion Impact format error: comparative mode "
+                    f"should not include perf-model coverage parenthetical "
+                    f"but got: {impact_text}"
+                )
+    return errors
 
 
 def _validate_report_args_column(content, output_dir):
