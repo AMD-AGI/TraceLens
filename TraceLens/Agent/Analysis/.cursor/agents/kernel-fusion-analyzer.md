@@ -177,14 +177,14 @@ Found N kernel fusion opportunities across M module types.
 <!-- [comparative] Use this methodology block instead: -->
 > **Methodology:** Savings are measured as the total GPU time difference between trace1 and trace2, accumulated across all instances. No roofline projection is used.
 
-## Findings
+## Recommendations
 
 ### 🔴 P1: <Pattern Name> (<time_ms> ms, <instance_count> instances)
 
-**Insight:** <Module name, what it launches, how many instances, why it's fusable>
+**Insight**: <Module name, what it launches, how many instances, why it's fusable>
 <!-- [comparative] Also state: how many kernels in trace1 vs trace2. -->
 
-**Action:** <Specific recommendation>
+**Action**: <Specific recommendation>
 
 <!-- === STANDALONE Impact === -->
 <!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
@@ -193,10 +193,10 @@ Found N kernel fusion opportunities across M module types.
 
 <!-- === COMPARATIVE Impact === -->
 <!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
-**Impact:** impact_score: X.X
+**Impact**: impact_score: X.X
 <!-- impact-end -->
 
-**Confidence:** High/Medium/Low -- <brief reason>
+**Confidence**: High/Medium/Low -- <brief reason>
 
 ## Detailed Analysis
 
@@ -232,19 +232,19 @@ Found N kernel fusion opportunities across M module types.
 <!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
 - Low end impact_score: X.XX
 - High end impact_score: X.XX
-<!-- impact-end -->
 - Coverage: M of N kernels modelled
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
 - Confidence: High/Medium/Low — <brief reason>
+<!-- impact-end -->
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 
 <!-- [comparative] -->
 <!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
 - Low end impact_score: X.XX
 - High end impact_score: X.XX
-<!-- impact-end -->
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
 - Confidence: High/Medium/Low — <brief reason>
+<!-- impact-end -->
 
 ## Impact Summary
 | Recommendation | Type | Estimated Savings (ms) | Estimated Improvement (E2E %) | Confidence |

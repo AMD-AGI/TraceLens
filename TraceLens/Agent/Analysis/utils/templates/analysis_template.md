@@ -268,7 +268,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 <!-- === COMPARATIVE system-level note === -->
 <!-- In comparative mode, add this note immediately after the blockquote above: -->
-<!-- > **Comparative note:** System-level analysis is performed on the primary trace (Trace 1) only. Cross-trace system-level comparison is not yet supported. -->
+<!-- > **Comparative Note:** System-level analysis is performed on the primary trace (Trace 1) only. Cross-trace system-level comparison is not yet supported. -->
 
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
