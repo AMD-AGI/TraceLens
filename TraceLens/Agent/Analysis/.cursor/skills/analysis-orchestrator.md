@@ -85,6 +85,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      3. **MI350X**
      4. **MI355X**
      5. **MI455X**
+   **`comparative`:** Ask: "Which platform is target trace (trace2)?" Assign `<platform2>`
 
 3. **Analysis Mode** → `<analysis_mode>`
    - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
@@ -155,7 +156,7 @@ If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not 
 
 Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
 
-For all of these scripts below, look at the environment variable TL_EXTENSION to recursively search for a file called <platform>.json
+For all of these scripts below, look at the environment variable TL_EXTENSION to recursively search for a file called <platform>.json. Do not look for <platform2>.json; it is not needed.
 If it is not found also look in TraceLens/Agent/Analysis/utils/arch/<platform>.json.
 Use <platform_file> to represent the location of this file
 
@@ -528,6 +529,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping. Render exactly one P-item per entry in `findings[]` — never merge entries.
    - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
+   - **`comparative` only:** substitute `<Platform1>` with `<platform>` and `<Platform2>` with `<platform2>` throughout the report (title, Executive Summary table headers, and any other occurrences).
    - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
    - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds." Do **not** rely on `<!-- no-actionable-findings -->` markers — validation uses the metrics JSON, not markers (`sub_agent_spec.md` § No actionable findings).
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
