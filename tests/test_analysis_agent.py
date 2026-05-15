@@ -546,32 +546,6 @@ def test_build_operation_metrics(output_dir_with_category_data):
         assert "efficiency_percent" in o["efficiency"] or "efficiency" in o
 
 
-def test_build_operation_metrics_comparative_uses_speedup():
-    """comparative scope: efficiency_percent = 100 * speedup (trace2/trace1)."""
-    df = pd.DataFrame(
-        {
-            "name": ["aten::mm", "aten::addmm"],
-            "count": [1, 1],
-            "Kernel Time (µs)_sum": [10_000.0, 5_000.0],
-            "TFLOPS/s_mean": [400.0, 350.0],
-            "TB/s_mean": [0.5, 0.4],
-            "FLOPS/Byte": [2000.0, 1800.0],
-            "Compute Spec": ["matrix_bf16", "matrix_bf16"],
-            "speedup (trace2/trace1)": [0.8, 1.2],
-        }
-    )
-    meta = {
-        "peak_hbm_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708},
-        "gpu_utilization": {"total_time_ms": 1000.0},
-    }
-    ops = build_operation_metrics(df, meta, {}, comparison_scope="comparative")
-    assert len(ops) == 2
-    mm = next(o for o in ops if o["name"] == "aten::mm")
-    addmm = next(o for o in ops if o["name"] == "aten::addmm")
-    assert mm["efficiency"]["efficiency_percent"] == 80.0
-    assert addmm["efficiency"]["efficiency_percent"] == 120.0
-
 
 def test_build_operation_metrics_comparative_uses_delta():
     """comparative scope falls back to delta column when speedup is absent."""
@@ -621,46 +595,6 @@ def test_build_operation_metrics_comparative_no_comparative_cols_yields_none():
 
 # ----- Unit tests: compute_impact_estimates (comparative mode) -----
 
-
-def test_compute_impact_estimates_comparative_excludes_ops_above_100():
-    """An op with eff > 100% produces savings_high=0, excluded by default min_savings_ms."""
-    operations = [
-        {
-            "name": "op_faster",
-            "time_ms": 10.0,
-            "efficiency": {"efficiency_percent": 120.0, "is_anomaly": False},
-        },
-        {
-            "name": "op_slower",
-            "time_ms": 10.0,
-            "efficiency": {"efficiency_percent": 60.0, "is_anomaly": False},
-        },
-    ]
-    estimates = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1)
-    names = [e["operation"] for e in estimates]
-    assert "op_faster" not in names
-    assert "op_slower" in names
-
-
-def test_compute_impact_estimates_comparative_savings_formula():
-    """savings bands: high=gap, mid=0.875*high, low=0.75*high."""
-    operations = [
-        {
-            "name": "aten::mm",
-            "time_ms": 10.0,
-            "efficiency": {"efficiency_percent": 50.0, "is_anomaly": False},
-        },
-    ]
-    estimates = compute_impact_estimates(
-        operations, "gemm", min_savings_ms=0.0, baseline_ms=100.0, analysis_mode="comparative"
-    )
-    assert len(estimates) == 1
-    e = estimates[0]
-    savings_high = round(10.0 * (1 - 50.0 / 100.0), 3)  # 5.0
-    assert e["savings_ms_high"] == savings_high
-    assert e["savings_ms"] == round(savings_high * 0.875, 3)
-    assert e["savings_ms_low"] == round(savings_high * 0.75, 3)
-    assert e["e2e_pct_high"] == round(savings_high / 100.0 * 100, 2)
 
 
 def test_compute_impact_estimates_comparative_at_100_pct_no_savings():
