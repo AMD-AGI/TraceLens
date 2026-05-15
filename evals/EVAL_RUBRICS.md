@@ -19,8 +19,8 @@ root-cause categories, and where the implementation lives.
 | Range | Type | Count | Engine |
 |-------|------|:-----:|--------|
 | workflow\_eval\_1–8 | Scripted (file/dir existence) | 8 | `workflow_scripted_evals.py` |
-| workflow\_eval\_9 | Scripted (per-header) | 6 sub-indices (standalone) / 7 (comparative) | `workflow_scripted_evals.py` |
-| workflow\_eval\_10 | Scripted (per-row + CSV cross-check) | 5 sub-indices (standalone) / 5+ arithmetic checks (comparative) | `workflow_scripted_evals.py` |
+| workflow\_eval\_9 | Scripted (per-header) | 7 sub-indices | `workflow_scripted_evals.py` |
+| workflow\_eval\_10 | Scripted (per-row + CSV cross-check) | 5 sub-indices | `workflow_scripted_evals.py` |
 | workflow\_eval\_11 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
 | workflow\_eval\_12 | LLM (multi-dimensional scoring) | 1 | `workflow-llm-eval.md` |
 | workflow\_eval\_13 | Scripted (per-category) | Dynamic | `workflow_scripted_evals.py` |
@@ -79,7 +79,7 @@ Checks `analysis.md` for required `##` section headers and a metrics table.
 | `workflow_eval_9_detailed` | `## Detailed Analysis` header present |
 | `workflow_eval_9_appendix` | `## Appendix` header present |
 | `workflow_eval_9_metrics_table` | Executive Summary section contains at least one markdown table row (`\|.*\|`) |
-| `workflow_eval_9_kernel_fusion` | `## Kernel Fusion Opportunities (Experimental)` header present — **comparative only** |
+| `workflow_eval_9_kernel_fusion` | `## Kernel Fusion Opportunities (Experimental)` header present |
 
 ---
 
@@ -107,8 +107,8 @@ Cross-checks T1 values against `perf_report_trace1_csvs/gpu_timeline.csv` and T2
 
 Additionally, for every numeric row: verifies `|reported_diff − (T1 − T2)| / max(|T1|, |T2|) ≤ 0.01`. Non-numeric rows (e.g., Top Bottleneck Category) are skipped.
 
-**Pass:** Row found in table. If CSV cross-check applies, report value within tolerance. Difference column arithmetic within 1%.
-**Fail:** Row not found, numeric value exceeds tolerance, or Difference arithmetic fails.
+**Pass:** Row found in table. If CSV cross-check applies, report value within tolerance of CSV value.
+**Fail:** Row not found, or numeric value exceeds tolerance.
 
 ---
 
@@ -187,7 +187,7 @@ the check is **skipped (PASS)** with a note in details.
 
 **Implementation:** `quality_scripted_evals.py`
 
-Compares CSVs against the reference directory. In standalone, compares `perf_report_csvs/`. In comparative, runs as two separate checks — `quality_eval_1_trace1` (trace1 csvs) and `quality_eval_1_trace2` (trace2 csvs).
+Compares CSVs against the reference directory.
 
 | Check | Criteria |
 |-------|----------|
