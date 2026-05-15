@@ -265,7 +265,7 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
     return fallback_maf
 
 
-def _comparative_efficiency_percent_from_row(
+def comparative_efficiency(
     result: Dict[str, Any], row: pd.Series
 ) -> None:
     """
@@ -318,7 +318,7 @@ def _comparative_efficiency_percent_from_row(
         result["warning"] = None
 
 
-def _apply_standalone_efficiency_percent(
+def standalone_efficiency(
     result: Dict[str, Any], row: pd.Series
 ) -> None:
     """
@@ -400,9 +400,9 @@ def calculate_efficiency(
         result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
 
     if comparison_scope == "comparative":
-        _comparative_efficiency_percent_from_row(result, row)
+        comparative_efficiency(result, row)
     else:
-        _apply_standalone_efficiency_percent(result, row)
+        standalone_efficiency(result, row)
 
     return result
 
@@ -601,7 +601,6 @@ def compute_impact_estimates(
     category: str,
     min_impact_score: float = 0.01,
     baseline_ms: float = 0,
-    analysis_mode: str = "standalone",
 ) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
@@ -906,7 +905,6 @@ def run_category_analysis(
             operations,
             category,
             baseline_ms=baseline_ms,
-            analysis_mode=comparison_scope,
         )
     else:
         impact_estimates = []

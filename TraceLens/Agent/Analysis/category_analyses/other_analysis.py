@@ -163,7 +163,6 @@ def main():
         operations,
         category,
         baseline_ms=baseline_ms,
-        analysis_mode=args.comparison_scope,
     )
     category_findings = build_category_findings(impact_estimates)
 

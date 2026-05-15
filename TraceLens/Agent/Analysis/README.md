@@ -75,7 +75,7 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 2. **Provide if prompted:**
    - Trace file path
    - Platform (of first trace)
-   - Analysis mode: default (training and non-VLLM/SGLang eager inference) vs inference (vLLM/SGLang)
+   - Analysis mode: default (training and non-vLLM/SGLang eager inference) vs inference (vLLM/SGLang)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name
    - Output directory (optional)
@@ -100,7 +100,7 @@ curl https://cursor.com/install -fsS | bash
 This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step. 
 
 
-**Cluster + container — default (training and eager inference non-vLLM/SGLang), assuming standalone:**
+**Cluster + container — default (training and non-vLLM/SGLang eager inference), assuming standalone:**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
@@ -229,8 +229,8 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ### Workflow Steps
 
 ```
-0.   Query User Inputs (Comparison scope, Trace path(s), Platform, Analysis Mode, Environment Setup)
-1.   Generate Performance Report (branches on analysis mode and comparison scope: one trace vs two + TraceDiff on Trace 1)
+0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
+1.   Generate Performance Report (branches on analysis mode and comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
 5.5. Model Identification (subagent) → metadata/model_info.json
 6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/

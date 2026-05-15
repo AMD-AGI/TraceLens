@@ -607,7 +607,7 @@ def test_compute_impact_estimates_comparative_at_100_pct_no_savings():
         },
     ]
     estimates = compute_impact_estimates(
-        operations, "gemm", min_savings_ms=0.1, analysis_mode="comparative"
+        operations, "gemm", min_savings_ms=0.1
     )
     assert len(estimates) == 0
 
