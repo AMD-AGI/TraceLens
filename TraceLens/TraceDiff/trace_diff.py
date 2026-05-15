@@ -819,15 +819,6 @@ class TraceDiff:
                 pass
             return dur
 
-        def get_thread_name(node, tree_obj):
-            pid = node.get("pid")
-            tid = node.get("tid")
-            if pid is None or tid is None:
-                return ""
-            return (
-                tree_obj.metadata.get(pid, {}).get(tid, {}).get("thread_name", "")
-            )
-
         def find_last_cpu_op_on_gpu_path(
             merged_child, tree_obj, tree_uid2node, uid_key, all_kernels=None
         ):
@@ -1071,9 +1062,6 @@ class TraceDiff:
                                         ),
                                         "cpu_op_uid": parent_uid,
                                         "source": source,
-                                        "thread_name": get_thread_name(
-                                            parent_node, tree_obj
-                                        ),
                                         "Input Dims": get_input_shape(parent_node),
                                         "Input Strides": get_input_strides(parent_node),
                                         "Input type": get_input_type(parent_node),
@@ -1175,9 +1163,6 @@ class TraceDiff:
                                 "cpu_op_name": child_name,
                                 "cpu_op_uid": parent_uid,
                                 "source": "trace1",
-                                "thread_name": get_thread_name(
-                                    parent_node, self.baseline
-                                ),
                                 "Input Dims": get_input_shape(parent_node),
                                 "Input Strides": get_input_strides(parent_node),
                                 "Input type": get_input_type(parent_node),
@@ -1252,9 +1237,6 @@ class TraceDiff:
                                 "cpu_op_name": child_name,
                                 "cpu_op_uid": parent_uid,
                                 "source": "trace2",
-                                "thread_name": get_thread_name(
-                                    parent_node, self.variant
-                                ),
                                 "Input Dims": get_input_shape(parent_node),
                                 "Input Strides": get_input_strides(parent_node),
                                 "Input type": get_input_type(parent_node),

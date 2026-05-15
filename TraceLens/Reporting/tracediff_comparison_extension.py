@@ -26,13 +26,12 @@ per-row values. For multi-op LCAs (several trace1 CPU ops sharing one
 non-empty. ``lca_id`` and ``lca_name`` are semicolon-separated lists when a
 row maps to multiple LCA groups.
 
-Matching is **gpu_op_uid only**. Every row in ``unified_perf_summary`` and in
-the op-category sheets carries a ``kernel_details_summary`` / ``kernel_details``
-list of kernels with ``gpu_op_uid``. Each diff_stats row carries the
-``gpu_op_uid`` of its kernel. Rows are aligned by mapping every gpu_op_uid in
-a perf row to a canonical uid (the minimum uid in that row), so all sheets
-sharing the same underlying kernels resolve to the same key. There is no
-fallback to CPU UID tree walks or to (name, args) string matching.
+Matching is **gpu_op_uid only**. Every row in ``unified_perf_summary`` carries
+a ``kernel_details_summary`` / ``kernel_details`` list of kernels with
+``gpu_op_uid``. Each diff_stats row carries the ``gpu_op_uid`` of its kernel.
+Rows are aligned by mapping every gpu_op_uid to the row index of the
+``unified_perf_summary`` row that contains it. There is no fallback to CPU UID
+tree walks or to (name, args) string matching.
 """
 
 from __future__ import annotations
@@ -221,19 +220,8 @@ def _iter_row_gpu_op_uids(row) -> List[Any]:
     return uids
 
 
-def _row_canonical_gpu_uid(row) -> Optional[Any]:
-    """Stable per-row key: minimum ``gpu_op_uid`` across the row's kernel_details.
-
-    Minimum (rather than first) makes the key order-independent so op-category
-    sheets and ``unified_perf_summary`` resolve to the same key for rows that
-    group the same set of kernels.
-    """
-    uids = _iter_row_gpu_op_uids(row)
-    return min(uids) if uids else None
-
-
-def _build_gpu_uid_to_canonical(ups: pd.DataFrame) -> Dict[Any, Any]:
-    """Map every ``gpu_op_uid`` in ``unified_perf_summary`` to its row's canonical uid.
+def _build_uid_to_row_idx(ups: pd.DataFrame) -> Dict[Any, Any]:
+    """Map every ``gpu_op_uid`` in ``unified_perf_summary`` to its row index.
 
     This is the only index used for diff_stats → perf-row matching.
     """
@@ -242,45 +230,41 @@ def _build_gpu_uid_to_canonical(ups: pd.DataFrame) -> Dict[Any, Any]:
         return mapping
     if not any(c in ups.columns for c in _KERNEL_DETAIL_COLS):
         return mapping
-    for _, row in ups.iterrows():
-        uids = _iter_row_gpu_op_uids(row)
-        if not uids:
-            continue
-        canonical = min(uids)
-        for u in uids:
-            mapping[u] = canonical
+    for idx, row in ups.iterrows():
+        for uid in _iter_row_gpu_op_uids(row):
+            mapping[uid] = idx
     return mapping
 
 
 def _resolve_diff_row_to_key(
-    row, gpu_uid_to_canonical: Dict[Any, Any]
+    row, uid_to_row_idx: Dict[Any, Any]
 ) -> Optional[Any]:
-    """Canonical key for a diff_stats row via its ``gpu_op_uid``."""
-    if not gpu_uid_to_canonical or "gpu_op_uid" not in row.index:
+    """Row index for a diff_stats row via its ``gpu_op_uid``."""
+    if not uid_to_row_idx or "gpu_op_uid" not in row.index:
         return None
     gpu_uid = row.get("gpu_op_uid")
     if gpu_uid is None or (isinstance(gpu_uid, float) and pd.isna(gpu_uid)):
         return None
-    return gpu_uid_to_canonical.get(gpu_uid)
+    return uid_to_row_idx.get(gpu_uid)
 
 
 def _build_lca_metadata(
     diff_stats_df: pd.DataFrame,
-    gpu_uid_to_canonical: Dict[Any, Any],
+    uid_to_row_idx: Dict[Any, Any],
 ) -> Dict[Any, Dict[str, Any]]:
-    """Map canonical ``gpu_op_uid`` → LCA metadata from ``diff_stats``.
+    """Map perf-summary row index → LCA metadata from ``diff_stats``.
 
-    For each trace1 row, the canonical key is resolved via
-    ``gpu_uid_to_canonical``. Every mapped row carries lists of
-    ``lca_ids`` and ``lca_names`` (one entry per LCA group that maps to this
-    key), plus accumulated ``lca_total_kernel_time_trace1_us`` and
-    ``lca_total_kernel_time_trace2_us`` (summed across all LCA groups).
+    For each trace1 row, the row index is resolved via ``uid_to_row_idx``.
+    Every mapped row carries lists of ``lca_ids`` and ``lca_names`` (one entry
+    per LCA group that maps to this key), plus accumulated
+    ``lca_total_kernel_time_trace1_us`` and ``lca_total_kernel_time_trace2_us``
+    (summed across all LCA groups).
 
     A single perf-summary row can map to multiple LCA groups when its kernels
     participate in different TraceDiff matching scopes.
     """
     out: Dict[Any, Dict[str, Any]] = {}
-    if diff_stats_df.empty or not gpu_uid_to_canonical:
+    if diff_stats_df.empty or not uid_to_row_idx:
         return out
 
     df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
@@ -319,7 +303,7 @@ def _build_lca_metadata(
             lca_display_name = None
 
         for _, row in grp.iterrows():
-            key = _resolve_diff_row_to_key(row, gpu_uid_to_canonical)
+            key = _resolve_diff_row_to_key(row, uid_to_row_idx)
             if key is None:
                 continue
             if key not in out:
@@ -342,9 +326,10 @@ def _build_lca_metadata(
 
 def _build_trace2_time_lookup(
     diff_stats_df: pd.DataFrame,
-    gpu_uid_to_canonical: Optional[Dict[Any, Any]] = None,
+    uid_to_row_idx: Optional[Dict[Any, Any]] = None,
+    gpu_uid_to_canonical: Optional[Dict[Any, Any]] = None,  # deprecated, ignored
 ) -> Tuple[Dict[Any, float], Dict[Any, List], Dict[Any, int]]:
-    if diff_stats_df.empty or not gpu_uid_to_canonical:
+    if diff_stats_df.empty or not uid_to_row_idx:
         return {}, {}, {}
 
     df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
@@ -378,7 +363,7 @@ def _build_trace2_time_lookup(
 
         all_keys: Set[Any] = set()
         for _, row in grp.iterrows():
-            key = _resolve_diff_row_to_key(row, gpu_uid_to_canonical)
+            key = _resolve_diff_row_to_key(row, uid_to_row_idx)
             if key is not None:
                 all_keys.add(key)
 
@@ -426,11 +411,10 @@ def _enrich_sheet_with_trace2(
     lca_t1_vals: List[float] = []
     lca_t2_vals: List[float] = []
 
-    for _, row in df.iterrows():
-        key = _row_canonical_gpu_uid(row)
-        meta = lca_meta.get(key) if key is not None else None
+    for idx, row in df.iterrows():
+        meta = lca_meta.get(idx)
 
-        cv = clookup.get(key) if key is not None else None
+        cv = clookup.get(idx)
         trace2_counts.append(np.nan if cv is None else float(cv))
 
         if meta:
@@ -517,15 +501,15 @@ def enrich_perf_report_dict_inplace(
 
     ups = perf_dfs.get("unified_perf_summary")
     ups_df = ups if isinstance(ups, pd.DataFrame) else pd.DataFrame()
-    gpu_uid_to_canonical = _build_gpu_uid_to_canonical(ups_df)
-    if not gpu_uid_to_canonical:
+    uid_to_row_idx = _build_uid_to_row_idx(ups_df)
+    if not uid_to_row_idx:
         return perf_dfs
 
     working = {k: v.copy() for k, v in perf_dfs.items()}
-    lca_metadata = _build_lca_metadata(diff_stats_df, gpu_uid_to_canonical)
+    lca_metadata = _build_lca_metadata(diff_stats_df, uid_to_row_idx)
     _, _, diff_count_lookup = _build_trace2_time_lookup(
         diff_stats_df,
-        gpu_uid_to_canonical=gpu_uid_to_canonical,
+        uid_to_row_idx=uid_to_row_idx,
     )
     return _enrich_consolidated_perf_sheets(
         working,

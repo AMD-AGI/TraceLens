@@ -8,9 +8,10 @@
 Unit tests for TraceLens.Reporting.tracediff_comparison_extension.
 
 Matching between ``diff_stats`` rows and ``unified_perf_summary`` rows is
-driven exclusively by ``gpu_op_uid`` (with a canonical per-row uid derived as
-the minimum gpu_op_uid in that row's ``kernel_details`` /
-``kernel_details_summary``). There is no fallback to CPU-UID tree walks or to
+driven exclusively by ``gpu_op_uid``. Each uid in a perf-summary row's
+``kernel_details`` / ``kernel_details_summary`` is mapped to that row's index
+via ``_build_uid_to_row_idx``; diff_stats rows resolve to the same index via
+their ``gpu_op_uid``. There is no fallback to CPU-UID tree walks or to
 ``(name, args)`` string-key matching; tests below exercise that contract.
 """
 
@@ -22,12 +23,11 @@ import pandas as pd
 import pytest
 
 from TraceLens.Reporting.tracediff_comparison_extension import (
-    _build_gpu_uid_to_canonical,
     _build_lca_metadata,
     _build_trace2_time_lookup,
+    _build_uid_to_row_idx,
     _enrich_sheet_with_trace2,
     _resolve_diff_row_to_key,
-    _row_canonical_gpu_uid,
     _trace2_gpu_op_uid_set_for_lca,
     enrich_perf_report_dict_inplace,
     tracediff_perf_summary_from_diff_stats,
@@ -63,7 +63,6 @@ def _make_diff_stats_row(
     nn_module_parent="root",
     cpu_op_uid=None,
     busy_time=None,
-    thread_name="",
     gpu_op_uid=None,
 ):
     if cpu_op_uid is None:
@@ -73,7 +72,6 @@ def _make_diff_stats_row(
         "cpu_op_name": cpu_op_name,
         "cpu_op_uid": cpu_op_uid,
         "source": source,
-        "thread_name": thread_name,
         "Input Dims": input_dims,
         "Input Strides": input_strides,
         "Input type": input_type,
@@ -310,66 +308,27 @@ class TestNaNLCADropped:
 
 
 # ---------------------------------------------------------------------------
-# Tests: helpers that compute canonical gpu_op_uid keys
+# Tests: _build_uid_to_row_idx
 # ---------------------------------------------------------------------------
-class TestRowCanonicalGpuUid:
-    def test_kernel_details_list_returns_min(self):
-        row = pd.Series({"kernel_details": _kd_list((30, 100), (10, 50), (20, 75))})
-        assert _row_canonical_gpu_uid(row) == 10
-
-    def test_kernel_details_summary_string_returns_min(self):
-        row = pd.Series({"kernel_details_summary": _kds_str((42, 100), (7, 50))})
-        assert _row_canonical_gpu_uid(row) == 7
-
-    def test_single_kernel(self):
-        row = pd.Series({"kernel_details": _kd_list((99, 10))})
-        assert _row_canonical_gpu_uid(row) == 99
-
-    def test_missing_columns_returns_none(self):
-        row = pd.Series({"name": "aten::mm"})
-        assert _row_canonical_gpu_uid(row) is None
-
-    def test_empty_list_returns_none(self):
-        row = pd.Series({"kernel_details": []})
-        assert _row_canonical_gpu_uid(row) is None
-
-    def test_null_summary_returns_none(self):
-        row = pd.Series({"kernel_details_summary": float("nan")})
-        assert _row_canonical_gpu_uid(row) is None
-
-    def test_prefers_kernel_details_summary_when_both_present(self):
-        """unified_perf_summary normally has only kernel_details_summary, but if
-        both columns exist, the summary form is preferred (iteration order)."""
-        row = pd.Series(
-            {
-                "kernel_details_summary": _kds_str((5, 10)),
-                "kernel_details": _kd_list((1, 10)),
-            }
-        )
-        assert _row_canonical_gpu_uid(row) == 5
-
-
-class TestBuildGpuUidToCanonical:
+class TestBuildUidToRowIdx:
     def test_empty_frame(self):
-        idx = _build_gpu_uid_to_canonical(pd.DataFrame())
-        assert idx == {}
+        assert _build_uid_to_row_idx(pd.DataFrame()) == {}
 
     def test_no_kernel_details_column(self):
         df = pd.DataFrame({"name": ["aten::mm"]})
-        idx = _build_gpu_uid_to_canonical(df)
-        assert idx == {}
+        assert _build_uid_to_row_idx(df) == {}
 
-    def test_maps_every_uid_to_row_canonical(self):
+    def test_maps_every_uid_to_row_index(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm"],
                 "kernel_details_summary": [_kds_str((5001, 100), (5002, 50))],
             }
         )
-        idx = _build_gpu_uid_to_canonical(df)
-        assert idx == {5001: 5001, 5002: 5001}
+        idx = _build_uid_to_row_idx(df)
+        assert idx == {5001: 0, 5002: 0}
 
-    def test_multiple_rows_distinct_canonicals(self):
+    def test_multiple_rows_map_to_distinct_indices(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm", "aten::relu"],
@@ -379,11 +338,11 @@ class TestBuildGpuUidToCanonical:
                 ],
             }
         )
-        idx = _build_gpu_uid_to_canonical(df)
-        assert idx[100] == 100
-        assert idx[200] == 100
-        assert idx[300] == 300
-        assert idx[400] == 300
+        idx = _build_uid_to_row_idx(df)
+        assert idx[100] == 0
+        assert idx[200] == 0
+        assert idx[300] == 1
+        assert idx[400] == 1
 
 
 class TestResolveDiffRowToKey:
@@ -393,19 +352,19 @@ class TestResolveDiffRowToKey:
 
     def test_returns_none_when_no_gpu_op_uid_col(self):
         row = pd.Series({"name": "kernel"})
-        assert _resolve_diff_row_to_key(row, {1: 1}) is None
+        assert _resolve_diff_row_to_key(row, {1: 0}) is None
 
     def test_returns_none_for_null_uid(self):
         row = pd.Series({"gpu_op_uid": float("nan")})
-        assert _resolve_diff_row_to_key(row, {1: 1}) is None
+        assert _resolve_diff_row_to_key(row, {1: 0}) is None
 
-    def test_returns_canonical_on_match(self):
+    def test_returns_row_idx_on_match(self):
         row = pd.Series({"gpu_op_uid": 5002})
-        assert _resolve_diff_row_to_key(row, {5001: 5001, 5002: 5001}) == 5001
+        assert _resolve_diff_row_to_key(row, {5001: 0, 5002: 0}) == 0
 
     def test_returns_none_on_miss(self):
         row = pd.Series({"gpu_op_uid": 9999})
-        assert _resolve_diff_row_to_key(row, {5001: 5001}) is None
+        assert _resolve_diff_row_to_key(row, {5001: 0}) is None
 
 
 class TestTrace2GpuOpUidSetForLca:
@@ -440,7 +399,7 @@ class TestBuildTrace2TimeLookup:
         lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame())
         assert lookup == {} and lca_ids == {} and lc == {}
 
-    def test_empty_canonical_map_returns_empty(self):
+    def test_empty_uid_map_returns_empty(self):
         rows = [
             _make_diff_stats_row(
                 "k",
@@ -475,14 +434,15 @@ class TestBuildTrace2TimeLookup:
                 "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
             ),
         ]
-        canonical = {1: 1, 2: 2}
+        # uid 1 (trace1) maps to perf-summary row 0
+        uid_map = {1: 0, 2: 1}
         lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
+            pd.DataFrame(rows), uid_to_row_idx=uid_map
         )
-        assert lookup == {1: 80.0}
-        assert lc == {1: 1}
+        assert lookup == {0: 80.0}
+        assert lc == {0: 1}
 
-    def test_multiple_lcas_same_canonical_aggregate(self):
+    def test_multiple_lcas_same_row_idx_aggregate(self):
         rows = [
             _make_diff_stats_row(
                 "k1", "aten::mm", "trace1", 50.0, "mm", 10, busy_time=50.0, gpu_op_uid=1
@@ -497,13 +457,13 @@ class TestBuildTrace2TimeLookup:
                 "k4", "aten::mm", "trace2", 45.0, "mm", 20, busy_time=45.0, gpu_op_uid=4
             ),
         ]
-        # uids 1 and 3 (trace1) both resolve to canonical 1; t2 kernels distinct.
-        canonical = {1: 1, 3: 1, 2: 2, 4: 4}
+        # uids 1 and 3 (trace1) both map to row 0; t2 kernels to distinct rows
+        uid_map = {1: 0, 3: 0, 2: 1, 4: 2}
         lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
+            pd.DataFrame(rows), uid_to_row_idx=uid_map
         )
-        assert lookup == {1: 40.0 + 45.0}
-        assert lc == {1: 2}
+        assert lookup == {0: 40.0 + 45.0}
+        assert lc == {0: 2}
 
     def test_trace1_only_lca_records_zero_trace2_time(self):
         rows = [
@@ -518,12 +478,12 @@ class TestBuildTrace2TimeLookup:
                 gpu_op_uid=1,
             ),
         ]
-        canonical = {1: 1}
+        uid_map = {1: 0}
         lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
+            pd.DataFrame(rows), uid_to_row_idx=uid_map
         )
-        assert lookup == {1: 0.0}
-        assert lc == {1: 0}
+        assert lookup == {0: 0.0}
+        assert lc == {0: 0}
 
     def test_unmatched_gpu_uid_skipped(self):
         rows = [
@@ -548,9 +508,9 @@ class TestBuildTrace2TimeLookup:
                 gpu_op_uid=888,
             ),
         ]
-        canonical = {1: 1}  # 999 and 888 not in map
+        uid_map = {1: 0}  # 999 and 888 not in map
         lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), gpu_uid_to_canonical=canonical
+            pd.DataFrame(rows), uid_to_row_idx=uid_map
         )
         assert lookup == {}
 
@@ -562,7 +522,7 @@ class TestEnrichSheetWithTrace2:
     def test_empty_sheet_returned_unchanged(self):
         df = pd.DataFrame()
         meta = {
-            1: {
+            0: {
                 "lca_ids": [1],
                 "lca_names": ["mm"],
                 "lca_total_kernel_time_trace1_us": 100.0,
@@ -593,8 +553,9 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
+        # metadata keyed by row index 0
         meta = {
-            1: {
+            0: {
                 "lca_ids": [1],
                 "lca_names": ["mm"],
                 "lca_total_kernel_time_trace1_us": 100.0,
@@ -602,7 +563,7 @@ class TestEnrichSheetWithTrace2:
             }
         }
         result = _enrich_sheet_with_trace2(
-            df, "Kernel Time (µs)_sum", count_lookup={1: 3}, lca_metadata=meta
+            df, "Kernel Time (µs)_sum", count_lookup={0: 3}, lca_metadata=meta
         )
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-20.0)
@@ -617,27 +578,13 @@ class TestEnrichSheetWithTrace2:
                 "Kernel Time (µs)_sum": [100.0],
             }
         )
+        # metadata keyed by row index 99 — doesn't match row 0
         meta = {
             99: {
                 "lca_ids": [99],
                 "lca_names": ["other"],
                 "lca_total_kernel_time_trace1_us": 10.0,
                 "lca_total_kernel_time_trace2_us": 5.0,
-            }
-        }
-        result = _enrich_sheet_with_trace2(
-            df, "Kernel Time (µs)_sum", lca_metadata=meta
-        )
-        assert np.isnan(result.iloc[0]["speedup (trace2/trace1)"])
-
-    def test_row_without_kernel_details_gets_nan(self):
-        df = pd.DataFrame({"name": ["aten::mm"], "Kernel Time (µs)_sum": [100.0]})
-        meta = {
-            1: {
-                "lca_ids": [1],
-                "lca_names": ["mm"],
-                "lca_total_kernel_time_trace1_us": 100.0,
-                "lca_total_kernel_time_trace2_us": 80.0,
             }
         }
         result = _enrich_sheet_with_trace2(
@@ -656,7 +603,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         meta = {
-            1: {
+            0: {
                 "lca_ids": [1],
                 "lca_names": ["mm"],
                 "lca_total_kernel_time_trace1_us": 50.0,
@@ -687,7 +634,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         meta = {
-            1: {
+            0: {
                 "lca_ids": [101, 102],
                 "lca_names": ["mm_scope_a", "mm_scope_b"],
                 "lca_total_kernel_time_trace1_us": 50.0,
@@ -697,7 +644,7 @@ class TestEnrichSheetWithTrace2:
         result = _enrich_sheet_with_trace2(
             df,
             "Kernel Time (µs)_sum",
-            count_lookup={1: 2},
+            count_lookup={0: 2},
             lca_metadata=meta,
         )
         assert "101" in str(result.iloc[0]["lca_id"])
@@ -715,7 +662,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         lca_meta = {
-            201: {
+            0: {
                 "lca_ids": [99],
                 "lca_names": ["lca"],
                 "lca_total_kernel_time_trace1_us": 525.0,
@@ -741,7 +688,7 @@ class TestEnrichSheetWithTrace2:
             }
         )
         meta = {
-            1: {
+            0: {
                 "lca_ids": [1],
                 "lca_names": ["mm"],
                 "lca_total_kernel_time_trace1_us": 100.0,
@@ -764,7 +711,7 @@ class TestEnrichSheetWithTrace2:
         )
         original_cols = list(df.columns)
         meta = {
-            1: {
+            0: {
                 "lca_ids": [1],
                 "lca_names": ["mm"],
                 "lca_total_kernel_time_trace1_us": 100.0,
@@ -780,9 +727,9 @@ class TestEnrichSheetWithTrace2:
 # ---------------------------------------------------------------------------
 class TestBuildLCAMetadata:
     def test_empty_df(self):
-        assert _build_lca_metadata(pd.DataFrame(), {1: 1}) == {}
+        assert _build_lca_metadata(pd.DataFrame(), {1: 0}) == {}
 
-    def test_empty_canonical_map(self):
+    def test_empty_uid_map(self):
         rows = [
             _make_diff_stats_row(
                 "k", "op_a", "trace1", 10.0, "lca", 1, busy_time=10.0, gpu_op_uid=1
@@ -806,12 +753,13 @@ class TestBuildLCAMetadata:
                 "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
             ),
         ]
-        canonical = {1: 1, 2: 2}
-        meta = _build_lca_metadata(pd.DataFrame(rows), canonical)
-        assert meta[1]["lca_ids"] == [10]
-        assert meta[1]["lca_names"] == ["mm"]
-        assert meta[1]["lca_total_kernel_time_trace1_us"] == pytest.approx(100.0)
-        assert meta[1]["lca_total_kernel_time_trace2_us"] == pytest.approx(80.0)
+        # uid 1 → row 0, uid 2 → row 1 (trace2 uid, won't appear in trace1 iteration)
+        uid_map = {1: 0, 2: 1}
+        meta = _build_lca_metadata(pd.DataFrame(rows), uid_map)
+        assert meta[0]["lca_ids"] == [10]
+        assert meta[0]["lca_names"] == ["mm"]
+        assert meta[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(100.0)
+        assert meta[0]["lca_total_kernel_time_trace2_us"] == pytest.approx(80.0)
 
     def test_multi_op_lca(self):
         rows = [
@@ -846,14 +794,15 @@ class TestBuildLCAMetadata:
                 gpu_op_uid=301,
             ),
         ]
-        canonical = {101: 101, 201: 201, 301: 301}
-        meta = _build_lca_metadata(pd.DataFrame(rows), canonical)
-        assert meta[101]["lca_ids"] == [99]
-        assert meta[201]["lca_ids"] == [99]
-        assert meta[101]["lca_names"] == ["lca"]
-        assert meta[101]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
-        assert meta[101]["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
-        assert meta[201]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        # uid 101 → row 0 (aten::fill_), uid 201 → row 1 (aiter::fmha_v3_bwd)
+        uid_map = {101: 0, 201: 1, 301: 2}
+        meta = _build_lca_metadata(pd.DataFrame(rows), uid_map)
+        assert meta[0]["lca_ids"] == [99]
+        assert meta[1]["lca_ids"] == [99]
+        assert meta[0]["lca_names"] == ["lca"]
+        assert meta[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        assert meta[0]["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
+        assert meta[1]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
 
 
 # ---------------------------------------------------------------------------
