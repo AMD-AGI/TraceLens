@@ -32,8 +32,8 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
+
 REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
 
 if [[ -n "$CONTAINER" ]]; then

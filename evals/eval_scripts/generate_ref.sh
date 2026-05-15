@@ -24,6 +24,9 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/evals"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
+STATUS_FILE="$(mktemp)"
+
 if [[ -n "$CONTAINER" ]]; then
     DEXEC=(docker exec -w "$REPO_ROOT" "$CONTAINER")
     RUNTIME_LABEL="container $CONTAINER"
@@ -33,20 +36,16 @@ else
     RUNTIME_LABEL="host (no container)"
     NODE_LABEL="local"
 fi
-STATUS_FILE="$(mktemp)"
-
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${MODE}.csv}"
-
 
 # ---------------------------------------------------------------------------
 # Auto-extract test archives if trace CSV references them
 # ---------------------------------------------------------------------------
-for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_${MODE}.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_${MODE}.tar.gz; do
+for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_${COMPARISON_SCOPE}.tar.gz "$EVALS_DIR"/analysis_tests/unit_tests_${COMPARISON_SCOPE}.tar.gz; do
     [ -f "$archive" ] || continue
     target_dir="${archive%.tar.gz}"
     if [ ! -d "$target_dir" ]; then
         echo "Extracting $(basename "$archive")..."
-        tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests"
+        tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests/"
     fi
 done
 

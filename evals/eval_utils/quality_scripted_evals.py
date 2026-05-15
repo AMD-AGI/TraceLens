@@ -120,17 +120,22 @@ def _pre_check_gates(output_dir: str, reference_dir: str, comparison_scope: str)
         return "generated output directory does not exist"
     if not os.path.isdir(reference_dir):
         return "reference directory does not exist"
-
-    if comparison_scope == "standalone":
-        if not os.path.isdir(os.path.join(output_dir, "perf_report_csvs")):
-            return "generated perf_report_csvs/ directory not found"
-        if not os.path.isdir(os.path.join(reference_dir, "perf_report_csvs")):
-            return "reference perf_report_csvs/ directory not found"
+    
+    if comparison_scope == "comparative":
+        csv_dir = "perf_report_trace1_csvs"
     else:
-        if not os.path.isdir(os.path.join(output_dir, "perf_report_trace1_csvs")):
-            return "generated perf_report_trace1_csvs/ directory not found"
-        if not os.path.isdir(os.path.join(reference_dir, "perf_report_trace1_csvs")):
-            return "reference perf_report_trace1_csvs/ directory not found"
+        csv_dir = "perf_report_csvs"
+
+    if not os.path.isdir(os.path.join(output_dir, csv_dir)):
+        return f"generated {csv_dir}/ directory not found"
+    if not os.path.isdir(os.path.join(reference_dir, csv_dir)):
+        return f"reference {csv_dir}/ directory not found"
+
+    if comparison_scope == "comparative":
+        if not os.path.isdir(os.path.join(output_dir, "perf_report_trace2_csvs")):
+            return "generated perf_report_trace2_csvs/ directory not found"
+        if not os.path.isdir(os.path.join(reference_dir, "perf_report_trace2_csvs")):
+            return "reference perf_report_trace2_csvs/ directory not found"
 
     return None
 
