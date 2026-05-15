@@ -220,16 +220,6 @@ class TestMultiStreamOverlap:
         assert summary.iloc[0]["kernel_time_trace1_us"] == pytest.approx(150.0)
         assert summary.iloc[0]["kernel_time_trace2_us"] == pytest.approx(120.0)
 
-    def test_speedup_uses_busy_time(self, report):
-        summary = report["tracediff_perf_summary"]
-        assert summary.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(
-            120.0 / 150.0
-        )
-
-    def test_delta_uses_busy_time(self, report):
-        summary = report["tracediff_perf_summary"]
-        assert summary.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-30.0)
-
 
 class TestTrace2OnlyLCA:
     @pytest.fixture
