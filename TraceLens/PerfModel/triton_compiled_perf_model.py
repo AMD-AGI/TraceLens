@@ -147,6 +147,7 @@ def _meta_from_trace_args(event: dict) -> dict | None:
     aten_ops = _parse_kernel_name(name)
 
     ptr_bytes: list[int] = []
+    ptr_shapes: list[list[int]] = []
     dtype: str | None = None
     from math import prod
 
@@ -155,14 +156,20 @@ def _meta_from_trace_args(event: dict) -> dict | None:
             continue
         bpe = _C10_DTYPE_BYTES.get(dt, 0)
         ptr_bytes.append(bpe)
+        ptr_shapes.append(dims)
         if dtype is None and bpe > 0:
             dtype = dt.split("::")[-1].lower()
+
+    total_bytes = float(sum(prod(s) * b for s, b in zip(ptr_shapes, ptr_bytes)))
+    if not is_reduction and ptr_bytes:
+        total_bytes += ptr_bytes[0] * xnumel
 
     return {
         "aten_ops": aten_ops,
         "xnumel": xnumel,
         "rnumel": rnumel,
         "ptr_bytes": ptr_bytes,
+        "total_bytes": total_bytes,
         "dtype": dtype,
     }
 
@@ -318,12 +325,15 @@ class TritonCompiledPerfModel:
     def bytes(self) -> float:
         if self._meta is None:
             raise NotImplementedError(f"No Inductor artifacts found for {self.name}")
+        total_bytes = self._meta.get("total_bytes")
+        if total_bytes is not None:
+            return total_bytes
+        # V1 fallback: no per-tensor shapes available
         xnumel = self._meta["xnumel"]
         rnumel = self._meta["rnumel"]
         ptr_bytes = self._meta["ptr_bytes"]
         if not ptr_bytes:
             return 0.0
-        # Reduction: inputs span xnumel*rnumel; last pointer (output) spans xnumel
         if rnumel > 1:
             return float(sum(ptr_bytes[:-1]) * xnumel * rnumel + ptr_bytes[-1] * xnumel)
         return float(sum(ptr_bytes) * xnumel)

@@ -31,7 +31,8 @@ import torch.profiler
 OUT_DIR = os.path.join(
     os.path.dirname(__file__), "..", "torch_trace_output_claude", "triton_repro"
 )
-TRACE_PATH = os.path.join(OUT_DIR, "trace.json.gz")
+DATE_TAG = __import__("datetime").date.today().strftime("%Y%m%d")
+TRACE_PATH = os.path.join(OUT_DIR, f"trace_{DATE_TAG}.json.gz")
 
 
 # ---------------------------------------------------------------------------
