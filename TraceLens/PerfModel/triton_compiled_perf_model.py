@@ -233,23 +233,34 @@ def _parse_wrapper(content: str) -> dict[str, dict]:
                 elif key.startswith("r"):
                     rnumel = int(val)
 
-        # Pointer element sizes and dtype from triton_meta signature
+        # Pointer element sizes and dtype from triton_meta signature.
+        # Parameter names indicate direction: in_ptr (read), out_ptr (write),
+        # in_out_ptr (read+write).  An in_out_ptr is listed once in the
+        # signature but moves data twice (one read + one write), so we track
+        # extra bytes to add in bytes().
         sig_m = re.search(r"'signature':\s*\{([^}]+)\}", block)
         ptr_bytes: list[int] = []
+        in_out_extra_bytes: list[int] = []
         dtype: str | None = None
         if sig_m:
-            for dm in re.finditer(r"'(\*\w+)'", sig_m.group(1)):
-                b = _PTR_DTYPE_BYTES.get(dm.group(1))
+            for dm in re.finditer(
+                r"'(\w+)':\s*'(\*\w+)'", sig_m.group(1)
+            ):
+                param_name, ptr_dtype = dm.group(1), dm.group(2)
+                b = _PTR_DTYPE_BYTES.get(ptr_dtype)
                 if b is not None:
                     ptr_bytes.append(b)
+                    if param_name.startswith("in_out_"):
+                        in_out_extra_bytes.append(b)
                     if dtype is None:
-                        dtype = dm.group(1)[1:]  # strip leading '*', e.g. 'bf16'
+                        dtype = ptr_dtype[1:]  # strip leading '*', e.g. 'bf16'
 
         results[name] = {
             "aten_ops": aten_ops,
             "xnumel": xnumel,
             "rnumel": rnumel,
             "ptr_bytes": ptr_bytes,
+            "in_out_extra_bytes": in_out_extra_bytes,
             "dtype": dtype,
         }
 
@@ -336,7 +347,10 @@ class TritonCompiledPerfModel:
             return 0.0
         if rnumel > 1:
             return float(sum(ptr_bytes[:-1]) * xnumel * rnumel + ptr_bytes[-1] * xnumel)
-        return float(sum(ptr_bytes) * xnumel)
+        # Pointwise: in_out_ptr is both read and written but listed once in
+        # the signature.  Add extra bytes for the write.
+        in_out_extra = sum(self._meta.get("in_out_extra_bytes", []))
+        return float((sum(ptr_bytes) + in_out_extra) * xnumel)
 
     def get_maf_type(self):
         return "vector" if self._meta is not None else None
