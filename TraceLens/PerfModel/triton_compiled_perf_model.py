@@ -396,8 +396,11 @@ class TritonCompiledPerfModel:
     Perf model for torch.compile-generated Triton kernels.
 
     FLOPs  = sum(flops_per_elem[op] for op in fused_aten_ops) * total_elements
-    Bytes  = num_ptr_args * xnumel * bytes_per_elem   (pointwise)
-           = (n-1) * xnumel * rnumel * bpe + xnumel * bpe  (reduction)
+    Bytes  = V2: sum(prod(shape_i) * bpe_i) for each pointer tensor,
+                 plus one extra write (ptr_bytes[0] * xnumel) for pointwise
+                 kernels whose output reuses an input buffer (in_out_ptr).
+             V1: similar formula using xnumel/rnumel from size_hints,
+                 with in_out_ptr detection from cache file signatures.
 
     Raises NotImplementedError if no Inductor artifacts are found, so
     TraceLens silently skips the kernel (same behaviour as unmodelled ATen ops).
