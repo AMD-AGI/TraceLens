@@ -88,13 +88,77 @@ _C10_DTYPE_BYTES: dict[str, int] = {
     "c10::Long": 8,
 }
 
-# Map bare op names (from kernel name) to their aten.* keys in _FLOPS_PER_ELEM.
-# Sorted longest-first so multi-word ops like "_unsafe_view" match before "view".
-_BARE_OPS = sorted(
-    [(op.replace("aten.", ""), op) for op in _FLOPS_PER_ELEM],
-    key=lambda x: len(x[0]),
-    reverse=True,
-)
+# ---------------------------------------------------------------------------
+# Kernel name → fused ATen ops parsing
+#
+# Inductor encodes fused ops in the kernel name:
+#   triton_poi_fused_add_mul_silu_0  →  [aten.add, aten.mul, aten.silu]
+#
+# The challenge: underscores serve as BOTH op separators AND part of op names
+# (e.g. "all_to_all_single", "_unsafe_view").  Two approaches below.
+# ---------------------------------------------------------------------------
+
+# -- Approach 1 (active): DP segmentation against PyTorch op registry -------
+# Builds a complete dictionary of op names from PyTorch at import time,
+# then uses dynamic programming to find the valid segmentation.  Handles
+# multi-word ops like "all_to_all_single" and "_unsafe_view" correctly.
+# Inductor sorts ops alphabetically, which disambiguates most cases.
+# Includes ops from torch.ops.aten plus torch.distributed (for collective
+# ops like all_to_all_single that Inductor can fuse into Triton kernels).
+_ALL_KNOWN_OPS: set[str] = set()
+try:
+    import torch as _torch
+
+    for _ns_name in dir(_torch.ops):
+        if _ns_name.startswith("__"):
+            continue
+        try:
+            _ns = getattr(_torch.ops, _ns_name)
+            _ALL_KNOWN_OPS.update(
+                n for n in dir(_ns) if not n.startswith("__")
+            )
+        except Exception:
+            pass
+    # Distributed ops (e.g. all_to_all_single) are in torch.distributed,
+    # not torch.ops.  Add them so the parser can segment kernel names
+    # that fuse collective ops.
+    if hasattr(_torch, "distributed"):
+        _ALL_KNOWN_OPS.update(
+            n
+            for n in dir(_torch.distributed)
+            if not n.startswith("_") and "_" in n
+        )
+except Exception:
+    pass
+
+# -- Approach 2 (previous, kept for reference): greedy longest-match ---------
+# Used a hardcoded dictionary from _FLOPS_PER_ELEM, sorted longest-first.
+# Works for simple ops but fails on multi-word ops not in the dictionary
+# (e.g. "all_to_all_single" is split into [all, to, all, single]).
+# We currently use Approach 1 above.  Kept here for reference.
+#
+# _BARE_OPS = sorted(
+#     [(op.replace("aten.", ""), op) for op in _FLOPS_PER_ELEM],
+#     key=lambda x: len(x[0]),
+#     reverse=True,
+# )
+#
+# def _parse_kernel_name(name: str) -> list[str]:
+#     """Extract fused ATen ops from a Triton kernel name."""
+#     m = re.match(r"triton_(?:poi|red|per)_fused_(.+)_(\d+)$", name)
+#     if not m:
+#         return []
+#     remaining = m.group(1)
+#     ops: list[str] = []
+#     while remaining:
+#         for bare, full in _BARE_OPS:
+#             if remaining == bare or remaining.startswith(bare + "_"):
+#                 ops.append(full)
+#                 remaining = remaining[len(bare) :].lstrip("_")
+#                 break
+#         else:
+#             remaining = remaining.split("_", 1)[-1] if "_" in remaining else ""
+#     return ops
 
 
 # ---------------------------------------------------------------------------
@@ -103,21 +167,47 @@ _BARE_OPS = sorted(
 
 
 def _parse_kernel_name(name: str) -> list[str]:
-    """Extract fused ATen ops from a Triton kernel name."""
+    """Extract fused ATen ops from a Triton kernel name (Approach 1).
+
+    Uses dynamic programming to segment the underscore-joined op names
+    against the full PyTorch op registry.  Falls back to a simple split
+    if the registry is unavailable.
+    """
     m = re.match(r"triton_(?:poi|red|per)_fused_(.+)_(\d+)$", name)
     if not m:
         return []
-    remaining = m.group(1)
+    tokens = m.group(1).split("_")
+    n = len(tokens)
+
+    if not _ALL_KNOWN_OPS:
+        return [f"aten.{t}" for t in tokens if t in _FLOPS_PER_ELEM.get(f"aten.{t}", t)]
+
+    # dp[i] = list of (op_name, prev_index) for valid segmentations ending
+    # at token i.  dp[0] = True is the base case (empty prefix).
+    dp: list = [None] * (n + 1)
+    dp[0] = True
+    for i in range(1, n + 1):
+        for j in range(i):
+            if dp[j] is None:
+                continue
+            candidate = "_".join(tokens[j:i])
+            if candidate in _ALL_KNOWN_OPS:
+                if dp[i] is None:
+                    dp[i] = []
+                dp[i].append((candidate, j))
+
+    if not dp[n]:
+        return []
+
+    # Backtrack: prefer longest matches (fewest ops)
     ops: list[str] = []
-    while remaining:
-        for bare, full in _BARE_OPS:
-            if remaining == bare or remaining.startswith(bare + "_"):
-                ops.append(full)
-                remaining = remaining[len(bare) :].lstrip("_")
-                break
-        else:
-            remaining = remaining.split("_", 1)[-1] if "_" in remaining else ""
-    return ops
+    pos = n
+    while pos > 0:
+        candidate, prev = max(dp[pos], key=lambda x: len(x[0]))
+        ops.append(candidate)
+        pos = prev
+    ops.reverse()
+    return [f"aten.{op}" for op in ops]
 
 
 def _meta_from_trace_args(event: dict) -> dict | None:
