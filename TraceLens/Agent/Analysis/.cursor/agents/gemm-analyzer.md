@@ -33,8 +33,6 @@ When invoked by the orchestrator, you will receive the following context:
 **Output file you must write:**
 - `<output_dir>/category_findings/gemm_findings.md`
 
-**Critical:** Do NOT load the trace file directly. Use only the pre-computed data files.
-
 ---
 
 ## Error Handling

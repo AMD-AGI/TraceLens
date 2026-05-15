@@ -25,7 +25,7 @@ Orchestrate modular PyTorch trace analysis using a **two-tier architecture**:
 
 **Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
 
-**Comparison scope (`<comparison_scope>`):** **`standalone`** — single trace, roofline analysis. **`comparative`** — primary trace vs second trace comparative analysis
+**Comparison scope (`<comparison_scope>`):** **`standalone`** — single trace, roofline analysis. **`comparative`** — baseline vs target trace comparative analysis
 
 ---
 
@@ -63,20 +63,20 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ### Required Information:
 
-0. **Comparison scope** → `<comparison_scope>`
+1. **Comparison scope** → `<comparison_scope>`
    - Set from the user’s intent **before** deep-diving on paths:
      - **`comparative`** if the skill was triggered by **“comparative analysis”**, **“compare two traces”**, or the user supplies **two** trace paths / explicitly asks to compare trace A vs B.
      - **`standalone`** otherwise (including triggers **“standalone analysis”**, **“analyze trace standalone”**, single trace only).
 
-1. **Trace File Path(s)**
+2. **Trace File Path(s)**
    - **`standalone`:** **Trace File Path** → `<trace_path>`
      - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
    - **`comparative`:** ask for both:
      - **Primary trace (trace1)** → `<trace_path>`
      - **Comparison trace (trace2)** → `<trace2_path>`
-     - Ask: "Please the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
+     - Ask: "Please provide the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
 
-2. **Platform** → `<platform>`
+3. **Platform** → `<platform>`
    **`standalone`**: Ask: "Which platform are you analyzing?"
    **`comparative`**: Ask: "Which platform is baseline trace (trace1)?"
    - Options:
@@ -87,7 +87,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      5. **MI455X**
    **`comparative`:** Ask: "Which platform is target trace (trace2)?" Assign `<platform2>`
 
-3. **Analysis Mode** → `<analysis_mode>`
+4. **Analysis Mode** → `<analysis_mode>`
    - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
    - Options:
      1. **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
@@ -98,7 +98,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
 
-4. **Environment Setup**
+5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
      - If **local**: No further environment questions — prefix is blank (commands run directly).
      - If **cluster**:
@@ -106,7 +106,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
        - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
        - Ask "Are you using a virtual environment?" → if yes, ask for venv path → `<venv_path>`
 
-5. **Output Directory** (Optional)
+6. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
 
@@ -202,7 +202,7 @@ Do **not** pass `--extension_*` on the trace2 command.
   --include_call_stack
 ```
 
-When `<comparison_scope>` = `comparative`, append the same `--extension_file` / `--extension_args <trace2_path>` pair as in the default-mode example (inference generator supports `--extension_args` for TraceDiff).
+When `<comparison_scope>` = `comparative`, append the same `--extension_file` / `--extension_args <trace2_path>` pair as in the default-mode example.
 
 **Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
 
@@ -376,12 +376,6 @@ comparison_scope: {comparison_scope}
   - **Comparative:** `100 × (Trace 2 kernel time) / (Trace 1 kernel time)`.
     - **< 100%** → Trace 1 is slower than Trace 2. **This is an optimization opportunity — flag it.**
     - **> 100%** → Trace 2 is slower than Trace 1. **NOT an anomaly; no Trace-1 optimization needed.**
-- When citing peak performance, use bound-type-aware references: `efficiency.resolved_peak_maf` (TFLOPS) for compute-bound ops, `efficiency.resolved_peak_hbm_bw` (TB/s) for memory-bound ops
-
-**Platform Specs:**
-- Peak HBM BW: {peak_hbm_bw} TB/s
-- Peak references are bound-type-aware: each operation's `efficiency.resolved_peak_maf` has the precision-correct compute peak (TFLOPS); `efficiency.resolved_peak_hbm_bw` has the memory bandwidth peak (TB/s). Use the one matching `efficiency.bound_type`
-- Impact estimates assume tuning can reach 75–100% of peak performance (midpoint 87.5% used for plots)
 
 **CRITICAL CONSTRAINTS:**
 1. **Standalone:** Any efficiency > 100% → `[ANOMALY] - verify measurement`. **Comparative:** efficiency > 100% means Trace 2 is slower — NOT an anomaly; efficiency < 100% means Trace 1 is slower — flag as optimization opportunity.
@@ -531,7 +525,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
    - **`comparative` only:** substitute `<Platform1>` with `<platform>` and `<Platform2>` with `<platform2>` throughout the report (title, Executive Summary table headers, and any other occurrences).
    - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
-   - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds." Do **not** rely on `<!-- no-actionable-findings -->` markers — validation uses the metrics JSON, not markers (`sub_agent_spec.md` § No actionable findings).
+   - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds."
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
 The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:

@@ -33,8 +33,6 @@ When invoked by the orchestrator, you will receive the following context:
 **Output file you must write:**
 - `<output_dir>/category_findings/triton_findings.md`
 
-**Critical:** Do NOT load the trace file directly. Use only the pre-computed data files.
-
 ---
 
 ## Error Handling
@@ -83,15 +81,13 @@ Execute the analysis script using the command prefix:
   --comparison_scope <comparison_scope>
 ```
 
-### Step 2: Read Metrics and Data
+### Step 2: Read Metrics
 
 After the script completes, read the JSON metrics file:
 
 ```bash
 cat <output_dir>/category_data/triton_metrics.json
 ```
-
-Check `status` field - if 'ERROR', write error findings and stop.
 
 ### Step 3: Write Informational Findings
 
@@ -106,7 +102,7 @@ Write `<output_dir>/category_findings/triton_findings.md` using the command pref
 
 **Platform:** <platform> | **Trace:** <trace_path> | **Analysis Date:** <date>
 
-> **Note:** Triton kernel analysis is not currently supported by TraceLens. This section provides an informational time breakdown only. No bottleneck conclusions or optimization recommendations are made. When `comparison_scope` is `comparative`, you may note that in the overview; do **not** infer trace2-vs-trace1 efficiency (this category does not emit comparative metrics).
+> **Note:** Triton kernel analysis is not currently supported by TraceLens. This section provides an informational time breakdown only. No bottleneck conclusions or optimization recommendations are made.
 
 ## 1. Overview
 
