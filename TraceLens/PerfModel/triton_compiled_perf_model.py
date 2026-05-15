@@ -225,6 +225,7 @@ def _meta_from_trace_args(event: dict) -> dict | None:
 
     name = event.get("name", "")
     is_reduction = name.startswith("triton_red_") or name.startswith("triton_per_")
+    is_pointwise = name.startswith("triton_poi_")
 
     scalars = [int(v) for v in concrete if v != ""]
     if is_reduction and len(scalars) >= 2:
@@ -251,7 +252,7 @@ def _meta_from_trace_args(event: dict) -> dict | None:
             dtype = dt.split("::")[-1].lower()
 
     total_bytes = float(sum(prod(s) * b for s, b in zip(ptr_shapes, ptr_bytes)))
-    if not is_reduction and ptr_bytes:
+    if is_pointwise and ptr_bytes:
         total_bytes += ptr_bytes[0] * xnumel
 
     return {
