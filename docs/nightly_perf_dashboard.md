@@ -73,7 +73,7 @@ The system uses **GitHub Actions** for nightly scheduling, **OpenTelemetry (OTLP
 
 ## Repo Split
 
-Reusable, trace-agnostic code can live in the **public TraceLens** repo. Anything that references private traces, internal storage, or nightly job config stays in **TraceLens-internal**.
+Reusable, trace-agnostic code can live in the **public TraceLens** repo. Anything that references private traces or internal storage stays in **TraceLens-internal**.
 
 | Component | Repo | Rationale |
 |---|---|---|
@@ -81,7 +81,7 @@ Reusable, trace-agnostic code can live in the **public TraceLens** repo. Anythin
 | OTLP emission utilities | Public | Generic metric emission, no trace-specific data |
 | Local run CLI / instructions | Public | Developer tooling, no private data |
 | Private trace manifest (`trace_manifest.yaml`) | **Internal** | Contains private trace IDs, storage paths |
-| Nightly workflow (`.github/workflows/nightly_perf_dashboard.yml`) | **Internal** | References private traces, internal secrets |
+| Nightly workflow (`.github/workflows/nightly_perf_dashboard.yml`) | Public | Contains no sensitive data; all credentials are in `${{ secrets.* }}` placeholders |
 | Prometheus / Grafana config | **Internal** | Internal infrastructure |
 | Raw profiling artifacts | **Internal** | Generated from private traces |
 
@@ -198,7 +198,7 @@ class StageTimer:
 
 **Memory:** Uses `resource.getrusage(resource.RUSAGE_SELF).ru_maxrss` to capture peak RSS after each trace completes. On Linux this returns kilobytes; the harness converts to bytes for consistency.
 
-**cProfile:** Each trace run is wrapped in `cProfile.Profile()` to produce a `.prof` artifact for deeper investigation.
+**cProfile:** Each trace run is wrapped in `cProfile.Profile()` to produce a `.prof` artifact for deeper investigation. cProfile data is stored as a raw artifact only — it is not parsed, aggregated, or emitted to Prometheus or Grafana. It exists solely for manual post-hoc analysis when a stage regression needs function-level investigation.
 
 ### Structured Timing JSON Output
 
@@ -261,19 +261,15 @@ opentelemetry-exporter-otlp-proto-http
 
 | Attribute | Example | Description |
 |---|---|---|
-| `service.name` | `tracelens-nightly-perf` | Identifies the job in Prometheus |
 | `service.version` | `0.5.0` | TraceLens version |
 | `vcs.commit.sha` | `abc123def` | Git commit under test |
-| `deployment.environment` | `github-actions` | Execution environment |
 
 **OTLP push setup:**
 
 ```python
 resource = Resource.create({
-    "service.name": "tracelens-nightly-perf",
     "service.version": tracelens_version,
     "vcs.commit.sha": commit_sha,
-    "deployment.environment": environment_label,
 })
 
 exporter = OTLPMetricExporter(
@@ -299,7 +295,7 @@ After each trace completes, the harness calls `stage_duration_gauge.set(elapsed,
 
 ## GitHub Actions Workflow
 
-The nightly workflow runs on TraceLens-internal only.
+The nightly workflow lives in the public TraceLens repo. All credentials are injected via GitHub Actions secrets; no sensitive data is in the workflow file itself. The private trace manifest and download scripts are checked out from TraceLens-internal at runtime.
 
 ### Workflow File: `.github/workflows/nightly_perf_dashboard.yml`
 
@@ -381,7 +377,7 @@ jobs:
 
 | Secret | Description |
 |---|---|
-| `RCLONE_CONFIG` | rclone configuration for accessing private trace storage |
+| `RCLONE_CONFIG` | rclone configuration for accessing private trace storage (OAuth credentials for SharePoint; used by `download_traces.py` to run commands such as `rclone copy "sharepoint:tracelens-private-traces/trace_001.json.gz" /tmp/traces/`) |
 | `PROMETHEUS_OTLP_ENDPOINT` | OTLP/HTTP receiver URL (e.g., Prometheus with OTLP receiver, or a Grafana Cloud endpoint) |
 | `PROMETHEUS_PUSH_TOKEN` | Bearer token for authenticating OTLP pushes |
 
@@ -431,7 +427,7 @@ OTLP metric names are translated to Prometheus format automatically:
 | `tracelens.total.duration_seconds` | `tracelens_total_duration_seconds` |
 | `tracelens.process.max_rss_bytes` | `tracelens_process_max_rss_bytes` |
 
-Labels (`trace_id`, `stage`, `workload_family`) and resource attributes (`service_name`, `vcs_commit_sha`, etc.) are preserved as Prometheus labels.
+Labels (`trace_id`, `stage`, `workload_family`) and resource attributes (`vcs_commit_sha`, `service_version`) are preserved as Prometheus labels.
 
 ### Retention
 
@@ -452,7 +448,7 @@ Labels (`trace_id`, `stage`, `workload_family`) and resource attributes (`servic
 #### Panel 1: Runtime Trend Per Trace (Time Series)
 
 ```promql
-tracelens_total_duration_seconds{service_name="tracelens-nightly-perf"}
+tracelens_total_duration_seconds
 ```
 
 - **Visualization:** Time series
@@ -474,7 +470,7 @@ tracelens_stage_duration_seconds{trace_id="$trace_id"}
 #### Panel 3: Max RSS Trend Per Trace (Time Series)
 
 ```promql
-tracelens_process_max_rss_bytes{service_name="tracelens-nightly-perf"} / 1073741824
+tracelens_process_max_rss_bytes / 1073741824
 ```
 
 - **Visualization:** Time series
@@ -527,7 +523,7 @@ avg by (workload_family) (tracelens_total_duration_seconds)
 
 ```promql
 topk(1,
-  tracelens_stage_duration_seconds{service_name="tracelens-nightly-perf"}
+  tracelens_stage_duration_seconds
 ) by (trace_id)
 ```
 
