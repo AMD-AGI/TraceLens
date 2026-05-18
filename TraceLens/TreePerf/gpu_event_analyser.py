@@ -108,8 +108,6 @@ class GPUEventAnalyser:
                     # (1) at equal timestamps. For a zero-dur event, ts == t_end,
                     # so its own end-point would be processed before its
                     # start-point and raise KeyError on active_uids.remove(uid).
-                    # Observed on ROCm 7.2 traces (gpu_memcpy events with
-                    # dur=0); see TraceLens-internal#182.
                     if event["t_end"] > event["ts"]:
                         compute_overlapping_uids = True
                         points.append(
@@ -125,7 +123,7 @@ class GPUEventAnalyser:
                     # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
                     # bucket so cross-version (7.1 vs 7.2) reports compare
                     # like-for-like; rocclr fill kernels follow gpu_memset's
-                    # existing home (comp_events). See AMD-AGI/TraceLens-internal#357.
+                    # existing home (comp_events).
                     if category == "kernel" and TraceEventUtils.is_rocm_legacy_memcpy(
                         name
                     ):

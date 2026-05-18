@@ -706,7 +706,6 @@ class TraceEventUtils:
     # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
     # cat=gpu_memset matching the CUDA convention. These patterns rebucket
     # legacy traces so cross-version reports compare like-for-like.
-    # See: AMD-AGI/TraceLens-internal#357
     _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
         r"^("
         r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"

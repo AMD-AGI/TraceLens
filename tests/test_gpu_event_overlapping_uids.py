@@ -24,7 +24,7 @@ overlapping_uids computation (GPUEventAnalyser):
 - Sub-microsecond overlap (<1µs) filtered as timestamp noise (Bug 1 regression)
 - Exactly 1µs overlap meets threshold and IS marked (strict < 1.0 check)
 - Above-threshold overlap (>1µs) correctly marked
-- Zero-duration GPU events do not raise (TraceLens-internal#182 regression):
+- Zero-duration GPU events do not raise:
     same-UID end (0) sorts before start (1) at equal timestamps; the sweep-line
     must skip zero-measure intervals from active_uids tracking.
 - ROCm legacy rocclr copy/fill kernels (cat=kernel with rocclr-internal names
@@ -347,11 +347,11 @@ def test_above_threshold_overlap_is_marked():
     assert by_uid[2] == {1}, "2.0µs overlap should be marked"
 
 
-# ── Zero-duration GPU events (TraceLens-internal#182 regression) ────────
+# ── Zero-duration GPU events (regression) ────────
 
 
 def test_zero_duration_memcpy_does_not_raise():
-    """Reproduces TraceLens-internal#182: ROCm 7.2 emits gpu_memcpy events
+    """Reproduces regression error where profiler emits gpu_memcpy events
     with dur=0 (HtoD transfers reported as zero-duration). The sweep-line
     sort key (ts, point_type) puts end (0) before start (1) at equal ts,
     so a same-UID end-point would be processed before its start-point and
@@ -419,7 +419,7 @@ def test_only_zero_duration_events_does_not_raise():
 # __amd_rocclr_copyBuffer*, __amd_rocclr_fillBuffer*). ROCm 7.2 uses
 # cat=gpu_memcpy / cat=gpu_memset matching the CUDA convention. These tests
 # pin the rerouting so a 7.1 trace's gpu_timeline buckets compute / memcpy /
-# memset the same way a 7.2 trace would. See AMD-AGI/TraceLens-internal#357.
+# memset the same way a 7.2 trace would.
 
 
 def test_rocm_legacy_copy_kernels_routed_to_memcpy():

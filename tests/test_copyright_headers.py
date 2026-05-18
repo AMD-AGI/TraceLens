@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -7,31 +7,6 @@
 import json
 import re
 from pathlib import Path
-
-# Default / reference header (year 2024 - 2025); tests accept the variants below.
-PYTHON_HEADER = """###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-"""
-
-MARKDOWN_HEADER = """<!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
-
-"""
-
-YAML_HEADER = """###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-"""
 
 # Copyright line must use one of these year forms (longer/more specific first).
 _COPYRIGHT_YEAR_RE = r"(?:2024 - 2025|2024 - 2026|2025-2026|2024|2025|2026)"
@@ -107,7 +82,7 @@ def test_python_files_have_valid_copyright():
         "env",
         ".venv",
     }
-    skip_files = {".gitignore", "LICENSE", "__init__.py"}
+    skip_files = {".gitignore", "LICENSE"}
 
     missing_copyright = []
     wrong_format = []
@@ -122,7 +97,8 @@ def test_python_files_have_valid_copyright():
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-
+            if filepath.name == "__init__.py" and len(content.splitlines()) <= 1:
+                continue
             if _matches_python_copyright_header(content):
                 continue
             elif "Copyright (c)" in content[:500]:
