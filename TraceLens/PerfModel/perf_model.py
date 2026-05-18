@@ -5797,3 +5797,101 @@ class primus_turbo_quantize_mxfp4_dual(UnaryElementwise):
             + write_rowwise_scale
             + write_colwise_scale
         )
+
+
+# ---------------------------------------------------------------------------
+# aiter MXFP4 GEMM ops (#644)
+# ---------------------------------------------------------------------------
+
+
+class aiter_gemm_a4w4(GEMM):
+    """
+    aiter::gemm_a4w4 — MXFP4 GEMM via the AITER native FP4 ASM backend.
+
+    9-positional-arg layout (from aiter/ops/gemm_op_a4w4.py):
+      aiter::gemm_a4w4(A, B, scaleA, scaleB, out, dtype, alpha, beta, bpreshuffle)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (B0, B1), (scA0, scA1), (scB0, scB1),
+                    (), (), (), (), ())
+      Input type:  (Float4_e2m1fn_x2, Float4_e2m1fn_x2,
+                    Float8_e8m0fnu,   Float8_e8m0fnu,
+                    '', 'Scalar', 'Scalar', 'Scalar', 'Scalar')
+      Concrete Inputs: ('', '', '', '', '', '<dtype_enum>',
+                        '<alpha>', '<beta>', '<bpreshuffle>')
+
+    Differences vs `hipblaslt_gemm_fp4`:
+      - Slot ordering: (A, B, scaleA, scaleB) at slots (0, 1, 2, 3) instead of
+        the hipBLASLt layout (A, scaleA, B, scaleB) at slots (0, 1, 2, 3).
+      - Trailing scalars are (dtype, alpha, beta, bpreshuffle) instead of
+        (transA, transB, transC, granularity); transA/transB/transC are not
+        in the trace because the aiter binding only supports the NT layout
+        (transA=False, transB=True) and BF16 output.
+      - `bpreshuffle=True` changes the in-memory layout of A/B/scales (and
+        their padding to [16, 16] tiles) but does not change the byte count
+        touched at roofline granularity, so bytes() is reused unchanged.
+
+    The internal `aiter::_gemm_a4w4_asm` cpu_op (the leaf launching the GPU
+    kernel) uses the same first 4 slots plus an output tensor at slot 4;
+    both events share this class. See `op_to_perf_model_class_map`.
+
+    `primus_turbo::gemm_fp4_impl` (the dispatcher wrapper around either this
+    op or `hipblaslt_gemm_fp4`) is intentionally NOT registered: it is a
+    pass-through that never launches a kernel of its own, so the tree-perf
+    leaf-walker attributes all GPU time to the inner cpu_op (this class or
+    `hipblaslt_gemm_fp4`) and the dispatcher contributes 0 GPU time to any
+    category breakdown.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[1])
+
+        # The aiter binding only supports the NT layout; transA/transB/transC
+        # are not in the trace. Hard-code NT and skip the transC swap that
+        # hipblaslt_gemm_fp4 inherits.
+        trans_a = False
+        trans_b = True
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K_packed = A_shape[0] if trans_a else A_shape[1]
+        K = K_packed * 2  # FP4 packing: 2 logical elements per byte
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        dtype_A_B = (input_types[0], input_types[1])
+        dtype_scaleA = input_types[2] if len(input_types) > 2 else None
+        dtype_scaleB = input_types[3] if len(input_types) > 3 else None
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+            "dtype_scaleA": dtype_scaleA,
+            "dtype_scaleB": dtype_scaleB,
+        }
+
+    # MXFP4 block size (32-element granularity) is intrinsic to the FP4 GEMM
+    # bytes formula and is reused from hipblaslt_gemm_fp4.
+    MXFP4_BLOCK_SIZE = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
+
+    def bytes(self):
+        # Same workload, same byte count — aiter's bpreshuffle layout changes
+        # the in-memory arrangement of A/B/scales but not the bytes touched.
+        # Delegate to hipblaslt_gemm_fp4.bytes which only reads M/N/K and
+        # param_details (dtype_A_B, dtype_scaleA, dtype_scaleB), all of which
+        # this class populates identically.
+        return hipblaslt_gemm_fp4.bytes(self)

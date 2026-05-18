@@ -5,12 +5,14 @@
 ###############################################################################
 
 """
-Tests for primus_turbo MXFP4 ops (#637):
+Tests for primus_turbo and aiter MXFP4 ops (#637, #644):
   - primus_turbo_cpp_extension::hipblaslt_gemm_fp4 -> GEMM
   - primus_turbo_cpp_extension::quantize_mxfp4_dual -> UnaryElementwise
+  - aiter::gemm_a4w4 / aiter::_gemm_a4w4_asm -> GEMM (AITER FP4 backend)
 """
 
 from TraceLens.PerfModel.perf_model import (
+    aiter_gemm_a4w4,
     hipblaslt_gemm_fp4,
     primus_turbo_quantize_mxfp4_dual,
     GEMM,
@@ -383,3 +385,219 @@ def test_quantize_mxfp4_dual_flops():
     M, N = 16384, 12288
     model = primus_turbo_quantize_mxfp4_dual(_mxfp4_quantize_event(M=M, N=N))
     assert model.flops() == M * N
+
+
+# ===========================================================================
+# aiter::gemm_a4w4 (AITER MXFP4 backend — issue #644)
+# ===========================================================================
+
+
+def _aiter_gemm_a4w4_event(
+    A_shape,
+    B_shape,
+    scaleA_shape=(),
+    scaleB_shape=(),
+    bpreshuffle=True,
+    name="aiter::gemm_a4w4",
+):
+    """Build an aiter::gemm_a4w4 event. The aiter binding only supports NT
+    (transA=False, transB=True); A has shape (M, K_packed), B has shape
+    (N, K_packed). Slot ordering differs from hipblaslt_gemm_fp4:
+    (A, B, scaleA, scaleB) instead of (A, scaleA, B, scaleB)."""
+    return {
+        "name": name,
+        "args": {
+            "Input Dims": [
+                A_shape,
+                B_shape,
+                scaleA_shape,
+                scaleB_shape,
+                (),
+                (),
+                (),
+                (),
+                (),
+            ],
+            "Input type": [
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float8_e8m0fnu",
+                "c10::Float8_e8m0fnu",
+                "",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+            ],
+            "Concrete Inputs": [
+                "",
+                "",
+                "",
+                "",
+                "",
+                "15",  # dtype enum (BF16)
+                "1.",  # alpha
+                "0.",  # beta
+                "True" if bpreshuffle else "False",
+            ],
+        },
+    }
+
+
+def _aiter_gemm_a4w4_asm_event(
+    A_shape,
+    B_shape,
+    scaleA_shape=(),
+    scaleB_shape=(),
+):
+    """Build an aiter::_gemm_a4w4_asm event. 11 slots: same first 4 tensors
+    as the public entry, plus an output tensor at slot 4 (BF16), plus 6
+    trailing scalars."""
+    M = A_shape[0]
+    N = B_shape[0]
+    return {
+        "name": "aiter::_gemm_a4w4_asm",
+        "args": {
+            "Input Dims": [
+                A_shape,
+                B_shape,
+                scaleA_shape,
+                scaleB_shape,
+                (M, N),
+                (),
+                (),
+                (),
+                (),
+                (),
+                (),
+            ],
+            "Input type": [
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float8_e8m0fnu",
+                "c10::Float8_e8m0fnu",
+                "c10::BFloat16",
+                "",
+                "",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+            ],
+            "Concrete Inputs": [
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "1.",
+                "0.",
+                "1",
+                "0",
+            ],
+        },
+    }
+
+
+def test_aiter_gemm_a4w4_mapping():
+    for op in ["aiter::gemm_a4w4", "aiter::_gemm_a4w4_asm"]:
+        assert op in op_to_perf_model_class_map, op
+        assert op_to_perf_model_class_map[op] is aiter_gemm_a4w4, op
+
+
+def test_aiter_gemm_a4w4_categorizes_as_gemm():
+    for op in ["aiter::gemm_a4w4", "aiter::_gemm_a4w4_asm"]:
+        row = {"name": op, "kernel_details": []}
+        assert categorize_torch_op(row) == "GEMM", op
+
+
+def test_aiter_gemm_a4w4_inherits_gemm_directly():
+    """Inherits directly from GEMM (per the op-registry's single-base
+    convention). The bytes() implementation is shared with hipblaslt_gemm_fp4
+    via delegation — see test_aiter_gemm_a4w4_bytes_match_hipblaslt_fp4."""
+    assert aiter_gemm_a4w4.__bases__ == (GEMM,)
+
+
+def test_aiter_gemm_a4w4_flops_double_stream_mlp_up_proj():
+    """Same Flux 12B shape as the hipBLASLt sibling test, dispatched via aiter:
+    A=(16384, 1536) x B=(12288, 1536), K_packed=1536 -> K=3072."""
+    M, K, N = 16384, 3072, 12288
+    K_packed = K // 2
+    model = aiter_gemm_a4w4(
+        _aiter_gemm_a4w4_event(
+            (M, K_packed),
+            (N, K_packed),
+            scaleA_shape=(M, K // 32),
+            scaleB_shape=(N, K // 32),
+        )
+    )
+    assert (model.M, model.N, model.K) == (M, N, K)
+    assert model.flops() == 2 * M * N * K
+
+
+def test_aiter_gemm_a4w4_bytes_match_hipblaslt_fp4():
+    """The two FP4 GEMM paths touch the same bytes (different memory layout,
+    same byte count). The shared `bytes()` implementation must produce the
+    same result for matching M, N, K and scale shapes."""
+    M, K, N = 16384, 3072, 12288
+    K_packed = K // 2
+    aiter_model = aiter_gemm_a4w4(
+        _aiter_gemm_a4w4_event(
+            (M, K_packed),
+            (N, K_packed),
+            scaleA_shape=(M, K // 32),
+            scaleB_shape=(N, K // 32),
+        )
+    )
+    hipblaslt_model = hipblaslt_gemm_fp4(
+        _fp4_gemm_event(
+            (M, K_packed),
+            (N, K_packed),
+            trans_b=True,
+            scaleA_shape=(M, K // 32),
+            scaleB_shape=(N, K // 32),
+        )
+    )
+    assert aiter_model.bytes() == hipblaslt_model.bytes()
+
+
+def test_aiter_gemm_a4w4_asm_event_uses_same_class():
+    """The inner asm dispatch event (the leaf that launches the kernel) has
+    11 slots — same first 4 tensors plus an output, then 6 scalars — and
+    must yield the same M/N/K as the public entry."""
+    M, K, N = 16384, 3072, 9216
+    K_packed = K // 2
+    model = aiter_gemm_a4w4(
+        _aiter_gemm_a4w4_asm_event(
+            (M, K_packed),
+            (N, K_packed),
+            scaleA_shape=(M, K // 32),
+            scaleB_shape=(N, K // 32),
+        )
+    )
+    assert (model.M, model.N, model.K) == (M, N, K)
+    assert model.flops() == 2 * M * N * K
+
+
+def test_aiter_gemm_a4w4_k_unpacked_factor_of_2():
+    """FP4 packing means K_logical = 2 * K_traced for the aiter path too."""
+    M, K_packed, N = 16384, 1536, 9216
+    model = aiter_gemm_a4w4(_aiter_gemm_a4w4_event((M, K_packed), (N, K_packed)))
+    assert model.K == K_packed * 2
+
+
+def test_aiter_gemm_a4w4_nt_layout_assumption():
+    """The aiter binding only supports NT. The model should derive M from
+    A_shape[0] and N from B_shape[0] (transB=True), regardless of the
+    bpreshuffle flag value — bpreshuffle is a layout knob, not a shape knob."""
+    M, K, N = 32768, 3072, 12288
+    K_packed = K // 2
+    for bpreshuffle in (True, False):
+        model = aiter_gemm_a4w4(
+            _aiter_gemm_a4w4_event(
+                (M, K_packed), (N, K_packed), bpreshuffle=bpreshuffle
+            )
+        )
+        assert (model.M, model.N, model.K) == (M, N, K)

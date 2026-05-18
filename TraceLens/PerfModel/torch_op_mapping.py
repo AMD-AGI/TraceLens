@@ -81,6 +81,14 @@ op_to_perf_model_class_map = {
     "primus_turbo_cpp_extension::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
     "primus_turbo::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
     "primus::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
+    # AITER MXFP4 native FP4 ASM GEMM (issue #644).
+    # Both the public entry (aiter::gemm_a4w4) and the inner asm dispatch
+    # (aiter::_gemm_a4w4_asm) are registered. The asm op is the leaf that
+    # actually launches the kernel and gets the GPU time attribution; the
+    # public entry is registered too so it is still classified as GEMM in
+    # any report that iterates op names directly.
+    "aiter::gemm_a4w4": perf_model.aiter_gemm_a4w4,
+    "aiter::_gemm_a4w4_asm": perf_model.aiter_gemm_a4w4,
 }
 
 # Add pseudo-op extension mappings
