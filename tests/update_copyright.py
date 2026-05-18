@@ -67,7 +67,15 @@ def git_years(path: Path) -> Optional[FileYears]:
             return None
 
         result = subprocess.run(
-            ["git", "log", "--follow", "--format=%ad", "--date=format:%Y", "--", str(path)],
+            [
+                "git",
+                "log",
+                "--follow",
+                "--format=%ad",
+                "--date=format:%Y",
+                "--",
+                str(path),
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -110,6 +118,7 @@ def build_header(years: FileYears, ext: str) -> str:
 # Detection / replacement helpers
 # --------------------------------------------------------------------------- #
 
+
 def _find_existing_amd_copyright(lines: list[str]) -> Optional[tuple[int, int]]:
     """Return (start_line, end_line) of the existing AMD copyright block, or None.
 
@@ -118,7 +127,9 @@ def _find_existing_amd_copyright(lines: list[str]) -> Optional[tuple[int, int]]:
     """
     window = lines[:30]
     for i, line in enumerate(window):
-        if not (_AMD_COPYRIGHT_RE.search(line) or _AMD_COPYRIGHT_SINGLE_RE.search(line)):
+        if not (
+            _AMD_COPYRIGHT_RE.search(line) or _AMD_COPYRIGHT_SINGLE_RE.search(line)
+        ):
             continue
 
         stripped = line.strip()
@@ -218,20 +229,30 @@ def process_file(path: Path, apply: bool) -> Optional[str]:
         action = "UPDATE"
         new_lines = lines[:start] + header_lines + lines[end + 1 :]
         # Extract old year range from the existing block for a concise description
-        m = _AMD_COPYRIGHT_RE.search(old_block) or _AMD_COPYRIGHT_SINGLE_RE.search(old_block)
+        m = _AMD_COPYRIGHT_RE.search(old_block) or _AMD_COPYRIGHT_SINGLE_RE.search(
+            old_block
+        )
         if m and len(m.groups()) == 2:
             old_years = f"{m.group(1)}-{m.group(2)}"
         elif m:
             old_years = m.group(1)
         else:
             old_years = "?"
-        new_years = str(years.modified) if years.created == years.modified else f"{years.created}-{years.modified}"
+        new_years = (
+            str(years.modified)
+            if years.created == years.modified
+            else f"{years.created}-{years.modified}"
+        )
         change_desc = f"{action}: {path}  ({old_years} → {new_years})"
     else:
         action = "ADD"
         insert_at = _skip_shebang_and_encoding(lines)
         new_lines = lines[:insert_at] + header_lines + lines[insert_at:]
-        new_years = str(years.modified) if years.created == years.modified else f"{years.created}-{years.modified}"
+        new_years = (
+            str(years.modified)
+            if years.created == years.modified
+            else f"{years.created}-{years.modified}"
+        )
         change_desc = f"{action}: {path}  ({new_years})"
 
     new_text = "".join(new_lines)
@@ -272,7 +293,10 @@ def collect_files(targets: list[str]) -> list[Path]:
             for candidate in p.rglob("*"):
                 if not candidate.is_file():
                     continue
-                if candidate.name not in _SKIP_FILES and candidate.suffix.lower() in COMMENT_STYLES:
+                if (
+                    candidate.name not in _SKIP_FILES
+                    and candidate.suffix.lower() in COMMENT_STYLES
+                ):
                     if not any(part in _SKIP_DIRS for part in candidate.parts):
                         result.append(candidate)
         else:
