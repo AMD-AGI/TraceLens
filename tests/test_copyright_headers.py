@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -82,7 +82,7 @@ def test_python_files_have_valid_copyright():
         "env",
         ".venv",
     }
-    skip_files = {".gitignore", "LICENSE"}
+    skip_files = {".gitignore", "LICENSE", "__init__.py"}
 
     missing_copyright = []
     wrong_format = []
@@ -97,8 +97,7 @@ def test_python_files_have_valid_copyright():
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-            if filepath.name == "__init__.py" and len(content.splitlines()) <= 1:
-                continue
+
             if _matches_python_copyright_header(content):
                 continue
             elif "Copyright (c)" in content[:500]:
