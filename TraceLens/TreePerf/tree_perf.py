@@ -1019,6 +1019,85 @@ class TreePerfAnalyzer:
         if event["overlapping_kernel_names"] == []:
             event["overlapping_kernel_names"] = None
 
+    @staticmethod
+    def _short_gpu_kernel_symbol_for_summary(raw: str) -> str:
+        """Strip return type, template args, and parameters from a GPU symbol string.
+
+        Used for ops_summary row names when the launcher is a bare runtime API so
+        rows group by a readable kernel identifier (e.g. ``NS::foo_kernel``) rather
+        than a full demangled signature.
+        """
+        if not raw or not isinstance(raw, str):
+            return raw
+        original = raw.strip()
+        s = original
+        for prefix in (
+            "void ",
+            "__global__ ",
+            "static ",
+            "inline ",
+            'extern "C" ',
+        ):
+            while s.startswith(prefix):
+                s = s[len(prefix) :].lstrip()
+        # Drop trailing ( ... ) then trailing < ... > repeatedly (handles tmpl<tmpl<>>)
+        changed = True
+        while changed:
+            changed = False
+            s = s.rstrip()
+            if s.endswith(")"):
+                depth = 0
+                for i in range(len(s) - 1, -1, -1):
+                    c = s[i]
+                    if c == ")":
+                        depth += 1
+                    elif c == "(":
+                        depth -= 1
+                        if depth == 0:
+                            s = s[:i].rstrip()
+                            changed = True
+                            break
+            if changed:
+                continue
+            s = s.rstrip()
+            if s.endswith(">"):
+                angle = 0
+                for i in range(len(s) - 1, -1, -1):
+                    c = s[i]
+                    if c == ">":
+                        angle += 1
+                    elif c == "<":
+                        angle -= 1
+                        if angle == 0:
+                            s = s[:i].rstrip()
+                            changed = True
+                            break
+        out = s.strip()
+        return out if out else original
+
+    @staticmethod
+    def _kernel_launcher_ops_summary_name(event: dict) -> str:
+        """Row ``name`` for ops_summary when the launcher is a GPU API stub.
+
+        Orphan launches use the runtime row (e.g. ``hipLaunchKernel``) as the launcher.
+        Summaries group by ``name``, so we substitute the actual GPU kernel name(s)
+        from ``kernel_details`` (same information unified perf uses via synthetic ops).
+        """
+        if event.get("cat") not in {"cuda_runtime", "cuda_driver"}:
+            return event["name"]
+        kd = event.get("kernel_details") or []
+        names = [
+            TreePerfAnalyzer._short_gpu_kernel_symbol_for_summary(k.get("name", ""))
+            for k in kd
+            if k.get("name")
+        ]
+        names = [n for n in names if n]
+        if not names:
+            return event["name"]
+        if len(names) == 1:
+            return names[0]
+        return ", ".join(names)
+
     def get_df_kernel_launchers(
         self,
         id_cols=False,
@@ -1035,7 +1114,7 @@ class TreePerfAnalyzer:
         rows = []
         for event in kernel_launchers:
             metrics_event = {
-                "name": event["name"],
+                "name": self._kernel_launcher_ops_summary_name(event),
                 "op category": event["op category"],
                 "UID": event["UID"],
                 "total_direct_kernel_time": event["total_direct_kernel_time"],

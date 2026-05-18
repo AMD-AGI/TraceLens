@@ -394,6 +394,153 @@ class TestUnlinkedRuntimeEvents:
         assert "aten::relu" in launcher_names
         assert "hipLaunchKernel" in launcher_names
 
+        # ops_summary groups get_df_kernel_launchers() by name — unlinked rows must
+        # use GPU kernel names, not the runtime API name (GitHub #641).
+        df_launchers = analyzer.get_df_kernel_launchers()
+        row_names = set(df_launchers["name"].tolist())
+        assert "aten::relu" in row_names
+        assert "unlinked_kernel" in row_names
+        assert "hipLaunchKernel" not in row_names
+
+    def test_df_kernel_launchers_orphan_runtime_row_name_is_kernel(self):
+        """Unlinked hipLaunchKernel launcher should expose the kernel name in the DF."""
+        corr = 450
+        events = [
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=1000,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr},
+            ),
+            _mk_event(
+                "kernel",
+                "my_custom_hip_kernel",
+                ts=1050,
+                dur=25,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="s"),
+            _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="f"),
+        ]
+        tree = TraceToTree(deepcopy(events))
+        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
+        df = analyzer.get_df_kernel_launchers()
+        assert len(df) == 1
+        assert df.iloc[0]["name"] == "my_custom_hip_kernel"
+
+    def test_ops_summary_two_orphans_not_merged(self):
+        """Distinct custom kernels must appear as separate ops_summary rows."""
+        events = [
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=1000,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": 901},
+            ),
+            _mk_event(
+                "kernel",
+                "kernel_alpha",
+                ts=1050,
+                dur=10,
+                pid=0,
+                tid=7,
+                args={"correlation": 901, "stream": 7},
+            ),
+            _mk_ac2g(901, pid=0, tid=7, ts=1050, phase="s"),
+            _mk_ac2g(901, pid=0, tid=7, ts=1050, phase="f"),
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=2000,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": 902},
+            ),
+            _mk_event(
+                "kernel",
+                "kernel_beta",
+                ts=2050,
+                dur=20,
+                pid=0,
+                tid=7,
+                args={"correlation": 902, "stream": 7},
+            ),
+            _mk_ac2g(902, pid=0, tid=7, ts=2050, phase="s"),
+            _mk_ac2g(902, pid=0, tid=7, ts=2050, phase="f"),
+        ]
+        tree = TraceToTree(deepcopy(events))
+        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
+        df_launchers = analyzer.get_df_kernel_launchers()
+        df_summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(df_launchers)
+        assert set(df_summary["name"]) == {"kernel_alpha", "kernel_beta"}
+        assert len(df_summary) == 2
+
+
+class TestShortGpuKernelSymbolForSummary:
+    """Demangled GPU symbols shortened for ops_summary orphan-runtime rows."""
+
+    def test_strips_void_template_and_parameters(self):
+        raw = (
+            "void TWELL_GATED_T2D::mm_t2d_kernel<256, 32, 22, 2048>("
+            "__hip_bfloat16 const*, unsigned int const*, "
+            "__hip_bfloat16 const*, __hip_bfloat16 const*, __hip_bfloat16*)"
+        )
+        assert (
+            TreePerfAnalyzer._short_gpu_kernel_symbol_for_summary(raw)
+            == "TWELL_GATED_T2D::mm_t2d_kernel"
+        )
+
+    def test_plain_name_unchanged(self):
+        assert (
+            TreePerfAnalyzer._short_gpu_kernel_symbol_for_summary(
+                "my_custom_hip_kernel"
+            )
+            == "my_custom_hip_kernel"
+        )
+
+    def test_df_kernel_launchers_applies_short_symbol(self):
+        corr = 460
+        long_kernel = (
+            "void TWELL_GATED_T2D::mm_t2d_kernel<256, 32, 22, 2048>("
+            "__hip_bfloat16 const*, unsigned int const*)"
+        )
+        events = [
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=1000,
+                dur=5,
+                pid=100,
+                tid=100,
+                args={"correlation": corr},
+            ),
+            _mk_event(
+                "kernel",
+                long_kernel,
+                ts=1050,
+                dur=25,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="s"),
+            _mk_ac2g(corr, pid=0, tid=7, ts=1050, phase="f"),
+        ]
+        tree = TraceToTree(deepcopy(events))
+        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
+        df = analyzer.get_df_kernel_launchers()
+        assert len(df) == 1
+        assert df.iloc[0]["name"] == "TWELL_GATED_T2D::mm_t2d_kernel"
+
 
 class TestNCCLKernelHandling:
     """Test NCCL kernel inclusion/exclusion."""
