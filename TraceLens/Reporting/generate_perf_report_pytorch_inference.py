@@ -1239,11 +1239,12 @@ def main():
         default=None,
         help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
     )
+
     parser.add_argument(
         "--extension_args",
         type=str,
         default=None,
-        help="Optional args for postprocess_perf_report_dataframes_extension (e.g. path to second trace for TraceDiff).",
+        help="Optional args for postprocess_perf_report_dataframes_extension.",
     )
 
     parser.add_argument(

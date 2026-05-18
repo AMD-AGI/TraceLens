@@ -937,18 +937,12 @@ def main():
         dest="extension_file",
         help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
     )
+
     parser.add_argument(
         "--extension_args",
-        "--extension-args",
         type=str,
         default=None,
-        metavar="VALUE",
-        dest="extension_args",
-        help=(
-            "Argument for extensions that implement postprocess_perf_report_dataframes_extension "
-            "(e.g. absolute path to a second profile JSON for TraceDiff comparison extensions). "
-            "Passed after expanduser; file paths are resolved to absolute paths."
-        ),
+        help="Optional args for postprocess_perf_report_dataframes_extension.",
     )
 
     parser.add_argument(
