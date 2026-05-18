@@ -87,3 +87,5 @@ Include scoring breakdown in the `details` column:
 `correctness=N/10 completeness=N/10 overall=N.N | <explanation>`
 
 Set `root_cause` to `template` and `recommended_fix` to a specific fix suggestion if the result is FAIL. Leave both empty if PASS.
+
+**Replace all commas in the `details` and `recommended_fix` text with semicolons** to avoid breaking CSV parsing.

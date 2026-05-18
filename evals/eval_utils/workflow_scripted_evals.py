@@ -452,7 +452,7 @@ _REPORT_HEADERS = {
 
 def _check_report_template(output_dir, comparison_scope="standalone"):
     """Eval 9 — per-header check for required section headers + table presence."""
-    content = _read_report(output_dir, comparison_scope)
+    content = _read_report(output_dir)
     rows = []
     for key, header_text in _REPORT_HEADERS.items():
         found = bool(re.search(rf"^## {re.escape(header_text)}", content, re.MULTILINE))
@@ -503,7 +503,7 @@ _EXEC_SUMMARY_CHECKS_COMPARATIVE = [
 
 def _check_exec_summary(output_dir, comparison_scope="standalone"):
     """Eval 10 — per-row check for exec summary metrics + CSV cross-validation."""
-    content = _read_report(output_dir, comparison_scope)
+    content = _read_report(output_dir)
     exec_section = _extract_section(content, "## Executive Summary")
     if not exec_section:
         return [
@@ -673,7 +673,7 @@ def _check_exec_summary_comparative(output_dir, exec_section):
 
 def _check_issue_template(output_dir, comparison_scope="standalone"):
     """Eval 11 — per-P-item check for correct bold fields in each priority item."""
-    content = _read_report(output_dir, comparison_scope)
+    content = _read_report(output_dir)
     compute_section = _extract_section(content, "## Compute Kernel Optimizations")
     system_section = _extract_section(content, "## System-Level Optimizations")
 
@@ -824,7 +824,6 @@ _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
     _check_issue_template,
-    _check_model_id,
 ]
 
 _GATE_FAIL_NEW_EVALS = [
@@ -838,7 +837,7 @@ _GATE_FAIL_NEW_EVALS = [
 def run(output_dir: str, results_path: str, comparison_scope: str = "standalone") -> list[dict]:
     rows = []
 
-    gate_fail = _pre_check_gates(output_dir, comparison_scope)
+    gate_fail = _pre_check_gates(output_dir)
     if gate_fail is not None:
         for i, (summary, _func, rc, fix, _mode_aware) in enumerate(EVAL_REGISTRY, start=1):
             rows.append(
@@ -886,6 +885,7 @@ def run(output_dir: str, results_path: str, comparison_scope: str = "standalone"
 
     for check_fn in _MULTI_EVAL_CHECKS:
         rows.extend(check_fn(output_dir, comparison_scope))
+    rows.extend(_check_model_id(output_dir))
 
     with open(results_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
