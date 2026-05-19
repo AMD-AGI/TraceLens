@@ -60,15 +60,21 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 
 ### To run via Cursor chat:
 
-1. **In a Cursor chat with Claude Opus 4.7 High, invoke:**
-   ```
-   "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
-   ```
+1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
+   - Standalone (single trace):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on on <path_to_trace.json>"
+    ```
+   - Comparative (two traces):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>"
+    ```
+    **NOTE**: Always pass **baseline** trace as trace1
 
 
 2. **Provide if prompted:**
    - Trace file path
-   - Platform
+   - Platform (of first trace)
    - Analysis mode: default (training and non-vLLM/SGLang eager inference) vs inference (vLLM/SGLang)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name
@@ -94,7 +100,7 @@ curl https://cursor.com/install -fsS | bash
 This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step. 
 
 
-**Cluster + container — default (training and non-vLLM/SGLang eager inference):**
+**Cluster + container — default (training and non-vLLM/SGLang eager inference), assuming standalone:**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
@@ -123,6 +129,8 @@ All parameters are passed inline so no interactive prompts are needed. This is u
 
 > **Only `analysis.md` is intended for end-user review.** Everything else under `analysis_output/` are agent internals: intermediates the orchestrator and sub-agents pass between steps.
 
+**Standalone** layout:
+
 ```
 analysis_output/
 ├── analysis.md                     # Stakeholder report (only user-facing output)
@@ -145,6 +153,32 @@ analysis_output/
 └── metadata/                       # Category metadata + model_info.json (Internal)
     ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
     └── model_info.json                 # Model identification (model, architecture, scale, precision)
+```
+
+**Comparative** layout:
+
+```
+analysis_output/
+├── analysis.md
+├── perf_report_trace1.xlsx         # Excel performance report for primary trace
+├── perf_report_trace1_csvs/        # Trace 1 CSV exports
+├── perf_report_trace2.xlsx         # Excel performance report for comparison trace
+├── perf_report_trace2_csvs/        # Trace 2 CSV exports
+├── category_data/
+│   ├── category_manifest.json      
+│   ├── multi_kernel_data.json
+│   ├── fusion_candidates.json
+│   ├── kernel_fusion_metrics.json
+│   ├── *_ops.csv
+│   ├── *_metrics.json
+│   └── *_tree_data.json
+├── system_findings/
+│   ├── *_findings.md
+│   └── kernel_fusion_findings.md
+├── category_findings/
+│   └── *_findings.md
+└── metadata/
+    └── *_metadata.json
 ```
 
 ---
@@ -195,8 +229,8 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ### Workflow Steps
 
 ```
-0.   Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
-1.   Generate Performance Report (branches on analysis mode: training vs inference)
+0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
+1.   Generate Performance Report (branches on analysis mode and comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
 5.5. Model Identification (subagent) → metadata/model_info.json
 6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/

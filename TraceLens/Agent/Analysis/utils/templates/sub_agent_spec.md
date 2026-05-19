@@ -11,7 +11,8 @@ files. The orchestrator extracts these sections when composing the final
 `analysis.md` report.
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
-> schema. Replace `<category>` with the actual category name
+> schema. Replace `<category>` with the actual category name.
+> This spec receives `comparison_scope`: `standalone` (default) or `comparative`.
 ---
 
 ## Orchestrator-consumed sections
@@ -22,6 +23,17 @@ Every findings file must end with these two sections, in this order:
 2. `## Detailed Analysis`
 
 Applies to both tiers (compute → `category_findings/`, system → `system_findings/`). Agents may include any other sections (Overview, Operations Breakdown, Key Bottlenecks, …) before them — those are agent-internal and not parsed by the orchestrator.
+
+---
+
+## No actionable findings
+
+**Compute tier:** There is no actionable bottleneck when the analyzer left
+`category_data/<category>_metrics.json::category_findings` as an **empty array**
+`[]`. In that case emit **empty** `## Recommendations` and **empty**
+`## Detailed Analysis` exactly as in § Empty category_findings.
+
+**System tier:** Follow the structured output your analyzer JSON supports.
 
 ---
 
@@ -82,8 +94,8 @@ blank line between them. The validator checks for these as substring matches.
 | Label | Purpose |
 |-------|---------|
 | `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
-| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
+| `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. include metric table (see § Metric Table Schema). |
+| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower", plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Compute tier: rendered from `category_findings[i]` (matched by `rank`), two-bullet low/high `impact_score` format (see § Impact estimate rendering). System tier: `Impact estimate is not quantifiable from trace data.` |
 
@@ -140,6 +152,8 @@ The universal rows above always apply on top of those.
 Standard column schema for operations breakdown tables and the `**Data:**` table
 inside `## Detailed Analysis` blocks.
 
+### Standalone (`comparison_scope` = `standalone`)
+
 ```markdown
 | Operation |  Args  |            Kernel Path                  | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
 |-----------|--------|-----------------------------------------|-----------|------|-------|----------|------------|-------|
@@ -159,6 +173,41 @@ inside `## Detailed Analysis` blocks.
   - `compute-bound`: `X.XX% of Y TFLOPS` (Y = `resolved_peak_maf`)
   - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_hbm_bw`)
 - **Bound**: `operations[i].efficiency.bound_type` + `-bound` suffix (e.g., `memory-bound`). Must reflect compute/memory bound type — never use `classification.gemm_type` or similar.
+
+### Comparative (`comparison_scope` = `comparative`)
+
+```markdown
+| Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+```
+
+**Column mappings** (T1 source: `metrics['operations']`; T2 source: `category_data/<category>_ops.csv`):
+- **Operation**: `operations[i].name`. Bare op name only.
+- **Args (T1)**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim. `—` when absent.
+- **Trace 1 Time (ms)**: `operations[i].time_ms`
+- **Trace 2 Time (ms)**: `lca_total_kernel_time_trace2_us / 1000` from the CSV row
+- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `lca_count_trace2` from the CSV row. Format `T1 / T2` (use `—` for missing T2).
+- **Difference (ms)**: `delta_us (trace2 - trace1) / 1000` from the CSV row
+- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
+- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
+
+Agents may add extra columns when needed (e.g. `Sub-Category` in the generic-op analyzer).
+
+---
+
+## Metric Table Schema (system tier)
+
+Standard schema for the `**Data:**` table inside system-tier `## Detailed Analysis` blocks. In comparative mode, report Trace 1 metrics only — do not add Trace 2 columns or comparisons.
+
+```markdown
+| Metric | Value | Flagged |
+|--------|-------|---------|
+```
+
+**Column rules:**
+- **Metric**: Copy metric label directly from earlier findings sections — do not rename or reformat.
+- **Value**: `X.X ms` or `X.X%` or `X.X ms (X.X%)`
+- **Flagged**: `false` when the metric's threshold is exceeded; `true` otherwise.
 
 ---
 
@@ -209,6 +258,7 @@ Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 <!-- impact-end -->
 ```
 
+**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
 
 ## Impact markers (REQUIRED)
 
@@ -263,11 +313,12 @@ if not passed:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/<subdir>/<category>_findings.md' '<tier>'
+" '<output_dir>/<subdir>/<category>_findings.md' '<tier>' '<comparison_scope>'
 ```
 
-Where `<tier>` is `compute` or `system` and `<subdir>` is `category_findings`
-or `system_findings` respectively.
+Where `<tier>` is `compute` or `system`, `<subdir>` is `category_findings`
+or `system_findings` respectively, and `<comparison_scope>` is `standalone` or
+`comparative`.
 
 **If validation fails (exit code 1):**
 

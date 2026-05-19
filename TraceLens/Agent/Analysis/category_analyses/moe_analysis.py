@@ -22,13 +22,14 @@ from analysis_utils import (
 )
 
 
-def _check_moe_data(output_dir, category):
+def _check_moe_data(output_dir, category, comparison_scope):
     """Return NO_DATA metrics if MoE CSV is absent (expected for non-MoE traces)."""
     moe_csv = f"{output_dir}/category_data/{category}_ops.csv"
     if not os.path.exists(moe_csv):
         return {
             "category": category,
             "status": "NO_DATA",
+            "comparison_scope": comparison_scope,
             "message": f"No MoE operations detected in this trace ({category} bucket)",
             "total_time_ms": 0,
             "percent_of_compute": 0,
@@ -50,6 +51,12 @@ def main():
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
+        "--comparison_scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help="standalone vs comparative (TraceDiff columns on Trace 1 CSVs).",
+    )
+    parser.add_argument(
         "--category",
         default="moe_fused",
         choices=("moe_fused", "moe_unfused"),
@@ -63,6 +70,7 @@ def main():
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,
         no_data_check_fn=_check_moe_data,
+        comparison_scope=args.comparison_scope,
     )
 
 

@@ -26,6 +26,7 @@ from analysis_utils import (
     build_operation_metrics,
     build_category_findings,
     compute_impact_estimates,
+    perf_report_csv_dir,
     write_metrics_json,
 )
 
@@ -89,6 +90,16 @@ def main():
     parser.add_argument(
         "--category", default="other", help="Category to analyze (default: other)"
     )
+
+    parser.add_argument(
+        "--comparison_scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: roofline efficiency in operations[].efficiency; "
+            "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
+        ),
+    )
     args = parser.parse_args()
 
     category = args.category
@@ -130,28 +141,35 @@ def main():
     }
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-
+    
     callstacks_df = None
     cs_path = os.path.join(
-        args.output_dir, "perf_report_csvs", "unified_perf_callstacks.csv"
+        perf_report_csv_dir(args.output_dir), "unified_perf_callstacks.csv"
     )
     if os.path.exists(cs_path):
         callstacks_df = pd.read_csv(cs_path)
 
     operations = build_operation_metrics(
-        ops_df, metadata, config, callstacks_df=callstacks_df
+        ops_df,
+        metadata,
+        config,
+        callstacks_df=callstacks_df,
+        comparison_scope=args.comparison_scope,
     )
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
 
     baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
     impact_estimates = compute_impact_estimates(
-        operations, category, baseline_ms=baseline_ms
+        operations,
+        category,
+        baseline_ms=baseline_ms,
     )
     category_findings = build_category_findings(impact_estimates)
 
     metrics = {
         "category": category,
         "status": "OK",
+        "comparison_scope": args.comparison_scope,
         **time_metrics,
         "operations": operations,
         "category_specific": category_specific,
