@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,10 +14,49 @@ and test_detect_recompute.
 import ast
 import os
 import re
+import shutil
 
 import numpy as np
 import pandas as pd
+import pytest
 from pandas.api.types import is_float_dtype
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--update-references",
+        action="store_true",
+        default=False,
+        help="Update reference CSV directories with freshly generated outputs "
+        "instead of comparing against them.",
+    )
+
+
+@pytest.fixture
+def update_references(request):
+    """Return True when reference traces should be overwritten with new outputs.
+
+    Enabled by the ``--update-references`` CLI flag.
+
+    .. note::
+        When you use this flag to regenerate reference reports as
+        part of a PR, explicitly note in the PR description which
+        references were updated and why. Do not use this flag to paper over
+        unexpected differences. Investigate any unexpected diffs first and
+        only update references when the new output is correct.
+    """
+    return request.config.getoption("--update-references", default=False)
+
+
+def update_reference_csvs(generated_dir, reference_dir):
+    """Replace *reference_dir* contents with the CSVs from *generated_dir*.
+
+    The reference directory is removed and recreated so that stale sheets
+    that no longer exist in the generated output are cleaned up.
+    """
+    if os.path.isdir(reference_dir):
+        shutil.rmtree(reference_dir)
+    shutil.copytree(generated_dir, reference_dir)
 
 
 def perf_report_csv_dirname(trace_base: str) -> str:

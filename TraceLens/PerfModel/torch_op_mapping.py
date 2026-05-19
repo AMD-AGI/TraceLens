@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -70,6 +70,11 @@ op_to_perf_model_class_map = {
     "CrossEntropyFunction": perf_model.cross_entropy_fwd,
     # Mamba SSD (fused conv1d + selective scan, issue #552)
     "MambaSplitConv1dScanCombinedFn": perf_model.mamba_ssd_fwd,
+    # Primus FP8 ops (hipBLASLt GEMM + quantize, issue #626)
+    "primus_turbo_cpp_extension::hipblaslt_gemm_fp8": perf_model.hipblaslt_gemm_fp8,
+    "primus_turbo::hipblaslt_gemm_fp8": perf_model.hipblaslt_gemm_fp8,
+    "primus_turbo_cpp_extension::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
+    "primus_turbo::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
 }
 
 # Add pseudo-op extension mappings
@@ -144,6 +149,9 @@ norm_ops = {
     "aten::miopen_rms_norm_backward": perf_model.RMSNormBwd,
     "aten::cudnn_rms_norm_backward": perf_model.RMSNormBwd,
     "aten::_fused_rms_norm_backward": perf_model.RMSNormBwd,
+    # Primus fused LN+modulate for MM-DiT (issue #627)
+    "primus::fused_ln_modulate": perf_model.FusedLnModulate,
+    "primus::fused_ln_modulate_backward": perf_model.FusedLnModulateBackward,
 }
 
 

@@ -1,41 +1,80 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-import os
-from pathlib import Path
 import json
+import re
+from pathlib import Path
 
-# Exact copyright header templates
-PYTHON_HEADER = """###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
+# Copyright line must use one of these year forms (longer/more specific first).
+# Ranges may use a hyphen with zero or one space on each side (e.g. 2025-2026 or 2025 - 2026).
+_YEAR_RANGE_SEP = r" ?- ?"
+_COPYRIGHT_YEAR_RE = (
+    rf"(?:2024{_YEAR_RANGE_SEP}2025|2024{_YEAR_RANGE_SEP}2026|"
+    rf"2025{_YEAR_RANGE_SEP}2026|2024|2025|2026)"
+)
 
-"""
+_PYTHON_YAML_HEADER_RE = re.compile(
+    r"^###############################################################################\n"
+    rf"# Copyright \(c\) {_COPYRIGHT_YEAR_RE} Advanced Micro Devices, Inc\. "
+    r"All rights reserved\.\n"
+    r"#\n"
+    r"# See LICENSE for license information\.\n"
+    r"###############################################################################\n"
+    r"\n",
+    re.MULTILINE,
+)
 
-MARKDOWN_HEADER = """<!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+_MARKDOWN_HEADER_RE = re.compile(
+    r"^<!--\n"
+    rf"Copyright \(c\) {_COPYRIGHT_YEAR_RE} Advanced Micro Devices, Inc\. "
+    r"All rights reserved\.\n"
+    r"\n"
+    r"See LICENSE for license information\.\n"
+    r"-->\n",
+    re.MULTILINE,
+)
 
-See LICENSE for license information.
--->
-
-"""
-
-YAML_HEADER = """###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-"""
+_NOTEBOOK_COPYRIGHT_CELL_RE = re.compile(
+    r"^<!--\n"
+    rf"Copyright \(c\) {_COPYRIGHT_YEAR_RE} Advanced Micro Devices, Inc\. "
+    r"All rights reserved\.\n"
+    r"\n"
+    r"See LICENSE for license information\.\n"
+    r"-->\s*",
+    re.MULTILINE,
+)
 
 
-def test_python_files_have_exact_copyright():
-    """Test that all Python files have exact copyright headers."""
+def _strip_shebang(content: str) -> str:
+    if content.startswith("#!"):
+        parts = content.split("\n", 1)
+        return parts[1] if len(parts) > 1 else ""
+    return content
+
+
+def _matches_python_copyright_header(content: str) -> bool:
+    return bool(_PYTHON_YAML_HEADER_RE.match(_strip_shebang(content)))
+
+
+def _matches_markdown_copyright_header(content: str) -> bool:
+    return bool(_MARKDOWN_HEADER_RE.match(content))
+
+
+def _matches_yaml_copyright_header(content: str) -> bool:
+    return bool(_PYTHON_YAML_HEADER_RE.match(content))
+
+
+def _matches_notebook_copyright_cell(source: list) -> bool:
+    if not source:
+        return False
+    return bool(_NOTEBOOK_COPYRIGHT_CELL_RE.match("".join(source)))
+
+
+def test_python_files_have_valid_copyright():
+    """Test that all Python files have a valid AMD copyright header (allowed year forms)."""
     root_path = Path(__file__).parent.parent
     skip_dirs = {
         ".git",
@@ -64,16 +103,7 @@ def test_python_files_have_exact_copyright():
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
 
-            # Handle shebang line
-            if content.startswith("#!"):
-                lines = content.split("\n", 1)
-                if len(lines) > 1:
-                    content = lines[1]
-                else:
-                    content = ""
-
-            # Check for exact match
-            if content.startswith(PYTHON_HEADER):
+            if _matches_python_copyright_header(content):
                 continue
             elif "Copyright (c)" in content[:500]:
                 wrong_format.append(str(filepath.relative_to(root_path)))
@@ -98,8 +128,8 @@ def test_python_files_have_exact_copyright():
         assert False, "\n".join(error_msgs)
 
 
-def test_markdown_files_have_exact_copyright():
-    """Test that all Markdown files have exact copyright headers."""
+def test_markdown_files_have_valid_copyright():
+    """Test that all Markdown files have a valid AMD copyright header (allowed year forms)."""
     root_path = Path(__file__).parent.parent
     skip_dirs = {
         ".git",
@@ -127,8 +157,7 @@ def test_markdown_files_have_exact_copyright():
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
 
-            # Check for exact match
-            if content.startswith(MARKDOWN_HEADER):
+            if _matches_markdown_copyright_header(content):
                 continue
             elif "Copyright (c)" in content[:500]:
                 wrong_format.append(str(filepath.relative_to(root_path)))
@@ -155,8 +184,8 @@ def test_markdown_files_have_exact_copyright():
         assert False, "\n".join(error_msgs)
 
 
-def test_yaml_files_have_exact_copyright():
-    """Test that all YAML files have exact copyright headers."""
+def test_yaml_files_have_valid_copyright():
+    """Test that all YAML files have a valid AMD copyright header (allowed year forms)."""
     root_path = Path(__file__).parent.parent
     skip_dirs = {
         ".git",
@@ -181,8 +210,7 @@ def test_yaml_files_have_exact_copyright():
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
 
-            # Check for exact match (YAML uses # comments)
-            if content.startswith(YAML_HEADER):
+            if _matches_yaml_copyright_header(content):
                 continue
             elif "Copyright (c)" in content[:500]:
                 wrong_format.append(str(filepath.relative_to(root_path)))
@@ -209,8 +237,8 @@ def test_yaml_files_have_exact_copyright():
         assert False, "\n".join(error_msgs)
 
 
-def test_notebooks_have_exact_copyright():
-    """Test that all Jupyter notebooks have exact copyright headers."""
+def test_notebooks_have_valid_copyright():
+    """Test that all Jupyter notebooks have a valid AMD copyright header (allowed year forms)."""
     root_path = Path(__file__).parent.parent
     skip_dirs = {
         ".git",
@@ -227,14 +255,6 @@ def test_notebooks_have_exact_copyright():
     missing_copyright = []
     wrong_format = []
 
-    expected_source = [
-        "<!--\n",
-        "Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.\n",
-        "\n",
-        "See LICENSE for license information.\n",
-        "-->",
-    ]
-
     for filepath in root_path.rglob("*.ipynb"):
         if any(skip_dir in filepath.parts for skip_dir in skip_dirs):
             continue
@@ -248,7 +268,7 @@ def test_notebooks_have_exact_copyright():
                 first_cell = notebook["cells"][0]
                 if first_cell.get("cell_type") == "markdown":
                     source = first_cell.get("source", [])
-                    if source == expected_source:
+                    if _matches_notebook_copyright_cell(source):
                         continue
                     elif any("Copyright (c)" in line for line in source):
                         wrong_format.append(str(filepath.relative_to(root_path)))

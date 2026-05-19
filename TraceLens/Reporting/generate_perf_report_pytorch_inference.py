@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -24,6 +24,7 @@ import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -87,7 +88,10 @@ def perf_report_sanity_check(
             e["name"]
             for e in events
             if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"}
-            and ("nccl" not in e.get("name", "").lower() or include_nccl)
+            and (
+                not TraceEventUtils.is_communication_string(e.get("name", ""))
+                or include_nccl
+            )
         )
     )
 
@@ -531,13 +535,16 @@ def generate_perf_report_pytorch(
     enable_origami: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
+    include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-    add_python_func = True if group_by_parent_module else False
+    add_python_func = (
+        True if (group_by_parent_module or include_call_stack is True) else False
+    )
     if augmented_tree is not None:
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
@@ -888,6 +895,8 @@ def generate_perf_report_pytorch(
                 agg_metrics=agg_metrics,
                 include_pct=True,
                 group_by_num_kernels=group_by_num_kernels,
+                include_call_stack=include_call_stack,
+                tree=perf_analyzer.tree,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -895,6 +904,25 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
+                if "call_stack" in df_unified_perf_summary.columns:
+                    df_callstacks = df_unified_perf_summary[
+                        ["name", "op category", "call_stack"]
+                    ].copy()
+                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
+                    dict_name2df["unified_perf_callstacks"] = df_callstacks
+
+                    n_frames = 4  # op name + 3 parent frames
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                    df_unified_perf_summary.insert(
+                        cs_col,
+                        "trunc_call_stack",
+                        df_unified_perf_summary["call_stack"].apply(
+                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
+                        ),
+                    )
+                    df_unified_perf_summary = df_unified_perf_summary.drop(
+                        columns=["call_stack"]
+                    )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if include_overlap_info:
@@ -1225,6 +1253,12 @@ def main():
         help="Group by number of kernels in summary tables.",
     )
     parser.add_argument(
+        "--include_call_stack",
+        action="store_true",
+        default=False,
+        help="Include callstack in the report.",
+    )
+    parser.add_argument(
         "--include_overlap_info",
         action="store_true",
         default=False,
@@ -1265,6 +1299,7 @@ def main():
         enable_origami=args.enable_origami,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
+        include_call_stack=args.include_call_stack,
     )
 
 

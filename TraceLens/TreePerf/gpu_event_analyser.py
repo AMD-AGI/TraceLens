@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -108,8 +108,6 @@ class GPUEventAnalyser:
                     # (1) at equal timestamps. For a zero-dur event, ts == t_end,
                     # so its own end-point would be processed before its
                     # start-point and raise KeyError on active_uids.remove(uid).
-                    # Observed on ROCm 7.2 traces (gpu_memcpy events with
-                    # dur=0); see TraceLens-internal#182.
                     if event["t_end"] > event["ts"]:
                         compute_overlapping_uids = True
                         points.append(
@@ -121,7 +119,20 @@ class GPUEventAnalyser:
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if TraceEventUtils.is_communication_string(event.get("name")):
+                    name = event.get("name") or ""
+                    # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
+                    # bucket so cross-version (7.1 vs 7.2) reports compare
+                    # like-for-like; rocclr fill kernels follow gpu_memset's
+                    # existing home (comp_events).
+                    if category == "kernel" and TraceEventUtils.is_rocm_legacy_memcpy(
+                        name
+                    ):
+                        memcpy_events.append(event)
+                    elif category == "kernel" and TraceEventUtils.is_rocm_legacy_memset(
+                        name
+                    ):
+                        comp_events.append(event)
+                    elif TraceEventUtils.is_communication_string(name):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)
@@ -154,7 +165,7 @@ class GPUEventAnalyser:
 
             for _, point_type, uid in points:
                 if point_type == 0:
-                    active_uids.remove(uid)
+                    active_uids.discard(uid)
                 else:
                     event = event_map[uid]
                     my_cpu_op = uid_to_cpu_op[uid]

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -256,19 +256,21 @@ def generate_perf_report_pytorch(
     enable_origami: bool = False,
     # activation recompute detection
     detect_recompute: bool = False,
+    include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-
+    add_python_func = True if include_call_stack else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
         arch=gpu_arch_json,
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
+        add_python_func=add_python_func,
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
     )
@@ -605,6 +607,8 @@ def generate_perf_report_pytorch(
                 agg_metrics=agg_metrics,
                 include_pct=True,
                 group_by_num_kernels=group_by_num_kernels,
+                include_call_stack=include_call_stack,
+                tree=perf_analyzer.tree,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -612,6 +616,25 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
+                if "call_stack" in df_unified_perf_summary.columns:
+                    df_callstacks = df_unified_perf_summary[
+                        ["name", "op category", "call_stack"]
+                    ].copy()
+                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
+                    dict_name2df["unified_perf_callstacks"] = df_callstacks
+
+                    n_frames = 4  # op name + 3 parent frames
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                    df_unified_perf_summary.insert(
+                        cs_col,
+                        "trunc_call_stack",
+                        df_unified_perf_summary["call_stack"].apply(
+                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
+                        ),
+                    )
+                    df_unified_perf_summary = df_unified_perf_summary.drop(
+                        columns=["call_stack"]
+                    )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if include_overlap_info:
@@ -941,6 +964,12 @@ def main():
         "when overlap sheets are enabled): earliest launcher timestamp per group, "
         "relative to the minimum in the table.",
     )
+    parser.add_argument(
+        "--include_call_stack",
+        action="store_true",
+        default=False,
+        help="Add trunc_call_stack to unified_perf_summary and write unified_perf_callstacks with full call stacks.",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -966,6 +995,7 @@ def main():
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
+        include_call_stack=args.include_call_stack,
     )
 
 
