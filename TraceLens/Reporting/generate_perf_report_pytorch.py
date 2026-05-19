@@ -6,6 +6,7 @@
 
 import argparse
 import importlib.util
+import inspect
 import json
 import os
 import subprocess
@@ -781,13 +782,16 @@ def generate_perf_report_pytorch(
         spec = importlib.util.spec_from_file_location(extension_name, extension_path)
         extension = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(extension)
-
+        extension_args = extension_args.strip() if extension_args else None
         if hasattr(extension, "get_additional_dataframes_extension"):
             print(f"Getting additional DataFrames from extension: {extension_path}")
             get_additional_dfs = getattr(
                 extension, "get_additional_dataframes_extension"
             )
-            additional_dfs = get_additional_dfs(perf_analyzer.tree)
+            if "extension_args" in inspect.signature(get_additional_dfs).parameters:
+                additional_dfs = get_additional_dfs(perf_analyzer.tree, extension_args=extension_args)
+            else:
+                additional_dfs = get_additional_dfs(perf_analyzer.tree)
             if additional_dfs:
                 dict_name2df.update(additional_dfs)
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
@@ -797,18 +801,10 @@ def generate_perf_report_pytorch(
                 f"Running postprocess_perf_report_dataframes_extension from {extension_path}"
             )
             post = getattr(extension, "postprocess_perf_report_dataframes_extension")
-            resolved_args = None
-            if extension_args and str(extension_args).strip():
-                resolved_args = os.path.abspath(
-                    os.path.expanduser(str(extension_args).strip())
-                )
-            dict_name2df = post(
-                dict_name2df,
-                perf_analyzer,
-                extension_args=resolved_args,
-                extension_file=extension_path,
-                enable_pseudo_ops=enable_pseudo_ops,
-            )
+            if "extension_args" in inspect.signature(post).parameters:
+                dict_name2df = post(dict_name2df, perf_analyzer, extension_args=extension_args)
+            else:
+                dict_name2df = post(dict_name2df, perf_analyzer)
 
     # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
