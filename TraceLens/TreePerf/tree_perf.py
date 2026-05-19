@@ -155,6 +155,9 @@ def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_o
 
 
 class TreePerfAnalyzer:
+    # Set on dicts returned by compute_perf_metrics when the perf model raises error
+    _PARTIAL_PERF_METRICS_ERR_KEY = "_partial_perf_metrics_err"
+
     @staticmethod
     def from_file(
         profile_filepath,
@@ -330,146 +333,165 @@ class TreePerfAnalyzer:
     def compute_perf_metrics(
         self, event, bwd=False, non_data_mov=False, perf_model_class=None
     ):
+        partial_metrics = {"Kernel Time (µs)": 0}
+        if non_data_mov:
+            partial_metrics["Non-Data-Mov Kernel Time (µs)"] = 0
 
-        # Handle kernel aggregation
-        if bwd:
-            # Always use subtree aggregation for backward metrics
-            cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
-        else:
-            cpu_op_uids = [event["UID"]]
-        cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
-        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
-        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
         busy_kernel_time = 0
-        if len(list_kernels) > 0:
-            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
-                "busy_time"
-            ]
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
-            cpu_op_list, filter_func=self.non_data_mov_filter
-        )
-        list_non_data_mov_kernels = [
-            self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
-        ]
         busy_non_data_mov_time = 0
-        if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = self.GPUEventAnalyser(
-                list_non_data_mov_kernels
-            ).compute_metrics()["busy_time"]
-        event["kernel_details"] = [
-            {
-                "name": kernel["name"],
-                "dur": kernel["dur"],
-                "stream": kernel.get("args", {}).get("stream", None),
-            }
-            for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
-        ]
+        try:
+            # Handle kernel aggregation (same busy_time used for partial + full metrics)
+            if bwd:
+                # Always use subtree aggregation for backward metrics
+                cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
+            else:
+                cpu_op_uids = [event["UID"]]
+            cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
+            _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
+            list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
+            if len(list_kernels) > 0:
+                busy_kernel_time = self.GPUEventAnalyser(
+                    list_kernels
+                ).compute_metrics()["busy_time"]
+            _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
+                cpu_op_list, filter_func=self.non_data_mov_filter
+            )
+            list_non_data_mov_kernels = [
+                self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
+            ]
+            if len(list_non_data_mov_kernels) > 0:
+                busy_non_data_mov_time = self.GPUEventAnalyser(
+                    list_non_data_mov_kernels
+                ).compute_metrics()["busy_time"]
+            event["kernel_details"] = [
+                {
+                    "name": kernel["name"],
+                    "dur": kernel["dur"],
+                    "stream": kernel.get("args", {}).get("stream", None),
+                }
+                for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
+            ]
+        except Exception as e:
+            event["kernel_details"] = []
+            partial_metrics[self._PARTIAL_PERF_METRICS_ERR_KEY] = e
+            return partial_metrics
+
+        partial_metrics["Kernel Time (µs)"] = busy_kernel_time
+        if non_data_mov:
+            partial_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
             perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
-        perf_model = perf_model_class(
-            **_perf_model_init_kwargs(
-                perf_model_class,
-                event,
-                self.arch,
-                self.python_path,
-                self.enable_origami,
+
+        try:
+            perf_model = perf_model_class(
+                **_perf_model_init_kwargs(
+                    perf_model_class,
+                    event,
+                    self.arch,
+                    self.python_path,
+                    self.enable_origami,
+                )
             )
-        )
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
+            gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
 
-        tflops_per_s = (
-            (gflops / 1e3) / (busy_kernel_time / 1e6)
-            if busy_kernel_time > 0
-            else float("nan")
-        )
-
-        non_data_mov_tflops_per_s = (
-            (gflops / 1e3) / (busy_non_data_mov_time / 1e6)
-            if busy_non_data_mov_time > 0
-            else float("nan")
-        )
-        bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
-
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": busy_kernel_time,
-            "TFLOPS/s": tflops_per_s,
-        }
-        if non_data_mov:
-            dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
-            dict_metrics["Non-Data-Mov TFLOPS/s"] = non_data_mov_tflops_per_s
-        if bytes_moved is not None:
-            dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
-            dict_metrics["FLOPS/Byte"] = (
-                (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
-            )
-            dict_metrics["TB/s"] = (
-                (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
+            tflops_per_s = (
+                (gflops / 1e3) / (busy_kernel_time / 1e6)
                 if busy_kernel_time > 0
                 else float("nan")
             )
-        else:
-            dict_metrics["Data Moved (MB)"] = float("nan")
-            dict_metrics["FLOPS/Byte"] = float("nan")
-            dict_metrics["TB/s"] = float("nan")
 
-        # Add compute spec column (e.g., "matrix_fp16", "vector_bf16")
-        compute_spec = get_compute_spec(perf_model)
-        dict_metrics["Compute Spec"] = compute_spec if compute_spec else ""
+            non_data_mov_tflops_per_s = (
+                (gflops / 1e3) / (busy_non_data_mov_time / 1e6)
+                if busy_non_data_mov_time > 0
+                else float("nan")
+            )
+            bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        # Compute roofline time and pct_roofline (only if arch is provided)
-        if self.arch is not None:
-            peak_tflops = get_max_achievable_tflops(perf_model, self.arch)
-            mem_bw_gbps = self.arch.get("mem_bw_gbps")
-
-            if (
-                peak_tflops is not None
-                and mem_bw_gbps is not None
-                and bytes_moved is not None
-                and gflops > 0
-            ):
-                # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
-                compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
-                # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
-                memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
-                roofline_time_us = max(compute_time_us, memory_time_us)
-                if compute_time_us >= memory_time_us:
-                    roofline_bound = "COMPUTE_BOUND"
-                else:
-                    roofline_bound = "MEMORY_BOUND"
-                dict_metrics["Roofline Time (µs)"] = roofline_time_us
-                dict_metrics["Roofline Bound"] = roofline_bound
-                dict_metrics["Pct Roofline"] = (
-                    (roofline_time_us / busy_kernel_time) * 100
+            dict_metrics = {
+                "GFLOPS": gflops,
+                "Kernel Time (µs)": busy_kernel_time,
+                "TFLOPS/s": tflops_per_s,
+            }
+            if non_data_mov:
+                dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
+                dict_metrics["Non-Data-Mov TFLOPS/s"] = non_data_mov_tflops_per_s
+            if bytes_moved is not None:
+                dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
+                dict_metrics["FLOPS/Byte"] = (
+                    (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
+                )
+                dict_metrics["TB/s"] = (
+                    (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
                     if busy_kernel_time > 0
                     else float("nan")
                 )
+            else:
+                dict_metrics["Data Moved (MB)"] = float("nan")
+                dict_metrics["FLOPS/Byte"] = float("nan")
+                dict_metrics["TB/s"] = float("nan")
 
-        if hasattr(perf_model, "get_simulation_time") and not bwd:
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.get_simulation_time(),
-                gflops,
-                bytes_moved,
-                busy_kernel_time,
-            )
+            # Add compute spec column (e.g., "matrix_fp16", "vector_bf16")
+            compute_spec = get_compute_spec(perf_model)
+            dict_metrics["Compute Spec"] = compute_spec if compute_spec else ""
 
-        if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.get_simulation_time_bwd(),
-                gflops,
-                bytes_moved,
-                busy_kernel_time,
-            )
+            # Compute roofline time and pct_roofline (only if arch is provided)
+            if self.arch is not None:
+                peak_tflops = get_max_achievable_tflops(perf_model, self.arch)
+                mem_bw_gbps = self.arch.get("mem_bw_gbps")
 
-        for key, value in perf_model.param_details.items():
-            dict_metrics[f"param: {key}"] = value
+                if (
+                    peak_tflops is not None
+                    and mem_bw_gbps is not None
+                    and bytes_moved is not None
+                    and gflops > 0
+                ):
+                    # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
+                    compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
+                    # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
+                    memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
+                    roofline_time_us = max(compute_time_us, memory_time_us)
+                    if compute_time_us >= memory_time_us:
+                        roofline_bound = "COMPUTE_BOUND"
+                    else:
+                        roofline_bound = "MEMORY_BOUND"
+                    dict_metrics["Roofline Time (µs)"] = roofline_time_us
+                    dict_metrics["Roofline Bound"] = roofline_bound
+                    dict_metrics["Pct Roofline"] = (
+                        (roofline_time_us / busy_kernel_time) * 100
+                        if busy_kernel_time > 0
+                        else float("nan")
+                    )
 
-        return dict_metrics
+            if hasattr(perf_model, "get_simulation_time") and not bwd:
+                add_simulation_time_columns(
+                    dict_metrics,
+                    perf_model.get_simulation_time(),
+                    gflops,
+                    bytes_moved,
+                    busy_kernel_time,
+                )
+
+            if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
+                add_simulation_time_columns(
+                    dict_metrics,
+                    perf_model.get_simulation_time_bwd(),
+                    gflops,
+                    bytes_moved,
+                    busy_kernel_time,
+                )
+
+            for key, value in perf_model.param_details.items():
+                dict_metrics[f"param: {key}"] = value
+
+            return dict_metrics
+        except Exception as e:
+            # NotImplementedError (unsupported op/direction), missing trace inputs,
+            # constructor/runtime failure, etc. — always return kernel-only metrics.
+            partial_metrics[self._PARTIAL_PERF_METRICS_ERR_KEY] = e
+            return partial_metrics
 
     def compute_fwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=False, non_data_mov=non_data_mov)
@@ -535,19 +557,23 @@ class TreePerfAnalyzer:
                     non_data_mov=non_data_mov,
                     perf_model_class=perf_model_class,
                 )
-            except NotImplementedError:
-                # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
-                continue
             except Exception as e:
                 list_warn_perf_metrics_failed.append((event, e))
                 continue
+
+            partial_err = dict_perf_metrics.pop(
+                self._PARTIAL_PERF_METRICS_ERR_KEY, None
+            )
+            if partial_err is not None:
+                list_warn_perf_metrics_failed.append((event, partial_err))
+
             # handle warnings
             if bwd and not event.get("bwd_events"):
                 list_no_bwd_events.append(event)
                 continue
             if (
-                dict_perf_metrics["GFLOPS"] > 0
-                and dict_perf_metrics["Kernel Time (µs)"] == 0
+                dict_perf_metrics.get("GFLOPS", 0) > 0
+                and dict_perf_metrics.get("Kernel Time (µs)", 0) == 0
             ):
                 list_warn_non_zero_flops_and_zero_time.append(event)
 
@@ -621,12 +647,17 @@ class TreePerfAnalyzer:
             )  # Return an empty DataFrame instead of raising an error
 
         dict_agg = {}
-        # first element for GFLOPS and FLOPS/Byte
-        dict_agg["GFLOPS"] = "first"
-        dict_agg["Data Moved (MB)"] = "first"
-        dict_agg["FLOPS/Byte"] = "first"
-        dict_agg["TB/s"] = agg_metrics
-        dict_agg["TFLOPS/s"] = agg_metrics
+        # first element for GFLOPS and FLOPS/Byte (partial perf rows may omit these)
+        if "GFLOPS" in df_perf_metrics.columns:
+            dict_agg["GFLOPS"] = "first"
+        if "Data Moved (MB)" in df_perf_metrics.columns:
+            dict_agg["Data Moved (MB)"] = "first"
+        if "FLOPS/Byte" in df_perf_metrics.columns:
+            dict_agg["FLOPS/Byte"] = "first"
+        if "TB/s" in df_perf_metrics.columns:
+            dict_agg["TB/s"] = agg_metrics
+        if "TFLOPS/s" in df_perf_metrics.columns:
+            dict_agg["TFLOPS/s"] = agg_metrics
         if "process_name" in df_perf_metrics.columns:
             dict_agg["process_name"] = "first"
         if "process_label" in df_perf_metrics.columns:
@@ -1665,14 +1696,10 @@ class TreePerfAnalyzer:
         if not fwd_event or not is_sole_bwd:
             return False
 
-        # Check if backward metrics are actually defined for this forward op
-        try:
-            self.compute_perf_metrics(fwd_event, bwd=True)
-            return True
-        except NotImplementedError:
-            return False
-        except Exception:
-            return False
+        # True only if backward perf metrics fully compute. Partial returns always
+        # attach _PARTIAL_PERF_METRICS_ERR_KEY; successful returns never do.
+        metrics = self.compute_perf_metrics(fwd_event, bwd=True)
+        return metrics.pop(self._PARTIAL_PERF_METRICS_ERR_KEY, None) is None
 
     def _has_descendant_cpu_op_with_own_perf_model(self, event):
         """
@@ -2011,6 +2038,9 @@ class TreePerfAnalyzer:
                 # Has own perf model - compute forward metrics
                 try:
                     metrics = self.compute_perf_metrics(event, bwd=False)
+                    partial_err = metrics.pop(self._PARTIAL_PERF_METRICS_ERR_KEY, None)
+                    if partial_err is not None:
+                        perf_metrics_failed.append((event, partial_err))
                     for col in perf_cols:
                         if col in metrics:
                             row[col] = metrics[col]
@@ -2021,10 +2051,6 @@ class TreePerfAnalyzer:
                         if k.startswith("param: ")
                     }
                     row["perf_params"] = perf_params if perf_params else None
-                except NotImplementedError:
-                    # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
-                    continue
-
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
@@ -2033,6 +2059,9 @@ class TreePerfAnalyzer:
                 fwd_event, _ = self._get_linked_fwd_event(event)
                 try:
                     metrics = self.compute_perf_metrics(fwd_event, bwd=True)
+                    partial_err = metrics.pop(self._PARTIAL_PERF_METRICS_ERR_KEY, None)
+                    if partial_err is not None:
+                        perf_metrics_failed.append((event, partial_err))
                     for col in perf_cols:
                         if col in metrics:
                             row[col] = metrics[col]
@@ -2043,28 +2072,23 @@ class TreePerfAnalyzer:
                         if k.startswith("param: ")
                     }
                     row["perf_params"] = perf_params if perf_params else None
-                except NotImplementedError:
-                    # This means we don't have a perf model for this op, which is expected for some ops. Ignore this.
-                    continue
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
                 row["perf_params"] = None
-
                 gpu_event_uids = event.get("gpu_events", [])
                 if gpu_event_uids:
-                    gpu_events = [
+                    gpu_events_list = [
                         self.tree.get_UID2event(uid)
                         for uid in gpu_event_uids
                         if self.tree.get_UID2event(uid)
                     ]
-                    if gpu_events:
-                        busy_time = GPUEventAnalyser(gpu_events).compute_metrics()[
-                            "busy_time"
-                        ]
-                        row["Kernel Time (µs)"] = busy_time
+                    if gpu_events_list:
+                        row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                            gpu_events_list
+                        ).compute_metrics()["busy_time"]
 
             rows.append(row)
 
