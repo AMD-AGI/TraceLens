@@ -116,15 +116,15 @@ traces:
 
 ### Fields
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `trace_id` | string | yes | Stable unique identifier |
-| `alias` | string | yes | Human-readable name |
-| `source_location` | string | yes | Private storage path (SharePoint, blob, local) |
-| `format` | enum | yes | Trace format: `pytorch`, `rocprof`, `jax` |
-| `workload_family` | string | yes | Workload category for aggregate views |
-| `enabled` | bool | yes | Whether to include in nightly runs |
-| `notes` | string | no | Special handling notes or exclusion reasons |
+| Field | Type | Description |
+|---|---|---|
+| `trace_id` | string | Stable unique identifier |
+| `alias` | string | Human-readable name |
+| `source_location` | string | Private storage path (SharePoint, blob, local) |
+| `format` | enum | Trace format: `pytorch`, `rocprof`, `jax` |
+| `workload_family` | string | Workload category for aggregate views |
+| `enabled` | bool | Whether to include in nightly runs |
+| `notes` | string | Special handling notes or exclusion reasons |
 
 ---
 
@@ -150,10 +150,12 @@ These are the 11 stages from the issue, each timed individually:
 | 10 | `get_df_kernels` | `TraceLens/TreePerf/tree_perf.py` |
 | 11 | `get_df_gpu_timeline` | `TraceLens/TreePerf/tree_perf.py` |
 
+All 11 stages are timed uniformly via `pstats` (`cumtime`) extracted from a `cProfile.Profile` wrapping the full run. No TraceLens source files are modified.
+
 ### Implementation Approach
 
 ```python
-import time
+import pstats
 import resource
 import cProfile
 import json
@@ -163,11 +165,11 @@ from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExp
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 
-STAGES = [
+STAGES = {
     "total_report_generation",
-    "TreePerfAnalyzer.from_file",
-    "DataLoader.load_data",
-    "TraceToTree.build_tree",
+    "from_file",
+    "load_data",
+    "build_tree",
     "build_host_call_stack_tree",
     "label_non_gpu_paths",
     "add_gpu_ops_to_tree",
@@ -175,30 +177,42 @@ STAGES = [
     "get_df_kernel_launchers",
     "get_df_kernels",
     "get_df_gpu_timeline",
-]
+}
 
-class StageTimer:
-    """Context manager that records wall-clock time for a named stage."""
+def run_tracelens_with_cprofile(trace_path: str, artifact_path: str) -> cProfile.Profile:
+    """Run TraceLens report generation under cProfile and save the .prof artifact."""
+    pr = cProfile.Profile()
+    pr.enable()
+    TreePerfAnalyzer.from_file(trace_path)  # entry point; internally calls all 11 stages
+    pr.disable()
+    pr.dump_stats(artifact_path)  # save .prof for artifact upload
+    return pr
 
-    def __init__(self, stage_name: str, results: dict):
-        self.stage_name = stage_name
-        self.results = results
+def extract_stage_timings(prof: cProfile.Profile) -> dict[str, float]:
+    """Parse the in-memory cProfile.Profile object and return cumtime for each tracked stage."""
+    stats = pstats.Stats(prof)
+    timings = {}
+    for (_, _, func), (_, _, _, cumtime, _) in stats.stats.items():
+        if func in STAGES:
+            timings[func] = cumtime
+    return timings
 
-    def __enter__(self):
-        self.start = time.perf_counter()
-        return self
+def profile_trace(trace_path: str, trace_id: str, output_dir: str) -> dict:
+    """Run TraceLens under cProfile, extract stage timings, and record peak memory."""
+    artifact_path = f"{output_dir}/{trace_id}_profile.prof"
 
-    def __exit__(self, *exc):
-        elapsed = time.perf_counter() - self.start
-        self.results[self.stage_name] = elapsed
-        return False
+    pr = run_tracelens_with_cprofile(trace_path, artifact_path)
+    timings = extract_stage_timings(pr)
+    max_rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024  # KB → bytes
+
+    return {"stages": timings, "max_rss_bytes": max_rss_bytes, "cprofile_artifact": artifact_path}
 ```
 
-**Timing:** Uses `time.perf_counter()` for monotonic wall-clock measurement (higher resolution than `time.time()`).
+**Timing:** The entire TraceLens run is wrapped in `cProfile.Profile()`. After the run, `pstats` extracts `cumtime` for each of the 11 named stage functions. `cumtime` measures the total time spent in a function including its callees, equivalent to wall-clock time for that call subtree.
 
 **Memory:** Uses `resource.getrusage(resource.RUSAGE_SELF).ru_maxrss` to capture peak RSS after each trace completes. On Linux this returns kilobytes; the harness converts to bytes for consistency.
 
-**cProfile:** Each trace run is wrapped in `cProfile.Profile()` to produce a `.prof` artifact for deeper investigation. cProfile data is stored as a raw artifact only — it is not parsed, aggregated, or emitted to Prometheus or Grafana. It exists solely for manual post-hoc analysis when a stage regression needs function-level investigation.
+**cProfile artifact:** The `.prof` file is also uploaded to Actions Artifacts for manual post-hoc investigation with tools like `pstats` or `snakeviz`.
 
 ### Structured Timing JSON Output
 
@@ -253,7 +267,7 @@ opentelemetry-exporter-otlp-proto-http
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `tracelens.stage.duration_seconds` | Gauge | `trace_id`, `stage`, `workload_family` | Wall-clock duration of a single stage |
+| `tracelens.stage.duration_seconds` | Gauge | `trace_id`, `stage`, `workload_family` | `cumtime` for a single stage function, extracted from cProfile via pstats |
 | `tracelens.total.duration_seconds` | Gauge | `trace_id`, `workload_family` | Total end-to-end processing time |
 | `tracelens.process.max_rss_bytes` | Gauge | `trace_id`, `workload_family` | Peak resident memory after processing |
 
