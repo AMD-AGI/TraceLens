@@ -10,6 +10,7 @@ from .gpu_event_analyser import (
     PytorchGPUEventAnalyser,
     JaxGPUEventAnalyser,
 )
+from .idle_time_analysis import IdleTimeAnalyser
 from .jax_analyses import JaxAnalyses
 from .jax_analyses import JaxAnalyses
 
@@ -19,5 +20,6 @@ __all__ = [
     "GPUEventAnalyser",
     "PytorchGPUEventAnalyser",
     "JaxGPUEventAnalyser",
+    "IdleTimeAnalyser",
     "JaxAnalyses",
 ]
