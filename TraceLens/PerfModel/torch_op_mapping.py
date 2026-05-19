@@ -38,7 +38,15 @@ op_to_perf_model_class_map = {
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "aiter::mha_fwd": perf_model.aiter__mha_fwd,
     "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::fmha_v3_bwd": perf_model.aiter__fmha_v3_bwd,
     "aiter::mha_bwd": perf_model.aiter__mha_bwd,
+    # aiter varlen FlashAttention (Wan 2.x training, sglang/vLLM inference). Issue #650 / #290.
+    "aiter::fmha_v3_varlen_fwd": perf_model.aiter__fmha_v3_varlen_fwd,
+    "aiter::fmha_v3_varlen_bwd": perf_model.aiter__fmha_v3_varlen_bwd,
+    "aiter::wrapper_fmha_v3_varlen_fwd": perf_model.aiter__fmha_v3_varlen_forward,
+    "aiter::wrapper_fmha_v3_varlen_bwd": perf_model.aiter__fmha_v3_varlen_backward,
+    # aten dispatcher-level Flash-Attention forward (PyTorch SDPA flash backend). Issue #650.
+    "aten::_flash_attention_forward": perf_model.aten___flash_attention_forward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
     "EvoformerAttention": perf_model.evoformer_attention,
@@ -271,7 +279,10 @@ def categorize_torch_op(row):
         "aten::_scaled_dot_product_flash_attention_backward",
         "aiter::_flash_attn_backward",
         "aiter::wrapper_fmha_v3_bwd",
+        "aiter::wrapper_fmha_v3_varlen_bwd",
         "aiter::mha_bwd",
+        "aiter::fmha_v3_bwd",
+        "aiter::fmha_v3_varlen_bwd",
     ]
     if row["name"] in dict_cat2names["SDPA"]:
         if row["name"].endswith("_backward") or row["name"] in sdpa_bwd_names:
