@@ -118,3 +118,4 @@ In the `details` column, include the scoring breakdown in the format:
 `correctness=N/10 completeness=N/10 precision=N/10 overall=N.N | <explanation>`
 
 **Replace all commas in the `details` explanation text with semicolons** to avoid breaking CSV parsing.
+Do not add any other columns.

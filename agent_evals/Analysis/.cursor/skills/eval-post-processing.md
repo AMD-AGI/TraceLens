@@ -26,7 +26,7 @@ The prompt provides these key=value parameters:
 
 - **results_root**: path to the repeatability results tree (contains `<trace_id>/run_<n>/` directories)
 - **suite**: `unit` or `e2e`
-- **test_traces_csv**: path to the trace CSV used (e.g. `evals/e2e_test_traces.csv`)
+- **test_traces_csv**: path to the trace CSV used (e.g. `agent_evals/Analysis/analysis_tests/combined_traces_standalone.csv`)
 - **report_dir**: where to write output reports
 - **container**: Docker container name (used in reproducer commands)
 
@@ -36,7 +36,7 @@ Run `aggregate_repeatability.py` to merge all per-run `eval_summary.csv` files a
 
 ```bash
 RESULTS_ROOT=<results_root> OUTPUT_DIR=<report_dir>/aggregates \
-  python3 evals/eval_utils/aggregate_repeatability.py
+  python3 agent_evals/Analysis/eval_utils/aggregate_repeatability.py
 ```
 
 This produces four files in `<report_dir>/aggregates/`:
@@ -56,7 +56,7 @@ Read these files:
 2. `<report_dir>/aggregates/pass_rate_summary.csv`
 3. `<report_dir>/aggregates/stability_summary.csv`
 4. `<report_dir>/aggregates/stream_diagnostics.csv`
-5. `evals/eval_utils/report_section_rules.yaml` — classification guide (YAML format, load with `yaml.safe_load()`)
+5. `agent_evals/Analysis/eval_utils/report_section_rules.yaml` — classification guide (YAML format, load with `yaml.safe_load()`)
 6. `<test_traces_csv>` — for trace metadata (id, sub_category, platform, trace_path)
 
 Note: `aggregated_results.csv` now includes `root_cause` and `recommended_fix` columns from scripted evals. Use these when available instead of re-classifying failure modes from scratch. The `stability_summary.csv` classifies each (trace, eval) pair as `STABLE_PASS`, `FLAKY_PASS`, `FLAKY_FAIL`, or `STABLE_FAIL`.
@@ -209,7 +209,7 @@ Generated at: `<ISO 8601 timestamp>`
 
 | Trace/Case | Failures | Platform | Reproducer command |
 |---|---|---|---|
-| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh` |
 ...top 5 unit test traces by failure count
 
 ---
@@ -241,13 +241,13 @@ Generated at: `<ISO 8601 timestamp>`
 
 | Trace/Case | Failures | Platform | Reproducer command |
 |---|---|---|---|
-| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash evals/eval_scripts/run_repeatability_parallel.sh` |
+| <trace_id> | <count> | <platform> | `CONTAINER=<container> TEST_IDS="<trace_id>" TEST_TRACES_CSV="<test_traces_csv_relative>" bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh` |
 ...top 5 e2e test traces by failure count
 ```
 
 For the reproducer commands:
 - Use the `container` value from inputs
-- Use the **relative** path of `test_traces_csv` (e.g. `evals/combined_traces.csv`) — never embed absolute or user-specific paths
+- Use the **relative** path of `test_traces_csv` (e.g. `agent_evals/Analysis/analysis_tests/combined_traces_standalone.csv`) — never embed absolute or user-specific paths
 - Omit `NUM_REPEATS` and `MAX_PARALLEL` so the script defaults (5 repeats, 5 parallel) are used, matching a standard eval run
 - The `platform` comes from the test traces CSV
 
@@ -299,10 +299,10 @@ Built <N> reproducer packages in <report_dir>/reproducers/
 
 ## Step 8 — Save and Summarize
 
-1. Copy `<report_dir>` to `evals/eval_reports/latest/` (remove existing `latest/` first if present):
+1. Copy `<report_dir>` to `agent_evals/Analysis/eval_reports/latest/` (remove existing `latest/` first if present):
    ```bash
-   rm -rf evals/eval_reports/latest
-   cp -r <report_dir> evals/eval_reports/latest
+   rm -rf agent_evals/Analysis/eval_reports/latest
+   cp -r <report_dir> agent_evals/Analysis/eval_reports/latest
    ```
 
 2. Print a summary to the user:
@@ -314,5 +314,5 @@ Built <N> reproducer packages in <report_dir>/reproducers/
      PR report:          <report_dir>/pr_report.md
      Fix-ticket report:  <report_dir>/fix_ticket_report.md
      Reproducer packages: <report_dir>/reproducers/ (<N> issues)
-     Latest copy:        evals/eval_reports/latest/
+     Latest copy:        agent_evals/Analysis/eval_reports/latest/
      ```

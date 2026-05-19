@@ -31,7 +31,7 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 # Paths (run from repo root on the node)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
-EVALS_DIR="$REPO_ROOT/evals"
+EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
 
 REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
@@ -193,8 +193,8 @@ if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     expand_archive unit_tests_comparative
     expand_archive e2e_tests_comparative
 else
-    expand_archive unit_tests
-    expand_archive e2e_tests
+    expand_archive unit_tests_standalone
+    expand_archive e2e_tests_standalone
 fi
 
 echo "========================================="

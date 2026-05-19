@@ -9,7 +9,7 @@ See LICENSE for license information.
 Single-source reference for every eval check, its pass/fail criteria, tolerances,
 root-cause categories, and where the implementation lives.
 
-> **Canonical location:** `evals/EVAL_RUBRICS.md`
+> **Canonical location:** `agent_evals/Analysis/EVAL_RUBRICS.md`
 > Update this file whenever an eval is added, removed, or its criteria change.
 
 ---
@@ -134,7 +134,7 @@ Finds every priority item (`### ...P{N}:` headers) and checks for required bold 
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `template`.
 
-**Implementation:** `evals/.cursor/skills/workflow-llm-eval.md`
+**Implementation:** `agent_evals/Analysis/.cursor/skills/workflow-llm-eval.md`
 
 Checks the `## Appendix` section for hardware reference values (only for trace1 if in comparative mode):
 - Platform name (e.g., MI300X)
@@ -206,7 +206,7 @@ Compares CSVs against the reference directory.
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `data`.
 
-**Implementation:** `evals/.cursor/skills/quality-llm-eval.md`
+**Implementation:** `agent_evals/Analysis/.cursor/skills/quality-llm-eval.md`
 
 Compares P-item titles in the generated report against the reference report.
 This is a **semantic** comparison — not a string match.
@@ -237,7 +237,7 @@ overall_score = correctness × 0.40 + completeness × 0.30 + precision × 0.30
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `data`.
 
-**Implementation:** `evals/.cursor/skills/quality-llm-eval.md`
+**Implementation:** `agent_evals/Analysis/.cursor/skills/quality-llm-eval.md`
 
 For each matched compute P-item pair (from eval 2), compares content values.
 **Only compares Compute Kernel P-items** — System-Level P-items are skipped entirely.

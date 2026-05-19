@@ -1,1 +1,1 @@
-../TraceLens/AgenticMode/Standalone/README.md
+../TraceLens/Agent/Analysis/README.md

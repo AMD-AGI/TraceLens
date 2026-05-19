@@ -64,7 +64,7 @@ All scripts run **on the node** from the repo root. They use `docker exec` to ru
 Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). For a single-pass eval, set `NUM_REPEATS=1`.
 
 ```bash
-CONTAINER=my_container bash evals/eval_scripts/run_repeatability_parallel.sh
+CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
 ```
 
 Environment variables:
@@ -75,8 +75,8 @@ Environment variables:
 | `MAX_PARALLEL` | 5 | Max concurrent jobs |
 | `NUM_REPEATS` | 5 | Repeats per test case |
 | `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
-| `TEST_TRACES_CSV` | `evals/analysis_tests/combined_traces.csv` | Path to the trace CSV to use |
-| `RESULTS_ROOT` | `evals/repeatability_results` | Where per-run results are written |
+| `TEST_TRACES_CSV` | `agent_evals/Analysis/analysis_tests/combined_traces.csv` | Path to the trace CSV to use |
+| `RESULTS_ROOT` | `agent_evals/Analysis/repeatability_results` | Where per-run results are written |
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
@@ -88,7 +88,7 @@ Example (subset of traces, 3 repeats, 2 parallel):
 CONTAINER=my_container \
 TEST_IDS="qwen1.5_mi300 06_llama3_2_mi300" \
 NUM_REPEATS=3 MAX_PARALLEL=2 \
-    bash evals/eval_scripts/run_repeatability_parallel.sh
+    bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
 ```
 
 Use a `screen` session to prevent disconnects during long runs. Each job cleans its output directory before starting to prevent stale results.
@@ -97,7 +97,7 @@ To run evals without generating reports (e.g. to re-process later):
 
 ```bash
 SKIP_POST_PROCESSING=1 CONTAINER=my_container \
-    bash evals/eval_scripts/run_repeatability_parallel.sh
+    bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
 ```
 
 ### Generate Golden References
@@ -105,13 +105,13 @@ SKIP_POST_PROCESSING=1 CONTAINER=my_container \
 Generates `analysis_output_ref/` for test cases listed in `analysis_tests/combined_traces.csv`. Runs analysis, copies the output as the reference, and strips intermediate files (keeps only `analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
 
 ```bash
-CONTAINER=my_container bash evals/eval_scripts/generate_ref.sh
+CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/generate_ref.sh
 ```
 
 Or with more parallelism:
 
 ```bash
-MAX_PARALLEL=5 CONTAINER=my_container bash evals/eval_scripts/generate_ref.sh
+MAX_PARALLEL=5 CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/generate_ref.sh
 ```
 
 ### Individual Manual Runs
@@ -129,7 +129,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 **Workflow Eval:**
 
 ```bash
-cd evals
+cd agent_evals/Analysis
 agent --model claude-opus-4-7-high --print --force --trust \
     "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
 ```
@@ -137,7 +137,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 **Quality Eval:**
 
 ```bash
-cd evals
+cd agent_evals/Analysis
 agent --model claude-opus-4-7-high --print --force --trust \
     "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
 ```
@@ -158,7 +158,7 @@ The skill performs four steps:
 You can re-run the post-processing skill on any previous results without re-running the eval loop:
 
 ```bash
-cd evals
+cd agent_evals/Analysis
 agent --model claude-opus-4-7-high --print --force --trust \
     "Run eval post processing on results_root=<results_root> suite=<suite> test_traces_csv=<csv_path> report_dir=<report_dir> container=<container>"
 ```
@@ -166,9 +166,9 @@ agent --model claude-opus-4-7-high --print --force --trust \
 Example:
 
 ```bash
-cd evals
+cd agent_evals/Analysis
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Run eval post processing on results_root=evals/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=evals/analysis_tests/combined_traces.csv report_dir=evals/eval_reports/my_run/reports container=modular_evals"
+    "Run eval post processing on results_root=agent_evals/Analysis/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=agent_evals/Analysis/analysis_tests/combined_traces.csv report_dir=agent_evals/Analysis/eval_reports/my_run/reports container=modular_evals"
 ```
 
 ### Error handling
@@ -181,7 +181,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 
 ### 1. Create the test case directory
 
-Each test case lives under `evals/analysis_tests/unit_tests/<category>/` and must contain:
+Each test case lives under `agent_evals/Analysis/analysis_tests/unit_tests/<category>/` and must contain:
 
 - The profiling trace JSON file.
 - `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `analysis.md` and `perf_report_csvs/`. Generate this with `generate_ref.sh`.
@@ -201,7 +201,7 @@ The CSV has the following columns:
 Example row:
 
 ```
-gemm_01_compute_few_tiles,gemm,evals/analysis_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/gemm_01_compute_few_tiles.json,evals/analysis_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/analysis_output_ref,MI300X
+gemm_01_compute_few_tiles,gemm,agent_evals/Analysis/analysis_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/gemm_01_compute_few_tiles.json,agent_evals/Analysis/analysis_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/analysis_output_ref,MI300X
 ```
 
 ## Eval Pipeline Summary
@@ -253,7 +253,7 @@ LLM evals (2–3) run via `.cursor/skills/quality-llm-eval.md`. System-level P-i
 
 ## Results
 
-Results are written to `evals/repeatability_results/<id>/run_<n>/` and include:
+Results are written to `agent_evals/Analysis/repeatability_results/<id>/run_<n>/` and include:
 
 - `analysis_stream.ndjson` -- stream JSON output from the analysis agent.
 - `workflow_scripted_eval.log` / `workflow_scripted_results.csv` -- scripted workflow eval output.

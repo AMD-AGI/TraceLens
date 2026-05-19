@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -9,7 +9,12 @@ import re
 from pathlib import Path
 
 # Copyright line must use one of these year forms (longer/more specific first).
-_COPYRIGHT_YEAR_RE = r"(?:2024 - 2025|2024 - 2026|2025-2026|2024|2025|2026)"
+# Ranges may use a hyphen with zero or one space on each side (e.g. 2025-2026 or 2025 - 2026).
+_YEAR_RANGE_SEP = r" ?- ?"
+_COPYRIGHT_YEAR_RE = (
+    rf"(?:2024{_YEAR_RANGE_SEP}2025|2024{_YEAR_RANGE_SEP}2026|"
+    rf"2025{_YEAR_RANGE_SEP}2026|2024|2025|2026)"
+)
 
 _PYTHON_YAML_HEADER_RE = re.compile(
     r"^###############################################################################\n"
@@ -82,7 +87,7 @@ def test_python_files_have_valid_copyright():
         "env",
         ".venv",
     }
-    skip_files = {".gitignore", "LICENSE", "__init__.py"}
+    skip_files = {".gitignore", "LICENSE"}
 
     missing_copyright = []
     wrong_format = []
@@ -97,7 +102,8 @@ def test_python_files_have_valid_copyright():
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-
+            if filepath.name == "__init__.py" and len(content.splitlines()) <= 1:
+                continue
             if _matches_python_copyright_header(content):
                 continue
             elif "Copyright (c)" in content[:500]:

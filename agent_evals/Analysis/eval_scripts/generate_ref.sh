@@ -23,7 +23,7 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
-EVALS_DIR="$REPO_ROOT/evals"
+EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 STATUS_FILE="$(mktemp)"
 
