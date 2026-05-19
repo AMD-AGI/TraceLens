@@ -236,9 +236,7 @@ def _build_uid_to_row_idx(ups: pd.DataFrame) -> Dict[Any, Any]:
     return mapping
 
 
-def _resolve_diff_row_to_key(
-    row, uid_to_row_idx: Dict[Any, Any]
-) -> Optional[Any]:
+def _resolve_diff_row_to_key(row, uid_to_row_idx: Dict[Any, Any]) -> Optional[Any]:
     """Row index for a diff_stats row via its ``gpu_op_uid``."""
     if not uid_to_row_idx or "gpu_op_uid" not in row.index:
         return None
