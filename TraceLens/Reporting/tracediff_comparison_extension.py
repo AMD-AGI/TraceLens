@@ -524,7 +524,7 @@ def postprocess_perf_report_dataframes_extension(
     *,
     extension_args: Optional[str] = None,
     extension_file: Optional[str] = None,
-    enable_pseudo_ops: bool = False,
+    enable_pseudo_ops: bool = True,
 ) -> Dict[str, Any]:
     if not extension_args or not str(extension_args).strip():
         return dict_name2df
@@ -544,11 +544,6 @@ def postprocess_perf_report_dataframes_extension(
     perf_analyzer2.tree.apply_annotation(
         name_filters=["vllm::unified_attention_with_output"]
     )
-    if extension_file:
-        from TraceLens.Reporting.generate_perf_report_pytorch import apply_extension
-
-        apply_extension(perf_analyzer2, extension_file)
-
     td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
     td.generate_tracediff_report()
 
