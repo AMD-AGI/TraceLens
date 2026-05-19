@@ -252,6 +252,163 @@ def test_varlen_bwd_param_extraction_cross_attention():
     assert p["max_seqlen_kv"] == 512.0
 
 
+def test_varlen_fwd_multi_seq_packing_accumulates_flops():
+    """Multi-sequence packed varlen: when ``cu_seqlens`` length > 2, the FLOPs
+    must scale with ``num_seqs_q`` (mirror of ``flash_attention_varlen_forward``).
+
+    Construct a 2-sequence packed varlen event: T=200 with cu_seqlens=[0,100,200],
+    so max_seqlen_q=100 and num_seqs_q=2. Single max-seq FLOPs:
+        4 * 1 * 4 * 100^2 * 64 = 10_240_000
+    Remainder seq (length (200-100)/(2-1) = 100):
+        4 * 1 * 4 * 100^2 * 64 = 10_240_000
+    Total = 20_480_000  (~ 2x the single-seq estimate at the same T)."""
+    event = {
+        "name": "aiter::fmha_v3_varlen_fwd",
+        "args": {
+            "Input Dims": (
+                [[200, 4, 64]] * 3  # Q, K, V — packed 2 sequences of 100
+                + [[3], [3]]  # cu_seqlens_q, cu_seqlens_kv: 3 entries -> B=2 seqs
+                + [[]] * 20
+            ),
+            "Input type": ["c10::BFloat16"] * 3
+            + ["int"] * 2
+            + ["Scalar"] * 13
+            + [""] * 7,
+            "Input Strides": [[256, 64, 1]] * 3 + [[1], [1]] + [[]] * 20,
+            "Concrete Inputs": [
+                "",
+                "",
+                "",
+                "",
+                "",
+                "100",
+                "100",
+                "0",
+                "0.",
+                "0.125",
+                "0.",
+                "False",
+                "False",
+                "-1",
+                "-1",
+                "True",
+                "False",
+                "1",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
+        },
+    }
+    m = aiter__fmha_v3_varlen_fwd(event)
+    assert m.param_details["num_seqs_q"] == 2
+    assert m.param_details["max_seqlen_q"] == 100.0
+    expected = 4 * 1 * 4 * 100**2 * 64 + 1 * 4 * 1 * 4 * 100**2 * 64
+    assert m.flops() == expected, (m.flops(), expected)
+
+
+def test_varlen_bwd_multi_seq_packing_accumulates_flops():
+    """Same multi-seq packing scenario for the backward perf model.
+    bwd / fwd ratio remains 5/2 for the square self-attention case."""
+    bwd_event = {
+        "name": "aiter::fmha_v3_varlen_bwd",
+        "args": {
+            "Input Dims": (
+                [[200, 4, 64]] * 5  # dout, q, k, v, out
+                + [[4, 200], [3], [3]]  # softmax_lse, cu_seqlens_q, cu_seqlens_kv
+                + [[]] * 11
+                + [[200, 4, 64]] * 3  # dq, dk, dv
+                + [[], [3], [], [], []]
+            ),
+            "Input type": ["c10::BFloat16"] * 5
+            + ["float", "int", "int"]
+            + ["Scalar"] * 11
+            + ["c10::BFloat16"] * 3
+            + ["", "long int", "", "", ""],
+            "Input Strides": [[256, 64, 1]] * 5
+            + [[200, 1], [1], [1]]
+            + [[]] * 11
+            + [[256, 64, 1]] * 3
+            + [[], [1], [], [], []],
+            "Concrete Inputs": [
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "100",
+                "100",
+                "0.",
+                "0.125",
+                "False",
+                "False",
+                "-1",
+                "-1",
+                "False",
+                "True",
+                "1",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
+        },
+    }
+    fwd_event = {
+        "name": "aiter::fmha_v3_varlen_fwd",
+        "args": {
+            "Input Dims": ([[200, 4, 64]] * 3 + [[3], [3]] + [[]] * 20),
+            "Input type": ["c10::BFloat16"] * 3
+            + ["int"] * 2
+            + ["Scalar"] * 13
+            + [""] * 7,
+            "Input Strides": [[256, 64, 1]] * 3 + [[1], [1]] + [[]] * 20,
+            "Concrete Inputs": [
+                "",
+                "",
+                "",
+                "",
+                "",
+                "100",
+                "100",
+                "0",
+                "0.",
+                "0.125",
+                "0.",
+                "False",
+                "False",
+                "-1",
+                "-1",
+                "True",
+                "False",
+                "1",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
+        },
+    }
+    m_bwd = aiter__fmha_v3_varlen_bwd(bwd_event)
+    m_fwd = aiter__fmha_v3_varlen_fwd(fwd_event)
+    assert m_bwd.param_details["num_seqs_q"] == 2
+    assert m_bwd.flops() / m_fwd.flops() == 2.5
+
+
 def test_varlen_bwd_fwd_flops_ratio_is_5_over_2_for_square():
     """Standard FA bwd identity: flops_bwd / flops_fwd == 5/2 for N_Q==N_KV."""
     m_fwd = aiter__fmha_v3_varlen_fwd(_WAN22_VARLEN_FWD)

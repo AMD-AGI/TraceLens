@@ -3283,7 +3283,14 @@ class aiter__fmha_v3_varlen_fwd(SDPA):
         return _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0)
 
     def flops(self):
-        return self.flops_func(
+        # Varlen FLOPs accumulator (mirrors ``flash_attention_varlen_forward``):
+        # the B and S dimensions are collapsed into a single packed T axis with
+        # ``num_seqs_q`` variable-length sequences whose exact per-sequence
+        # lengths are not in the trace. We estimate as one ``max_seqlen``
+        # sequence plus ``num_seqs - 1`` equal-length sequences whose lengths
+        # average to ``(N - max_seqlen) / (num_seqs - 1)`` (lower bound: the
+        # max-length sequence dominates the N^2 term).
+        accum_flops = self.flops_func(
             self.B,
             self.max_seqlen_q,
             self.H_Q,
@@ -3293,6 +3300,18 @@ class aiter__fmha_v3_varlen_fwd(SDPA):
             self.d_h_v,
             self.param_details["causal"],
         )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+            )
+        return accum_flops
 
 
 class aiter__fmha_v3_varlen_forward(SDPA):
@@ -3315,7 +3334,8 @@ class aiter__fmha_v3_varlen_forward(SDPA):
         return _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=1)
 
     def flops(self):
-        return self.flops_func(
+        # See note on ``aiter__fmha_v3_varlen_fwd.flops()``.
+        accum_flops = self.flops_func(
             self.B,
             self.max_seqlen_q,
             self.H_Q,
@@ -3325,6 +3345,18 @@ class aiter__fmha_v3_varlen_forward(SDPA):
             self.d_h_v,
             self.param_details["causal"],
         )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+            )
+        return accum_flops
 
 
 class aiter__fmha_v3_varlen_bwd(SDPA):
@@ -3348,7 +3380,11 @@ class aiter__fmha_v3_varlen_bwd(SDPA):
         return _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=0)
 
     def flops(self):
-        return self.flops_bwd_func(
+        # See note on ``aiter__fmha_v3_varlen_fwd.flops()``; the bwd FLOPs
+        # identity ``bwd = 5/2 * fwd`` (square self-attn, flash_impl=True) is
+        # baked into ``flops_bwd_func`` so the multi-seq accumulator stays
+        # consistent with the fwd one.
+        accum_flops = self.flops_bwd_func(
             self.B,
             self.max_seqlen_q,
             self.H_Q,
@@ -3359,6 +3395,19 @@ class aiter__fmha_v3_varlen_bwd(SDPA):
             self.param_details["causal"],
             self.param_details["flash_impl"],
         )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_bwd_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+                self.param_details["flash_impl"],
+            )
+        return accum_flops
 
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
@@ -3383,7 +3432,8 @@ class aiter__fmha_v3_varlen_backward(SDPA):
         return _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=1)
 
     def flops(self):
-        return self.flops_bwd_func(
+        # See note on ``aiter__fmha_v3_varlen_bwd.flops()``.
+        accum_flops = self.flops_bwd_func(
             self.B,
             self.max_seqlen_q,
             self.H_Q,
@@ -3394,6 +3444,19 @@ class aiter__fmha_v3_varlen_backward(SDPA):
             self.param_details["causal"],
             self.param_details["flash_impl"],
         )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_bwd_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+                self.param_details["flash_impl"],
+            )
+        return accum_flops
 
     def bytes(self, bytes_per_element=2):
         return self.bytes_bwd(bytes_per_element)
