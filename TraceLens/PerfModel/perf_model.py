@@ -3072,6 +3072,449 @@ class aiter__mha_bwd(SDPA):
         return self.bytes_bwd(bytes_per_element)
 
 
+class aiter__fmha_v3_bwd(SDPA):
+    """Perf model for ``aiter::fmha_v3_bwd`` (non-varlen). Issue #590.
+
+    Same argument layout as ``aiter::mha_bwd``:
+        dout[0], q[1], k[2], v[3], out[4], softmax_lse[5],
+        dropout_p[6], softmax_scale[7], is_causal[8], ...
+    Tensors are in raw (B, N, H, d_h) layout (bnhd); bhnd_idx=(0,2,1,3) extracts
+    B, H, N, d_h. Mirrors :class:`aiter__mha_bwd`.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return aiter__mha_bwd.get_param_details(event)
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
+def _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0):
+    """Shared parser for ``aiter::(wrapper_)fmha_v3_varlen_fwd``. Issue #650 / #290.
+
+    Direct variant (``aiter::fmha_v3_varlen_fwd``, ``tensor_offset=0``):
+        Input Dims: q[0], k[1], v[2], cu_seqlens_q[3], cu_seqlens_k[4], scalars...
+        Concrete Inputs: ..., max_seqlen_q[5], max_seqlen_k[6], min_seqlen_q[7],
+                         dropout_p[8], softmax_scale[9], logits_soft_cap[10],
+                         is_causal[11], ...
+
+    Wrapper variant (``aiter::wrapper_fmha_v3_varlen_fwd``, ``tensor_offset=1``):
+        Extra leading ``out`` tensor — all indices shift by +1. Mirrors the
+        precedent set by ``aiter__fmha_v3_forward`` vs ``aiter__fmha_v3_fwd``.
+
+    Q/K/V are packed varlen tensors in (T, H, d_h) layout. Cross-attention is
+    supported: K/V may have different T than Q.
+    """
+    input_dims = event["args"]["Input Dims"]
+    concrete_inputs = event["args"]["Concrete Inputs"]
+
+    q_idx = tensor_offset + 0
+    k_idx = tensor_offset + 1
+    v_idx = tensor_offset + 2
+    cu_q_idx = tensor_offset + 3
+    cu_k_idx = tensor_offset + 4
+    scalar_base = tensor_offset + 5
+    max_q_idx = scalar_base + 0
+    max_kv_idx = scalar_base + 1
+    dropout_idx = scalar_base + 3
+    causal_idx = scalar_base + 6
+
+    q_shape, k_shape, v_shape = (
+        input_dims[q_idx],
+        input_dims[k_idx],
+        input_dims[v_idx],
+    )
+    hnd_idx = 1, 0, 2  # (T, H, d_h) layout
+    sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
+    B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+        sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+    )
+
+    cu_q_dim = input_dims[cu_q_idx] if cu_q_idx < len(input_dims) else []
+    cu_k_dim = input_dims[cu_k_idx] if cu_k_idx < len(input_dims) else []
+    num_seqs_q = cu_q_dim[0] - 1 if cu_q_dim else 1
+    num_seqs_kv = cu_k_dim[0] - 1 if cu_k_dim else 1
+
+    def _f(idx, default):
+        v = concrete_inputs[idx] if idx < len(concrete_inputs) else ""
+        if v in ("", "None"):
+            return default
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return default
+
+    max_seqlen_q = _f(max_q_idx, float(N_Q))
+    max_seqlen_kv = _f(max_kv_idx, float(N_KV))
+    dropout = _f(dropout_idx, 0.0)
+    causal = False
+    if causal_idx < len(concrete_inputs):
+        cv = concrete_inputs[causal_idx]
+        if cv not in ("", "None"):
+            causal = cv.lower() == "true"
+
+    return {
+        "B": B,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_KV,
+        "H_KV": H_KV,
+        "d_h_qk": d_h_qk,
+        "d_h_v": d_h_v,
+        "dropout": dropout,
+        "causal": causal,
+        "flash_impl": True,
+        "num_seqs_q": num_seqs_q,
+        "num_seqs_kv": num_seqs_kv,
+        "max_seqlen_q": max_seqlen_q,
+        "max_seqlen_kv": max_seqlen_kv,
+    }
+
+
+def _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=0):
+    """Shared parser for ``aiter::(wrapper_)fmha_v3_varlen_bwd``. Issue #650.
+
+    Direct variant (``aiter::fmha_v3_varlen_bwd``, ``tensor_offset=0``):
+        Input Dims: dout[0], q[1], k[2], v[3], out[4], softmax_lse[5],
+                    cu_seqlens_q[6], cu_seqlens_k[7], scalars...
+        Concrete Inputs: ..., max_seqlen_q[8], max_seqlen_k[9],
+                         dropout_p[10], softmax_scale[11], is_causal[12], ...
+
+    Wrapper variant (``aiter::wrapper_fmha_v3_varlen_bwd``, ``tensor_offset=1``):
+        Extra leading tensor — all indices shift by +1.
+
+    Q/K/V are packed varlen tensors in (T, H, d_h) layout; cross-attention with
+    differing N_Q vs N_KV is supported.
+    """
+    input_dims = event["args"]["Input Dims"]
+    concrete_inputs = event["args"]["Concrete Inputs"]
+
+    q_idx = tensor_offset + 1
+    k_idx = tensor_offset + 2
+    v_idx = tensor_offset + 3
+    cu_q_idx = tensor_offset + 6
+    cu_k_idx = tensor_offset + 7
+    scalar_base = tensor_offset + 8
+    max_q_idx = scalar_base + 0
+    max_kv_idx = scalar_base + 1
+    dropout_idx = scalar_base + 2
+    causal_idx = scalar_base + 4
+
+    q_shape, k_shape, v_shape = (
+        input_dims[q_idx],
+        input_dims[k_idx],
+        input_dims[v_idx],
+    )
+    hnd_idx = 1, 0, 2  # (T, H, d_h) layout
+    sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
+    B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+        sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+    )
+
+    cu_q_dim = input_dims[cu_q_idx] if cu_q_idx < len(input_dims) else []
+    cu_k_dim = input_dims[cu_k_idx] if cu_k_idx < len(input_dims) else []
+    num_seqs_q = cu_q_dim[0] - 1 if cu_q_dim else 1
+    num_seqs_kv = cu_k_dim[0] - 1 if cu_k_dim else 1
+
+    def _f(idx, default):
+        v = concrete_inputs[idx] if idx < len(concrete_inputs) else ""
+        if v in ("", "None"):
+            return default
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return default
+
+    max_seqlen_q = _f(max_q_idx, float(N_Q))
+    max_seqlen_kv = _f(max_kv_idx, float(N_KV))
+    dropout = _f(dropout_idx, 0.0)
+    causal = False
+    if causal_idx < len(concrete_inputs):
+        cv = concrete_inputs[causal_idx]
+        if cv not in ("", "None"):
+            causal = cv.lower() == "true"
+
+    return {
+        "B": B,
+        "N_Q": N_Q,
+        "H_Q": H_Q,
+        "N_KV": N_KV,
+        "H_KV": H_KV,
+        "d_h_qk": d_h_qk,
+        "d_h_v": d_h_v,
+        "dropout": dropout,
+        "causal": causal,
+        "flash_impl": True,
+        "num_seqs_q": num_seqs_q,
+        "num_seqs_kv": num_seqs_kv,
+        "max_seqlen_q": max_seqlen_q,
+        "max_seqlen_kv": max_seqlen_kv,
+    }
+
+
+class aiter__fmha_v3_varlen_fwd(SDPA):
+    """Perf model for ``aiter::fmha_v3_varlen_fwd``. Issue #650.
+
+    Varlen forward attention used in diffusion training (Wan 2.x) and inference
+    (sglang / vLLM). Q/K/V in (T, H, d_h) packed layout, sequence boundaries
+    in cu_seqlens. Shape-based FLOPs use ``SDPA.flops_func`` with
+    ``N_Q = max_seqlen_q``, ``N_KV = max_seqlen_kv`` (lower-bound estimate when
+    multiple varlen sequences are present).
+
+    Replaces the annotation-only path in
+    ``extensions.attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd`` for
+    training traces; that extension class continues to exist for sglang/vLLM
+    inference flows that inject chunk annotations.
+    """
+
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+        self.num_seqs_q = self.param_details["num_seqs_q"]
+        self.num_seqs_kv = self.param_details["num_seqs_kv"]
+        self.max_seqlen_q = self.param_details["max_seqlen_q"]
+        self.max_seqlen_kv = self.param_details["max_seqlen_kv"]
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0)
+
+    def flops(self):
+        # Varlen FLOPs accumulator (mirrors ``flash_attention_varlen_forward``):
+        # the B and S dimensions are collapsed into a single packed T axis with
+        # ``num_seqs_q`` variable-length sequences whose exact per-sequence
+        # lengths are not in the trace. We estimate as one ``max_seqlen``
+        # sequence plus ``num_seqs - 1`` equal-length sequences whose lengths
+        # average to ``(N - max_seqlen) / (num_seqs - 1)`` (lower bound: the
+        # max-length sequence dominates the N^2 term).
+        accum_flops = self.flops_func(
+            self.B,
+            self.max_seqlen_q,
+            self.H_Q,
+            self.max_seqlen_kv,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+        )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+            )
+        return accum_flops
+
+
+class aiter__fmha_v3_varlen_forward(SDPA):
+    """Perf model for ``aiter::wrapper_fmha_v3_varlen_fwd``. Issue #290.
+
+    Same kernel as :class:`aiter__fmha_v3_varlen_fwd` accessed via the Python
+    wrapper layer; the wrapper traces an extra leading ``out`` tensor, so all
+    arg indices shift by +1.
+    """
+
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+        self.num_seqs_q = self.param_details["num_seqs_q"]
+        self.num_seqs_kv = self.param_details["num_seqs_kv"]
+        self.max_seqlen_q = self.param_details["max_seqlen_q"]
+        self.max_seqlen_kv = self.param_details["max_seqlen_kv"]
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=1)
+
+    def flops(self):
+        # See note on ``aiter__fmha_v3_varlen_fwd.flops()``.
+        accum_flops = self.flops_func(
+            self.B,
+            self.max_seqlen_q,
+            self.H_Q,
+            self.max_seqlen_kv,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+        )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+            )
+        return accum_flops
+
+
+class aiter__fmha_v3_varlen_bwd(SDPA):
+    """Perf model for ``aiter::fmha_v3_varlen_bwd``. Issue #650.
+
+    Varlen backward attention. Q/K/V in (T, H, d_h) packed layout, dout at
+    Input Dims[0], cu_seqlens at [6]/[7]. FLOPs use ``SDPA.flops_bwd_func`` with
+    ``flash_impl=True`` (recompute QK + 4 GEMMs ⇒ 5/2 × forward FLOPs for the
+    square N_Q=N_KV case). Cross-attention (N_Q ≠ N_KV) supported.
+    """
+
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+        self.num_seqs_q = self.param_details["num_seqs_q"]
+        self.num_seqs_kv = self.param_details["num_seqs_kv"]
+        self.max_seqlen_q = self.param_details["max_seqlen_q"]
+        self.max_seqlen_kv = self.param_details["max_seqlen_kv"]
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=0)
+
+    def flops(self):
+        # See note on ``aiter__fmha_v3_varlen_fwd.flops()``; the bwd FLOPs
+        # identity ``bwd = 5/2 * fwd`` (square self-attn, flash_impl=True) is
+        # baked into ``flops_bwd_func`` so the multi-seq accumulator stays
+        # consistent with the fwd one.
+        accum_flops = self.flops_bwd_func(
+            self.B,
+            self.max_seqlen_q,
+            self.H_Q,
+            self.max_seqlen_kv,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+            self.param_details["flash_impl"],
+        )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_bwd_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+                self.param_details["flash_impl"],
+            )
+        return accum_flops
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
+class aiter__fmha_v3_varlen_backward(SDPA):
+    """Perf model for ``aiter::wrapper_fmha_v3_varlen_bwd``. Issue #650.
+
+    Same kernel as :class:`aiter__fmha_v3_varlen_bwd` accessed via the Python
+    wrapper layer; tensor indices shift by +1 for the extra leading tensor.
+    """
+
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+        self.num_seqs_q = self.param_details["num_seqs_q"]
+        self.num_seqs_kv = self.param_details["num_seqs_kv"]
+        self.max_seqlen_q = self.param_details["max_seqlen_q"]
+        self.max_seqlen_kv = self.param_details["max_seqlen_kv"]
+
+    @staticmethod
+    def get_param_details(event):
+        return _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=1)
+
+    def flops(self):
+        # See note on ``aiter__fmha_v3_varlen_bwd.flops()``.
+        accum_flops = self.flops_bwd_func(
+            self.B,
+            self.max_seqlen_q,
+            self.H_Q,
+            self.max_seqlen_kv,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
+            self.param_details["flash_impl"],
+        )
+        if self.num_seqs_q > 1:
+            accum_flops += (self.num_seqs_q - 1) * self.flops_bwd_func(
+                self.B,
+                (self.N_Q - self.max_seqlen_q) // (self.num_seqs_q - 1),
+                self.H_Q,
+                (self.N_KV - self.max_seqlen_kv) // (self.num_seqs_kv - 1),
+                self.H_KV,
+                self.d_h_qk,
+                self.d_h_v,
+                self.param_details["causal"],
+                self.param_details["flash_impl"],
+            )
+        return accum_flops
+
+    def bytes(self, bytes_per_element=2):
+        return self.bytes_bwd(bytes_per_element)
+
+
+class aten___flash_attention_forward(SDPA):
+    """Perf model for ``aten::_flash_attention_forward``. Issue #650.
+
+    PyTorch's dispatcher-level Flash-Attention forward (called by
+    ``torch.nn.functional.scaled_dot_product_attention`` when the flash backend
+    is selected). Mirrors :class:`aten__scaled_dot_product_flash_attention`.
+
+    Signature (Input Dims / Concrete Inputs are parallel arrays):
+        q[0], k[1], v[2], cum_seq_q[3], cum_seq_k[4],
+        max_q[5], max_k[6], dropout_p[7], is_causal[8],
+        return_debug_mask[9], scale[10], ...
+    Q/K/V layout: (B, S, H, d_h); bhnd_idx=(0, 2, 1, 3) extracts B, H, N, d_h.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        q_idx, k_idx, v_idx = 0, 1, 2
+        q_shape, k_shape, v_shape = (
+            input_dims[q_idx],
+            input_dims[k_idx],
+            input_dims[v_idx],
+        )
+        bhnd_idx = 0, 2, 1, 3
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+        dropout_p = 0.0
+        if len(concrete_inputs) > 7 and concrete_inputs[7] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[7])
+            except (ValueError, TypeError):
+                pass
+        is_causal = False
+        if len(concrete_inputs) > 8 and concrete_inputs[8] not in ("", "None"):
+            is_causal = concrete_inputs[8].lower() == "true"
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+        }
+
+
 class vllm_unified_attention_with_output(SDPA):
 
     @staticmethod

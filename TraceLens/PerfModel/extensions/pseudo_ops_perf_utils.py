@@ -45,7 +45,13 @@ def get_pseudo_op_mappings():
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
-        "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
+        # ``aiter::fmha_v3_varlen_fwd`` is handled by the core SDPA-derived class
+        # (``perf_model.aiter__fmha_v3_varlen_fwd``) since TraceLens #650 — that
+        # class supports both training (Wan 2.x, no annotation) and inference
+        # (sglang / vLLM) via shape-based extraction. The annotation-aware
+        # ``attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd`` class is
+        # preserved for any future caller that wants to map a renamed
+        # ``pseudo_op::*`` event to it explicitly.
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd_586": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops
