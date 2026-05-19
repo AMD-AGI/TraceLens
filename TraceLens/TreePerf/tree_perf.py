@@ -361,6 +361,7 @@ class TreePerfAnalyzer:
                 "name": kernel["name"],
                 "dur": kernel["dur"],
                 "stream": kernel.get("args", {}).get("stream", None),
+                "gpu_op_uid": kernel.get("UID"),
             }
             for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
@@ -1294,7 +1295,9 @@ class TreePerfAnalyzer:
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
         # --- CHANGE: Collect durations BY INDEX, not by name ---
+        # Collect per-position durations and gpu_op_uids across all instances.
         all_durations = [[] for _ in template]
+        all_gpu_op_uids = [[] for _ in template]
 
         for kernel_list in series_of_kernel_lists:
             if isinstance(kernel_list, list):
@@ -1316,6 +1319,11 @@ class TreePerfAnalyzer:
                             UserWarning,
                         )
                         continue
+                    uid = kernel.get("gpu_op_uid")
+                    if uid is None:
+                        uid = kernel.get("UID")
+                    if uid is not None:
+                        all_gpu_op_uids[i].append(uid)
 
         # --- CHANGE: Create a deep copy to avoid modifying original data ---
         summary_list = copy.deepcopy(template)
@@ -1327,11 +1335,13 @@ class TreePerfAnalyzer:
 
             # --- CHANGE: Use consistent naming and clear up original 'dur' key ---
             del kernel_summary["dur"]
+            kernel_summary.pop("gpu_op_uid", None)
 
             kernel_summary["count"] = len(dur_arr)
             kernel_summary["total_duration_us"] = np.sum(
                 dur_arr
             )  # Use consistent key name
+            kernel_summary["gpu_op_uids"] = list(all_gpu_op_uids[i])
 
             if not durations_for_this_index:
                 # If no durations were collected (e.g., all rows skipped), skip metric calculation
@@ -1985,6 +1995,7 @@ class TreePerfAnalyzer:
                                 "name": gpu_event.get("name"),
                                 "dur": gpu_event.get("dur"),
                                 "stream": gpu_event.get("args", {}).get("stream"),
+                                "gpu_op_uid": gpu_event.get("UID"),
                             }
                         )
                 row["kernel_details"] = kernel_details if kernel_details else None
