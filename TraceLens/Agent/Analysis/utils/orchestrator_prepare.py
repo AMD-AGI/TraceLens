@@ -664,19 +664,6 @@ def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) ->
     }
 
 
-def _perf_csv_dirs_for_scope(comparison_scope: str, output_dir: str):
-    """Return (trace1_csv_dir, trace2_csv_dir_or_none) for standalone vs comparative."""
-    if comparison_scope == "standalone":
-        return (
-            os.path.join(output_dir, "perf_report_csvs"),
-            None,
-        )
-    if comparison_scope == "comparative":
-        return (
-            os.path.join(output_dir, "perf_report_trace1_csvs"),
-            os.path.join(output_dir, "perf_report_trace2_csvs"),
-        )
-
 
 
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
@@ -819,9 +806,12 @@ def main():
     output_dir = args.output_dir
     enable_pseudo_ops = args.enable_pseudo_ops
     comparison_scope = args.comparison_scope
-    trace1_csv_dir, trace2_csv_dir = _perf_csv_dirs_for_scope(
-        comparison_scope, output_dir
-    )
+    if comparison_scope == "comparative":
+        trace1_csv_dir = os.path.join(output_dir, "perf_report_trace1_csvs")
+        trace2_csv_dir = os.path.join(output_dir, "perf_report_trace2_csvs")
+    else:
+        trace1_csv_dir = os.path.join(output_dir, "perf_report_csvs")
+        trace2_csv_dir = None
 
     print("=" * 80)
     print("TRACELENS AGENT - ORCHESTRATOR PREPARATION")
