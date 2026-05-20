@@ -103,13 +103,6 @@ def _strip_module_index(name):
     return _MODULE_INDEX_RE.sub("", prefix)
 
 
-def _is_fusion_eligible(name):
-    lower = name.lower()
-    return not any(x in lower for x in FUSION_EXCLUDED_KERNELS) and not any(
-        x in lower for x in FUSION_ALREADY_FUSED
-    )
-
-
 def _has_fused_kernel(kernel_list):
     return any(
         any(p in k["name"].lower() for p in FUSION_ALREADY_FUSED)
@@ -133,11 +126,30 @@ def _build_parent_chain(ev, tree) -> list:
     return parent_chain
 
 
-def _is_layout_transform(kernel_name: str) -> bool:
-    """Return True if a kernel is a layout-transform (tile/autotuner difference, not fusion)."""
-    lower = kernel_name.lower()
-    return any(p in lower for p in _LAYOUT_TRANSFORM_PATTERNS)
+def _dedup_by_kernel_set(candidates: list, kernels_field: str, score_fn) -> list:
+    """Deduplicate fusion candidates with identical kernel name tuples.
 
+    When two candidates share the same ordered kernel names, keeps the one
+    with the higher ``score_fn`` value.  Handles both ``name`` and
+    ``kernel_name`` key variants in the kernel dicts.
+    """
+    seen: dict = {}
+    for c in candidates:
+        kernels = c.get(kernels_field, [])
+        if not kernels:
+            continue
+        nk = "name" if "name" in kernels[0] else "kernel_name"
+        kset = tuple(k.get(nk, "") for k in kernels)
+        prev = seen.get(kset)
+        if prev is None or score_fn(c) > score_fn(prev):
+            seen[kset] = c
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# Comparative fusion extraction helpers (used only by
+# _extract_comparative_fusion_candidates)
+# ---------------------------------------------------------------------------
 
 def _is_case_a_fusion_gap(trace1_kernels: list, trace2_kernels: list) -> bool:
     """Return True if Case-A gates pass (trace1 has more kernels than trace2).
@@ -207,7 +219,10 @@ def _apply_comparative_gates(t1_kernels, t2_kernels):
         return False
 
     # Skip if all delta kernels are layout-transforms (tile/autotuner choice).
-    if delta_kernels and all(_is_layout_transform(k["name"]) for k in delta_kernels):
+    if delta_kernels and all(
+        any(p in k["name"].lower() for p in _LAYOUT_TRANSFORM_PATTERNS)
+        for k in delta_kernels
+    ):
         return False
 
     return True
@@ -243,26 +258,6 @@ def _make_comparative_candidate(
     if lca_id is not None:
         candidate["lca_id"] = int(lca_id)
     return candidate
-
-
-def _dedup_by_kernel_set(candidates: list, kernels_field: str, score_fn) -> list:
-    """Deduplicate fusion candidates with identical kernel name tuples.
-
-    When two candidates share the same ordered kernel names, keeps the one
-    with the higher ``score_fn`` value.  Handles both ``name`` and
-    ``kernel_name`` key variants in the kernel dicts.
-    """
-    seen: dict = {}
-    for c in candidates:
-        kernels = c.get(kernels_field, [])
-        if not kernels:
-            continue
-        nk = "name" if "name" in kernels[0] else "kernel_name"
-        kset = tuple(k.get(nk, "") for k in kernels)
-        prev = seen.get(kset)
-        if prev is None or score_fn(c) > score_fn(prev):
-            seen[kset] = c
-    return list(seen.values())
 
 
 def _extract_comparative_fusion_candidates(
@@ -366,6 +361,13 @@ def _extract_comparative_fusion_candidates(
     )
 
     return candidates
+
+
+def _is_fusion_eligible(name):
+    lower = name.lower()
+    return not any(x in lower for x in FUSION_EXCLUDED_KERNELS) and not any(
+        x in lower for x in FUSION_ALREADY_FUSED
+    )
 
 
 def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -> list:
