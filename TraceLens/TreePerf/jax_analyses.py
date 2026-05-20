@@ -64,6 +64,24 @@ class JaxAnalyses:
                     found = True
                     break
             if not found:
+                # Metadata-aware fallback (issue #422): an XLA-emitted
+                # buffer-init kernel such as `__amd_rocclr_fillBufferAligned.kd`
+                # does not match any name keyword, but its
+                # ``args["hlo_op"]`` carries the surrounding XLA op (e.g.
+                # ``te_fused_attn_backward_ffi.12``) which does. Re-run the
+                # same substring match against that field so the kernel
+                # lands in the correct category instead of `Uncategorized`.
+                hlo_op = (compute_event.get("args") or {}).get("hlo_op")
+                if isinstance(hlo_op, str) and hlo_op:
+                    for (
+                        category,
+                        filters,
+                    ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                        if any(f in hlo_op for f in filters):
+                            add_event(cur_categorized_list, category, duration)
+                            found = True
+                            break
+            if not found:
                 if group_by_name:
                     name = name.rstrip(string.digits)
                 add_event(
