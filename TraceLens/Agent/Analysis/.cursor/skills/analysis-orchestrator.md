@@ -582,7 +582,7 @@ If the file is absent, skip this step silently. The analysis is complete; the si
 ```bash
 EXT='<agent_extension_file>'
 if [ -f "$EXT" ]; then
-  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
+  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential' --comparison-scope <comparison_scope>
 fi
 ```
 
