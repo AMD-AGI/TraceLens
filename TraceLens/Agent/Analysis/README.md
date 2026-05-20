@@ -10,6 +10,22 @@ See LICENSE for license information.
 
 The TraceLens Agentic Analysis module is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a **prioritized bottleneck list**. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence , the reasoning behind the call-out and a possible concrete resolution.
 
+## Analysis Modes
+
+**Standalone** — single-trace roofline analysis. Suitable when a single trace is available and the goal is to identify where performance falls short of hardware limits.
+
+**Comparative** — two-trace gap analysis. The agent profiles a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference.
+
+### Supported Analyses
+
+| | Standalone | Comparative |
+|---|---|---|
+| **Eager** | ✅ | ✅ |
+| **Graph + Capture** | ✅ | ❌ |
+| **Graph** | ❌ | ❌ |
+
+> **Note:** Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, or both from SGLang). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
+
 ---
 
 ## Prerequisites
@@ -159,26 +175,29 @@ analysis_output/
 
 ```
 analysis_output/
-├── analysis.md
-├── perf_report_trace1.xlsx         # Excel performance report for primary trace
-├── perf_report_trace1_csvs/        # Trace 1 CSV exports
-├── perf_report_trace2.xlsx         # Excel performance report for comparison trace
-├── perf_report_trace2_csvs/        # Trace 2 CSV exports
-├── category_data/
-│   ├── category_manifest.json      
-│   ├── multi_kernel_data.json
-│   ├── fusion_candidates.json
-│   ├── kernel_fusion_metrics.json
-│   ├── *_ops.csv
-│   ├── *_metrics.json
-│   └── *_tree_data.json
-├── system_findings/
-│   ├── *_findings.md
-│   └── kernel_fusion_findings.md
-├── category_findings/
-│   └── *_findings.md
-└── metadata/
-    └── *_metadata.json
+├── analysis.md                     # Stakeholder report (only user-facing output)
+├── perf_report_trace1.xlsx         # Excel export of TraceLens perf report for trace 1 (Internal)
+├── perf_report_trace1_csvs/        # Trace 1 CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── perf_report_trace2.xlsx         # Excel export of TraceLens perf report for trace 2 (Internal)
+├── perf_report_trace2_csvs/        # Trace 2 CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
+│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
+│   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
+│   ├── fusion_candidates.json          # Kernel fusion candidate modules
+│   ├── kernel_fusion_metrics.json      # Gap-based savings estimates for fusion candidates
+│   ├── priority_data.json              # Globally ranked findings + impact scores
+│   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
+│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
+│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
+├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
+│   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
+│   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
+│   └── kernel_fusion_findings.md       # Kernel fusion analysis output
+├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
+│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
+└── metadata/                       # Category metadata + model_info.json (Internal)
+    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
+    └── model_info.json                 # Model identification (model, architecture, scale, precision)
 ```
 
 ---
