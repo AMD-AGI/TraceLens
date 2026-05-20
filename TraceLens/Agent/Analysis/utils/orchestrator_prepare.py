@@ -363,11 +363,96 @@ def _extract_comparative_fusion_candidates(
     return candidates
 
 
+# ---------------------------------------------------------------------------
+# Standalone fusion extraction helpers (used only by
+# _extract_standalone_fusion_candidates)
+# ---------------------------------------------------------------------------
+
 def _is_fusion_eligible(name):
     lower = name.lower()
     return not any(x in lower for x in FUSION_EXCLUDED_KERNELS) and not any(
         x in lower for x in FUSION_ALREADY_FUSED
     )
+
+
+def _build_kernel_perf_lookup(csv_path):
+    """GPU kernel name -> {shape -> {op_category, data_in_mb, data_out_mb}} from perf CSV."""
+    df = pd.read_csv(csv_path)
+    lookup = defaultdict(dict)
+    for _, row in df.iterrows():
+        kd = row.get("kernel_details_summary", "")
+        if pd.isna(kd):
+            continue
+        cat = row.get("op category", "")
+        dm = row.get("Data Moved (MB)")
+        dm = float(dm) if dm is not None and not pd.isna(dm) else None
+        pp = row.get("perf_params", "")
+        if pd.isna(pp):
+            pp = ""
+        data_in, data_out = _compute_data_in_out(cat, pp, dm)
+        shape = parse_first_shape(row.get("Input Dims"))
+        for kn in re.findall(r"'name':\s*'([^']+)'", str(kd)):
+            if shape not in lookup[kn]:
+                lookup[kn][shape] = {
+                    "op_category": cat,
+                    "data_in_mb": data_in,
+                    "data_out_mb": data_out,
+                }
+    return dict(lookup)
+
+
+def _is_gemm_norm_only(entry):
+    """Reject GEMM + norm-only candidates (BN folding, not kernel fusion)."""
+    kernels = entry.get("kernels", [])
+    has_gemm = any(
+        k.get("type", "").upper() in ("GEMM", "GEMM (GENERIC)")
+        or "conv" in k.get("name", "").lower()
+        for k in kernels
+    )
+    if not has_gemm:
+        return False
+    non_gemm = [
+        k
+        for k in kernels
+        if k.get("type", "").upper() not in ("GEMM", "GEMM (GENERIC)")
+        and "conv" not in k.get("name", "").lower()
+    ]
+    if not non_gemm:
+        return False
+    return all(
+        any(p in k.get("name", "").lower() for p in _NORM_KERNEL_PATTERNS)
+        or k.get("type", "") in ("Elementwise Add", "Copy/Cast")
+        for k in non_gemm
+    )
+
+
+def _prefix_lookup(lookup, kname):
+    """Look up by exact key, falling back to prefix match for truncated CSV names."""
+    result = lookup.get(kname)
+    if result is not None:
+        return result
+    for csv_name in lookup:
+        if kname.startswith(csv_name) or csv_name.startswith(kname):
+            return lookup[csv_name]
+    return None
+
+
+def _extract_attention_core(kernels, perf_lookup):
+    """If kernels contain unfused attention (softmax), return just QKt+softmax+PV."""
+    name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
+
+    def is_gemm(k):
+        entries = _prefix_lookup(perf_lookup, k.get(name_key, "")) or {}
+        return any(e.get("op_category") == "GEMM" for e in entries.values())
+
+    for i, k in enumerate(kernels):
+        if "softmax" not in k.get(name_key, "").lower():
+            continue
+        qk = next((j for j in range(i - 1, -1, -1) if is_gemm(kernels[j])), None)
+        pv = next((j for j in range(i + 1, len(kernels)) if is_gemm(kernels[j])), None)
+        if qk is not None and pv is not None:
+            return kernels[qk : pv + 1]
+    return None
 
 
 def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -> list:
@@ -690,86 +775,6 @@ def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
     elif op_category == "elementwise" and "shape_in1" in params:
         return data_moved_mb * 2 / 3, data_moved_mb / 3
     return half
-
-
-def _build_kernel_perf_lookup(csv_path):
-    """GPU kernel name -> {shape -> {op_category, data_in_mb, data_out_mb}} from perf CSV."""
-    df = pd.read_csv(csv_path)
-    lookup = defaultdict(dict)
-    for _, row in df.iterrows():
-        kd = row.get("kernel_details_summary", "")
-        if pd.isna(kd):
-            continue
-        cat = row.get("op category", "")
-        dm = row.get("Data Moved (MB)")
-        dm = float(dm) if dm is not None and not pd.isna(dm) else None
-        pp = row.get("perf_params", "")
-        if pd.isna(pp):
-            pp = ""
-        data_in, data_out = _compute_data_in_out(cat, pp, dm)
-        shape = parse_first_shape(row.get("Input Dims"))
-        for kn in re.findall(r"'name':\s*'([^']+)'", str(kd)):
-            if shape not in lookup[kn]:
-                lookup[kn][shape] = {
-                    "op_category": cat,
-                    "data_in_mb": data_in,
-                    "data_out_mb": data_out,
-                }
-    return dict(lookup)
-
-
-def _is_gemm_norm_only(entry):
-    """Reject GEMM + norm-only candidates (BN folding, not kernel fusion)."""
-    kernels = entry.get("kernels", [])
-    has_gemm = any(
-        k.get("type", "").upper() in ("GEMM", "GEMM (GENERIC)")
-        or "conv" in k.get("name", "").lower()
-        for k in kernels
-    )
-    if not has_gemm:
-        return False
-    non_gemm = [
-        k
-        for k in kernels
-        if k.get("type", "").upper() not in ("GEMM", "GEMM (GENERIC)")
-        and "conv" not in k.get("name", "").lower()
-    ]
-    if not non_gemm:
-        return False
-    return all(
-        any(p in k.get("name", "").lower() for p in _NORM_KERNEL_PATTERNS)
-        or k.get("type", "") in ("Elementwise Add", "Copy/Cast")
-        for k in non_gemm
-    )
-
-
-def _prefix_lookup(lookup, kname):
-    """Look up by exact key, falling back to prefix match for truncated CSV names."""
-    result = lookup.get(kname)
-    if result is not None:
-        return result
-    for csv_name in lookup:
-        if kname.startswith(csv_name) or csv_name.startswith(kname):
-            return lookup[csv_name]
-    return None
-
-
-def _extract_attention_core(kernels, perf_lookup):
-    """If kernels contain unfused attention (softmax), return just QKt+softmax+PV."""
-    name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
-
-    def is_gemm(k):
-        entries = _prefix_lookup(perf_lookup, k.get(name_key, "")) or {}
-        return any(e.get("op_category") == "GEMM" for e in entries.values())
-
-    for i, k in enumerate(kernels):
-        if "softmax" not in k.get(name_key, "").lower():
-            continue
-        qk = next((j for j in range(i - 1, -1, -1) if is_gemm(kernels[j])), None)
-        pv = next((j for j in range(i + 1, len(kernels)) if is_gemm(kernels[j])), None)
-        if qk is not None and pv is not None:
-            return kernels[qk : pv + 1]
-    return None
 
 
 def main():
