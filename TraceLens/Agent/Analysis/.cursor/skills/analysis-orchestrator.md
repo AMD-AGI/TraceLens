@@ -23,9 +23,7 @@ Orchestrate modular PyTorch trace analysis using a **two-tier architecture**:
 - **System-Level Analysis** (Step 6): CPU/idle time + Kernel Fusion + Multi-kernel issues (memcpy, communication blocking, overlap)
 - **Compute Kernel Analysis** (Step 7): Per-category kernel efficiency (GEMM, SDPA, elementwise, etc.)
 
-**Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
-
-**Comparison scope (`<comparison_scope>`):** **`standalone`** — single trace, roofline analysis. **`comparative`** — baseline vs target trace comparative analysis
+**Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, and aggregate results into independently composable report sections. For **standalone** mode this will be a single trace, roofline analysis. For **comparative** mode this will be a baseline vs target trace comparative analysis.
 
 ---
 
@@ -97,6 +95,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
+   - **Unsupported combination:** If `<inference_exec_mode>` = `graph_capture` **and** `<comparison_scope>` = `comparative`, stop immediately. Inform the user: "Graph replay + capture mode is not yet supported for comparative analysis. Please provide eager mode traces instead." Do **not** proceed to Step 1 or beyond.
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -160,18 +159,23 @@ For all of these scripts below, look at the environment variable TL_EXTENSION to
 If it is not found also look in TraceLens/Agent/Analysis/utils/arch/<platform>.json.
 Use <platform_file> to represent the location of this file
 
-**Output paths:**
-**`standalone`** — one run: `--output_xlsx_path <output_dir>/perf_report.xlsx`, `--output_csvs_dir <output_dir>/perf_report_csvs`.
-**`comparative`** — two runs: trace1 → `<output_dir>/perf_report_trace1.xlsx`, `<output_dir>/perf_report_trace1_csvs`; trace2 → `--profile_json_path <trace2_path>`, `<output_dir>/perf_report_trace2.xlsx`, `<output_dir>/perf_report_trace2_csvs`.
+All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<comparison_scope>`:
 
-**Extension flags (comparative, trace1 only):** When `<comparison_scope>` = `comparative`, append **only** to the trace1 command:
+**`<suffix_1>`** — output paths:
 
-```text
-  --extension_file TraceLens/Reporting/tracediff_comparison_extension.py \
-  --extension_args <trace2_path>
-```
+| scope | value |
+|-------|-------|
+| `standalone` | `--output_xlsx_path <output_dir>/perf_report.xlsx --output_csvs_dir <output_dir>/perf_report_csvs` |
+| `comparative` trace1 | `--output_xlsx_path <output_dir>/perf_report_trace1.xlsx --output_csvs_dir <output_dir>/perf_report_trace1_csvs` |
+| `comparative` trace2 | `--profile_json_path <trace2_path> --output_xlsx_path <output_dir>/perf_report_trace2.xlsx --output_csvs_dir <output_dir>/perf_report_trace2_csvs` |
 
-Do **not** pass `--extension_*` on the trace2 command.
+**`<suffix_2>`** — extension flags:
+
+| scope | value |
+|-------|-------|
+| `standalone` | none |
+| `comparative` trace1 | `--extension_file TraceLens/Reporting/tracediff_comparison_extension.py --extension_args <trace2_path>` |
+| `comparative` trace2 | none |
 
 ---
 
@@ -180,12 +184,12 @@ Do **not** pass `--extension_*` on the trace2 command.
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
-  --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path <platform_file> \
   --enable_pseudo_ops \
   --group_by_num_kernels \
-  --include_call_stack
+  --include_call_stack \
+  <suffix_1> \
+  <suffix_2>
 ```
 
 **Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
@@ -193,16 +197,14 @@ Do **not** pass `--extension_*` on the trace2 command.
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
   --profile_json_path <trace_path> \
-  --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
-  --include_call_stack
+  --include_call_stack \
+  <suffix_1> \
+  <suffix_2>
 ```
-
-When `<comparison_scope>` = `comparative`, append the same `--extension_file` / `--extension_args <trace2_path>` pair as in the default-mode example.
 
 **Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
 
@@ -210,18 +212,14 @@ When `<comparison_scope>` = `comparative`, append the same `--extension_file` / 
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
   --profile_json_path <trace_path> \
   --capture_folder <capture_folder_path> \
-  --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
-  --include_call_stack
+  --include_call_stack \
+  <suffix_1> \
+  <suffix_2>
 ```
-
-This generates: 
-**`standalone`:** `perf_report.xlsx` and `perf_report_csvs/`. 
-**`comparative`:** `perf_report_trace1.xlsx`, `perf_report_trace1_csvs/`, `perf_report_trace2.xlsx`, `perf_report_trace2_csvs/`.
 
 Excel report contains all sheets. CSV directory contains individual sheets in report
 
@@ -239,10 +237,6 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --output-dir <output_dir>
   --comparison-scope <comparison_scope>
 ```
-
-**Perf CSV directories by scope:** 
-**`standalone`** → `<output_dir>/perf_report_csvs`. 
-**`comparative`** → trace 1 from `<output_dir>/perf_report_trace1_csvs`, trace 2 from `<output_dir>/perf_report_trace2_csvs`
 
 This script performs:
 - **Step 2:** Assess GPU utilization (computation, idle, communication times)
@@ -525,7 +519,6 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
    - **`comparative` only:** substitute `<Platform1>` with `<platform>` and `<Platform2>` with `<platform2>` throughout the report (title, Executive Summary table headers, and any other occurrences).
    - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
-   - **No-findings categories (compute):** If `category_data/<category>_metrics.json` has `category_findings: []`, that category has no actionable compute recommendations (sub-agents emit empty `## Recommendations` / `## Detailed Analysis` for it). Include the category in the Top Operations table but do **not** generate a P-item card for it in the Compute Kernel Optimizations section. If **all** quantified compute categories are empty this way, use: "✅ No compute kernel optimization opportunities identified. All categories are within expected performance bounds."
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
 The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:

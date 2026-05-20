@@ -18,8 +18,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
   - **Trace 1** =  trace (primary). **Trace 2** = trace (target/comparison).
   - Impact semantics: standalone uses roofline gap (75–100% of peak); comparative uses
     trace 2 kernel time as the optimization target (gap = trace1 time − trace2 time).
-  - Comparative speed semantics: express as "X% faster" or "X% slower" relative to Trace 1.
-    Formula: `speed_diff_pct = abs(1 - t2/t1) × 100`. If t2 < t1 → "X% faster"; if t2 > t1 → "X% slower".
+  - Comparative speed semantics: express as "X% faster" or "X% slower" relative to Trace 1. If t2 < t1 → "X% faster"; if t2 > t1 → "X% slower".
     Standalone efficiency semantics: % of roofline (unchanged).
 
 === GENERAL RULES ===
@@ -151,7 +150,6 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 <!-- === NO ACTIONABLE FINDINGS (all quantified compute categories have empty category_findings[] in *_metrics.json) === -->
 <!-- Use when priority_data / per-category metrics show no compute P-items to render (category_findings[] empty everywhere that applies). -->
-
 ✅ No compute kernel optimization opportunities identified. All categories are within target performance bounds.
 
 <!-- === ACTIONABLE FINDINGS (at least one compute category has P-items) === -->
@@ -209,7 +207,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 
-<!-- Populate from category_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
+<!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by confidence then kernel time. -->
 <!-- Icon mapping by CONFIDENCE (not priority number): 🔴 high → 🟡 medium → 🟢 low. -->
