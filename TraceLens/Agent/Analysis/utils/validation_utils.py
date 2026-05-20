@@ -60,6 +60,7 @@ _COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
 # § Operations Table Schema — Comparative).
 _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
     "Operation",
+    "Args (T1)",
     "Trace 1 Time (ms)",
     "Trace 2 Time (ms)",
     "Count (T1/T2)",
