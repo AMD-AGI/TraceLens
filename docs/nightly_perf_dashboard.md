@@ -23,7 +23,7 @@ A single total runtime number is not enough. This proposal describes a nightly p
 - Publishes summarized results to Grafana dashboards
 - Supports local developer runs for testing optimization branches
 
-The system uses **GitHub Actions** for nightly scheduling, **OpenTelemetry (OTLP)** for metrics emission, **Prometheus** for metrics storage, and **Grafana** for visualization.
+The system uses **GitHub Actions** for nightly scheduling, **OpenTelemetry (OTLP)** for metrics emission, and **Grafana Cloud** for metrics storage and visualization (managed Prometheus + Grafana).
 
 ---
 
@@ -46,19 +46,20 @@ The system uses **GitHub Actions** for nightly scheduling, **OpenTelemetry (OTLP
                 │  job metadata)                      │ (timing JSON,
                 ▼                                     │  cProfile dumps)
 ┌───────────────────────────┐                         │
-│    Prometheus Pushgateway  │                         │
-│    (or remote_write)       │                         ▼
-│                            │              ┌─────────────────────┐
-│  Metrics:                  │              │  Private Artifact   │
-│  - stage duration (s)      │              │  Storage            │
-│  - total duration (s)      │              │  (retained N days)  │
-│  - max RSS (bytes)         │              └─────────────────────┘
+│    Grafana Cloud           │                         │
+│    (managed Prometheus     │                         ▼
+│     + OTLP endpoint)       │              ┌─────────────────────┐
+│                            │              │  Private Artifact   │
+│  Metrics:                  │              │  Storage            │
+│  - stage duration (s)      │              │  (retained N days)  │
+│  - total duration (s)      │              └─────────────────────┘
+│  - max RSS (bytes)         │
 │  - job metadata labels     │
 └─────────────┬──────────────┘
               │ PromQL queries
               ▼
 ┌───────────────────────────┐
-│         Grafana            │
+│    Grafana Cloud           │
 │                            │
 │  Dashboards:               │
 │  - Runtime trends          │
@@ -99,7 +100,7 @@ version: 1
 traces:
   - trace_id: "trace_001"
     alias: "large-resnet50-h100"
-    source_location: "<private storage path or URL>"
+    source_location: "sharepoint:Documents/tracelens-private-traces/traces/trace_001.json.gz"
     format: "pytorch"          # pytorch | rocprof | jax
     workload_family: "vision"  # vision | nlp | recommendation | etc.
     enabled: true              # false to skip in nightly without removing
@@ -107,7 +108,7 @@ traces:
 
   - trace_id: "trace_002"
     alias: "llm-inference-mi300"
-    source_location: "<private storage path or URL>"
+    source_location: "sharepoint:Documents/tracelens-private-traces/traces/trace_002.json.gz"
     format: "pytorch"
     workload_family: "nlp"
     enabled: true
@@ -120,7 +121,7 @@ traces:
 |---|---|---|
 | `trace_id` | string | Stable unique identifier |
 | `alias` | string | Human-readable name |
-| `source_location` | string | Private storage path (SharePoint, blob, local) |
+| `source_location` | string | SharePoint path in rclone remote format (e.g. `sharepoint:Documents/tracelens-private-traces/traces/trace.json.gz`) |
 | `format` | enum | Trace format: `pytorch`, `rocprof`, `jax` |
 | `workload_family` | string | Workload category for aggregate views |
 | `enabled` | bool | Whether to include in nightly runs |
@@ -134,7 +135,7 @@ The harness is the core component. It instruments TraceLens processing stages, m
 
 ### Stages Instrumented
 
-These are the 11 stages from the issue, each timed individually:
+These are the 12 stages tracked by the dashboard, each timed individually:
 
 | # | Stage | Source Location |
 |---|---|---|
@@ -145,10 +146,11 @@ These are the 11 stages from the issue, each timed individually:
 | 5 | `build_host_call_stack_tree` | `TraceLens/Trace2Tree/trace_to_tree.py` |
 | 6 | `label_non_gpu_paths` | `TraceLens/Trace2Tree/trace_to_tree.py` |
 | 7 | `add_gpu_ops_to_tree` | `TraceLens/Trace2Tree/trace_to_tree.py` |
-| 8 | `build_df_unified_perf_table` | `TraceLens/TreePerf/tree_perf.py` |
-| 9 | `get_df_kernel_launchers` | `TraceLens/TreePerf/tree_perf.py` |
-| 10 | `get_df_kernels` | `TraceLens/TreePerf/tree_perf.py` |
-| 11 | `get_df_gpu_timeline` | `TraceLens/TreePerf/tree_perf.py` |
+| 8 | `collect_unified_perf_events` | `TraceLens/TreePerf/tree_perf.py` |
+| 9 | `build_df_unified_perf_table` | `TraceLens/TreePerf/tree_perf.py` |
+| 10 | `get_df_kernel_launchers` | `TraceLens/TreePerf/tree_perf.py` |
+| 11 | `get_df_kernels` | `TraceLens/TreePerf/tree_perf.py` |
+| 12 | `get_df_gpu_timeline` | `TraceLens/TreePerf/tree_perf.py` |
 
 All 11 stages are timed uniformly via `pstats` (`cumtime`) extracted from a `cProfile.Profile` wrapping the full run. No TraceLens source files are modified.
 
@@ -173,6 +175,7 @@ STAGES = {
     "build_host_call_stack_tree",
     "label_non_gpu_paths",
     "add_gpu_ops_to_tree",
+    "collect_unified_perf_events",
     "build_df_unified_perf_table",
     "get_df_kernel_launchers",
     "get_df_kernels",
@@ -183,7 +186,15 @@ def run_tracelens_with_cprofile(trace_path: str, artifact_path: str) -> cProfile
     """Run TraceLens report generation under cProfile and save the .prof artifact."""
     pr = cProfile.Profile()
     pr.enable()
-    TreePerfAnalyzer.from_file(trace_path)  # entry point; internally calls all 11 stages
+    # from_file covers stages 2-7: load_data, TraceToTree construction, build_tree,
+    # and the internal build_tree sub-stages (build_host_call_stack_tree,
+    # label_non_gpu_paths, add_gpu_ops_to_tree)
+    analyzer = TreePerfAnalyzer.from_file(trace_path)
+    # stages 8-11 are lazy methods not called by from_file; invoke explicitly
+    analyzer.build_df_unified_perf_table()
+    analyzer.get_df_kernel_launchers()
+    analyzer.get_df_kernels()
+    analyzer.get_df_gpu_timeline()
     pr.disable()
     pr.dump_stats(artifact_path)  # save .prof for artifact upload
     return pr
@@ -391,45 +402,37 @@ jobs:
 
 | Secret | Description |
 |---|---|
-| `RCLONE_CONFIG` | rclone configuration for accessing private trace storage (OAuth credentials for SharePoint; used by `download_traces.py` to run commands such as `rclone copy "sharepoint:tracelens-private-traces/trace_001.json.gz" /tmp/traces/`) |
+| `RCLONE_CONFIG` | rclone configuration file containing OAuth credentials for SharePoint; written to `~/.config/rclone/rclone.conf` so that `download_traces.py` can run `rclone copy sharepoint:... /tmp/traces/` |
 | `PROMETHEUS_OTLP_ENDPOINT` | OTLP/HTTP receiver URL (e.g., Prometheus with OTLP receiver, or a Grafana Cloud endpoint) |
 | `PROMETHEUS_PUSH_TOKEN` | Bearer token for authenticating OTLP pushes |
 
 ### Trace Download
 
-A helper script (`scripts/download_traces.py`) reads the manifest and downloads each enabled trace to a local directory. This keeps the download logic separate from the profiling harness so the harness stays trace-agnostic.
+The `RCLONE_CONFIG` secret contains the rclone configuration file with OAuth credentials for SharePoint. The "Configure private trace access" workflow step writes this secret to `~/.config/rclone/rclone.conf`, which is the default path rclone reads for authentication when it runs.
+
+`scripts/download_traces.py` then reads the trace manifest and, for each enabled trace, shells out to rclone using the `source_location` field as the SharePoint path:
+
+```python
+subprocess.run([
+    "rclone", "copy",
+    trace["source_location"],  # e.g. "sharepoint:Documents/tracelens-private-traces/traces/trace_001.json.gz"
+    output_dir,
+])
+```
+
+rclone picks up the SharePoint OAuth credentials from `~/.config/rclone/rclone.conf` automatically and copies each trace file to `/tmp/traces/`. This keeps the download logic separate from the profiling harness so the harness stays trace-agnostic.
 
 ---
 
 ## Prometheus Setup
 
-### Option A: Prometheus with OTLP Receiver (Self-Hosted)
-
-Prometheus 2.47+ supports native OTLP ingestion. Enable the OTLP receiver in `prometheus.yml`:
-
-```yaml
-otlp:
-  protocols:
-    http:
-      endpoint: "0.0.0.0:4318"
-
-global:
-  scrape_interval: 15s
-
-storage:
-  tsdb:
-    retention.time: 180d   # 6 months of nightly data
-```
-
-### Option B: Grafana Cloud (Managed)
-
-If using Grafana Cloud, the OTLP endpoint is provided by the managed Prometheus instance. The harness pushes directly to the Grafana Cloud OTLP endpoint:
+Grafana Cloud provides a managed Prometheus instance with a built-in OTLP endpoint. The harness pushes directly to it:
 
 ```
 https://otlp-gateway-<region>.grafana.net/otlp
 ```
 
-Authentication uses the Grafana Cloud API key set as `PROMETHEUS_PUSH_TOKEN`.
+Set `PROMETHEUS_OTLP_ENDPOINT` to this URL and `PROMETHEUS_PUSH_TOKEN` to the Grafana Cloud API key. No self-hosted Prometheus or Pushgateway is needed.
 
 ### Metric Naming
 
