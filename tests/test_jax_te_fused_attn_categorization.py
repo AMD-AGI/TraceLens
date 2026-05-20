@@ -28,7 +28,6 @@ forward + ``jax.value_and_grad``, BS3HD, causal mask, dropout 0.1).
 
 import os
 
-from TraceLens.TreePerf.gpu_event_analyser import JaxGPUEventAnalyser
 from TraceLens.TreePerf.jax_analyses import JaxAnalyses
 from TraceLens.util import DataLoader, TraceEventUtils
 
@@ -113,3 +112,20 @@ def test_te_keys_include_te_fused_attn():
     assert (
         "te_fused_attn" in te_keys
     ), f"expected 'te_fused_attn' in TEKeys; got {te_keys}"
+
+
+def test_uncategorized_bucket_is_always_seeded():
+    """When every event matches a category (no leftovers), the
+    ``Uncategorized Events`` bucket must still be present with ``[0, 0]``
+    so downstream consumers (``create_gpu_summary`` etc.) can index it
+    unconditionally without ``KeyError``. Regression for review of #655."""
+    events_all_te = [
+        {"pid": 1, "tid": 1, "name": "te_fused_attn_forward_ffi", "dur": 100.0},
+        {"pid": 1, "tid": 1, "name": "Cijk_mm_fp16", "dur": 50.0},
+    ]
+    cat, _ = JaxAnalyses.breakdown_compute_events(events_all_te, group_by_gpu=False)
+    unc = TraceEventUtils.JaxOpKeys.UncategorizedEventKey
+    assert (
+        unc in cat
+    ), f"Uncategorized bucket missing when all events match a category: {list(cat)}"
+    assert cat[unc] == [0, 0], f"expected [0, 0], got {cat[unc]}"

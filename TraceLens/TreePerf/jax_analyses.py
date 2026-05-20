@@ -55,33 +55,43 @@ class JaxAnalyses:
                 cur_categorized_list = categorized_events
                 cur_uncategorized_list = uncategorized_events
 
+            # Always seed the Uncategorized bucket so downstream code
+            # (e.g. create_gpu_summary) can index into it unconditionally
+            # even when the fallback below catches every event.
+            cur_categorized_list.setdefault(
+                TraceEventUtils.JaxOpKeys.UncategorizedEventKey, [0, 0]
+            )
+
             name = compute_event[TraceEventUtils.TraceKeys.Name]
             duration = compute_event[TraceEventUtils.TraceKeys.Duration]
-            found = False
-            for category, filters in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                if any(f in name for f in filters):
-                    add_event(cur_categorized_list, category, duration)
-                    found = True
-                    break
-            if not found:
-                # Metadata-aware fallback (issue #422): an XLA-emitted
-                # buffer-init kernel such as `__amd_rocclr_fillBufferAligned.kd`
-                # does not match any name keyword, but its
-                # ``args["hlo_op"]`` carries the surrounding XLA op (e.g.
-                # ``te_fused_attn_backward_ffi.12``) which does. Re-run the
-                # same substring match against that field so the kernel
-                # lands in the correct category instead of `Uncategorized`.
-                hlo_op = (compute_event.get("args") or {}).get("hlo_op")
-                if isinstance(hlo_op, str) and hlo_op:
-                    for (
-                        category,
-                        filters,
-                    ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                        if any(f in hlo_op for f in filters):
-                            add_event(cur_categorized_list, category, duration)
-                            found = True
-                            break
-            if not found:
+
+            def _match_category(candidate):
+                """Return the first JaxOpKeys category whose substring
+                filters match ``candidate``, or ``None``."""
+                if not isinstance(candidate, str) or not candidate:
+                    return None
+                for (
+                    category,
+                    filters,
+                ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                    if any(f in candidate for f in filters):
+                        return category
+                return None
+
+            # 1) Primary: match against the event name.
+            # 2) Fallback (issue #422): an XLA-emitted buffer-init kernel
+            #    such as ``__amd_rocclr_fillBufferAligned.kd`` does not
+            #    match any name keyword, but its ``args["hlo_op"]`` carries
+            #    the surrounding XLA op (e.g.
+            #    ``te_fused_attn_backward_ffi.12``) which does — retry the
+            #    same scan against that field.
+            args_dict = compute_event.get(TraceEventUtils.TraceKeys.Args) or {}
+            hlo_op = args_dict.get(TraceEventUtils.JaxKernelEventArgs.hlo_op)
+            category = _match_category(name) or _match_category(hlo_op)
+
+            if category is not None:
+                add_event(cur_categorized_list, category, duration)
+            else:
                 if group_by_name:
                     name = name.rstrip(string.digits)
                 add_event(
