@@ -83,7 +83,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      3. **MI350X**
      4. **MI355X**
      5. **MI455X**
-   **`comparative`:** Ask: "Which platform is target trace (trace2)?" Assign `<platform2>`
+   **`comparative`:** Ask: "Which platform is target trace (trace2)?" Assign `<platform2>` (`<platform2>` does not need to be one of the platform options)
 
 4. **Analysis Mode** → `<analysis_mode>`
    - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
@@ -95,7 +95,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
-   - **Unsupported combination:** If `<inference_exec_mode>` = `graph_capture` **and** `<comparison_scope>` = `comparative`, stop immediately. Inform the user: "Graph replay + capture mode is not yet supported for comparative analysis. Please provide eager mode traces instead." Do **not** proceed to Step 1 or beyond.
+   - **Unsupported combination:** If `<inference_exec_mode>` = `graph_capture` **and** `<comparison_scope>` = `comparative`, stop immediately. Inform the user: "Graph replay + capture mode is not yet supported for comparative analysis. Please provide eager mode traces instead." Do not misinterpret as two standalone analyses. Do **not** proceed to Step 1 or beyond.
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -159,6 +159,10 @@ For all of these scripts below, look at the environment variable TL_EXTENSION to
 If it is not found also look in TraceLens/Agent/Analysis/utils/arch/<platform>.json.
 Use <platform_file> to represent the location of this file
 
+**CLI call count:**
+- **`standalone`**: one TraceLens CLI call (for `<trace_path>`)
+- **`comparative`**: one TraceLens CLI call per trace (for `<trace_path>` and `<trace2_path>`)
+
 All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<comparison_scope>`:
 
 **`<suffix_1>`** — output paths:
@@ -220,8 +224,6 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   <suffix_1> \
   <suffix_2>
 ```
-
-Excel report contains all sheets. CSV directory contains individual sheets in report
 
 ---
 
@@ -517,7 +519,6 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping. Render exactly one P-item per entry in `findings[]` — never merge entries.
    - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
    - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
-   - **`comparative` only:** substitute `<Platform1>` with `<platform>` and `<Platform2>` with `<platform2>` throughout the report (title, Executive Summary table headers, and any other occurrences).
    - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
    - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
 
