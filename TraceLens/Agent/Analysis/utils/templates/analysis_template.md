@@ -144,8 +144,8 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- === COMPARATIVE Top Operations === -->
 `Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match.
 <!-- impact-begin kind=top_ops -->
-| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) | Potential improvement (time, E2E %) |
-|------|----------|-------------------|-------------------|-------------------|-----|-----------------|-------------------------------------|
+| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
+|------|----------|-------------------|-------------------|-------------------|-----|-----------------|
 | 1 | ... | ... | ... | ... | ... | +/-X.X or — | ~X–Y ms (X–Y%) or — |
 <!-- impact-end -->
 
