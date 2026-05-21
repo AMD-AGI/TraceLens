@@ -6,6 +6,7 @@
 
 import argparse
 import importlib.util
+import inspect
 import json
 import os
 import subprocess
@@ -249,7 +250,8 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
+    extension_args: Optional[str] = None,
+    # for gemm simulator
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     group_by_num_kernels: bool = False,
@@ -780,18 +782,31 @@ def generate_perf_report_pytorch(
         spec = importlib.util.spec_from_file_location(extension_name, extension_path)
         extension = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(extension)
-
+        extension_args = extension_args.strip() if extension_args else None
         if hasattr(extension, "get_additional_dataframes_extension"):
             print(f"Getting additional DataFrames from extension: {extension_path}")
             get_additional_dfs = getattr(
                 extension, "get_additional_dataframes_extension"
             )
-            additional_dfs = get_additional_dfs(perf_analyzer.tree)
+            if "extension_args" in inspect.signature(get_additional_dfs).parameters:
+                additional_dfs = get_additional_dfs(perf_analyzer.tree, extension_args=extension_args)
+            else:
+                additional_dfs = get_additional_dfs(perf_analyzer.tree)
             if additional_dfs:
                 dict_name2df.update(additional_dfs)
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
-    # Write CSVs and/or Excel (independent options)
+        if hasattr(extension, "postprocess_perf_report_dataframes_extension"):
+            print(
+                f"Running postprocess_perf_report_dataframes_extension from {extension_path}"
+            )
+            post = getattr(extension, "postprocess_perf_report_dataframes_extension")
+            if "extension_args" in inspect.signature(post).parameters:
+                dict_name2df = post(dict_name2df, perf_analyzer, extension_args=extension_args)
+            else:
+                dict_name2df = post(dict_name2df, perf_analyzer)
+
+    # Write all DataFrames to separate sheets in an Excel workbook
     if output_csvs_dir:
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
@@ -912,9 +927,18 @@ def main():
 
     parser.add_argument(
         "--extension_file",
+        "--extension-file",
         type=str,
         default=None,
+        dest="extension_file",
         help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
+    )
+
+    parser.add_argument(
+        "--extension_args",
+        type=str,
+        default=None,
+        help="Optional args for postprocess_perf_report_dataframes_extension.",
     )
 
     parser.add_argument(
@@ -972,6 +996,7 @@ def main():
     )
 
     args = parser.parse_args()
+
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         output_xlsx_path=args.output_xlsx_path,
@@ -990,6 +1015,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         extension_file=args.extension_file,
+        extension_args=args.extension_args,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         group_by_num_kernels=args.group_by_num_kernels,

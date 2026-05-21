@@ -7,6 +7,21 @@ See LICENSE for license information.
 <!--
 === FORMATTING RULES (for the agent filling in this template) ===
 
+=== MODE SELECTION ===
+This template supports two modes determined by `comparison_scope`:
+  - **standalone**: Single-trace roofline analysis (default). Use sections marked STANDALONE.
+  - **comparative**: Two-trace analysis (Trace 1 =  primary, Trace 2 = target). Use sections marked COMPARATIVE.
+When filling in this template, select the block matching the active `comparison_scope` for each
+section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
+
+=== COMPARATIVE TERMINOLOGY ===
+  - **Trace 1** =  trace (primary). **Trace 2** = trace (target/comparison).
+  - Impact semantics: standalone uses roofline gap (75–100% of peak); comparative uses
+    trace 2 kernel time as the optimization target (gap = trace1 time − trace2 time).
+  - Comparative speed semantics: express as "X% faster" or "X% slower" relative to Trace 1. If t2 < t1 → "X% faster"; if t2 > t1 → "X% slower".
+    Standalone efficiency semantics: % of roofline (unchanged).
+
+=== GENERAL RULES ===
 1. Warnings section: Only include if there were errors or high-variance operations; omit entirely if all succeeded and no variance flags.
 2. Executive Summary: Max ~20 lines.
 3. Performance plot: The {{PERF_PLOT}} placeholder is replaced by Step 11.3 with a base64-embedded
@@ -50,13 +65,20 @@ See LICENSE for license information.
     parenthetical.
 -->
 
-# <Model> - <Platform> Analysis
+<!-- === STANDALONE title === -->
+# <Model> - <Platform> Standalone Analysis
+
+<!-- === COMPARATIVE title === -->
+# <Model> - Comparative Analysis: <Platform1> vs <Platform2>
 
 ## Executive Summary
+
+<!-- === STANDALONE Executive Summary === -->
 [1 paragraph overview + key metrics table]
 
 <!-- MANDATORY: This table must contain exactly these 5 rows:
-     Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category -->
+     Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category
+     Top Bottleneck Category V% = gpu_kernel_time_ms of top category / (gpu_utilization.total_time_ms * computation_time_percent / 100) -->
 | Metric | Value |
 |--------|-------|
 | Total Time | X ms |
@@ -64,6 +86,19 @@ See LICENSE for license information.
 | Idle % | Z% |
 | Exposed Communication % | W% |
 | Top Bottleneck Category | Category (V%) |
+
+<!-- === COMPARATIVE Executive Summary === -->
+[1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
+
+<!-- Top Bottleneck Category X% = top category's gpu_kernel_time_ms / (manifest.gpu_utilization.total_time_ms * manifest.gpu_utilization.computation_time_percent / 100)
+     Top Bottleneck Category Y% = top category's gpu_kernel_time_ms / (manifest.trace2_gpu_utilization.total_time_ms * manifest.trace2_gpu_utilization.computation_time_percent / 100) -->
+| Metric | Trace 1 - (<Platform1>) | Trace 2 - (<Platform2>) | Difference |
+|--------|----------------------------|-------------------------------|------------|
+| Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
+| Compute % | X% | Y% | +/-Z% |
+| Idle % | X% | Y% | +/-Z% |
+| Exposed Communication % | X% | Y% | +/-Z% |
+| Top Bottleneck Category | Category (X%) | Category (Y%) | — |
 
 {{PERF_PLOT}}
 
@@ -98,14 +133,29 @@ Summaries of recommendations from Step 7 sub-agents, focused on individual kerne
 
 One row per entry in `priority_data.json::priorities[]`, in array order (no manifest-sort, no extra rows). For row N (= `priorities[N-1]`): `Rank`/`Category` = `rank`/`display_name`; `Time (ms)` = matching `manifest.categories[].gpu_kernel_time_ms` (verbatim); `Ops` = matching `manifest.categories[].ops_count`; `% of Compute Time` = `Time (ms) / (gpu_utilization.total_time_ms * computation_time_percent / 100)`; trailer `low`/`high` = `priorities[N-1].impact_score_low`/`impact_score_high` (use `null` for `source: "manifest_fallback"`). Wrap the whole block (header + separator + rows) in the `kind=top_ops` marker.
 
+<!-- === STANDALONE Top Operations === -->
 <!-- impact-begin kind=top_ops -->
 | Rank | Category | Time (ms) | % of Compute Time | Ops |
 |------|----------|-----------|-------------------|-----|
 | 1 | ... | ... | ... | ... | <!-- top-ops-row low=<impact_score_low> high=<impact_score_high> -->
 <!-- impact-end -->
 
+<!-- === COMPARATIVE Top Operations === -->
+`Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match.
+<!-- impact-begin kind=top_ops -->
+| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
+|------|----------|-------------------|-------------------|-------------------|-----|-----------------|
+| 1 | ... | ... | ... | ... | ... | +/-X.X or — | ~X–Y ms (X–Y%) or — |
+<!-- impact-end -->
+
+<!-- === NO ACTIONABLE FINDINGS (all quantified compute categories have empty category_findings[] in *_metrics.json) === -->
+<!-- Use when priority_data / per-category metrics show no compute P-items to render (category_findings[] empty everywhere that applies). -->
+✅ No compute kernel optimization opportunities identified. All categories are within target performance bounds.
+
+<!-- === ACTIONABLE FINDINGS (at least one compute category has P-items) === -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- One card per entry in priority_data.findings[] in array order. Title uses the entry's category and library; Action text is category-appropriate. Do NOT recommend "fuse the SDPA kernel" (already fused — defer upstream/downstream fusion to Kernel Fusion section). -->
+<!-- Skip categories that have empty category_findings[] in category_data/<cat>_metrics.json (no P-items for that category). -->
 
 ### 🔴 P1: <Brief Title> (<Library>)
 
@@ -152,8 +202,10 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 ---
 
 ## Kernel Fusion Opportunities (Experimental)
-
+<!-- === STANDALONE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Actual recoverable time depends on implementation feasibility and interaction effects.
+<!-- === COMPARATIVE Kernel Fusion === -->
+> **Note:** Kernel fusion analysis is experimental.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
@@ -214,6 +266,10 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 ## System-Level Optimizations
 
 > **Note:** System-level analysis is exploratory. The patterns and recommendations below are under active development and may be refined as system-level analysis matures.
+
+<!-- === COMPARATIVE system-level note === -->
+<!-- In comparative mode, add this note immediately after the blockquote above: -->
+<!-- > **Comparative Note:** System-level analysis is performed on the primary trace (Trace 1) only. Cross-trace system-level comparison is not yet supported. -->
 
 Findings from system-level analysis (GPU utilization, memory transfer patterns,
 communication/compute overlap). These affect the GPU pipeline as a whole.
@@ -276,6 +332,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Source the body block from the sub-agent's findings.md by joining on (findings[i].category, findings[i].category_rank): the sub-agent emits its P-items ordered by intra-category rank, so its rank-N block becomes this report's PN where N matches the position in priority_data.findings[]. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
+<!-- === STANDALONE Compute Kernel Data table === Use this schema for standalone mode ONLY. Use these 8 exact columns-->
+
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title> (<Library>)
 **Identification:**
@@ -288,6 +346,24 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Reasoning for Slowdown:**
 **Resolution:**
 **Impact estimate:**
+
+<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 8 exact columns-->
+<!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = lca_total_kernel_time_trace2_us / 1000.
+     Count T1/T2 = operation_count / lca_count_trace2 when present.
+     Difference (ms) = delta_us (trace2 - trace1) / 1000 (positive ⇒ more time on Trace 2), or —. -->
+
+<a id="detailed-analysis-compute-p1"></a>
+#### 🔴 P1: <Brief Title>
+**Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
+**Data:** [1 sentence summary of table]
+
+| Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+| ...       | ...       | ...               | ...               | .../...       | ...             | ...             | ...        |
+
+**Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
+**Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]
+**Impact estimate:** [Rendered from metadata → impact_estimates]
 
 ### Kernel Fusion Insights
 
@@ -319,6 +395,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- One #### 🔴/🟡/🟢 Pn: <title> block per promoted system P-item, in priority order. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-system-pN"></a> -->
+<!-- System-level detailed analysis uses the same format for both standalone and comparative modes.
+     In comparative mode, system-level analysis covers Trace 1 () only. -->
 
 <a id="detailed-analysis-system-p1"></a>
 #### 🔴 P1: <Brief Title>

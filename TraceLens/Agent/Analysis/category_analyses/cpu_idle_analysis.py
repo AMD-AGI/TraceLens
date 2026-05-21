@@ -18,18 +18,17 @@ import argparse
 import json
 import os
 import sys
-
 import pandas as pd
 from typing import Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import write_metrics_json
+from analysis_utils import perf_report_csv_dir, write_metrics_json
 
 
 def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
     """Load GPU timeline data from CSV."""
-    csv_path = f"{output_dir}/perf_report_csvs/gpu_timeline.csv"
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "gpu_timeline.csv")
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"GPU timeline not found: {csv_path}")
@@ -45,7 +44,7 @@ def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
 
 def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
     """Load operations summary for kernel analysis."""
-    csv_path = f"{output_dir}/perf_report_csvs/ops_summary.csv"
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "ops_summary.csv")
 
     if not os.path.exists(csv_path):
         return None

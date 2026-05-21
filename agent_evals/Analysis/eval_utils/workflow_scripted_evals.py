@@ -8,6 +8,8 @@
 
 Checks directory structure, file existence, and output completeness
 against the category_manifest.json contract.
+
+Supports both standalone and comparative analysis modes via --comparison-scope flag.
 """
 
 import argparse
@@ -135,10 +137,15 @@ def _check_model_info(output_dir: str) -> tuple[str, str]:
     return "PASS", ""
 
 
-def _check_unified_perf_report(output_dir: str) -> tuple[str, str]:
-    path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+def _check_unified_perf_report(output_dir: str, comparison_scope: str = "standalone") -> tuple[str, str]:
+    if comparison_scope == "comparative":
+        path = os.path.join(output_dir, "perf_report_trace1_csvs", "unified_perf_summary.csv")
+        label = "perf_report_trace1_csvs/unified_perf_summary.csv"
+    else:
+        path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+        label = "perf_report_csvs/unified_perf_summary.csv"
     if not os.path.isfile(path):
-        return "FAIL", "perf_report_csvs/unified_perf_summary.csv not found"
+        return "FAIL", f"{label} not found"
     return "PASS", ""
 
 
@@ -231,54 +238,65 @@ def _check_plot(output_dir: str) -> tuple[str, str]:
     return "FAIL", "perf_improvement.png not found"
 
 
+# Each entry: (summary, func, root_cause, recommended_fix, mode_aware)
+# mode_aware=True  → called as func(output_dir, comparison_scope)
+# mode_aware=False → called as func(output_dir)
 EVAL_REGISTRY = [
     (
         "Directory structure created",
         _check_directories,
         "pipeline",
         "Re-run analysis pipeline from Step 1",
+        False,
     ),
     (
         "Metadata files exist on disk",
         _check_metadata_files,
         "pipeline",
         "Re-run orchestrator_prepare.py to regenerate metadata",
+        False,
     ),
     (
         "Model info JSON exists and valid",
         _check_model_info,
         "pipeline",
         "Check model-identification subagent; add fallback skeleton in prepare step",
+        False,
     ),
     (
         "Unified perf. report exists",
         _check_unified_perf_report,
         "pipeline",
         "Re-run TraceLens_generate_perf_report_pytorch (Step 1)",
+        True,
     ),
     (
         "Tree data files exist on disk",
         _check_tree_data_files,
         "pipeline",
         "Re-run orchestrator_prepare.py to regenerate tree data",
+        False,
     ),
     (
         "Categorical findings .md files exist",
         _check_findings_exist,
         "pipeline",
         "Retry failed subagent(s) for missing findings files",
+        False,
     ),
     (
         "All findings exist",
         _check_findings_placement,
         "pipeline",
         "Fix tier assignment in orchestrator_prepare.py",
+        False,
     ),
     (
         "Plot generated on disk",
         _check_plot,
         "pipeline",
         "Check priority_data.json; add fallback empty plot_data.json",
+        False,
     ),
 ]
 
@@ -337,15 +355,47 @@ def _find_table_row(section_text, label_synonyms):
     return None
 
 
+def _find_table_row_all_cells(section_text, label_synonyms):
+    """Find a markdown table row matching any synonym. Returns all cells or None."""
+    for line in section_text.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if all(set(c) <= {"-", ":", " "} for c in cells):
+            continue
+        label = cells[0]
+        for synonym in label_synonyms:
+            if synonym.lower() in label.lower():
+                return cells  # [label, val1, val2, ...]
+    return None
+
+
 def _extract_percent(value_str):
     """Extract a percentage value from a string like '82.2%'."""
     m = re.search(r"([\d.]+)\s*%", value_str)
     return float(m.group(1)) if m else None
 
 
-def _load_gpu_timeline(output_dir):
+def _extract_numeric(value_str):
+    """Extract first numeric value from a string (handles %, ms, ±, sign prefix)."""
+    # Strip commas used as thousands separators
+    s = value_str.replace(",", "")
+    # Match optional leading sign then digits
+    m = re.search(r"([-+]?\s*[\d.]+)", s)
+    if m:
+        return float(m.group(1).replace(" ", ""))
+    return None
+
+
+def _load_gpu_timeline(output_dir, comparison_scope="standalone", trace_num=1):
     """Load gpu_timeline.csv as {type_name: percent}."""
-    path = os.path.join(output_dir, "perf_report_csvs", "gpu_timeline.csv")
+    if comparison_scope == "standalone":
+        path = os.path.join(output_dir, "perf_report_csvs", "gpu_timeline.csv")
+    else:
+        path = os.path.join(output_dir, f"perf_report_trace{trace_num}_csvs", "gpu_timeline.csv")
     if not os.path.isfile(path):
         return None
     data = {}
@@ -387,33 +437,22 @@ def _check_p_item_fields(p_text, is_compute):
 
 
 # ---------------------------------------------------------------------------
-# Per-item check functions (evals 9, 10, 11, 14)
+# Per-item check functions (evals 9, 10, 11, 13, 14)
 # ---------------------------------------------------------------------------
 
 _REPORT_HEADERS = {
     "executive_summary": "Executive Summary",
     "compute": "Compute Kernel Optimizations",
+    "kernel_fusion": "Kernel Fusion Opportunities (Experimental)",
     "system": "System-Level Optimizations",
     "detailed": "Detailed Analysis",
     "appendix": "Appendix",
 }
 
 
-def _check_report_template(output_dir):
+def _check_report_template(output_dir, comparison_scope="standalone"):
     """Eval 9 — per-header check for required section headers + table presence."""
     content = _read_report(output_dir)
-    if content is None:
-        return [
-            _make_row(
-                "workflow_eval_9",
-                "Report Template Rendering",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
-
     rows = []
     for key, header_text in _REPORT_HEADERS.items():
         found = bool(re.search(rf"^## {re.escape(header_text)}", content, re.MULTILINE))
@@ -443,7 +482,7 @@ def _check_report_template(output_dir):
     return rows
 
 
-_EXEC_SUMMARY_CHECKS = [
+_EXEC_SUMMARY_CHECKS_STANDALONE = [
     ("total_time", ["Total Compute Time", "Total Time"], None, None),
     ("compute_pct", ["Computation", "Compute %", "Compute"], "computation_time", 1.0),
     ("idle_pct", ["Idle Time", "Idle %", "Idle"], "idle_time", 1.0),
@@ -451,22 +490,20 @@ _EXEC_SUMMARY_CHECKS = [
     ("bottleneck", ["Top Bottleneck Category", "Top Bottleneck"], None, None),
 ]
 
+# comparative: (key, labels, csv_type_t1, tol_t1, csv_type_t2, tol_t2)
+# None csv_type means no CSV cross-check for that trace
+_EXEC_SUMMARY_CHECKS_COMPARATIVE = [
+    ("total_time", ["Total Compute Time", "Total Time"], None, None, None, None),
+    ("compute_pct", ["Computation", "Compute %", "Compute"], "computation_time", 1.0, "computation_time", 1.0),
+    ("idle_pct", ["Idle Time", "Idle %", "Idle"], "idle_time", 1.0, "idle_time", 1.0),
+    ("comm_pct", ["Exposed Communication", "Exposed Communication %"], None, None, None, None),
+    ("bottleneck", ["Top Bottleneck Category", "Top Bottleneck"], None, None, None, None),
+]
 
-def _check_exec_summary(output_dir):
+
+def _check_exec_summary(output_dir, comparison_scope="standalone"):
     """Eval 10 — per-row check for exec summary metrics + CSV cross-validation."""
     content = _read_report(output_dir)
-    if content is None:
-        return [
-            _make_row(
-                "workflow_eval_10",
-                "Executive Summary has metrics table",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
-
     exec_section = _extract_section(content, "## Executive Summary")
     if not exec_section:
         return [
@@ -480,10 +517,15 @@ def _check_exec_summary(output_dir):
             )
         ]
 
-    csv_data = _load_gpu_timeline(output_dir)
+    if comparison_scope == "standalone":
+        return _check_exec_summary_standalone(output_dir, exec_section)
+    return _check_exec_summary_comparative(output_dir, exec_section)
 
+
+def _check_exec_summary_standalone(output_dir, exec_section):
+    csv_data = _load_gpu_timeline(output_dir, comparison_scope="standalone")
     rows = []
-    for key, labels, csv_type, tolerance in _EXEC_SUMMARY_CHECKS:
+    for key, labels, csv_type, tolerance in _EXEC_SUMMARY_CHECKS_STANDALONE:
         value_str = _find_table_row(exec_section, labels)
         if value_str is None:
             rows.append(
@@ -531,21 +573,107 @@ def _check_exec_summary(output_dir):
     return rows
 
 
-def _check_issue_template(output_dir):
+def _check_exec_summary_comparative(output_dir, exec_section):
+    """Comparative exec summary: 4-column table (Metric | T1 | T2 | Difference)."""
+    csv_t1 = _load_gpu_timeline(output_dir, comparison_scope="comparative", trace_num=1)
+    csv_t2 = _load_gpu_timeline(output_dir, comparison_scope="comparative", trace_num=2)
+    rows = []
+
+    for key, labels, csv_type_t1, tol_t1, csv_type_t2, tol_t2 in _EXEC_SUMMARY_CHECKS_COMPARATIVE:
+        cells = _find_table_row_all_cells(exec_section, labels)
+        if cells is None:
+            rows.append(
+                _make_row(
+                    f"workflow_eval_10_{key}",
+                    f"Exec Summary row: {labels[0]}",
+                    "FAIL",
+                    f"Row not found (looked for: {', '.join(labels)})",
+                    "template",
+                    "Add missing row to Executive Summary table",
+                )
+            )
+            continue
+
+        # Expect [label, t1_val, t2_val, diff_val]
+        t1_str = cells[1] if len(cells) > 1 else ""
+        t2_str = cells[2] if len(cells) > 2 else ""
+
+        result, detail_parts = "PASS", []
+
+        if csv_type_t1 and not t1_str:
+            result = "FAIL"
+            detail_parts.append("T1 cell missing or empty")
+        if csv_type_t2 and not t2_str:
+            result = "FAIL"
+            detail_parts.append("T2 cell missing or empty")
+
+        # Cross-check T1
+        if csv_type_t1 and csv_t1 and tol_t1:
+            csv_val = csv_t1.get(csv_type_t1)
+            if csv_val is not None:
+                report_val = _extract_percent(t1_str)
+                if report_val is not None:
+                    diff = abs(report_val - csv_val)
+                    if diff > tol_t1:
+                        result = "FAIL"
+                        detail_parts.append(
+                            f"T1 mismatch: report={report_val:.1f}%, csv={csv_val:.2f}%, diff={diff:.2f}%"
+                        )
+                    else:
+                        detail_parts.append(f"T1 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)")
+
+        # Cross-check T2
+        if csv_type_t2 and csv_t2 and tol_t2:
+            csv_val = csv_t2.get(csv_type_t2)
+            if csv_val is not None:
+                report_val = _extract_percent(t2_str)
+                if report_val is not None:
+                    diff = abs(report_val - csv_val)
+                    if diff > tol_t2:
+                        result = "FAIL"
+                        detail_parts.append(
+                            f"T2 mismatch: report={report_val:.1f}%, csv={csv_val:.2f}%, diff={diff:.2f}%"
+                        )
+                    else:
+                        detail_parts.append(f"T2 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)")
+
+        # Check Difference column exists
+        if len(cells) < 4:
+            result = "FAIL"
+            detail_parts.append("Difference column missing (expected 4-column table)")
+        else:
+            # Arithmetic check: |Difference| ≈ |T1 - T2| within 1%
+            diff_str = cells[3]
+            t1_val = _extract_numeric(t1_str)
+            t2_val = _extract_numeric(t2_str)
+            diff_val = _extract_numeric(diff_str)
+            if t1_val is not None and t2_val is not None and diff_val is not None:
+                expected_magnitude = abs(t1_val - t2_val)
+                denom = max(abs(t1_val), abs(t2_val), 1.0)
+                rel_err = abs(abs(diff_val) - expected_magnitude) / denom
+                if rel_err > 0.01:
+                    result = "FAIL"
+                    detail_parts.append(
+                        f"Difference arithmetic error: reported={diff_str}, "
+                        f"expected |diff|≈{expected_magnitude:.2f}, rel_err={rel_err:.3f}"
+                    )
+
+        rows.append(
+            _make_row(
+                f"workflow_eval_10_{key}",
+                f"Exec Summary row: {labels[0]}",
+                result,
+                "; ".join(detail_parts),
+                "template" if result == "FAIL" else "",
+                "Fix value in Executive Summary table" if result == "FAIL" else "",
+            )
+        )
+    return rows
+
+
+def _check_issue_template(output_dir, comparison_scope="standalone"):
     """Eval 11 — per-P-item check for correct bold fields in each priority item."""
     content = _read_report(output_dir)
-    if content is None:
-        return [
-            _make_row(
-                "workflow_eval_11",
-                "Issue Template rendering",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
-
     compute_section = _extract_section(content, "## Compute Kernel Optimizations")
     system_section = _extract_section(content, "## System-Level Optimizations")
 
@@ -581,14 +709,19 @@ def _check_issue_template(output_dir):
             )
 
     if not rows:
+        all_sections = (compute_section or "") + (system_section or "")
+        intentionally_empty = (
+            "No compute kernel optimization opportunities identified" in all_sections
+            or "No system-level bottlenecks detected" in all_sections
+        )
         rows.append(
             _make_row(
                 "workflow_eval_11",
                 "Issue Template rendering",
-                "FAIL",
-                "No P-items found in report",
-                "template",
-                "Ensure report contains priority items",
+                "PASS" if intentionally_empty else "FAIL",
+                "" if intentionally_empty else "No P-items found in report",
+                "" if intentionally_empty else "template",
+                "" if intentionally_empty else "Ensure report contains priority items",
             )
         )
     return rows
@@ -691,7 +824,6 @@ _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
     _check_issue_template,
-    _check_model_id,
 ]
 
 _GATE_FAIL_NEW_EVALS = [
@@ -702,12 +834,12 @@ _GATE_FAIL_NEW_EVALS = [
 ]
 
 
-def run(output_dir: str, results_path: str) -> list[dict]:
+def run(output_dir: str, results_path: str, comparison_scope: str = "standalone") -> list[dict]:
     rows = []
 
     gate_fail = _pre_check_gates(output_dir)
     if gate_fail is not None:
-        for i, (summary, _func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
+        for i, (summary, _func, rc, fix, _mode_aware) in enumerate(EVAL_REGISTRY, start=1):
             rows.append(
                 {
                     "index": f"workflow_eval_{i}",
@@ -737,8 +869,8 @@ def run(output_dir: str, results_path: str) -> list[dict]:
             writer.writerows(rows)
         return rows
 
-    for i, (summary, func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
-        result, details = func(output_dir)
+    for i, (summary, func, rc, fix, mode_aware) in enumerate(EVAL_REGISTRY, start=1):
+        result, details = func(output_dir, comparison_scope) if mode_aware else func(output_dir)
         rows.append(
             {
                 "index": f"workflow_eval_{i}",
@@ -752,7 +884,8 @@ def run(output_dir: str, results_path: str) -> list[dict]:
         )
 
     for check_fn in _MULTI_EVAL_CHECKS:
-        rows.extend(check_fn(output_dir))
+        rows.extend(check_fn(output_dir, comparison_scope))
+    rows.extend(_check_model_id(output_dir))
 
     with open(results_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
@@ -765,9 +898,15 @@ def main():
     parser = argparse.ArgumentParser(description="Pythonic workflow evals")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--results", required=True)
+    parser.add_argument(
+        "--comparison-scope",
+        choices=["standalone", "comparative"],
+        default="standalone",
+        help="Analysis comparison scope (default: standalone)",
+    )
     args = parser.parse_args()
 
-    rows = run(args.output_dir, args.results)
+    rows = run(args.output_dir, args.results, args.comparison_scope)
     passed = sum(1 for r in rows if r["result"] == "PASS")
     sys.exit(0 if passed == len(rows) else 1)
 

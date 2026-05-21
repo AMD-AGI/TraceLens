@@ -73,38 +73,306 @@ _NORM_KERNEL_PATTERNS = [
 ]
 _MODULE_INDEX_RE = re.compile(r"_(\d+)$")
 
+# Layout-transform kernels emitted by BOTH backends (tile/autotuner choice, NOT fusion)
+_LAYOUT_TRANSFORM_PATTERNS = [
+    "batched_transpose",
+    "nchw2nhwc",
+    "nhwc2nchw",
+    "transpose_nchw",
+    "transpose_cnhw",
+]
 
-def _normalize_category(row):
-    """Normalize upstream ``op category`` to a filesystem-safe key."""
-    category = row.get("op category", "")
-    if pd.isna(category) or category == "":
-        return "other", "Other"
-    category_name = category.replace(" ", "_").replace("/", "_").lower()
-    return category_name, category
+# Case-A gate constants (comparative mode)
+_CASE_A_MAX_DELTA = 15  # G2: |n1 - n2| must be <= this
+_CASE_A_MAX_N1 = 30     # G3: n1 must be <= this
+
+# Event categories that are never fusion candidate containers
+_SKIP_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}
 
 
-def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
-    """Split Data Moved into (data_in_mb, data_out_mb) using op type and shapes."""
-    half = (data_moved_mb / 2, data_moved_mb / 2) if data_moved_mb else (None, None)
-    try:
-        params = ast.literal_eval(str(perf_params_str)) if perf_params_str else {}
-    except Exception:
-        return half
-    if data_moved_mb is None:
-        return half
-    if op_category == "GEMM":
-        M, N, K = params.get("M"), params.get("N"), params.get("K")
-        if all((M, N, K)):
-            total = M * K + K * N + M * N
-            return (
-                data_moved_mb * (M * K + K * N) / total,
-                data_moved_mb * M * N / total,
-            )
-    elif op_category == "reduce":
-        return data_moved_mb, 0.0
-    elif op_category == "elementwise" and "shape_in1" in params:
-        return data_moved_mb * 2 / 3, data_moved_mb / 3
-    return half
+# ---------------------------------------------------------------------------
+# Module-level helpers shared by standalone and comparative extraction
+# ---------------------------------------------------------------------------
+
+def _strip_module_index(name):
+    prefix = (
+        name[len("nn.Module: "):]
+        if name.startswith("nn.Module: ")
+        else name
+    )
+    return _MODULE_INDEX_RE.sub("", prefix)
+
+
+def _has_fused_kernel(kernel_list):
+    return any(
+        any(p in k["name"].lower() for p in FUSION_ALREADY_FUSED)
+        for k in kernel_list
+    )
+
+
+def _build_parent_chain(ev, tree) -> list:
+    """Walk ancestors and return a list of cleaned parent names (outermost last)."""
+    parent_chain = []
+    ancestor = ev
+    while tree.get_parent_event(ancestor) is not None:
+        ancestor = tree.get_parent_event(ancestor)
+        pname = ancestor.get("name", "")
+        if pname:
+            if pname.startswith("nn.Module: "):
+                pname = pname[len("nn.Module: "):]
+            elif "/" in pname:
+                pname = pname.rsplit("/", 1)[-1]
+            parent_chain.append(pname)
+    return parent_chain
+
+
+def _dedup_by_kernel_set(candidates: list, kernels_field: str, score_fn) -> list:
+    """Deduplicate fusion candidates with identical kernel name tuples.
+
+    When two candidates share the same ordered kernel names, keeps the one
+    with the higher ``score_fn`` value.  Handles both ``name`` and
+    ``kernel_name`` key variants in the kernel dicts.
+    """
+    seen: dict = {}
+    for c in candidates:
+        kernels = c.get(kernels_field, [])
+        if not kernels:
+            continue
+        nk = "name" if "name" in kernels[0] else "kernel_name"
+        kset = tuple(k.get(nk, "") for k in kernels)
+        prev = seen.get(kset)
+        if prev is None or score_fn(c) > score_fn(prev):
+            seen[kset] = c
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# Comparative fusion extraction helpers (used only by
+# _extract_comparative_fusion_candidates)
+# ---------------------------------------------------------------------------
+
+def _is_case_a_fusion_gap(trace1_kernels: list, trace2_kernels: list) -> bool:
+    """Return True if Case-A gates pass (trace1 has more kernels than trace2).
+
+    Gates:
+      G1: n1 > n2              — focus on trace1 inefficiencies only
+      G2: |n1-n2| <= 15        — large deltas indicate structural divergence (Case B)
+      G3: n1 <= 30             — oversized sub-trees are also Case B
+      G4: n2 >= 1              — cannot do gap analysis with nothing on trace2
+    """
+    n1, n2 = len(trace1_kernels), len(trace2_kernels)
+    if n1 <= n2:                          # G1
+        return False
+    if (n1 - n2) > _CASE_A_MAX_DELTA:    # G2
+        return False
+    if n1 > _CASE_A_MAX_N1:              # G3
+        return False
+    if n2 < 1:                           # G4
+        return False
+    return True
+
+
+def _build_diff_stats_lookups(df):
+    """Build UID→kernel and LCA→trace2-kernels mappings from diff_stats DataFrame."""
+    uid_to_t1 = {}  # gpu_event_uid → {name, type, dur_us, lca_id}
+    lca_to_t2: dict = defaultdict(list)  # lca_id → [kernel dicts]
+
+    has_uid = "gpu_event_uid" in df.columns
+    for _, row in df.iterrows():
+        kname = row["name"]
+        ktype, *_ = classify_kernel(kname)
+        lca_id = row["lowest_common_ancestor_id"]
+        dur_us = float(row.get("kernel_time", 0) or 0)
+
+        if row["source"] == "trace1" and has_uid and pd.notna(row.get("gpu_event_uid")):
+            uid = int(row["gpu_event_uid"])
+            uid_to_t1[uid] = {
+                "name": kname,
+                "type": ktype,
+                "dur_us": dur_us,
+                "lca_id": lca_id,
+                "gpu_event_uid": uid,
+            }
+        elif row["source"] == "trace2":
+            lca_to_t2[lca_id].append({
+                "name": kname,
+                "type": ktype,
+                "dur_us": dur_us,
+            })
+
+    return uid_to_t1, dict(lca_to_t2)
+
+
+def _apply_comparative_gates(t1_kernels, t2_kernels):
+    """Apply Case-A gates and delta filters.  Returns True if candidate should be kept."""
+    if not _is_case_a_fusion_gap(t1_kernels, t2_kernels):
+        return False
+
+    n1, n2 = len(t1_kernels), len(t2_kernels)
+    delta_kernels = sorted(t1_kernels, key=lambda k: k["dur_us"])[: n1 - n2]
+
+    # Skip if all delta kernels are excluded infrastructure (nccl/rccl/memcpy).
+    if delta_kernels and all(
+        any(x in k["name"].lower() for x in FUSION_EXCLUDED_KERNELS)
+        for k in delta_kernels
+    ):
+        return False
+
+    # Skip if all delta kernels are layout-transforms (tile/autotuner choice).
+    if delta_kernels and all(
+        any(p in k["name"].lower() for p in _LAYOUT_TRANSFORM_PATTERNS)
+        for k in delta_kernels
+    ):
+        return False
+
+    return True
+
+
+def _make_comparative_candidate(
+    module_name, base_name, t1_kernels, t2_kernels, parent_chain=None, input_dims=None, lca_id=None,
+):
+    """Build a comparative candidate dict from trace1/trace2 kernel lists."""
+    n1, n2 = len(t1_kernels), len(t2_kernels)
+    type_sig = [k["type"] for k in t1_kernels]
+    type_summary: dict = {}
+    for k in t1_kernels:
+        type_summary[k["type"]] = type_summary.get(k["type"], 0) + 1
+
+    candidate = {
+        "module_name": module_name,
+        "base_name": base_name,
+        "parent_chain": parent_chain or [],
+        "instance_count": 1,
+        "kernel_count_trace1": n1,
+        "kernel_count_trace2": n2,
+        "delta": n1 - n2,
+        "kernels_trace1": t1_kernels,
+        "kernels_trace2": t2_kernels,
+        "kernel_type_signature": type_sig,
+        "kernel_type_summary": type_summary,
+        "has_fused_kernel": _has_fused_kernel(t1_kernels),
+        "total_kernel_time_us_trace1": sum(k["dur_us"] for k in t1_kernels),
+        "total_kernel_time_us_trace2": sum(k["dur_us"] for k in t2_kernels),
+        "input_dims": input_dims,
+    }
+    if lca_id is not None:
+        candidate["lca_id"] = int(lca_id)
+    return candidate
+
+
+def _extract_comparative_fusion_candidates(
+    trace1_csv_dir: str, analyzer=None, tree=None,
+) -> list:
+    """Extract fusion candidates from diff_stats.csv (comparative mode).
+
+    Walks trace1's event tree at every level (nn.Module, aten::, etc.),
+    cross-references descendant GPU kernel UIDs against diff_stats.csv to
+    find trace2 counterparts via LCA.  Deduplicates by ``base_name`` with
+    instance_count accumulation (same as standalone).
+    """
+    diff_stats_path = os.path.join(trace1_csv_dir, "diff_stats.csv")
+    if not os.path.exists(diff_stats_path):
+        print(f"  ⚠️  diff_stats.csv not found at {diff_stats_path}")
+        return []
+
+    df = pd.read_csv(diff_stats_path)
+    if df.empty or "lowest_common_ancestor_id" not in df.columns:
+        print("  ⚠️  diff_stats.csv is empty or missing expected columns")
+        return []
+
+    df = df.dropna(subset=["lowest_common_ancestor_id"])
+
+    if tree is None or analyzer is None:
+        print("  ⚠️  tree/analyzer not provided; comparative extraction requires both")
+        return []
+
+    uid_to_t1, lca_to_t2 = _build_diff_stats_lookups(df)
+    if not uid_to_t1:
+        print("  ⚠️  No trace1 kernel UIDs found in diff_stats.csv")
+        return []
+
+    categorizer = analyzer.event_to_category
+    seen_base: dict = {}
+
+    for ev in tree.events:
+        if categorizer(ev) in _SKIP_CATEGORIES:
+            continue
+        gpu_uids = list(dict.fromkeys(ev.get("gpu_events", [])))
+        if len(gpu_uids) < 2:
+            continue
+        name = ev.get("name", "")
+        base = _strip_module_index(name)
+        if not base:
+            continue
+        
+        # Gather trace1 kernels that appear in diff_stats
+        t1_kernels = []
+        matched_lca_ids = set()
+        for uid in gpu_uids:
+            info = uid_to_t1.get(uid)
+            if info is not None:
+                t1_kernels.append(info)
+                matched_lca_ids.add(info["lca_id"])
+
+        if len(t1_kernels) < 2:
+            continue
+
+        # Gather trace2 kernels from the matched LCAs
+        t2_kernels = []
+        for lca_id in matched_lca_ids:
+            t2_kernels.extend(lca_to_t2.get(lca_id, []))
+
+        if not _apply_comparative_gates(t1_kernels, t2_kernels):
+            continue
+
+        t1_time = sum(k["dur_us"] for k in t1_kernels)
+        t2_time = sum(k["dur_us"] for k in t2_kernels)
+
+        if base in seen_base:
+            seen_base[base]["instance_count"] += 1
+            seen_base[base]["total_kernel_time_us_trace1"] += t1_time
+            seen_base[base]["total_kernel_time_us_trace2"] += t2_time
+            continue
+
+        candidate = _make_comparative_candidate(
+            module_name=name,
+            base_name=base,
+            t1_kernels=t1_kernels,
+            t2_kernels=t2_kernels,
+            parent_chain=_build_parent_chain(ev, tree),
+            input_dims=ev.get("args", {}).get("Input Dims"),
+        )
+        seen_base[base] = candidate
+
+    candidates = [
+        c
+        for c in seen_base.values()
+        if c.get("total_kernel_time_us_trace1", 0)
+        >= c.get("total_kernel_time_us_trace2", 0)
+    ]
+
+    candidates = _dedup_by_kernel_set(
+        candidates,
+        kernels_field="kernels_trace1",
+        score_fn=lambda c: (
+            c.get("module_name", "").startswith("nn.Module:"),
+            len(c.get("parent_chain", [])),
+        ),
+    )
+
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# Standalone fusion extraction helpers (used only by
+# _extract_standalone_fusion_candidates)
+# ---------------------------------------------------------------------------
+
+def _is_fusion_eligible(name):
+    lower = name.lower()
+    return not any(x in lower for x in FUSION_EXCLUDED_KERNELS) and not any(
+        x in lower for x in FUSION_ALREADY_FUSED
+    )
 
 
 def _build_kernel_perf_lookup(csv_path):
@@ -187,6 +455,328 @@ def _extract_attention_core(kernels, perf_lookup):
     return None
 
 
+def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -> list:
+    """Extract fusion candidates from the live trace tree (standalone mode).
+
+    Walks tree.events to find modules that launch >= 2 GPU kernels, then runs a
+    sibling-sequence pass and post-processing (attention narrowing, kernel-set
+    dedup, data-movement enrichment).  Returns candidates in the standalone schema.
+    """
+    seen_base = {}
+    base_order = []
+    categorizer = analyzer.event_to_category
+
+    for ev in tree.events:
+        if categorizer(ev) in _SKIP_CATEGORIES:
+            continue
+        gpu_uids = ev.get("gpu_events", [])
+        if len(gpu_uids) < 2:
+            continue
+        name = ev.get("name", "")
+        base = _strip_module_index(name)
+        if not base:
+            continue
+
+        if base in seen_base:
+            seen_base[base]["instance_count"] += 1
+            seen_base[base]["total_kernel_time_us"] += sum(
+                tree.get_UID2event(u).get("dur", 0)
+                for u in gpu_uids
+                if categorizer(tree.get_UID2event(u)) == "kernel"
+            )
+            continue
+
+        kernels = []
+        for uid in gpu_uids:
+            try:
+                k = tree.get_UID2event(uid)
+                if categorizer(k) == "kernel":
+                    kname = k.get("name", "")
+                    ktype, *_ = classify_kernel(kname)
+                    kernels.append(
+                        {
+                            "name": kname,
+                            "type": ktype,
+                            "dur_us": k.get("dur", 0),
+                            "eligible": _is_fusion_eligible(kname),
+                            "gpu_event_uid": uid,
+                        }
+                    )
+            except (KeyError, IndexError):
+                pass
+        if len(kernels) < 2:
+            continue
+
+        type_sig = [k["type"] for k in kernels]
+        type_summary = {}
+        for k in kernels:
+            type_summary[k["type"]] = type_summary.get(k["type"], 0) + 1
+
+        entry = {
+            "module_name": name,
+            "base_name": base,
+            "parent_chain": _build_parent_chain(ev, tree),
+            "instance_count": 1,
+            "kernel_count": len(kernels),
+            "eligible_kernel_count": sum(1 for k in kernels if k["eligible"]),
+            "kernels": kernels,
+            "kernel_type_signature": type_sig,
+            "kernel_type_summary": type_summary,
+            "has_fused_kernel": _has_fused_kernel(kernels),
+            "total_kernel_time_us": sum(k["dur_us"] for k in kernels),
+            "input_dims": ev.get("args", {}).get("Input Dims"),
+        }
+        seen_base[base] = entry
+        base_order.append(base)
+
+    # Sibling sequence extraction
+    collected_events = analyzer.collect_unified_perf_events()
+    parent_groups = defaultdict(list)
+    for ev in collected_events:
+        gpu_uids = ev.get("gpu_events", [])
+        if len(gpu_uids) != 1:
+            continue
+        parent_uid = ev.get("parent")
+        if parent_uid is None:
+            continue
+        try:
+            k = tree.get_UID2event(gpu_uids[0])
+            if categorizer(k) != "kernel":
+                continue
+            kname = k.get("name", "")
+            ktype, *_ = classify_kernel(kname)
+            parent_groups[parent_uid].append(
+                {
+                    "op": ev.get("name", ""),
+                    "kernel_type": ktype,
+                    "kernel_name": kname,
+                    "dur_us": k.get("dur", 0),
+                    "gpu_event_uid": gpu_uids[0],
+                }
+            )
+        except (KeyError, IndexError):
+            pass
+
+    sibling_seqs = []
+    seen_sibling_bases = {}
+    for parent_uid, children in parent_groups.items():
+        if len(children) < 2:
+            continue
+        try:
+            parent_evt = tree.get_UID2event(parent_uid)
+        except (KeyError, IndexError):
+            continue
+        pname = parent_evt.get("name", "")
+        sbase = _strip_module_index(pname)
+        if sbase in seen_sibling_bases:
+            seen_sibling_bases[sbase]["instance_count"] += 1
+            seen_sibling_bases[sbase]["total_time_us"] += sum(
+                c["dur_us"] for c in children
+            )
+            continue
+        entry = {
+            "ancestor_name": pname,
+            "base_name": sbase,
+            "sequence": children,
+            "kernel_type_signature": [c["kernel_type"] for c in children],
+            "total_time_us": sum(c["dur_us"] for c in children),
+            "instance_count": 1,
+            "input_dims": parent_evt.get("args", {}).get("Input Dims"),
+        }
+        seen_sibling_bases[sbase] = entry
+        sibling_seqs.append(entry)
+
+    fusion_candidates = []
+    for b in base_order:
+        m = seen_base[b]
+        if m["has_fused_kernel"] or m["eligible_kernel_count"] < 2:
+            continue
+        if _is_gemm_norm_only(m):
+            continue
+        fusion_candidates.append(m)
+
+    for s in sibling_seqs:
+        if len(s["sequence"]) < 2:
+            continue
+        fusion_candidates.append(
+            {
+                "module_name": s["ancestor_name"],
+                "base_name": s["base_name"],
+                "parent_chain": [],
+                "instance_count": s["instance_count"],
+                "kernel_count": len(s["sequence"]),
+                "eligible_kernel_count": len(s["sequence"]),
+                "kernels": s["sequence"],
+                "kernel_type_signature": s["kernel_type_signature"],
+                "kernel_type_summary": {},
+                "has_fused_kernel": False,
+                "total_kernel_time_us": s["total_time_us"],
+                "source": "sibling_sequence",
+                "input_dims": s.get("input_dims"),
+            }
+        )
+
+    # Post-process: attention narrowing + data movement enrichment
+    csv_path = os.path.join(trace1_csv_dir, "unified_perf_summary.csv")
+    if os.path.exists(csv_path):
+        perf_lookup = _build_kernel_perf_lookup(csv_path)
+
+        for c in fusion_candidates:
+            core = _extract_attention_core(c.get("kernels", []), perf_lookup)
+            if core is not None:
+                c["kernels"] = core
+                c["kernel_count"] = len(core)
+                c["eligible_kernel_count"] = len(core)
+                c["kernel_type_signature"] = [
+                    k.get("type", k.get("kernel_type", "Unknown")) for k in core
+                ]
+                c["total_kernel_time_us"] = sum(
+                    k.get("dur_us", 0) for k in core
+                ) * c.get("instance_count", 1)
+
+        fusion_candidates = _dedup_by_kernel_set(
+            fusion_candidates,
+            kernels_field="kernels",
+            score_fn=lambda c: (
+                c.get("module_name", "").startswith("nn.Module:"),
+                len(c.get("parent_chain", [])),
+            ),
+        )
+
+        for c in fusion_candidates:
+            for k in c.get("kernels", []):
+                if k.get("data_in_mb") is not None:
+                    continue
+                kname = k.get("name", k.get("kernel_name", ""))
+                entry = shape_aware_lookup(
+                    perf_lookup, kname, c.get("input_dims")
+                )
+                if entry.get("data_in_mb") is not None:
+                    k["data_in_mb"] = entry["data_in_mb"]
+                    k["data_out_mb"] = entry["data_out_mb"]
+
+    print(
+        f"  ✓ Fusion candidates: {len(seen_base)} unique module types, "
+        f"{len(fusion_candidates)} candidates"
+    )
+    return fusion_candidates
+
+
+def _normalize_category(row):
+    """Normalize upstream ``op category`` to a filesystem-safe key."""
+    category = row.get("op category", "")
+    if pd.isna(category) or category == "":
+        return "other", "Other"
+    category_name = category.replace(" ", "_").replace("/", "_").lower()
+    return category_name, category
+
+
+def _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir: str) -> list:
+    """Build trace 2 ops summary grouped by enhanced category (op-name-based).
+
+    Uses unified_perf_summary.csv and get_enhanced_category() so that trace 2
+    categories match the trace 1 enhanced categories (e.g. CONV_fwd + CONV_bwd
+    merge into 'convolution', NORM_fwd + NORM_bwd merge into 'norm').
+    Falls back to ops_summary_by_category.csv if unified_perf_summary.csv is
+    not available.
+    """
+    unified_path = os.path.join(trace2_csv_dir, "unified_perf_summary.csv")
+    if not os.path.isfile(unified_path):
+        return json.loads(
+            pd.read_csv(
+                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
+            ).to_json(orient="records")
+        )
+
+    df = pd.read_csv(unified_path)
+    df["enhanced_category"], df["display_name"] = zip(
+        *df.apply(_normalize_category, axis=1)
+    )
+
+    if "Kernel Time (µs)_sum" in df.columns:
+        time_col = "Kernel Time (µs)_sum"
+        time_scale = 1 / 1000  # µs → ms
+    elif "total_direct_kernel_time_ms" in df.columns:
+        time_col = "total_direct_kernel_time_ms"
+        time_scale = 1.0
+    else:
+        return json.loads(
+            pd.read_csv(
+                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
+            ).to_json(orient="records")
+        )
+
+    count_col = (
+        "operation_count" if "operation_count" in df.columns else "enhanced_category"
+    )
+    grouped = (
+        df.groupby("enhanced_category")
+        .agg(
+            Count=(count_col, "sum" if count_col == "operation_count" else "size"),
+            total_direct_kernel_time_ms=(time_col, "sum"),
+        )
+        .reset_index()
+    )
+    grouped["total_direct_kernel_time_ms"] *= time_scale
+    total_time = grouped["total_direct_kernel_time_ms"].sum()
+    grouped["Percentage (%)"] = (
+        (grouped["total_direct_kernel_time_ms"] / total_time * 100)
+        if total_time > 0
+        else 0
+    )
+    grouped = grouped.sort_values("total_direct_kernel_time_ms", ascending=False)
+    grouped["Cumulative Percentage (%)"] = grouped["Percentage (%)"].cumsum()
+    grouped = grouped.rename(columns={"enhanced_category": "op category"})
+
+    return json.loads(grouped.to_json(orient="records"))
+
+
+def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) -> dict:
+    """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows."""
+    gpu_data = {}
+    for _, row in gpu_timeline.iterrows():
+        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
+    return {
+        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
+        "computation_time_percent": gpu_data.get("computation_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
+            "percent", 0
+        ),
+        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
+    }
+
+
+
+
+def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
+    """Split Data Moved into (data_in_mb, data_out_mb) using op type and shapes."""
+    half = (data_moved_mb / 2, data_moved_mb / 2) if data_moved_mb else (None, None)
+    try:
+        params = ast.literal_eval(str(perf_params_str)) if perf_params_str else {}
+    except Exception:
+        return half
+    if data_moved_mb is None:
+        return half
+    if op_category == "GEMM":
+        M, N, K = params.get("M"), params.get("N"), params.get("K")
+        if all((M, N, K)):
+            total = M * K + K * N + M * N
+            return (
+                data_moved_mb * (M * K + K * N) / total,
+                data_moved_mb * M * N / total,
+            )
+    elif op_category == "reduce":
+        return data_moved_mb, 0.0
+    elif op_category == "elementwise" and "shape_in1" in params:
+        return data_moved_mb * 2 / 3, data_moved_mb / 3
+    return half
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Prepare category data for TraceLens analysis"
@@ -199,6 +789,15 @@ def main():
         help="AMD platform (MI300X, MI325X, MI350X, MI355X, MI455X)",
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument(
+        "--comparison-scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: read <output-dir>/perf_report_csvs (single trace). "
+            "comparative: trace 1 from perf_report_trace1_csvs, trace 2 from perf_report_trace2_csvs."
+        ),
+    )
     parser.add_argument(
         "--disable_pseudo_ops",
         action="store_false",
@@ -213,7 +812,13 @@ def main():
     platform = args.platform
     output_dir = args.output_dir
     enable_pseudo_ops = args.enable_pseudo_ops
-    csv_dir = f"{output_dir}/perf_report_csvs"
+    comparison_scope = args.comparison_scope
+    if comparison_scope == "comparative":
+        trace1_csv_dir = os.path.join(output_dir, "perf_report_trace1_csvs")
+        trace2_csv_dir = os.path.join(output_dir, "perf_report_trace2_csvs")
+    else:
+        trace1_csv_dir = os.path.join(output_dir, "perf_report_csvs")
+        trace2_csv_dir = None
 
     print("=" * 80)
     print("TRACELENS AGENT - ORCHESTRATOR PREPARATION")
@@ -221,6 +826,10 @@ def main():
     print(f"Platform: {platform}")
     print(f"Trace: {trace_path}")
     print(f"Output: {output_dir}")
+    print(f"Comparison scope: {comparison_scope}")
+    print(f"Trace 1 perf CSVs: {trace1_csv_dir}")
+    if trace2_csv_dir is not None:
+        print(f"Trace 2 perf CSVs: {trace2_csv_dir}")
     print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("=" * 80)
 
@@ -242,27 +851,22 @@ def main():
     # ============================================================================
     print("\n[STEP 2] Assessing GPU Utilization...")
 
-    gpu_timeline = pd.read_csv(f"{csv_dir}/gpu_timeline.csv")
+    gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
+    gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
+        gpu_timeline
+    )
 
-    # The CSV has columns: type, time ms, percent
-    # Convert to dict for easy lookup
-    gpu_data = {}
-    for _, row in gpu_timeline.iterrows():
-        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
-
-    gpu_utilization_metrics = {
-        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
-        "computation_time_percent": gpu_data.get("computation_time", {}).get(
-            "percent", 0
-        ),
-        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
-            "percent", 0
-        ),
-        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
-            "percent", 0
-        ),
-        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
-    }
+    if comparison_scope == "comparative" and trace2_csv_dir is not None:
+        trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
+            pd.read_csv(os.path.join(trace2_csv_dir, "gpu_timeline.csv"))
+        )
+        with open(
+            os.path.join(output_dir, "metadata", "trace2_gpu_utilization.json"), "w"
+        ) as f:
+            json.dump(trace2_gpu_utilization, f, indent=2)
+        trace2_ops_summary_by_category = _build_trace2_ops_summary_by_enhanced_category(
+            trace2_csv_dir
+        )
 
     print(f"\nGPU Utilization Metrics:")
     print(f"  Total Time: {gpu_utilization_metrics['total_time_ms']:.2f} ms")
@@ -281,7 +885,7 @@ def main():
     # ============================================================================
     print("\n[STEP 3] Identifying Top Operations...")
 
-    ops_summary = pd.read_csv(f"{csv_dir}/ops_summary.csv")
+    ops_summary = pd.read_csv(os.path.join(trace1_csv_dir, "ops_summary.csv"))
 
     # Sort by total_direct_kernel_time_ms if available, else by time column
     if "total_direct_kernel_time_ms" in ops_summary.columns:
@@ -327,7 +931,9 @@ def main():
         print(f"  ✓ Tree has {len(tree.events)} events")
 
         # Read unified performance summary
-        unified_df = pd.read_csv(f"{csv_dir}/unified_perf_summary.csv")
+        unified_df = pd.read_csv(
+            os.path.join(trace1_csv_dir, "unified_perf_summary.csv")
+        )
 
         # Get unique categories
         categories = unified_df["op category"].unique()
@@ -568,269 +1174,56 @@ def main():
         # ====================================================================
         print("\n[STEP 4b] Extracting Kernel Fusion Candidates...")
 
+        fusion_candidates_file = (
+            f"{output_dir}/category_data/fusion_candidates.json"
+        )
+
         try:
-
-            def _strip_module_index(name):
-                prefix = (
-                    name[len("nn.Module: ") :]
-                    if name.startswith("nn.Module: ")
-                    else name
-                )
-                return _MODULE_INDEX_RE.sub("", prefix)
-
-            def _is_fusion_eligible(name):
-                lower = name.lower()
-                return not any(x in lower for x in FUSION_EXCLUDED_KERNELS) and not any(
-                    x in lower for x in FUSION_ALREADY_FUSED
-                )
-
-            def _has_fused_kernel(kernel_list):
-                return any(
-                    any(p in k["name"].lower() for p in FUSION_ALREADY_FUSED)
-                    for k in kernel_list
-                )
-
-            seen_base = {}
-            base_order = []
-            categorizer = analyzer.event_to_category
-
-            for ev in tree.events:
-                if categorizer(ev) in {
-                    "kernel",
-                    "gpu_memcpy",
-                    "gpu_memset",
-                    "cuda_runtime",
-                    "cuda_driver",
-                }:
-                    continue
-                gpu_uids = ev.get("gpu_events", [])
-                if len(gpu_uids) < 2:
-                    continue
-                name = ev.get("name", "")
-                base = _strip_module_index(name)
-                if not base:
-                    continue
-
-                if base in seen_base:
-                    seen_base[base]["instance_count"] += 1
-                    seen_base[base]["total_kernel_time_us"] += sum(
-                        tree.get_UID2event(u).get("dur", 0)
-                        for u in gpu_uids
-                        if categorizer(tree.get_UID2event(u)) == "kernel"
+            if comparison_scope == "comparative":
+                # Comparative mode: use LCA-aligned diff_stats.csv as the source
+                # so candidates carry both kernels_trace1 and kernels_trace2 context.
+                diff_stats_csv = os.path.join(trace1_csv_dir, "diff_stats.csv")
+                if os.path.exists(diff_stats_csv):
+                    fusion_candidates = _extract_comparative_fusion_candidates(
+                        trace1_csv_dir, analyzer=analyzer, tree=tree,
                     )
-                    continue
-
-                kernels = []
-                for uid in gpu_uids:
-                    try:
-                        k = tree.get_UID2event(uid)
-                        if categorizer(k) == "kernel":
-                            kname = k.get("name", "")
-                            ktype, *_ = classify_kernel(kname)
-                            kernels.append(
-                                {
-                                    "name": kname,
-                                    "type": ktype,
-                                    "dur_us": k.get("dur", 0),
-                                    "eligible": _is_fusion_eligible(kname),
-                                }
-                            )
-                    except (KeyError, IndexError):
-                        pass
-                if len(kernels) < 2:
-                    continue
-
-                type_sig = [k["type"] for k in kernels]
-                type_summary = {}
-                for k in kernels:
-                    type_summary[k["type"]] = type_summary.get(k["type"], 0) + 1
-
-                parent_chain = []
-                ancestor = ev
-                while tree.get_parent_event(ancestor) is not None:
-                    ancestor = tree.get_parent_event(ancestor)
-                    pname = ancestor.get("name", "")
-                    if pname:
-                        if pname.startswith("nn.Module: "):
-                            pname = pname[len("nn.Module: ") :]
-                        elif "/" in pname:
-                            pname = pname.rsplit("/", 1)[-1]
-                        parent_chain.append(pname)
-
-                entry = {
-                    "module_name": name,
-                    "base_name": base,
-                    "parent_chain": parent_chain,
-                    "instance_count": 1,
-                    "kernel_count": len(kernels),
-                    "eligible_kernel_count": sum(1 for k in kernels if k["eligible"]),
-                    "kernels": kernels,
-                    "kernel_type_signature": type_sig,
-                    "kernel_type_summary": type_summary,
-                    "has_fused_kernel": _has_fused_kernel(kernels),
-                    "total_kernel_time_us": sum(k["dur_us"] for k in kernels),
-                    "input_dims": ev.get("args", {}).get("Input Dims"),
-                }
-                seen_base[base] = entry
-                base_order.append(base)
-
-            # Sibling sequence extraction
-            collected_events = analyzer.collect_unified_perf_events()
-            parent_groups = defaultdict(list)
-            for ev in collected_events:
-                gpu_uids = ev.get("gpu_events", [])
-                if len(gpu_uids) != 1:
-                    continue
-                parent_uid = ev.get("parent")
-                if parent_uid is None:
-                    continue
-                try:
-                    k = tree.get_UID2event(gpu_uids[0])
-                    if categorizer(k) != "kernel":
-                        continue
-                    kname = k.get("name", "")
-                    ktype, *_ = classify_kernel(kname)
-                    parent_groups[parent_uid].append(
-                        {
-                            "op": ev.get("name", ""),
-                            "kernel_type": ktype,
-                            "kernel_name": kname,
-                            "dur_us": k.get("dur", 0),
-                        }
+                    print(
+                        f"  ✓ Comparative fusion: {len(fusion_candidates)} candidates "
+                        f"(from diff_stats.csv)"
                     )
-                except (KeyError, IndexError):
-                    pass
-
-            sibling_seqs = []
-            seen_sibling_bases = {}
-            for parent_uid, children in parent_groups.items():
-                if len(children) < 2:
-                    continue
-                try:
-                    parent_evt = tree.get_UID2event(parent_uid)
-                except (KeyError, IndexError):
-                    continue
-                pname = parent_evt.get("name", "")
-                sbase = _strip_module_index(pname)
-                if sbase in seen_sibling_bases:
-                    seen_sibling_bases[sbase]["instance_count"] += 1
-                    seen_sibling_bases[sbase]["total_time_us"] += sum(
-                        c["dur_us"] for c in children
+                else:
+                    print(
+                        "  ⚠️  diff_stats.csv not found; "
+                        "comparative fusion extraction skipped"
                     )
-                    continue
-                entry = {
-                    "ancestor_name": pname,
-                    "base_name": sbase,
-                    "sequence": children,
-                    "kernel_type_signature": [c["kernel_type"] for c in children],
-                    "total_time_us": sum(c["dur_us"] for c in children),
-                    "instance_count": 1,
-                    "input_dims": parent_evt.get("args", {}).get("Input Dims"),
-                }
-                seen_sibling_bases[sbase] = entry
-                sibling_seqs.append(entry)
-
-            fusion_candidates = []
-            for b in base_order:
-                m = seen_base[b]
-                if m["has_fused_kernel"] or m["eligible_kernel_count"] < 2:
-                    continue
-                if _is_gemm_norm_only(m):
-                    continue
-                fusion_candidates.append(m)
-
-            for s in sibling_seqs:
-                if len(s["sequence"]) < 2:
-                    continue
-                fusion_candidates.append(
-                    {
-                        "module_name": s["ancestor_name"],
-                        "base_name": s["base_name"],
-                        "parent_chain": [],
-                        "instance_count": s["instance_count"],
-                        "kernel_count": len(s["sequence"]),
-                        "eligible_kernel_count": len(s["sequence"]),
-                        "kernels": s["sequence"],
-                        "kernel_type_signature": s["kernel_type_signature"],
-                        "kernel_type_summary": {},
-                        "has_fused_kernel": False,
-                        "total_kernel_time_us": s["total_time_us"],
-                        "source": "sibling_sequence",
-                        "input_dims": s.get("input_dims"),
-                    }
+                    fusion_candidates = []
+            else:
+                fusion_candidates = _extract_standalone_fusion_candidates(
+                    analyzer, tree, trace1_csv_dir
                 )
 
-            # Post-process: attention narrowing + data movement enrichment
-            csv_path = f"{output_dir}/perf_report_csvs/unified_perf_summary.csv"
-            if os.path.exists(csv_path):
-                perf_lookup = _build_kernel_perf_lookup(csv_path)
+            if comparison_scope == "comparative":
+                fusion_candidates.sort(
+                    key=lambda c: c.get("total_kernel_time_us_trace1", 0),
+                    reverse=True,
+                )
+            else:
+                fusion_candidates.sort(
+                    key=lambda c: c.get("total_kernel_time_us", 0),
+                    reverse=True,
+                )
 
-                for c in fusion_candidates:
-                    core = _extract_attention_core(c.get("kernels", []), perf_lookup)
-                    if core is not None:
-                        c["kernels"] = core
-                        c["kernel_count"] = len(core)
-                        c["eligible_kernel_count"] = len(core)
-                        c["kernel_type_signature"] = [
-                            k.get("type", k.get("kernel_type", "Unknown")) for k in core
-                        ]
-                        c["total_kernel_time_us"] = sum(
-                            k.get("dur_us", 0) for k in core
-                        ) * c.get("instance_count", 1)
-
-                # Dedup candidates with the same kernel set: prefer nn.Module, then deepest
-                def _dedup_score(c):
-                    return (
-                        c.get("module_name", "").startswith("nn.Module:"),
-                        len(c.get("parent_chain", [])),
-                    )
-
-                seen_ksets = {}
-                for c in fusion_candidates:
-                    nk = (
-                        "name" if "name" in c.get("kernels", [{}])[0] else "kernel_name"
-                    )
-                    kset = tuple(k.get(nk, "") for k in c.get("kernels", []))
-                    prev = seen_ksets.get(kset)
-                    if prev is None or _dedup_score(c) > _dedup_score(prev):
-                        seen_ksets[kset] = c
-                fusion_candidates = list(seen_ksets.values())
-
-                for c in fusion_candidates:
-                    for k in c.get("kernels", []):
-                        if k.get("data_in_mb") is not None:
-                            continue
-                        kname = k.get("name", k.get("kernel_name", ""))
-                        entry = shape_aware_lookup(
-                            perf_lookup, kname, c.get("input_dims")
-                        )
-                        if entry.get("data_in_mb") is not None:
-                            k["data_in_mb"] = entry["data_in_mb"]
-                            k["data_out_mb"] = entry["data_out_mb"]
-
-            fusion_candidates.sort(
-                key=lambda c: c.get("total_kernel_time_us", 0), reverse=True
-            )
-
-            fusion_candidates_file = (
-                f"{output_dir}/category_data/fusion_candidates.json"
-            )
             with open(fusion_candidates_file, "w") as f:
                 json.dump(fusion_candidates, f, indent=2, default=str)
 
             print(
-                f"  ✓ Fusion candidates: {len(seen_base)} unique module types, {len(fusion_candidates)} candidates"
-            )
-            print(
-                f"  ✓ Written to fusion_candidates.json ({os.path.getsize(fusion_candidates_file) / 1024:.1f} KB)"
+                f"  ✓ Written to fusion_candidates.json "
+                f"({os.path.getsize(fusion_candidates_file) / 1024:.1f} KB)"
             )
 
         except Exception as ex:
             print(f"  ⚠️  Error during fusion candidate extraction: {ex}")
             traceback.print_exc()
-            fusion_candidates_file = (
-                f"{output_dir}/category_data/fusion_candidates.json"
-            )
             fusion_candidates = []
             with open(fusion_candidates_file, "w") as f:
                 json.dump([], f)
@@ -844,7 +1237,7 @@ def main():
     # ============================================================================
     print("\n[STEP 5] Filtering and Exporting Category Data...")
 
-    unified_df = pd.read_csv(f"{csv_dir}/unified_perf_summary.csv")
+    unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
@@ -1119,10 +1512,14 @@ def main():
         "platform": platform,
         "trace_path": trace_path,
         "output_dir": output_dir,
+        "comparison_scope": comparison_scope,
         "gpu_utilization": gpu_utilization_metrics,
         "categories": exported_categories,
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
     }
+    if comparison_scope == "comparative" and trace2_gpu_utilization is not None:
+        manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
+        manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
 
     manifest_file = f"{output_dir}/category_data/category_manifest.json"
     with open(manifest_file, "w") as f:
@@ -1148,6 +1545,8 @@ def main():
     print(f"✓ Orchestrator Preparation Complete (Steps 2-5)")
     print(f"✓ Exported {len(exported_categories)} categories")
     print(f"✓ Manifest saved: {manifest_file}")
+    if comparison_scope == "comparative":
+        print(f"✓ metadata/trace2_gpu_utilization.json + manifest trace2_* fields")
     print(f"{'='*80}")
 
 

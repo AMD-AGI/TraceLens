@@ -45,7 +45,7 @@ _TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args\s*\|.*\|\s*$", re.MULTILINE)
 # Mandatory columns of the compute-tier **Data:** Operations Table, in spec
 # order (sub_agent_spec.md § Operations Table Schema). Agents may append
 # extra columns at the end but must not drop or reorder these.
-_COMPUTE_DATA_REQUIRED_COLS = (
+_COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
     "Operation",
     "Args",
     "Kernel Path",
@@ -56,9 +56,28 @@ _COMPUTE_DATA_REQUIRED_COLS = (
     "Efficiency",
     "Bound",
 )
+# Mandatory columns for comparative-mode **Data:** tables (sub_agent_spec.md
+# § Operations Table Schema — Comparative).
+_COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
+    "Operation",
+    "Args (T1)",
+    "Trace 1 Time (ms)",
+    "Trace 2 Time (ms)",
+    "Count (T1/T2)",
+    "Difference (ms)",
+    "FLOPS/Byte (T1)",
+    "Bound (T1)",
+)
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
+_KF_IMPACT_STANDALONE_RE = re.compile(
+    r"impact_score:\s*[\d.]+\s*\(perf-model coverage \d+/\d+ kernels\)"
+)
+_KF_IMPACT_COMPARATIVE_RE = re.compile(
+    r"impact_score:\s*[\d.]+\s*$"
+)
+
 _REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
     "Compute Kernel Optimizations",
@@ -108,13 +127,14 @@ def _category_findings_empty(filepath):
     return isinstance(cf, list) and len(cf) == 0
 
 
-def validate_findings_file(filepath, tier):
+def validate_findings_file(filepath, tier, comparison_scope=None):
     """Validate a single findings file against the sub-agent spec contract.
 
     Checks:
     - Required ## headers present and in correct order
     - P-item labels match tier (compute: Insight/Action/Impact; system: Insight/Action)
     - At least one reasoning-candidate block in Detailed Analysis
+      (unless compute tier and ``category_findings`` is ``[]`` in ``*_metrics.json``)
     - P-item count matches reasoning-candidate count
     - Compute tier only: per-block Data table shape + Args/Kernel Path cells
       verbatim vs <cat>_metrics.json (see _validate_compute_data_tables)
@@ -125,6 +145,8 @@ def validate_findings_file(filepath, tier):
     Args:
         filepath: Path to the *_findings.md file
         tier: "compute" or "system"
+        comparison_scope: "standalone" or "comparative". When omitted, inferred
+            from the category metrics JSON.
 
     Returns:
         Tuple of (passed: bool, errors: list of error strings)
@@ -159,10 +181,10 @@ def validate_findings_file(filepath, tier):
         rec_section = content[rec_start:rec_end]
 
         p_items = _P_ITEM_RE.findall(rec_section)
+
         if not relaxed_empty:
             if not p_items:
                 errors.append("No ### P<N>: items found under ## Recommendations")
-
             expected_labels = (
                 _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
             )
@@ -203,7 +225,7 @@ def validate_findings_file(filepath, tier):
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
     if tier == "compute":
-        errors.extend(_validate_compute_data_tables(content, filepath))
+        errors.extend(_validate_compute_data_tables(content, filepath, comparison_scope))
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -328,14 +350,21 @@ def _find_data_table(lines, start, end):
     return header_idx + 1, header_cols, rows()
 
 
-def _validate_compute_data_tables(content, findings_path):
+def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
-    (Args column required), Args cells verbatim vs operations[].args, and
-    Kernel Path cells verbatim vs operations[].launcher_path when present.
+    (Args column required for standalone; comparative schema for comparative),
+    Args cells verbatim vs operations[].args, and Kernel Path cells verbatim
+    vs operations[].launcher_path when present.
     Skips silently when the metrics JSON is absent.
     """
     metrics_path = _metrics_json_for_findings(findings_path)
     cat_metrics_basename = os.path.basename(metrics_path)
+    is_comparative = comparison_scope == "comparative"
+    required_cols = (
+        _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
+        if is_comparative
+        else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+    )
     valid_args, valid_paths = _load_compute_data_metrics(metrics_path)
     lines = content.splitlines()
     errors = []
@@ -348,20 +377,19 @@ def _validate_compute_data_tables(content, findings_path):
             )
             continue
         header_line, header_cols, row_iter = table
-        if (
-            tuple(header_cols[: len(_COMPUTE_DATA_REQUIRED_COLS)])
-            != _COMPUTE_DATA_REQUIRED_COLS
-        ):
+        if tuple(header_cols[: len(required_cols)]) != required_cols:
             errors.append(
                 f"compute Data table at line {header_line}: header must start "
-                f"with the {len(_COMPUTE_DATA_REQUIRED_COLS)} canonical columns "
-                f"in order {list(_COMPUTE_DATA_REQUIRED_COLS)}; got {header_cols} "
+                f"with the {len(required_cols)} canonical columns "
+                f"in order {list(required_cols)}; got {header_cols} "
                 f"(sub_agent_spec.md § Operations Table Schema)"
             )
             continue
-        args_idx = _COMPUTE_DATA_REQUIRED_COLS.index("Args")
-        kp_idx = _COMPUTE_DATA_REQUIRED_COLS.index("Kernel Path")
+        args_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Args")
+        kp_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Path")
         for row_line, cells in row_iter:
+            if is_comparative:
+                continue
             if valid_args and args_idx < len(cells) and cells[args_idx]:
                 if cells[args_idx] not in valid_args:
                     errors.append(
@@ -532,7 +560,7 @@ def _check_priority_consistency(output_dir, manifest):
 # Level 3: final report validation (called at Step 11.1)
 
 
-def validate_report(output_dir):
+def validate_report(output_dir, comparison_scope=None):
     """Validate analysis.md for structural issues.
 
     Checks:
@@ -540,6 +568,7 @@ def validate_report(output_dir):
     - Metrics table under Executive Summary (5 rows, no placeholders)
     - Unfilled template placeholders
     - Args column cells match operations[].args verbatim
+    - Comparison-scope-dependent formatting (kernel fusion Impact format)
     - Report-level marker structure: pairing, kind= attribute, per-kind
       required attrs, mandatory kind=top_ops
 
@@ -549,6 +578,8 @@ def validate_report(output_dir):
 
     Args:
         output_dir: Base output directory containing analysis.md
+        comparison_scope: "standalone" or "comparative". When omitted,
+            falls back to ``category_manifest.json``.
 
     Returns:
         Tuple of (passed: bool, missing: list of error/missing-section strings)
@@ -604,12 +635,58 @@ def validate_report(output_dir):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
+    missing.extend(_validate_report_comparison_scope_diffs(content, output_dir, comparison_scope))
+
     missing.extend(_validate_report_priority_consistency(content, output_dir))
 
     # Report-level marker structure
     missing.extend(MarkerValidator.check_report(report_path))
 
     return len(missing) == 0, missing
+
+
+def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scope=None):
+    """Check scope-dependent formatting in the report.
+
+    Kernel fusion Impact lines:
+      - standalone: ``impact_score: X.X (perf-model coverage Y/Z kernels)``
+      - comparative: ``impact_score: X.X`` (no parenthetical)
+
+    Silently skips when the Kernel Fusion section is absent or comparison_scope
+    cannot be determined.
+
+    Args:
+        comparison_scope: "standalone" or "comparative". When omitted,
+            falls back to ``category_manifest.json``.
+    """
+    kf_start = content.find("## Kernel Fusion Opportunities")
+    if kf_start < 0:
+        return []
+    kf_next = content.find("\n## ", kf_start + 1)
+    kf_section = content[kf_start:kf_next] if kf_next > 0 else content[kf_start:]
+
+    errors = []
+    for line_offset, line in enumerate(kf_section.splitlines()):
+        if not line.strip().startswith("**Impact**"):
+            continue
+        impact_text = line.split("**Impact**")[-1].strip().lstrip(":").strip()
+        if not impact_text:
+            continue
+        if comparison_scope == "standalone":
+            if not _KF_IMPACT_STANDALONE_RE.search(impact_text):
+                errors.append(
+                    f"Kernel Fusion Impact format error: standalone mode "
+                    f"requires 'impact_score: X.X (perf-model coverage Y/Z "
+                    f"kernels)' but got: {impact_text}"
+                )
+        else:
+            if re.search(r"\(perf-model coverage", impact_text):
+                errors.append(
+                    f"Kernel Fusion Impact format error: comparative mode "
+                    f"should not include perf-model coverage parenthetical "
+                    f"but got: {impact_text}"
+                )
+    return errors
 
 
 def _validate_report_args_column(content, output_dir):
