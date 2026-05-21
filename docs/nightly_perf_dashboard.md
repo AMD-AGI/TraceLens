@@ -291,8 +291,8 @@ resource = Resource.create({
 })
 
 exporter = OTLPMetricExporter(
-    endpoint=os.environ["PROMETHEUS_OTLP_ENDPOINT"],
-    headers={"Authorization": f"Bearer {os.environ['PROMETHEUS_PUSH_TOKEN']}"},
+    endpoint=os.environ["GRAFANA_CLOUD_OTLP_ENDPOINT"],
+    headers={"Authorization": f"Bearer {os.environ['GRAFANA_CLOUD_OTLP_TOKEN']}"},
 )
 
 reader = PeriodicExportingMetricReader(exporter, export_interval_millis=30000)
@@ -367,8 +367,8 @@ jobs:
 
       - name: Run profiling harness
         env:
-          PROMETHEUS_OTLP_ENDPOINT: ${{ secrets.PROMETHEUS_OTLP_ENDPOINT }}
-          PROMETHEUS_PUSH_TOKEN: ${{ secrets.PROMETHEUS_PUSH_TOKEN }}
+          GRAFANA_CLOUD_OTLP_ENDPOINT: ${{ secrets.GRAFANA_CLOUD_OTLP_ENDPOINT }}
+          GRAFANA_CLOUD_OTLP_TOKEN: ${{ secrets.GRAFANA_CLOUD_OTLP_TOKEN }}
         run: |
           python scripts/tracelens_perf_harness.py \
             --manifest config/trace_manifest.yaml \
@@ -396,8 +396,8 @@ jobs:
 | Secret | Description |
 |---|---|
 | `RCLONE_CONFIG` | rclone configuration file containing OAuth credentials for SharePoint; written to `~/.config/rclone/rclone.conf` so that `download_traces.py` can run `rclone copy sharepoint:... /tmp/traces/` |
-| `PROMETHEUS_OTLP_ENDPOINT` | OTLP/HTTP receiver URL (e.g., Prometheus with OTLP receiver, or a Grafana Cloud endpoint) |
-| `PROMETHEUS_PUSH_TOKEN` | Bearer token for authenticating OTLP pushes |
+| `GRAFANA_CLOUD_OTLP_ENDPOINT` | OTLP/HTTP receiver URL (e.g., Prometheus with OTLP receiver, or a Grafana Cloud endpoint) |
+| `GRAFANA_CLOUD_OTLP_TOKEN` | Bearer token for authenticating OTLP pushes |
 
 ### Trace Download
 
@@ -425,7 +425,7 @@ Grafana Cloud provides a managed Prometheus instance with a built-in OTLP endpoi
 https://otlp-gateway-<region>.grafana.net/otlp
 ```
 
-Set `PROMETHEUS_OTLP_ENDPOINT` to this URL and `PROMETHEUS_PUSH_TOKEN` to the Grafana Cloud API key. No self-hosted Prometheus or Pushgateway is needed.
+Set `GRAFANA_CLOUD_OTLP_ENDPOINT` to this URL and `GRAFANA_CLOUD_OTLP_TOKEN` to the Grafana Cloud API key. No self-hosted Prometheus or Pushgateway is needed.
 
 ### Metric Naming
 
