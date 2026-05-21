@@ -99,17 +99,13 @@ The trace list is defined by a YAML manifest checked into TraceLens-internal. Th
 version: 1
 traces:
   - trace_id: "trace_001"
-    alias: "large-resnet50-h100"
     source_location: "sharepoint:Documents/tracelens-private-traces/traces/trace_001.json.gz"
-    format: "pytorch"          # pytorch | rocprof | jax
     workload_family: "vision"  # vision | nlp | recommendation | etc.
     enabled: true              # false to skip in nightly without removing
     notes: ""
 
   - trace_id: "trace_002"
-    alias: "llm-inference-mi300"
     source_location: "sharepoint:Documents/tracelens-private-traces/traces/trace_002.json.gz"
-    format: "pytorch"
     workload_family: "nlp"
     enabled: true
     notes: "Extremely large trace; may need extended timeout"
@@ -120,9 +116,7 @@ traces:
 | Field | Type | Description |
 |---|---|---|
 | `trace_id` | string | Stable unique identifier |
-| `alias` | string | Human-readable name |
 | `source_location` | string | SharePoint path in rclone remote format (e.g. `sharepoint:Documents/tracelens-private-traces/traces/trace.json.gz`) |
-| `format` | enum | Trace format: `pytorch`, `rocprof`, `jax` |
 | `workload_family` | string | Workload category for aggregate views |
 | `enabled` | bool | Whether to include in nightly runs |
 | `notes` | string | Special handling notes or exclusion reasons |
@@ -241,7 +235,6 @@ Each run produces a JSON file with this structure:
   "traces": [
     {
       "trace_id": "trace_001",
-      "alias": "large-resnet50-h100",
       "workload_family": "vision",
       "stages": {
         "total_report_generation": 145.23,
