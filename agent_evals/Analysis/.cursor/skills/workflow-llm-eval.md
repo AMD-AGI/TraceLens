@@ -23,6 +23,11 @@ Evaluate the analysis report's Appendix for correct hardware reference values.
 checks in `workflow_scripted_evals.py`. This skill now only handles eval 12 (Hardware
 Reference in Appendix), which requires semantic reasoning about hardware values.
 
+**Note:** Marker structural checks (top\_ops wrapper, per-P-item `kind=p_item` markers,
+and per-P-item `kind=detail_estimate` markers in Detailed Analysis) are handled
+deterministically by `workflow_scripted_evals.py` and reported under the
+"Marker Identification" category in the results CSV. See `EVAL_RUBRICS.md` for details.
+
 ## Inputs
 
 When triggered, the prompt will specify:
