@@ -251,17 +251,6 @@ def emit_otlp_metrics(results, metadata):
     print("OTLP metrics emitted successfully")
 
 
-def run_single_trace(trace_file, output_dir, trace_id=None):
-    """Profile a single trace file and return the result dict."""
-    if trace_id is None:
-        trace_id = Path(trace_file).stem
-    print(f"Profiling trace: {trace_id} ({trace_file})")
-    result = profile_trace(trace_file, trace_id, output_dir)
-    result["trace_id"] = trace_id
-    result["workload_family"] = "unknown"
-    return result
-
-
 def run_manifest(manifest_path, trace_dir, output_dir, filter_ids=None):
     """Profile all enabled traces from a manifest and return list of result dicts."""
     traces = load_manifest(manifest_path)
@@ -296,20 +285,15 @@ def main():
         description="TraceLens profiling harness for nightly performance dashboard"
     )
     parser.add_argument(
-        "--trace-file",
-        help="Path to a single trace file to profile",
-    )
-    parser.add_argument(
         "--manifest",
         help="Path to trace manifest YAML",
     )
     parser.add_argument(
         "--trace-dir",
-        help="Directory containing downloaded trace files (used with --manifest)",
+        help="Directory containing trace files",
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
         help="Directory to write timing JSON and cProfile artifacts",
     )
     parser.add_argument(
@@ -321,14 +305,22 @@ def main():
         action="store_true",
         help="Emit metrics to Grafana Cloud via OTLP/HTTP",
     )
+    parser.add_argument(
+        "--push-only",
+        metavar="TIMING_JSON",
+        help="Skip profiling and push an existing timing.json to Grafana Cloud",
+    )
 
     args = parser.parse_args()
 
-    if not args.trace_file and not args.manifest:
-        parser.error("Either --trace-file or --manifest is required")
+    if args.push_only:
+        with open(args.push_only) as f:
+            data = json.load(f)
+        emit_otlp_metrics(data["traces"], data["metadata"])
+        return
 
-    if args.manifest and not args.trace_dir:
-        parser.error("--trace-dir is required when using --manifest")
+    if not args.manifest or not args.trace_dir or not args.output_dir:
+        parser.error("--manifest, --trace-dir, and --output-dir are required")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -336,12 +328,7 @@ def main():
     if args.filter:
         filter_ids = set(args.filter.split(","))
 
-    if args.trace_file:
-        results = [run_single_trace(args.trace_file, args.output_dir)]
-    else:
-        results = run_manifest(
-            args.manifest, args.trace_dir, args.output_dir, filter_ids
-        )
+    results = run_manifest(args.manifest, args.trace_dir, args.output_dir, filter_ids)
 
     if not results:
         print("No traces were profiled")
