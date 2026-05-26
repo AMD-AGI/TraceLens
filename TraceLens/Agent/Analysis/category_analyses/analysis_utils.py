@@ -67,10 +67,10 @@ def _eff_bucket(pct):
     if pct is None:
         return "unknown"
     if pct < _EFF_BUCKET_BOUNDARIES[0]:
-        return "0-30"
+        return f"0-{_EFF_BUCKET_BOUNDARIES[0]}"
     if pct < _EFF_BUCKET_BOUNDARIES[1]:
-        return "30-60"
-    return "60-100"
+        return f"{_EFF_BUCKET_BOUNDARIES[0]}-{_EFF_BUCKET_BOUNDARIES[1]}"
+    return f"{_EFF_BUCKET_BOUNDARIES[1]}-100"
 
 
 def perf_report_csv_dir(output_dir: str) -> str:
