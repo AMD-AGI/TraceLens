@@ -226,7 +226,7 @@ Do not look up peaks independently from the metadata dict.
 
 ## Impact estimate rendering
 
-Compute-tier sub-agents READ their P-items from `category_data/<category>_metrics.json::category_findings[]`, one card per entry ordered by `rank`. The analyzer script has already grouped per-op estimates by `(bound_type, library)`, summed impact, and dropped sub-threshold groups; the sub-agent renders one card per surviving entry.
+Compute-tier sub-agents READ their P-items from `category_data/<category>_metrics.json::category_findings[]`, one card per entry ordered by `rank`. The analyzer script has already grouped per-op estimates by `(bound_type, library, eff_bucket)` in standalone mode (or `(bound_type, library)` in comparative mode), summed impact, and dropped sub-threshold groups; the sub-agent renders one card per surviving entry.
 
 The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPACT_SCORE` already gated upstream. **Per-category efficiency tables, expected-band thresholds, and Common Patterns in analyzer files are interpretation context for the prose** (cite in **Reasoning for Slowdown** when a member matches the band/symptom); they MUST NOT be used to add or drop P-items.
 
@@ -237,6 +237,7 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `rank` | Card order within your category (1 = highest impact). Also the `rank=` value in `<!-- reasoning-candidate -->`. |
 | `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
+| `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
 | `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
 | `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, …) — rows of the `**Data:**` table. |
 

@@ -164,7 +164,7 @@ def main():
         category,
         baseline_ms=baseline_ms,
     )
-    category_findings = build_category_findings(impact_estimates)
+    category_findings = build_category_findings(impact_estimates, comparison_scope=args.comparison_scope)
 
     metrics = {
         "category": category,

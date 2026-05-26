@@ -36,6 +36,7 @@ TARGET_MID = 87.5
 MIN_PITEM_IMPACT_SCORE = (
     0.5  # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
 )
+_EFF_BUCKET_BOUNDARIES = (30, 60)
 
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),
@@ -59,6 +60,17 @@ _KERNEL_NAME_LIBRARY_RULES = [
 ]
 _COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
+
+
+def _eff_bucket(pct):
+    """Classify roofline efficiency into a coarse band for P-item grouping."""
+    if pct is None:
+        return "unknown"
+    if pct < _EFF_BUCKET_BOUNDARIES[0]:
+        return "0-30"
+    if pct < _EFF_BUCKET_BOUNDARIES[1]:
+        return "30-60"
+    return "60-100"
 
 
 def perf_report_csv_dir(output_dir: str) -> str:
@@ -685,8 +697,15 @@ def compute_impact_estimates(
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
 
-def build_category_findings(estimates: List[dict]) -> List[dict]:
-    """Group one category's per-op impact estimates by (bound_type, library).
+def build_category_findings(
+    estimates: List[dict], comparison_scope: str = "standalone"
+) -> List[dict]:
+    """Group one category's per-op impact estimates into P-item findings.
+
+    Standalone mode groups by ``(bound_type, library, eff_bucket)`` so
+    kernels at different roofline-efficiency levels get separate P-items.
+    Comparative mode groups by ``(bound_type, library)`` only because
+    ``efficiency_pct`` represents a trace-time ratio, not roofline utilization.
 
     Sums impact across members, drops groups below ``MIN_PITEM_IMPACT_SCORE``,
     sorts by ``impact_score`` desc, attaches intra-category ``rank``. Each
@@ -694,6 +713,7 @@ def build_category_findings(estimates: List[dict]) -> List[dict]:
     later concatenates these arrays across categories to derive the global
     ``priority_data.json::findings[]`` ranking.
     """
+    use_eff_bucket = comparison_scope == "standalone"
     groups: dict = defaultdict(
         lambda: {
             "members": [],
@@ -703,7 +723,10 @@ def build_category_findings(estimates: List[dict]) -> List[dict]:
         }
     )
     for e in estimates:
-        key = (e.get("bound_type") or "unknown", e.get("library") or "Unknown")
+        bound = e.get("bound_type") or "unknown"
+        lib = e.get("library") or "Unknown"
+        bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
+        key = (bound, lib, bucket)
         g = groups[key]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
@@ -711,13 +734,14 @@ def build_category_findings(estimates: List[dict]) -> List[dict]:
         g["impact_score_high"] += e.get("impact_score_high", 0)
 
     findings = []
-    for (bound, lib), g in groups.items():
+    for (bound, lib, bucket), g in groups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": bound,
                 "library": lib,
+                "eff_bucket": bucket,
                 "impact_score": round(g["impact_score"], 2),
                 "impact_score_low": round(g["impact_score_low"], 2),
                 "impact_score_high": round(g["impact_score_high"], 2),
@@ -909,7 +933,7 @@ def run_category_analysis(
     else:
         impact_estimates = []
 
-    category_findings = build_category_findings(impact_estimates)
+    category_findings = build_category_findings(impact_estimates, comparison_scope=comparison_scope)
 
     metrics = {
         "category": category,
