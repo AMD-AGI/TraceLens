@@ -278,7 +278,8 @@ class mha_varlen_fwd(InferenceAttention):
 
 class aiter_fmha_v3_varlen_fwd(InferenceAttention):
     """
-    Performance model for ``aiter::fmha_v3_varlen_fwd`` (inference: sglang / vLLM).
+    Annotation-aware perf model for ``aiter::fmha_v3_varlen_fwd`` (inference:
+    sglang / vLLM).
 
     Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
     on the event). Sets ``d_h_v`` from the **v** tensor (``Input Dims[2]``) so MLA
@@ -286,6 +287,14 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
 
     Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
     (see base class); no packed-tensor fallback.
+
+    **Not registered in** ``pseudo_ops_perf_utils.PseudoOpMapping``: the default
+    ``aiter::fmha_v3_varlen_fwd`` event is handled by the core SDPA-derived class
+    ``perf_model.aiter__fmha_v3_varlen_fwd`` (TraceLens #650) via
+    ``torch_op_mapping.py``. That core class supports both training (Wan 2.x, no
+    annotation) and inference via shape-based extraction. This extension class is
+    kept for any future caller that wants to map a renamed ``pseudo_op::*`` event
+    to the annotation-aware path explicitly.
     """
 
     @staticmethod
