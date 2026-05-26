@@ -49,7 +49,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
    OPTIMIZATION CARDS (§Compute Kernel Optimizations, §Kernel Fusion, §System-Level):
    - Compute Kernel P-items: **Insight** / **Action** / **Impact**
    - Kernel Fusion P-items:  **Insight** / **Action** / **Impact** / **Confidence**
-   - System-Level P-items:   **Insight** / **Action**
+   - System-Level P-items:   **Insight** / **Action** / **Impact**
 
    DETAILED ANALYSIS (§Detailed Analysis only):
    - Compute / System blocks: **Identification:** / **Data:** / **Reasoning for Slowdown:** / **Resolution:** / **Impact estimate:**
@@ -278,7 +278,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Otherwise, number priorities sequentially: CPU/Idle first (if idle > 15%), then multi-kernel issues by severity. -->
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. -->
-<!-- System-level recommendations have NO **Impact** field -- impact is not quantifiable for system-level issues. -->
+<!-- System-level recommendations always include **Impact**: "Not quantifiable from trace data" with null markers. -->
 
 <!-- === TEMPLATE A: No actionable system-level issues === -->
 <!-- Use this when idle <= 15% and all multi-kernel assessments have flagged: false -->
@@ -294,6 +294,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Action**: [1-2 sentences - what to do]
 
+<!-- impact-begin kind=p_item low=null mid=null high=null -->
+**Impact**: Not quantifiable from trace data
+<!-- impact-end -->
+
 → *See [Detailed Analysis: System-level insights > P1](#detailed-analysis-system-p1) for details*
 
 ---
@@ -304,6 +308,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Action**: [1-2 sentences - what to do]
 
+<!-- impact-begin kind=p_item low=null mid=null high=null -->
+**Impact**: Not quantifiable from trace data
+<!-- impact-end -->
+
 → *See [Detailed Analysis: System-level insights > P2](#detailed-analysis-system-p2) for details*
 
 ---
@@ -313,6 +321,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Insight**: [1 sentence]
 
 **Action**: [1-2 sentences]
+
+<!-- impact-begin kind=p_item low=null mid=null high=null -->
+**Impact**: Not quantifiable from trace data
+<!-- impact-end -->
 
 → *See [Detailed Analysis: System-level insights > P3](#detailed-analysis-system-p3) for details*
 

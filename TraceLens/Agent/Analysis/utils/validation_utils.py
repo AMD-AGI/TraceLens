@@ -32,7 +32,7 @@ from .report_utils import load_manifest, _scan_findings_dir
 
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-_SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**"]
+_SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
@@ -132,7 +132,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     Checks:
     - Required ## headers present and in correct order
-    - P-item labels match tier (compute: Insight/Action/Impact; system: Insight/Action)
+    - P-item labels match tier (all tiers: Insight/Action/Impact)
     - At least one reasoning-candidate block in Detailed Analysis
       (unless compute tier and ``category_findings`` is ``[]`` in ``*_metrics.json``)
     - P-item count matches reasoning-candidate count
@@ -194,16 +194,6 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
                         f"Missing label {label} in ## Recommendations "
                         f"(required for {tier} tier)"
                     )
-
-        # Kernel fusion (system_findings) uses roofline-backed **Impact** on P-items.
-        if (
-            tier == "system"
-            and "**Impact**" in rec_section
-            and os.path.basename(filepath) != _KERNEL_FUSION_FINDINGS
-        ):
-            errors.append(
-                "System-tier ## Recommendations must not contain **Impact** labels"
-            )
 
     candidates = []
     if da_start >= 0:
