@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -32,6 +32,12 @@ def _process_single_rank(
 
     processed_events = []
     for event in data["traceEvents"]:
+        if event["ph"] == "M" and event["name"] in (
+            "process_name",
+            "process_sort_index",
+            "process_labels",
+        ):
+            continue
         # If filter_fn is None, use default filter
         if filter_fn is None:
             if not _default_filter_fn(event, include_pyfunc):
@@ -111,9 +117,14 @@ class TraceFuse:
             ),
             None,
         )
-        self.linking_key = (
-            "correlation" if "correlation" in launch_event["args"] else "External id"
-        )
+        if launch_event is None:
+            self.linking_key = "External id"
+        else:
+            self.linking_key = (
+                "correlation"
+                if "correlation" in launch_event["args"]
+                else "External id"
+            )
 
     def _set_offset_multiplier(self, events):
         """Calculate offset multipliers for each field."""
@@ -127,13 +138,57 @@ class TraceFuse:
                 if isinstance(value, int):
                     max_values[field] = max(max_values[field], value)
         self.offset_multiplier = {
-            field: 10 ** (math.ceil(math.log10(max_value)) + 1)
+            field: 10 ** (math.ceil(math.log10(max_value + 1)) + 1)
             for field, max_value in max_values.items()
         }
 
     @staticmethod
     def default_filter_fn(event):
         return event.get("cat", None) != "Trace"
+
+    _GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
+
+    def _generate_rank_metadata(self, merged_data):
+        """Generate process_name metadata events with 'RANK N - CPU' / 'RANK N - GPU' labels."""
+        pid_to_rank = {}
+        gpu_pids = set()
+        for event in merged_data:
+            if event.get("ph") == "M":
+                continue
+            pid = event.get("pid")
+            if not isinstance(pid, int):
+                continue
+            rank = event.get("args", {}).get("rank")
+            if rank is not None:
+                if pid not in pid_to_rank:
+                    pid_to_rank[pid] = rank
+                if event.get("cat") in self._GPU_CATEGORIES:
+                    gpu_pids.add(pid)
+
+        metadata = []
+        sorted_pids = sorted(pid_to_rank.items(), key=lambda x: (x[1], x[0]))
+        for pid, rank in sorted_pids:
+            label = "GPU" if pid in gpu_pids else "CPU"
+            sort_idx = rank * 2 + (1 if pid in gpu_pids else 0)
+            metadata.append(
+                {
+                    "name": "process_name",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": 0,
+                    "args": {"name": f"RANK {rank} - {label}"},
+                }
+            )
+            metadata.append(
+                {
+                    "name": "process_sort_index",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": 0,
+                    "args": {"sort_index": sort_idx},
+                }
+            )
+        return metadata
 
     def merge(self, filter_fn=None, include_pyfunc=False):
         """Merge trace files."""
@@ -178,6 +233,8 @@ class TraceFuse:
                 )
                 merged_data.extend(processed_events)
 
+        rank_metadata = self._generate_rank_metadata(merged_data)
+        merged_data.extend(rank_metadata)
         return merged_data
 
     def merge_and_save(

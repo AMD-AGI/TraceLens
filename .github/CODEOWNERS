@@ -1,0 +1,30 @@
+# Team slugs: https://github.com/orgs/AMD-AGI/teams
+# Syntax:     https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# Last matching rule wins. Prefer GitHub Teams over individuals.
+# Default — every file requires project-team approval
+*                            @AMD-AGI/perf-opt
+# Stricter paths — leads must approve
+
+# TraceLens package changes require Adeem or Gabe review
+/TraceLens/                   @ajassani @gabeweisz
+
+# Agent code and evals require area owner review
+/TraceLens/Agent/             @tsrikris
+/agent_evals/                 @Ahmedhasssan-aig @tsrikris
+
+# TraceDiff module and docs require Spandan review
+/TraceLens/TraceDiff/         @spandoesai
+/docs/TraceDiff.md            @spandoesai
+
+# Extensions and experimental trace merge require Deval review
+/TraceLens/PerfModel/extensions/                         @devalshahamd
+/TraceLens/Trace2Tree/extensions/                        @devalshahamd
+/TraceLens/Trace2Tree/trace_capture_merge_experimental.py @devalshahamd
+
+# Inference reporting, docs, tests, and workflows require Deval review
+/TraceLens/Reporting/generate_perf_report_pytorch_inference.py @devalshahamd
+/TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
+/examples/custom_workflows/inference_analysis/               @devalshahamd
+/docs/Inference_analysis.md                                  @devalshahamd
+/tests/test_inference_perf_report.py                         @devalshahamd
+/tests/traces/inference/                                     @devalshahamd

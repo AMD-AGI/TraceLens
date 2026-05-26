@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -12,10 +12,72 @@ and test_detect_recompute.
 """
 
 import ast
+import os
 import re
+import shutil
 
 import numpy as np
+import pandas as pd
+import pytest
 from pandas.api.types import is_float_dtype
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--update-references",
+        action="store_true",
+        default=False,
+        help="Update reference CSV directories with freshly generated outputs "
+        "instead of comparing against them.",
+    )
+
+
+@pytest.fixture
+def update_references(request):
+    """Return True when reference traces should be overwritten with new outputs.
+
+    Enabled by the ``--update-references`` CLI flag.
+
+    .. note::
+        When you use this flag to regenerate reference reports as
+        part of a PR, explicitly note in the PR description which
+        references were updated and why. Do not use this flag to paper over
+        unexpected differences. Investigate any unexpected diffs first and
+        only update references when the new output is correct.
+    """
+    return request.config.getoption("--update-references", default=False)
+
+
+def update_reference_csvs(generated_dir, reference_dir):
+    """Replace *reference_dir* contents with the CSVs from *generated_dir*.
+
+    The reference directory is removed and recreated so that stale sheets
+    that no longer exist in the generated output are cleaned up.
+    """
+    if os.path.isdir(reference_dir):
+        shutil.rmtree(reference_dir)
+    shutil.copytree(generated_dir, reference_dir)
+
+
+def perf_report_csv_dirname(trace_base: str) -> str:
+    """Directory name for CSV sheets next to trace_base.json.gz (e.g. foo_perf_report_csvs)."""
+    return trace_base + "_perf_report_csvs"
+
+
+def list_perf_report_csv_sheets(csv_dir: str):
+    """Return sorted sheet names (CSV stems) in a perf-report CSV directory."""
+    return sorted(f[:-4] for f in os.listdir(csv_dir) if f.endswith(".csv"))
+
+
+def read_perf_report_csv(csv_dir: str, sheet: str):
+    """Load one sheet from a directory of per-sheet CSV files."""
+    path = os.path.join(csv_dir, f"{sheet}.csv")
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def normalize_value(val):
@@ -23,7 +85,10 @@ def normalize_value(val):
     if isinstance(val, (np.integer, np.floating)):
         return val.item()
     elif isinstance(val, list):
-        return [normalize_value(v) for v in val]
+        normalized = [normalize_value(v) for v in val]
+        if normalized and all(isinstance(v, dict) for v in normalized):
+            normalized.sort(key=lambda d: str(sorted(d.items())))
+        return normalized
     elif isinstance(val, dict):
         return {k: normalize_value(v) for k, v in val.items()}
     elif isinstance(val, str):

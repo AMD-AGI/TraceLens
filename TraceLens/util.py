@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -20,7 +20,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
-from typing import List, Dict, Callable, Iterable, Tuple
+from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,28 @@ class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
         if filename_path.endswith("pb"):
-            from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+            try:
+                from xprof.convert import raw_to_tool_data as convert
+
+                converter_lib = "xprof"
+            except ImportError:
+                from tensorboard_plugin_profile.convert import (
+                    raw_to_tool_data as convert,
+                )
+
+                converter_lib = "tensorboard-plugin-profile"
+                logger.warning(
+                    "xprof not available, falling back to tensorboard-plugin-profile "
+                    "for trace conversion. Install xprof for JAX 0.8+ support."
+                )
 
             data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            if data is None:
+                raise RuntimeError(
+                    f"Trace conversion using '{converter_lib}' returned None for "
+                    f"{filename_path}. Ensure the file exists and the output directory "
+                    "is writable (cache files may need to be written)."
+                )
             data = data.decode("utf-8")  # we get bytes back from the call above
         elif filename_path.endswith("json.gz"):
             import gzip
@@ -79,24 +98,27 @@ class JaxProfileProcessor:
 
     @staticmethod
     def process_protobuf_file(protobuf_file_name, module_name):
-        from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+        try:
+            from xprof.convert import raw_to_tool_data as convert
+        except ImportError:
+            from tensorboard_plugin_profile.convert import (
+                raw_to_tool_data as convert,
+            )
 
-        # look to see if the protobuf file has already been extracted
         dir_name = os.path.dirname(protobuf_file_name) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
             convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
-        # assert len(hlo_filename) == 0
         if len(hlo_filename) > 1:
-            print("Multiple matching hlo_filenames:")
-            print(hlo_filename)
+            logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
         elif len(hlo_filename) == 0:
-            print("No matching hlo_filenames:")
-            print(hlo_filename)
+            logger.warning(
+                f"No matching hlo_filenames for module '{module_name}' in {dir_name}. "
+                "HLO metadata will be unavailable."
+            )
+            return {}
 
-        # need to make sure that the pb exists and get the numerical suffix into the module name
-        # and remove '.hlo_proto.pb'
         module_name = os.path.splitext(
             os.path.splitext(os.path.basename(hlo_filename[0]))[0]
         )[0]
@@ -115,7 +137,37 @@ class JaxProfileProcessor:
         data = data.decode("utf-8").split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
+        JaxProfileProcessor._resolve_operand_references(hlo_ops)
         return hlo_ops
+
+    @staticmethod
+    def _resolve_operand_references(hlo_ops: dict):
+        """Resolve operand references that lack inline type info.
+
+        Some graph viewer backends (e.g. xprof >= 2.20.0) emit operands as bare
+        references like ``%bitcast.39.0`` instead of ``bf16[...] %bitcast.39.0``.
+        When the referenced op exists in *hlo_ops*, substitute its output type so
+        downstream consumers (parse_operands, parse_conv_metadata) see the expected
+        shape strings.
+        """
+        for op_data in hlo_ops.values():
+            operands = op_data.get("operands")
+            if not isinstance(operands, list):
+                continue
+            resolved = []
+            for operand in operands:
+                if isinstance(operand, str) and operand.startswith("%"):
+                    ref_data = hlo_ops.get(operand)
+                    if ref_data and "output" in ref_data:
+                        resolved.append(ref_data["output"])
+                        continue
+                    logger.warning(
+                        "Unable to resolve HLO operand reference '%s'; "
+                        "HLO metadata for this operand may be incomplete.",
+                        operand,
+                    )
+                resolved.append(operand)
+            op_data["operands"] = resolved
 
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
@@ -170,27 +222,26 @@ class JaxProfileProcessor:
         dict_line["computation"] = "rest"
         if metadata is not None:
             dict_line["metadata"] = metadata[0]
-            if backend_config is not None:
-                dict_line["backend_config"] = backend_config[0]
-            if custom_call_target is not None:
-                gemm_keys = ["matmul", "cublas"]
-                dict_line["custom_call_target"] = custom_call_target[0]
-                if any(k in dict_line["custom_call_target"] for k in gemm_keys):
-                    if "f8" in str(custom_call_target[0]):
-                        dict_line["type"] = "fp8"
-                        dict_line["computation"] = "gemm"
-                    else:
-                        gemm_type = JaxProfileProcessor.get_operand_type(
-                            hlo_ops, operands[0]
-                        )
-                        if not all(
-                            JaxProfileProcessor.get_operand_type(hlo_ops, o)
-                            == gemm_type
-                            for o in operands[1:]
-                        ):
-                            raise Exception("Input operand type mismatch", line)
-                        dict_line["type"] = gemm_type
-                        dict_line["computation"] = "gemm"
+        if backend_config is not None:
+            dict_line["backend_config"] = backend_config[0]
+        if custom_call_target is not None:
+            gemm_keys = ["matmul", "cublas"]
+            dict_line["custom_call_target"] = custom_call_target[0]
+            if any(k in dict_line["custom_call_target"] for k in gemm_keys):
+                if "f8" in str(custom_call_target[0]):
+                    dict_line["type"] = "fp8"
+                    dict_line["computation"] = "gemm"
+                else:
+                    gemm_type = JaxProfileProcessor.get_operand_type(
+                        hlo_ops, operands[0]
+                    )
+                    if not all(
+                        JaxProfileProcessor.get_operand_type(hlo_ops, o) == gemm_type
+                        for o in operands[1:]
+                    ):
+                        raise Exception("Input operand type mismatch", line)
+                    dict_line["type"] = gemm_type
+                    dict_line["computation"] = "gemm"
         if replica_groups is not None:
             dict_line["replica_groups"] = replica_groups["replica_string"]
 
@@ -336,8 +387,18 @@ class JaxProfileProcessor:
 # Trace event utilities to help with traces in the Google Trace Event format
 # https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview?tab=t.0
 # This trace event format includes both Pytorch and Jax traces (and anything that can be viewed in Perfetto)
-class TraceEventUtils:
+#
+# Shared by TraceEventUtils and JaxOpKeys; cannot use TraceEventUtils.CommunicationKeys
+# inside the nested JaxOpKeys class (outer class name is not bound yet during nested exec).
+COMMUNICATION_KEYS = ["rccl", "nccl"]
 
+# (kernel-name regex fragment, canonical collective name for inference)
+DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
+    (r"cross_device_reduce", "allreduce"),
+]
+
+
+class TraceEventUtils:
     class JaxOpKeys:
 
         # keywords for splitting jax events
@@ -354,9 +415,15 @@ class TraceEventUtils:
             "fmha_fwd",  # _ZN5aiter*fmha_fwd*
         ]
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
-        TEKeys = ["transformer_engine"]
-        CommunicationKeys = ["rccl", "nccl"]
+        # "FillBuffer" was historically here but matches XLA buffer-init
+        # fusions that sit inside TE custom calls (issue #423); the
+        # metadata-aware fallback in JaxAnalyses.breakdown_compute_events
+        # now re-routes those by hlo_op instead.
+        ConvKeys = ["conv_", "conv.", "conv-"]
+        # "te_fused_attn" catches te_fused_attn_{forward,backward}_ffi
+        # XLA custom-call host events (issue #422 reproducer).
+        TEKeys = ["transformer_engine", "te_fused_attn"]
+        CommunicationKeys = COMMUNICATION_KEYS  # use the generic version until we can't
         ClassCategories = {
             "GEMM": GemmKeys,
             "FA BWD": FABwdKeys,
@@ -499,8 +566,9 @@ class TraceEventUtils:
     # TODO separate util class for Jax
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(
-            TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata
+        if (
+            event.get(TraceEventUtils.TraceKeys.Phase)
+            == TraceEventUtils.TracePhases.Metadata
         ):
             return "metadata"
         elif (
@@ -580,6 +648,89 @@ class TraceEventUtils:
                 event[TraceEventUtils.TraceKeys.TimeStamp]
                 + event[TraceEventUtils.TraceKeys.Duration]
             )
+
+    @staticmethod
+    def get_communication_regexes(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> List[re.Pattern]:
+        """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
+
+        When *custom_collective_patterns* is ``None``, built-in defaults from
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
+        are included. Pass an explicit list (possibly empty) to override that
+        set while keeping NCCL/RCCL markers.
+        """
+        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+        custom = (
+            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+            if custom_collective_patterns is None
+            else custom_collective_patterns
+        )
+        for pattern, _ in custom:
+            regexes.append(re.compile(pattern, re.IGNORECASE))
+        return regexes
+
+    @staticmethod
+    def build_collective_filter_and_inference_rules(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> Tuple[List[re.Pattern], List[Tuple[re.Pattern, str]]]:
+        """Compile NCCL/RCCL/custom kernel match patterns and collective inference rules.
+
+        Same *custom_collective_patterns* semantics as
+        :meth:`get_communication_regexes`: ``None`` uses
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS``; otherwise the given list
+        replaces that default set (use ``[]`` for no custom kernels).
+        """
+        effective = (
+            custom_collective_patterns
+            if custom_collective_patterns is not None
+            else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+        )
+        filter_patterns = TraceEventUtils.get_communication_regexes(
+            custom_collective_patterns=effective
+        )
+        inference_rules = [
+            (re.compile(pattern, re.IGNORECASE), collective)
+            for pattern, collective in effective
+        ]
+        return filter_patterns, inference_rules
+
+    @staticmethod
+    def is_communication_string(text: str) -> bool:
+        """Return True if *text* matches NCCL/RCCL or default custom collective patterns.
+
+        Uses substring search (``Pattern.search``), not start-anchored ``match``,
+        so demangled names like ``void rcclGenericKernel<...>(...)`` match.
+        Custom kernels use the same defaults as :meth:`get_communication_regexes`.
+        """
+        if not text:
+            return False
+        return any(x.search(text) for x in TraceEventUtils.get_communication_regexes())
+
+    # ROCm 7.1 / older Primus images label memory copies and fills as cat=kernel
+    # with rocclr-internal names (MEMORY_COPY_*, __amd_rocclr_copyBuffer*,
+    # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
+    # cat=gpu_memset matching the CUDA convention. These patterns rebucket
+    # legacy traces so cross-version reports compare like-for-like.
+    _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
+        r"^("
+        r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"
+        r"|__amd_rocclr_copyBuffer(Rect)?(Aligned)?"
+        r")(\.kd)?$"
+    )
+    _ROCM_LEGACY_MEMSET_NAMES = re.compile(
+        r"^__amd_rocclr_fillBuffer(Aligned)?(\.kd)?$"
+    )
+
+    @staticmethod
+    def is_rocm_legacy_memcpy(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy copy kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMCPY_NAMES.match(text))
+
+    @staticmethod
+    def is_rocm_legacy_memset(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy fill kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMSET_NAMES.match(text))
 
 
 class RocprofParser:

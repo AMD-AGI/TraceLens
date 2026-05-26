@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -21,10 +21,29 @@ except ImportError:
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
+from ..PerfModel.utils import add_simulation_time_columns
 from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
 
 
 class JaxAnalyses:
+    GPU_STREAM_PID_MAX = 100
+    GPU_STREAM_TID_MAX = 100
+
+    @staticmethod
+    def is_gpu_stream_pid(event_or_pid) -> bool:
+        if isinstance(event_or_pid, dict):
+            pid = event_or_pid.get("pid")
+        else:
+            pid = event_or_pid
+        return pid is not None and int(pid) <= JaxAnalyses.GPU_STREAM_PID_MAX
+
+    @staticmethod
+    def is_gpu_stream_tid(event_or_tid) -> bool:
+        if isinstance(event_or_tid, dict):
+            tid = event_or_tid.get("tid")
+        else:
+            tid = event_or_tid
+        return tid is not None and int(tid) < JaxAnalyses.GPU_STREAM_TID_MAX
 
     @staticmethod
     def breakdown_compute_events(
@@ -54,15 +73,43 @@ class JaxAnalyses:
                 cur_categorized_list = categorized_events
                 cur_uncategorized_list = uncategorized_events
 
+            # Always seed the Uncategorized bucket so downstream code
+            # (e.g. create_gpu_summary) can index into it unconditionally
+            # even when the fallback below catches every event.
+            cur_categorized_list.setdefault(
+                TraceEventUtils.JaxOpKeys.UncategorizedEventKey, [0, 0]
+            )
+
             name = compute_event[TraceEventUtils.TraceKeys.Name]
             duration = compute_event[TraceEventUtils.TraceKeys.Duration]
-            found = False
-            for category, filters in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                if any(f in name for f in filters):
-                    add_event(cur_categorized_list, category, duration)
-                    found = True
-                    break
-            if not found:
+
+            def _match_category(candidate):
+                """Return the first JaxOpKeys category whose substring
+                filters match ``candidate``, or ``None``."""
+                if not isinstance(candidate, str) or not candidate:
+                    return None
+                for (
+                    category,
+                    filters,
+                ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                    if any(f in candidate for f in filters):
+                        return category
+                return None
+
+            # 1) Primary: match against the event name.
+            # 2) Fallback (issue #422): an XLA-emitted buffer-init kernel
+            #    such as ``__amd_rocclr_fillBufferAligned.kd`` does not
+            #    match any name keyword, but its ``args["hlo_op"]`` carries
+            #    the surrounding XLA op (e.g.
+            #    ``te_fused_attn_backward_ffi.12``) which does — retry the
+            #    same scan against that field.
+            args_dict = compute_event.get(TraceEventUtils.TraceKeys.Args) or {}
+            hlo_op = args_dict.get(TraceEventUtils.JaxKernelEventArgs.hlo_op)
+            category = _match_category(name) or _match_category(hlo_op)
+
+            if category is not None:
+                add_event(cur_categorized_list, category, duration)
+            else:
                 if group_by_name:
                     name = name.rstrip(string.digits)
                 add_event(
@@ -92,7 +139,7 @@ class JaxAnalyses:
         thread_name = thread_info.get("thread_name", "")
         if not thread_name:
             # Fallback to old logic for backward compatibility
-            return event.get("tid", 200) < 100
+            return JaxAnalyses.is_gpu_stream_tid(event)
         return thread_name.startswith("Stream #")
 
     @staticmethod
@@ -117,7 +164,7 @@ class JaxAnalyses:
         average_gpu_metrics = None
         num_gpus = 0
         for pid, cur_events in all_events.items():
-            if pid <= 100:
+            if JaxAnalyses.is_gpu_stream_pid(pid):
                 num_gpus += 1
                 analyzer.verify_dict_gpu_event_lists(cur_events)
                 current_metrics = analyzer.compute_metrics_dict(cur_events)
@@ -375,7 +422,10 @@ class JaxAnalyses:
 
     @staticmethod
     def gemm_performance_from_pb(
-        pb_file_name, module_name: str = "jit_train_step", arch: dict = None
+        pb_file_name,
+        module_name: str = "jit_train_step",
+        arch: dict = None,
+        enable_origami: bool = False,
     ):
         all_profile_events = DataLoader.load_data(filename_path=pb_file_name)[
             "traceEvents"
@@ -428,6 +478,7 @@ class JaxAnalyses:
                 ],
                 False,
                 arch,
+                enable_origami=enable_origami,
             )
             for event in gpu_0_gemms
         ]
@@ -492,7 +543,9 @@ class JaxAnalyses:
         return None
 
     @staticmethod
-    def gemm_perf_metrics(event, op_params, bwd: bool = False, arch=None):
+    def gemm_perf_metrics(
+        event, op_params, bwd: bool = False, arch=None, enable_origami: bool = False
+    ):
         perf_model_class = JaxAnalyses.get_perf_model(event)
         # the class structure of the perf_model class doesn't make it easy to add additional parameters to the event,
         # so make a copy of the event with the hlo op info inside it
@@ -500,7 +553,9 @@ class JaxAnalyses:
         event_copy[TraceEventUtils.JaxKernelEventArgs.hlo_op] = op_params
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
-        perf_model = perf_model_class(event_copy, arch=arch)
+        perf_model = perf_model_class(
+            event_copy, arch=arch, enable_origami=enable_origami
+        )
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
         time = event[TraceEventUtils.TraceKeys.Duration]
@@ -529,14 +584,13 @@ class JaxAnalyses:
             dict_metrics["TB/s"] = float("nan")
 
         if hasattr(perf_model, "get_simulation_time"):
-            simulated_time = perf_model.get_simulation_time()
-            if simulated_time:
-                dict_metrics["Simulated Time (µs)"] = simulated_time
-                dict_metrics["Simulated TFLOPS/s"] = (
-                    (gflops / 1e3) / (simulated_time / 1e6)
-                    if simulated_time > 0
-                    else float("nan")
-                )
+            add_simulation_time_columns(
+                dict_metrics,
+                perf_model.get_simulation_time(),
+                gflops,
+                bytes_moved,
+                time,
+            )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
