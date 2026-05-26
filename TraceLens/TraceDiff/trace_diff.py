@@ -1082,7 +1082,6 @@ class TraceDiff:
                                         "nn_module_parent": (
                                             parent_node.get("nn_module_stack") or [""]
                                         )[-1],
-                                        "gpu_event_uid": gpu_uid,
                                     }
                                 )
 
@@ -1179,7 +1178,6 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
-                                "gpu_event_uid": gpu_uid,
                             }
                         )
 
@@ -1253,7 +1251,6 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
-                                "gpu_event_uid": gpu_uid,
                             }
                         )
 
