@@ -1274,15 +1274,14 @@ class TraceDiff:
             traverse(root_id, None)
 
         df = pd.DataFrame(rows)
-        if not df.empty and "busy_time" in df.columns:
-            df["busy_time"] = df["busy_time"].round(3)
 
         if df.empty:
             print("[TraceDiff] No GPU events found in either trace")
             self.identical_traces = True
             self.diff_stats_df = df
             return df
-
+        
+        df["busy_time"] = df["busy_time"].round(3)
         df_trace1 = df[df["source"] == "trace1"].drop(columns=["source"])
         df_trace2 = df[df["source"] == "trace2"].drop(columns=["source"])
         if df_trace1.reset_index(drop=True).equals(df_trace2.reset_index(drop=True)):
