@@ -118,3 +118,18 @@ def torch_dtype_map(dtype):
         "c10::float8_e4m3fn": "fp8",
     }
     return dict_dtype2simulation.get(dtype.lower(), None)
+
+
+def parse_bool(input):
+    if isinstance(input, bool):
+        return input
+    if input is None:
+        return False
+    if isinstance(input, str):
+        value = input.strip().lower()
+        if value in {"true", "1"}:
+            return True
+        if value in {"false", "0", ""}:
+            return False
+    return bool(input)
+

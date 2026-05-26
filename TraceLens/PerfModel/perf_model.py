@@ -15,7 +15,7 @@ import warnings
 
 from .kernel_name_parser import gemm_name_parser
 
-from .utils import name2bpe, simulation_dtype_map, torch_dtype_map
+from .utils import name2bpe, parse_bool, simulation_dtype_map, torch_dtype_map
 
 
 # 1. GEMM
@@ -4223,20 +4223,6 @@ class jax_conv:
 # parser helper
 def parse_list(input: str, dtype):
     return [dtype(x) for x in ast.literal_eval(input)]
-
-
-def parse_bool(input):
-    if isinstance(input, bool):
-        return input
-    if input is None:
-        return False
-    if isinstance(input, str):
-        value = input.strip().lower()
-        if value in {"true", "1"}:
-            return True
-        if value in {"false", "0", ""}:
-            return False
-    return bool(input)
 
 
 class Normalization:
