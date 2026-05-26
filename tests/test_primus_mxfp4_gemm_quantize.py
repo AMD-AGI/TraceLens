@@ -218,6 +218,19 @@ def test_hipblaslt_gemm_fp4_trans_c_swap():
     assert (base.M, base.N, base.K) == (swapped.M, swapped.N, swapped.K)
 
 
+def test_hipblaslt_gemm_fp4_bool_parser_accepts_bool_and_lowercase_strings():
+    M, K, N = 1024, 512, 768
+    K_packed = K // 2
+    event = _fp4_gemm_event((K_packed, M), (K_packed, N), trans_b=False)
+    event["args"]["Concrete Inputs"][5] = True
+    event["args"]["Concrete Inputs"][6] = "false"
+    event["args"]["Concrete Inputs"][7] = ""
+
+    model = hipblaslt_gemm_fp4(event)
+
+    assert (model.M, model.N, model.K) == (M, N, K)
+
+
 def test_hipblaslt_gemm_fp4_missing_concrete_inputs_defaults_to_no_transpose():
     """Older traces without Concrete Inputs default to transA=transB=False.
     K_packed in the trace dim is still unpacked via ×2."""

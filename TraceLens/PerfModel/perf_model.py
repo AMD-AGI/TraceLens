@@ -4225,6 +4225,20 @@ def parse_list(input: str, dtype):
     return [dtype(x) for x in ast.literal_eval(input)]
 
 
+def parse_bool(input):
+    if isinstance(input, bool):
+        return input
+    if input is None:
+        return False
+    if isinstance(input, str):
+        value = input.strip().lower()
+        if value in {"true", "1"}:
+            return True
+        if value in {"false", "0", ""}:
+            return False
+    return bool(input)
+
+
 class Normalization:
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         self.event = event
@@ -5399,9 +5413,9 @@ class hipblaslt_gemm_fp8(GEMM):
         A_shape = list(input_dims[0])
         B_shape = list(input_dims[2])
 
-        trans_a = (concrete[5] == "True") if len(concrete) > 5 else False
-        trans_b = (concrete[6] == "True") if len(concrete) > 6 else False
-        trans_c = (concrete[7] == "True") if len(concrete) > 7 else False
+        trans_a = parse_bool(concrete[5]) if len(concrete) > 5 else False
+        trans_b = parse_bool(concrete[6]) if len(concrete) > 6 else False
+        trans_c = parse_bool(concrete[7]) if len(concrete) > 7 else False
 
         # Replicate C++ transC swap (hipblaslt_gemm.cpp)
         if trans_c:
@@ -5663,9 +5677,9 @@ class hipblaslt_gemm_fp4(GEMM):
         A_shape = list(input_dims[0])
         B_shape = list(input_dims[2])
 
-        trans_a = (concrete[5] == "True") if len(concrete) > 5 else False
-        trans_b = (concrete[6] == "True") if len(concrete) > 6 else False
-        trans_c = (concrete[7] == "True") if len(concrete) > 7 else False
+        trans_a = parse_bool(concrete[5]) if len(concrete) > 5 else False
+        trans_b = parse_bool(concrete[6]) if len(concrete) > 6 else False
+        trans_c = parse_bool(concrete[7]) if len(concrete) > 7 else False
 
         if trans_c:
             A_shape, B_shape = B_shape, A_shape
