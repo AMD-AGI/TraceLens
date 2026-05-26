@@ -1277,7 +1277,7 @@ class TraceDiff:
             self.identical_traces = True
             self.diff_stats_df = df
             return df
-        
+
         df["busy_time"] = df["busy_time"].round(3)
         df_trace1 = df[df["source"] == "trace1"].drop(columns=["source"])
         df_trace2 = df[df["source"] == "trace2"].drop(columns=["source"])
