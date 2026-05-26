@@ -76,7 +76,7 @@ Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_e
 - `time_ms`: Total candidate time across all instances
 - `warning`: Present when some kernels lack perf models
 
-If `impact_estimates` is empty, skip Steps 2-3 entirely and write the "No fusion opportunities detected" template (see Step 4 fallback).
+If `impact_estimates` is empty (or `status` is `NO_DATA`), skip Steps 2-4 entirely. Write **only** the three-line fallback file shown at the end of Step 4 — no P-item cards, no Detailed Analysis blocks, no Impact Summary table. Just the `# heading`, blank line, and the single sentence "No kernel fusion opportunities detected."
 
 For each entry in `impact_estimates`, look up the matching candidate in `<output_dir>/category_data/fusion_candidates.json` by `base_name == operation` to pull the descriptive fields used in Steps 2-4:
 
@@ -251,12 +251,15 @@ Found N kernel fusion opportunities across M module types.
 |---------------|------|----------------------|-------------------------------|------------|
 ```
 
-If no fusion opportunities detected:
+**If `impact_estimates` is empty or `status` is `NO_DATA`:** write exactly this file and nothing else — no P-item cards, no `## Recommendations`, no `## Detailed Analysis`, no `## Impact Summary`:
+
 ```markdown
 # Kernel Fusion Analysis Summary (Experimental)
 
 No kernel fusion opportunities detected.
 ```
+
+Then proceed directly to Step 4.1 validation.
 
 ### Step 4.1: Validate Findings
 

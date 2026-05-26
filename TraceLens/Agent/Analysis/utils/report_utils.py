@@ -188,9 +188,8 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
     table, and the optional detailed extension plot.
 
     Produces four top-level arrays:
-      - ``findings``: per-(category, bound_type, library) groups, concatenated
-        from each ``_metrics.json::category_findings`` (already grouped and
-        gated by ``MIN_PITEM_IMPACT_SCORE`` in the analyzer script). Sorted
+      - ``findings``: per-(category, bound_type, library, eff_bucket) groups
+        from each ``_metrics.json::category_findings``. Sorted
         globally by ``impact_score`` with ``global_rank`` / ``category_rank``
         attached. Drives the report's flat P-numbering.
       - ``priorities``: ranked category list. Quantified categories are a
