@@ -7,7 +7,8 @@
 """Pythonic workflow evals.
 
 Checks directory structure, file existence, and output completeness
-against the category_manifest.json contract.
+against the category_manifest.json contract. Also includes deterministic
+marker identification checks (top_ops, p_item, detail_estimate).
 
 Supports both standalone and comparative analysis modes via --comparison-scope flag.
 """
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import sys
+
 
 CSV_COLUMNS = [
     "index",
@@ -32,6 +34,20 @@ _REQUIRED_MODEL_KEYS = {"model", "architecture", "scale", "precision"}
 
 _MIN_REPORT_BYTES = 100
 _GARBLED_THRESHOLD = 0.50
+
+# Marker validation regexes — identical to those in MarkerValidator
+# (TraceLens/Agent/Analysis/utils/validation_utils.py). Defined here directly
+# because validation_utils.py has relative imports that prevent standalone loading.
+_MV_BEGIN_RE = re.compile(r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL)
+_MV_END_RE = re.compile(r"<!--\s*impact-end\s*-->")
+_MV_KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
+_MV_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+_TOP_OPS_ROW_RE = re.compile(r"<!--\s*top-ops-row\s+([^>]*?)-->")
+_DETAIL_P_HEADER_RE = re.compile(r"^####\s+.+P(\d+):", re.MULTILINE)
+_DETAIL_P_HEADER_FALLBACK_RE = re.compile(r"^(?:####|###)\s+.+P(\d+):", re.MULTILINE)
+_NOT_QUANTIFIABLE_RE = re.compile(
+    r"not\s+quantifiable\s+from\s+trace\s+data", re.IGNORECASE
+)
 
 
 def _pre_check_gates(output_dir: str) -> str | None:
@@ -306,10 +322,10 @@ EVAL_REGISTRY = [
 # ---------------------------------------------------------------------------
 
 
-def _make_row(index, summary, result, details, root_cause, fix):
+def _make_row(index, summary, result, details, root_cause, fix, category="Workflow"):
     return {
         "index": index,
-        "category": "Workflow",
+        "category": category,
         "issue_summary": summary,
         "result": result,
         "details": details,
@@ -820,10 +836,287 @@ def _check_model_id(output_dir):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Marker Identification checks (deterministic, structural)
+# ---------------------------------------------------------------------------
+
+
+def _marker_attrs_from_inner(inner):
+    """Parse key=value pairs from a marker's inner content."""
+    return dict(_MV_ATTR_RE.findall(inner))
+
+
+def _make_marker_row(index, summary, result, details, root_cause="", fix=""):
+    return _make_row(index, summary, result, details, root_cause, fix,
+                     category="Marker Identification")
+
+
+def _check_marker_top_ops(output_dir):
+    """Marker eval 1: top_ops wrapper + inline top-ops-row markers."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_1",
+                "Top Operations markers (kind=top_ops)",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    errors = []
+    top_ops_begin = None
+    for m in _MV_BEGIN_RE.finditer(content):
+        inner = m.group(1)
+        km = _MV_KIND_ATTR_RE.search(inner)
+        if km and km.group(1) == "top_ops":
+            top_ops_begin = m
+            break
+
+    if top_ops_begin is None:
+        errors.append("No <!-- impact-begin kind=top_ops --> marker found")
+    else:
+        end_after = _MV_END_RE.search(content, top_ops_begin.end())
+        if end_after is None:
+            errors.append("kind=top_ops marker has no matching <!-- impact-end -->")
+        else:
+            block = content[top_ops_begin.end():end_after.start()]
+            row_markers = list(_TOP_OPS_ROW_RE.finditer(block))
+            if not row_markers:
+                errors.append(
+                    "No <!-- top-ops-row ... --> markers found inside top_ops block"
+                )
+            else:
+                for i, rm in enumerate(row_markers, start=1):
+                    inner = rm.group(1)
+                    attrs = _marker_attrs_from_inner(inner)
+                    missing_attrs = []
+                    if "low" not in attrs:
+                        missing_attrs.append("low")
+                    if "high" not in attrs:
+                        missing_attrs.append("high")
+                    if missing_attrs:
+                        errors.append(
+                            f"top-ops-row #{i} missing attributes: "
+                            f"{', '.join(missing_attrs)}"
+                        )
+
+    result = "PASS" if not errors else "FAIL"
+    details = "; ".join(errors) if errors else ""
+    return [
+        _make_marker_row(
+            "marker_eval_1",
+            "Top Operations markers (kind=top_ops)",
+            result,
+            details,
+            "template" if result == "FAIL" else "",
+            "Add or fix top_ops markers in analysis.md" if result == "FAIL" else "",
+        )
+    ]
+
+
+def _check_marker_p_items(output_dir):
+    """Marker eval 2: kind=p_item markers for each compute P-item."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_2",
+                "P-item markers (kind=p_item)",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    compute_section = _extract_section(content, "## Compute Kernel Optimizations")
+    if compute_section is None:
+        return [
+            _make_marker_row(
+                "marker_eval_2",
+                "P-item markers (kind=p_item)",
+                "FAIL",
+                "Compute Kernel Optimizations section not found",
+                "template",
+                "Ensure report contains Compute Kernel Optimizations section",
+            )
+        ]
+
+    p_items = _extract_p_items(compute_section)
+    if not p_items:
+        return [
+            _make_marker_row(
+                "marker_eval_2",
+                "P-item markers (kind=p_item)",
+                "FAIL",
+                "No P-items found in Compute Kernel Optimizations",
+                "template",
+                "Ensure report contains P-items",
+            )
+        ]
+
+    rows = []
+    for pnum, p_text in p_items:
+        errors = []
+        p_item_markers = []
+        for m in _MV_BEGIN_RE.finditer(p_text):
+            inner = m.group(1)
+            km = _MV_KIND_ATTR_RE.search(inner)
+            if km and km.group(1) == "p_item":
+                p_item_markers.append(inner)
+
+        if not p_item_markers:
+            errors.append("No <!-- impact-begin kind=p_item ... --> marker found")
+        else:
+            for inner in p_item_markers:
+                attrs = _marker_attrs_from_inner(inner)
+                required = ("category", "low", "mid", "high")
+                missing = [a for a in required if a not in attrs]
+                if missing:
+                    errors.append(
+                        f"kind=p_item marker missing attributes: "
+                        f"{', '.join(missing)}"
+                    )
+
+            end_count = len(_MV_END_RE.findall(p_text))
+            begin_count = len(_MV_BEGIN_RE.findall(p_text))
+            if begin_count > end_count:
+                errors.append("Unpaired impact-begin (missing impact-end)")
+
+        result = "PASS" if not errors else "FAIL"
+        details = "; ".join(errors) if errors else ""
+        rows.append(
+            _make_marker_row(
+                f"marker_eval_2_P{pnum}",
+                f"Compute P{pnum} impact marker (kind=p_item)",
+                result,
+                details,
+                "template" if result == "FAIL" else "",
+                f"Fix kind=p_item marker for P{pnum}" if result == "FAIL" else "",
+            )
+        )
+    return rows
+
+
+def _check_marker_detail_estimates(output_dir):
+    """Marker eval 3: kind=detail_estimate markers in Detailed Analysis."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_3",
+                "Detail estimate markers (kind=detail_estimate)",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    detailed_section = _extract_section(content, "## Detailed Analysis")
+    if detailed_section is None:
+        return [
+            _make_marker_row(
+                "marker_eval_3",
+                "Detail estimate markers (kind=detail_estimate)",
+                "FAIL",
+                "Detailed Analysis section not found",
+                "template",
+                "Ensure report contains Detailed Analysis section",
+            )
+        ]
+
+    m = re.search(
+        r"^### Compute Kernel Insights[^\n]*\n(.*?)(?=^### (?!.*P\d)|^## |\Z)",
+        detailed_section,
+        re.MULTILINE | re.DOTALL,
+    )
+    compute_subsection = m.group(0) if m else detailed_section
+
+    matches = list(_DETAIL_P_HEADER_RE.finditer(compute_subsection))
+    if not matches:
+        matches = list(_DETAIL_P_HEADER_FALLBACK_RE.finditer(compute_subsection))
+
+    if not matches:
+        return [
+            _make_marker_row(
+                "marker_eval_3",
+                "Detail estimate markers (kind=detail_estimate)",
+                "FAIL",
+                "No P-item headers found in Detailed Analysis",
+                "template",
+                "Ensure Detailed Analysis contains P-item sections",
+            )
+        ]
+
+    rows = []
+    for i, match in enumerate(matches):
+        pnum = int(match.group(1))
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(compute_subsection)
+        block = compute_subsection[start:end]
+
+        errors = []
+        detail_markers = []
+        for bm in _MV_BEGIN_RE.finditer(block):
+            inner = bm.group(1)
+            km = _MV_KIND_ATTR_RE.search(inner)
+            if km and km.group(1) == "detail_estimate":
+                detail_markers.append(inner)
+
+        has_not_quantifiable = bool(_NOT_QUANTIFIABLE_RE.search(block))
+
+        if not detail_markers and not has_not_quantifiable:
+            errors.append(
+                "No <!-- impact-begin kind=detail_estimate ... --> marker "
+                "and no 'not quantifiable from trace data' sentinel found"
+            )
+        elif detail_markers:
+            for inner in detail_markers:
+                attrs = _marker_attrs_from_inner(inner)
+                required = ("low", "high")
+                missing = [a for a in required if a not in attrs]
+                if missing:
+                    errors.append(
+                        f"kind=detail_estimate marker missing attributes: "
+                        f"{', '.join(missing)}"
+                    )
+
+            total_begin = len(_MV_BEGIN_RE.findall(block))
+            end_count = len(_MV_END_RE.findall(block))
+            if total_begin > end_count:
+                errors.append("Unpaired impact-begin (missing impact-end)")
+
+        result = "PASS" if not errors else "FAIL"
+        details = "; ".join(errors) if errors else ""
+        rows.append(
+            _make_marker_row(
+                f"marker_eval_3_P{pnum}",
+                f"Detailed Analysis P{pnum} estimate marker (kind=detail_estimate)",
+                result,
+                details,
+                "template" if result == "FAIL" else "",
+                (
+                    f"Fix kind=detail_estimate marker for P{pnum} in Detailed Analysis"
+                    if result == "FAIL"
+                    else ""
+                ),
+            )
+        )
+    return rows
+
+
 _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
     _check_issue_template,
+    _check_model_id,
+    _check_marker_top_ops,
+    _check_marker_p_items,
+    _check_marker_detail_estimates,
 ]
 
 _GATE_FAIL_NEW_EVALS = [
@@ -831,6 +1124,9 @@ _GATE_FAIL_NEW_EVALS = [
     ("workflow_eval_10", "Executive Summary has metrics table"),
     ("workflow_eval_11", "Issue Template rendering"),
     ("workflow_eval_13", "Model identification in report"),
+    ("marker_eval_1", "Top Operations markers (kind=top_ops)"),
+    ("marker_eval_2", "P-item markers (kind=p_item)"),
+    ("marker_eval_3", "Detail estimate markers (kind=detail_estimate)"),
 ]
 
 

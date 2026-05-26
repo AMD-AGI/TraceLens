@@ -27,8 +27,11 @@ root-cause categories, and where the implementation lives.
 | quality\_eval\_1 | Scripted (CSV alignment) | 1 (standalone) / 2 (comparative) | `quality_scripted_evals.py` |
 | quality\_eval\_2 | LLM (multi-dimensional scoring) | 1 | `quality-llm-eval.md` |
 | quality\_eval\_3 | LLM (multi-dimensional scoring) | 1 | `quality-llm-eval.md` |
+| marker\_eval\_1 | Scripted (structural) | 1 | `workflow_scripted_evals.py` |
+| marker\_eval\_2 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
+| marker\_eval\_3 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
 
-**Total:** 12 scripted evals (expanding to ~30+ sub-indices) + 3 LLM evals = 15 logical evals.
+**Total:** 15 scripted evals (expanding to ~30+ sub-indices) + 3 LLM evals = 18 logical evals.
 
 ---
 
@@ -284,6 +287,61 @@ overall_score = correctness × 0.40 + completeness × 0.30 + precision × 0.30
 
 ---
 
+## Marker Identification Evals
+
+**Type:** Scripted (structural / deterministic). **Root cause on fail:** `template`.
+
+**Implementation:** `agent_evals/Analysis/eval_utils/workflow_scripted_evals.py`
+
+Validates the structural correctness of impact markers (`<!-- impact-begin ... -->` /
+`<!-- impact-end -->`) in generated `analysis.md` files. These checks are purely
+regex-based and do not validate numeric correctness of marker attribute values.
+
+### marker\_eval\_1: Top Operations Markers
+
+Checks `analysis.md` for:
+
+| Check | Pass Criteria |
+|-------|---------------|
+| `kind=top_ops` wrapper | A `<!-- impact-begin kind=top_ops -->` / `<!-- impact-end -->` pair exists |
+| Inline row markers | Each table row within the wrapper has a `<!-- top-ops-row low=... high=... -->` marker |
+| Row marker attributes | Each `top-ops-row` marker contains both `low` and `high` attributes |
+
+**Pass:** All structural checks satisfied.
+**Fail:** Any marker missing or malformed. Details list specific issues.
+
+### marker\_eval\_2: P-item Impact Markers
+
+**Sub-indices:** `marker_eval_2_P{N}` (one per compute P-item)
+
+For each P-item (`### ...P{N}:`) under `## Compute Kernel Optimizations`:
+
+| Check | Pass Criteria |
+|-------|---------------|
+| `kind=p_item` marker present | A `<!-- impact-begin kind=p_item ... -->` / `<!-- impact-end -->` pair exists |
+| Required attributes | Marker contains `category`, `low`, `mid`, `high` attributes |
+| Pairing | Every `impact-begin` has a matching `impact-end` |
+
+**Pass:** All structural checks satisfied for the P-item.
+**Fail:** Marker missing, attributes missing, or unpaired. Details list specific issues.
+
+### marker\_eval\_3: Detail Estimate Markers
+
+**Sub-indices:** `marker_eval_3_P{N}` (one per compute P-item in Detailed Analysis)
+
+For each compute P-item section under `## Detailed Analysis`:
+
+| Check | Pass Criteria |
+|-------|---------------|
+| `kind=detail_estimate` marker or sentinel | Either a `<!-- impact-begin kind=detail_estimate ... -->` / `<!-- impact-end -->` pair exists, or the text "not quantifiable from trace data" is present |
+| Required attributes | If marker present, it contains `low` and `high` attributes |
+| Pairing | Every `impact-begin` has a matching `impact-end` |
+
+**Pass:** Marker with correct attributes present, or not-quantifiable sentinel present.
+**Fail:** Neither marker nor sentinel found, or marker has missing attributes. Details list specific issues.
+
+---
+
 ## Stability Classification
 
 After multiple repeated runs, the aggregation script (`aggregate_repeatability.py`)
@@ -321,7 +379,7 @@ index,category,issue_summary,result,details,root_cause,recommended_fix
 | Column | Description |
 |--------|-------------|
 | `index` | Eval identifier (e.g., `workflow_eval_9_compute`, `quality_eval_2`) |
-| `category` | `Workflow` or `Quality` |
+| `category` | `Workflow`, `Quality`, or `Marker Identification` |
 | `issue_summary` | Human-readable name of the check |
 | `result` | `PASS` or `FAIL` |
 | `details` | Failure specifics, scoring breakdown, or match confirmation |
