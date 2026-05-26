@@ -329,10 +329,10 @@ class JaxProfileProcessor:
                     sizes_string = outputs
                 operand_list = []
                 for opid in op["operands"]:
-                    if "[" in opid and "]" in opid:
-                        # pb format, shapes in operand list
+                    if "[" in opid and "]" in opid and not opid.split("[")[1].startswith("]"):
+                        # pb format, shapes in operand list; exclude scalars e.g. f32[]
                         operand_list.append(opid)
-                    else:
+                    elif "[" not in opid:
                         output = hlo_ops[opid]["output"]
                         if any(
                             output.startswith(d) for d in dtypes + ["f8"]
