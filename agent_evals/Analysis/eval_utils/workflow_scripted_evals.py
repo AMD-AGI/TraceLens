@@ -43,6 +43,11 @@ _MV_END_RE = re.compile(r"<!--\s*impact-end\s*-->")
 _MV_KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
 _MV_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
 _TOP_OPS_ROW_RE = re.compile(r"<!--\s*top-ops-row\s+([^>]*?)-->")
+_DETAIL_P_HEADER_RE = re.compile(r"^####\s+.+P(\d+):", re.MULTILINE)
+_DETAIL_P_HEADER_FALLBACK_RE = re.compile(r"^(?:####|###)\s+.+P(\d+):", re.MULTILINE)
+_NOT_QUANTIFIABLE_RE = re.compile(
+    r"not\s+quantifiable\s+from\s+trace\s+data", re.IGNORECASE
+)
 
 
 def _pre_check_gates(output_dir: str) -> str | None:
@@ -994,13 +999,6 @@ def _check_marker_p_items(output_dir):
             )
         )
     return rows
-
-
-_DETAIL_P_HEADER_RE = re.compile(r"^####\s+.+P(\d+):", re.MULTILINE)
-_DETAIL_P_HEADER_FALLBACK_RE = re.compile(r"^(?:####|###)\s+.+P(\d+):", re.MULTILINE)
-_NOT_QUANTIFIABLE_RE = re.compile(
-    r"not\s+quantifiable\s+from\s+trace\s+data", re.IGNORECASE
-)
 
 
 def _check_marker_detail_estimates(output_dir):
