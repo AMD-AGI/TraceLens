@@ -132,4 +132,3 @@ def parse_bool(input):
         if value in {"false", "0", ""}:
             return False
     return bool(input)
-
