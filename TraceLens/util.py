@@ -415,8 +415,14 @@ class TraceEventUtils:
             "fmha_fwd",  # _ZN5aiter*fmha_fwd*
         ]
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
-        TEKeys = ["transformer_engine"]
+        # "FillBuffer" was historically here but matches XLA buffer-init
+        # fusions that sit inside TE custom calls (issue #423); the
+        # metadata-aware fallback in JaxAnalyses.breakdown_compute_events
+        # now re-routes those by hlo_op instead.
+        ConvKeys = ["conv_", "conv.", "conv-"]
+        # "te_fused_attn" catches te_fused_attn_{forward,backward}_ffi
+        # XLA custom-call host events (issue #422 reproducer).
+        TEKeys = ["transformer_engine", "te_fused_attn"]
         CommunicationKeys = COMMUNICATION_KEYS  # use the generic version until we can't
         ClassCategories = {
             "GEMM": GemmKeys,

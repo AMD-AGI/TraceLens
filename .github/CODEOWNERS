@@ -8,6 +8,10 @@
 # TraceLens package changes require Adeem or Gabe review
 /TraceLens/                   @ajassani @gabeweisz
 
+# Agent code and evals require area owner review
+/TraceLens/Agent/             @tsrikris
+/agent_evals/                 @Ahmedhasssan-aig @tsrikris
+
 # TraceDiff module and docs require Spandan review
 /TraceLens/TraceDiff/         @spandoesai
 /docs/TraceDiff.md            @spandoesai
