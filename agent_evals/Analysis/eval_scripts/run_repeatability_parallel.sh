@@ -63,7 +63,7 @@ expand_archive() {
     if [[ -f "$archive" ]]; then
         if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
             echo "Expanding ${name}.tar.gz..."
-            tar xzf "$archive" -C "$EVALS_DIR/analysis_tests"
+            tar xzf "$archive" -C "$REPO_ROOT"
             echo "Done."
         fi
     fi
