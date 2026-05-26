@@ -169,6 +169,7 @@ class TreePerfAnalyzer:
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
         data = DataLoader.load_data(profile_filepath)
         data = data["traceEvents"]
+
         categorizer = (
             TraceToTree.default_categorizer
             if not jax
