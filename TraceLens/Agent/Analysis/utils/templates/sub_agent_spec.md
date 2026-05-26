@@ -46,13 +46,13 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
 <!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
-**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]   <!-- compute tier only -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
 <!-- impact-end -->
 ```
 
 - **Compute tier**: include all three fields. Pull `**Impact**` from `category_data/<category>_metrics.json::category_findings[i]`, ordered by `rank` (one card per entry).
-- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix. System-tier P-items still wrap `**Impact**` in `kind=p_item` markers when they choose to emit one (typically as `Not quantifiable from trace data`); see § Impact markers (REQUIRED) below.
-- **Field labels are exact** — always `**Insight**`, `**Action**`, `**Impact**`.
+- **System tier**: omit the `(<Library>)` title suffix. Always emit `**Impact**: Not quantifiable from trace data` wrapped in `kind=p_item` markers with `low=null mid=null high=null`.
+- **Field labels are exact** — `**Insight**`, `**Action**`, `**Impact**`.
 - **`(<Library>)` suffix**: the single `category_findings[i].library` for this card (one library per finding by construction). Omit the parenthetical when the value is `Unknown`.
 - **Marker required** — see § Impact markers (REQUIRED). The `low`/`mid`/`high` attributes carry the raw `impact_score_low/impact_score/impact_score_high` values from `category_findings[i]`. For non-quantifiable cards (system tier) use `low=null mid=null high=null`.
 
@@ -224,7 +224,7 @@ Do not look up peaks independently from the metadata dict.
 
 ---
 
-## Impact Estimates
+## Impact estimate rendering
 
 Compute-tier sub-agents READ their P-items from `category_data/<category>_metrics.json::category_findings[]`, one card per entry ordered by `rank`. The analyzer script has already grouped per-op estimates by `(bound_type, library)`, summed impact, and dropped sub-threshold groups; the sub-agent renders one card per surviving entry.
 
