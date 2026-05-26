@@ -26,6 +26,24 @@ from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
 
 
 class JaxAnalyses:
+    GPU_STREAM_PID_MAX = 100
+    GPU_STREAM_TID_MAX = 100
+
+    @staticmethod
+    def is_gpu_stream_pid(event_or_pid) -> bool:
+        if isinstance(event_or_pid, dict):
+            pid = event_or_pid.get("pid")
+        else:
+            pid = event_or_pid
+        return pid is not None and int(pid) <= JaxAnalyses.GPU_STREAM_PID_MAX
+
+    @staticmethod
+    def is_gpu_stream_tid(event_or_tid) -> bool:
+        if isinstance(event_or_tid, dict):
+            tid = event_or_tid.get("tid")
+        else:
+            tid = event_or_tid
+        return tid is not None and int(tid) < JaxAnalyses.GPU_STREAM_TID_MAX
 
     @staticmethod
     def breakdown_compute_events(
@@ -121,7 +139,7 @@ class JaxAnalyses:
         thread_name = thread_info.get("thread_name", "")
         if not thread_name:
             # Fallback to old logic for backward compatibility
-            return event.get("tid", 200) < 100
+            return JaxAnalyses.is_gpu_stream_tid(event)
         return thread_name.startswith("Stream #")
 
     @staticmethod
@@ -146,7 +164,7 @@ class JaxAnalyses:
         average_gpu_metrics = None
         num_gpus = 0
         for pid, cur_events in all_events.items():
-            if pid <= 100:
+            if JaxAnalyses.is_gpu_stream_pid(pid):
                 num_gpus += 1
                 analyzer.verify_dict_gpu_event_lists(cur_events)
                 current_metrics = analyzer.compute_metrics_dict(cur_events)

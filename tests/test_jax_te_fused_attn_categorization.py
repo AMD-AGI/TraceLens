@@ -45,16 +45,14 @@ def _trace_path():
 def _bucket_compute_events():
     data = DataLoader.load_data(filename_path=_trace_path(), save_preprocessed=False)
     events = data["traceEvents"]
-    # GPU-stream compute events: pid<=100, tid<100, with a duration.
+    # GPU-stream compute events: pid/tid within JaxAnalyses stream bounds.
     compute = [
         e
         for e in events
         if isinstance(e.get("name"), str)
         and "dur" in e
-        and e.get("pid") is not None
-        and int(e.get("pid")) <= 100
-        and e.get("tid") is not None
-        and int(e.get("tid")) < 100
+        and JaxAnalyses.is_gpu_stream_pid(e)
+        and JaxAnalyses.is_gpu_stream_tid(e)
     ]
     cat, uncat = JaxAnalyses.breakdown_compute_events(
         compute, group_by_gpu=False, group_by_name=False
