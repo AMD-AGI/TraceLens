@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -22,8 +22,9 @@ import gzip
 import re
 import zipfile
 
-from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
+from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -87,7 +88,10 @@ def perf_report_sanity_check(
             e["name"]
             for e in events
             if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"}
-            and ("nccl" not in e.get("name", "").lower() or include_nccl)
+            and (
+                not TraceEventUtils.is_communication_string(e.get("name", ""))
+                or include_nccl
+            )
         )
     )
 
@@ -524,20 +528,24 @@ def generate_perf_report_pytorch(
     topk_short_kernels: Optional[int] = None,  # include all below thresh by default
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
+    comparison_json_path: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator
+    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     enable_origami: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
+    include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     if gpu_arch_json_path:
         with open(gpu_arch_json_path, "r") as f:
             gpu_arch_json = json.load(f)
     else:
         gpu_arch_json = None
-    add_python_func = True if group_by_parent_module else False
+    add_python_func = (
+        True if (group_by_parent_module or include_call_stack is True) else False
+    )
     if augmented_tree is not None:
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
@@ -859,6 +867,7 @@ def generate_perf_report_pytorch(
 
     # Build dict_name2df - only include sheets that have data
     dict_name2df = {"gpu_timeline": df_gpu_timeline}
+    df_unified_perf: pd.DataFrame = pd.DataFrame()
 
     # Add CPU-dependent sheets only if not GPU-only
     if not perf_analyzer.gpu_only:
@@ -882,12 +891,32 @@ def generate_perf_report_pytorch(
         df_unified_perf = perf_analyzer.build_df_unified_perf_table(
             include_nccl=collective_analysis
         )
+
+        # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
+        _tracediff_diff_stats: Optional[pd.DataFrame] = None
+        if comparison_json_path and not df_unified_perf.empty:
+            perf_analyzer2 = TreePerfAnalyzer.from_file(
+                profile_filepath=comparison_json_path,
+                python_path=perf_analyzer.python_path,
+                include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
+                enable_pseudo_ops=enable_pseudo_ops,
+                add_python_func=perf_analyzer.add_python_func,
+            )
+            perf_analyzer2.tree.apply_annotation(
+                name_filters=["vllm::unified_attention_with_output"]
+            )
+            td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
+            td.generate_tracediff_report()
+            _tracediff_diff_stats = td.diff_stats_df
+
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
                 df_unified_perf,
                 agg_metrics=agg_metrics,
                 include_pct=True,
                 group_by_num_kernels=group_by_num_kernels,
+                include_call_stack=include_call_stack,
+                tree=perf_analyzer.tree,
             )
             if not df_unified_perf_summary.empty:
                 df_unified_perf_summary = add_truncated_kernel_details(
@@ -895,7 +924,38 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
+                if "call_stack" in df_unified_perf_summary.columns:
+                    df_callstacks = df_unified_perf_summary[
+                        ["name", "op category", "call_stack"]
+                    ].copy()
+                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
+                    dict_name2df["unified_perf_callstacks"] = df_callstacks
+
+                    n_frames = 4  # op name + 3 parent frames
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                    df_unified_perf_summary.insert(
+                        cs_col,
+                        "trunc_call_stack",
+                        df_unified_perf_summary["call_stack"].apply(
+                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
+                        ),
+                    )
+                    df_unified_perf_summary = df_unified_perf_summary.drop(
+                        columns=["call_stack"]
+                    )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+
+            if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
+                from TraceLens.Reporting.tracediff_comparison_extension import (
+                    enrich_perf_report_dict_inplace,
+                )
+
+                dict_name2df = enrich_perf_report_dict_inplace(
+                    dict_name2df,
+                    _tracediff_diff_stats,
+                    df_unified_perf=df_unified_perf,
+                )
+                dict_name2df["diff_stats"] = _tracediff_diff_stats
 
             if include_overlap_info:
                 df_unified_perf_summary_overlapping_kernels = (
@@ -1058,7 +1118,7 @@ def generate_perf_report_pytorch(
                 dict_name2df.update(additional_dfs)
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
-    # Write all DataFrames to separate sheets in an Excel workbook
+    # Write CSVs and/or Excel (independent options)
     if output_csvs_dir:
         # Ensure the output directory exists
         os.makedirs(output_csvs_dir, exist_ok=True)
@@ -1187,6 +1247,17 @@ def main():
     )
 
     parser.add_argument(
+        "--comparison_json_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a second trace to compare against the primary trace. "
+            "Runs TraceDiff and adds speedup, delta, and LCA columns to "
+            "unified_perf_summary, plus a diff_stats sheet."
+        ),
+    )
+
+    parser.add_argument(
         "--extension_file",
         type=str,
         default=None,
@@ -1225,6 +1296,12 @@ def main():
         help="Group by number of kernels in summary tables.",
     )
     parser.add_argument(
+        "--include_call_stack",
+        action="store_true",
+        default=False,
+        help="Include callstack in the report.",
+    )
+    parser.add_argument(
         "--include_overlap_info",
         action="store_true",
         default=False,
@@ -1259,12 +1336,14 @@ def main():
         topk_short_kernels=args.topk_short_kernels,
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
+        comparison_json_path=args.comparison_json_path,
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         enable_origami=args.enable_origami,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
+        include_call_stack=args.include_call_stack,
     )
 
 
