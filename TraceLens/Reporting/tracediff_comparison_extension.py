@@ -89,14 +89,8 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
         nn_module_stack = src["nn_module_stack"].iloc[0] if not src.empty else ""
         nn_module_parent = src["nn_module_parent"].iloc[0] if not src.empty else ""
 
-        if not t1.empty and "busy_time" in t1.columns and t1["busy_time"].notna().any():
-            kernel_time_trace1 = t1["busy_time"].iloc[0]
-        else:
-            kernel_time_trace1 = t1["kernel_time"].sum() if not t1.empty else 0.0
-        if not t2.empty and "busy_time" in t2.columns and t2["busy_time"].notna().any():
-            kernel_time_trace2 = t2["busy_time"].iloc[0]
-        else:
-            kernel_time_trace2 = t2["kernel_time"].sum() if not t2.empty else 0.0
+        kernel_time_trace1 = t1["busy_time"].iloc[0] if not t1.empty else 0.0
+        kernel_time_trace2 = t2["busy_time"].iloc[0] if not t2.empty else 0.0
         num_kernels_trace1 = len(t1)
         num_kernels_trace2 = len(t2)
         kernel_names_trace1 = t1["name"].tolist() if not t1.empty else []
@@ -243,24 +237,10 @@ def _build_lca_metadata(
     if trace1.empty:
         return out
 
-    _has_busy = "busy_time" in trace2.columns and trace2["busy_time"].notna().any()
-    if _has_busy:
-        lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")[
-            "busy_time"
-        ].first()
-    else:
-        lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")[
-            "kernel_time"
-        ].sum()
+    lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["busy_time"].first()
 
     for lca_id, grp in trace1.groupby("lowest_common_ancestor_id"):
-        _has_busy_t1 = "busy_time" in grp.columns and grp["busy_time"].notna().any()
-        if _has_busy_t1:
-            t1_total = float(grp["busy_time"].iloc[0])
-        elif "kernel_time" in grp.columns:
-            t1_total = float(grp["kernel_time"].sum())
-        else:
-            t1_total = 0.0
+        t1_total = float(grp["busy_time"].iloc[0])
 
         t2_total = float(lca_trace2_time.get(lca_id, 0.0))
         has_trace2_match = bool(_trace2_gpu_op_uid_set_for_lca(trace2, lca_id))
