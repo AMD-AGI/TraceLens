@@ -1988,6 +1988,7 @@ class TreePerfAnalyzer:
                             }
                         )
                 row["kernel_details"] = kernel_details if kernel_details else None
+                row["num_kernels"] = len(kernel_details)
 
             # Add perf metrics if available
             perf_cols = [
@@ -2103,6 +2104,7 @@ class TreePerfAnalyzer:
             col_order.append("perf_params")
         if include_kernel_details:
             col_order.append("kernel_details")
+            col_order.append("num_kernels")
 
         col_order = [c for c in col_order if c in df.columns]
         return df[col_order]
