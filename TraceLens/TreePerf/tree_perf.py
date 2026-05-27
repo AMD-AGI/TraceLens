@@ -3223,6 +3223,11 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             "u32": 4,
             "f16": 2,
             "u64": 8,
+            "f8e4m3fn": 1,
+            "f8e4m3fnuz": 1,
+            "f8e5m2": 1,
+            "f8e5m2fnuz": 1,
+            "pred": 1,
         }
 
         def parse_dtype_shape_layout(operand):
