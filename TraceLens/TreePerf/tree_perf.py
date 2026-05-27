@@ -1294,15 +1294,12 @@ class TreePerfAnalyzer:
             )
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
-        # Collect per-position durations and gpu_op_uids across all instances.
-        # gpu_op_uids is needed by downstream tracediff matching; the template's
-        # single gpu_op_uid only points at the first instance, so without this
-        # consumers see a tiny subset of the kernels actually in the group.
+        # Collect per-position durations across all instances.
         all_durations = [[] for _ in template]
-        all_gpu_op_uids = [[] for _ in template]
 
         for kernel_list in series_of_kernel_lists:
             if isinstance(kernel_list, list):
+                # Basic validation to prevent errors and warn about inconsistencies
                 if len(kernel_list) != len(template):
                     warnings.warn(
                         f"Inconsistent kernel list length found. Skipping a row.",
@@ -1312,6 +1309,7 @@ class TreePerfAnalyzer:
 
                 for i, kernel in enumerate(kernel_list):
                     try:
+                        # Append the duration to the list corresponding to its position
                         all_durations[i].append(kernel["dur"])
                     except (KeyError, IndexError):
                         warnings.warn(
@@ -1319,14 +1317,10 @@ class TreePerfAnalyzer:
                             UserWarning,
                         )
                         continue
-                    uid = kernel.get("gpu_op_uid")
-                    if uid is None:
-                        uid = kernel.get("UID")
-                    if uid is not None:
-                        all_gpu_op_uids[i].append(uid)
 
         summary_list = copy.deepcopy(template)
 
+        # Now, compute statistics and populate the summary list
         for i, kernel_summary in enumerate(summary_list):
             durations_for_this_index = all_durations[i]
             dur_arr = np.array(durations_for_this_index)
@@ -1335,10 +1329,12 @@ class TreePerfAnalyzer:
             kernel_summary.pop("gpu_op_uid", None)
 
             kernel_summary["count"] = len(dur_arr)
-            kernel_summary["total_duration_us"] = np.sum(dur_arr)
-            kernel_summary["gpu_op_uids"] = list(all_gpu_op_uids[i])
+            kernel_summary["total_duration_us"] = np.sum(
+                dur_arr
+            )  # Use consistent key name
 
             if not durations_for_this_index:
+                # If no durations were collected (e.g., all rows skipped), skip metric calculation
                 continue
 
             for metric in agg_metrics:
