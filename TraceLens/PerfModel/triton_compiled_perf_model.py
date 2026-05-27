@@ -270,7 +270,9 @@ def _meta_from_trace_args(event: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _cache_dirs() -> list[str]:
+def _cache_dirs(inductor_cache_dir: str | None = None) -> list[str]:
+    if inductor_cache_dir:
+        return [inductor_cache_dir] if os.path.isdir(inductor_cache_dir) else []
     env = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
     if env:
         return [env] if os.path.isdir(env) else []
@@ -363,12 +365,12 @@ _kernel_meta_cache: dict[str, dict] = {}
 _scanned_wrappers: set[str] = set()
 
 
-def _lookup(name: str) -> dict | None:
+def _lookup(name: str, inductor_cache_dir: str | None = None) -> dict | None:
     """Return parsed metadata for a kernel name, scanning cache dirs as needed."""
     if name in _kernel_meta_cache:
         return _kernel_meta_cache[name]
 
-    for cache_dir in _cache_dirs():
+    for cache_dir in _cache_dirs(inductor_cache_dir):
         for path in glob.glob(os.path.join(cache_dir, "**", "*.py"), recursive=True):
             if path in _scanned_wrappers:
                 continue
@@ -411,7 +413,7 @@ class TritonCompiledPerfModel:
         self.name = event["name"]
         self._meta = _meta_from_trace_args(event)  # V2: trace args
         if self._meta is None:
-            self._meta = _lookup(self.name)  # V1: cache fallback
+            self._meta = _lookup(self.name, kwargs.get("inductor_cache_dir"))  # V1: cache fallback
         self.param_details: dict = {}
         if self._meta is not None:
             self.param_details = {

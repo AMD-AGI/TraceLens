@@ -252,6 +252,7 @@ def generate_perf_report_pytorch(
     # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    inductor_cache_dir: Optional[str] = None,
     group_by_num_kernels: bool = False,
     enable_origami: bool = False,
     # activation recompute detection
@@ -271,6 +272,7 @@ def generate_perf_report_pytorch(
         enable_pseudo_ops=enable_pseudo_ops,
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
+        inductor_cache_dir=inductor_cache_dir,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -919,6 +921,13 @@ def main():
         help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
     )
     parser.add_argument(
+        "--inductor_cache_dir",
+        type=str,
+        default=None,
+        help="Path to the TorchInductor cache directory for Triton kernel metadata (V1 fallback). "
+        "Defaults to $TORCHINDUCTOR_CACHE_DIR, ~/.cache/torchinductor, or /tmp/torchinductor_<user>.",
+    )
+    parser.add_argument(
         "--include_overlap_info",
         action="store_true",
         default=False,
@@ -966,6 +975,7 @@ def main():
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
+        inductor_cache_dir=args.inductor_cache_dir,
     )
 
 
