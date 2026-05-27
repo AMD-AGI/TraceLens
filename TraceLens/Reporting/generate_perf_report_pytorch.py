@@ -657,7 +657,7 @@ def generate_perf_report_pytorch(
                     )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
-            if not _tracediff_diff_stats.empty:
+            if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
                 from TraceLens.Reporting.tracediff_comparison_extension import (
                     enrich_perf_report_dict_inplace,
                 )
