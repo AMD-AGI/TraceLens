@@ -26,8 +26,10 @@ Cache dirs searched by V1 (first wins):
 
 import getpass
 import glob
+import json
 import os
 import re
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # FLOPs per element for ATen ops that commonly appear in fused Triton kernels.
@@ -106,30 +108,10 @@ _C10_DTYPE_BYTES: dict[str, int] = {
 # Includes ops from torch.ops.aten plus torch.distributed (for collective
 # ops like all_to_all_single that Inductor can fuse into Triton kernels).
 _ALL_KNOWN_OPS: set[str] = set()
-try:
-    import torch as _torch
-
-    for _ns_name in dir(_torch.ops):
-        if _ns_name.startswith("__"):
-            continue
-        try:
-            _ns = getattr(_torch.ops, _ns_name)
-            _ALL_KNOWN_OPS.update(
-                n for n in dir(_ns) if not n.startswith("__")
-            )
-        except Exception:
-            pass
-    # Distributed ops (e.g. all_to_all_single) are in torch.distributed,
-    # not torch.ops.  Add them so the parser can segment kernel names
-    # that fuse collective ops.
-    if hasattr(_torch, "distributed"):
-        _ALL_KNOWN_OPS.update(
-            n
-            for n in dir(_torch.distributed)
-            if not n.startswith("_") and "_" in n
-        )
-except Exception:
-    pass
+_ops_json = Path(__file__).parent / "_known_aten_ops.json"
+if _ops_json.exists():
+    with open(_ops_json) as _f:
+        _ALL_KNOWN_OPS = set(json.load(_f))
 
 # -- Approach 2 (previous, kept for reference): greedy longest-match ---------
 # Used a hardcoded dictionary from _FLOPS_PER_ELEM, sorted longest-first.
