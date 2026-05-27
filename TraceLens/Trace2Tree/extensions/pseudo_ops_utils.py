@@ -224,9 +224,7 @@ def inject_pseudo_op_above_event(
             "Input type": donor_args.get("Input type"),
             "Input Strides": donor_args.get("Input Strides"),
             "Concrete Inputs": donor_args.get("Concrete Inputs"),
-            "Sequence number": donor_args.get(
-                "Sequence number", parent_evt.get("UID")
-            ),
+            "Sequence number": donor_args.get("Sequence number", parent_evt.get("UID")),
             "Pseudo op": True,
         },
         "children": [target_evt["UID"]],
@@ -311,9 +309,7 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
 
         extensions.append(("MoE_Flydsl", create_pseudo_ops_moe_flydsl))
         if verbose:
-            logger.info(
-                "Auto-detected flydsl MoE operations under aiter::fused_moe_"
-            )
+            logger.info("Auto-detected flydsl MoE operations under aiter::fused_moe_")
 
     # MLA Decode: AITER implementation
     if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:

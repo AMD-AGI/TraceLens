@@ -37,7 +37,7 @@ def create_pseudo_ops_moe_flydsl(trace_tree):
     if FUSED_MOE_PARENT not in trace_tree.name2event_uids:
         return
 
-    # Resolve full event names that contain each marker.  
+    # Resolve full event names that contain each marker.
     marker_to_event_names = {marker: [] for marker in STAGE_WRAPPERS.values()}
     for name in trace_tree.name2event_uids:
         for marker in marker_to_event_names:
