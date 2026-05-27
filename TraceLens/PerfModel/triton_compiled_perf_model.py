@@ -180,7 +180,7 @@ def _parse_kernel_name(name: str) -> list[str]:
     n = len(tokens)
 
     if not _ALL_KNOWN_OPS:
-        return [f"aten.{t}" for t in tokens if t in _FLOPS_PER_ELEM.get(f"aten.{t}", t)]
+        return [f"aten.{t}" for t in tokens if f"aten.{t}" in _FLOPS_PER_ELEM]
 
     # dp[i] = list of (op_name, prev_index) for valid segmentations ending
     # at token i.  dp[0] = True is the base case (empty prefix).
