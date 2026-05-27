@@ -24,7 +24,6 @@ import pytest
 
 from TraceLens.Reporting.tracediff_comparison_extension import (
     _build_lca_metadata,
-    _build_trace2_time_lookup,
     _build_uid_to_row_idx,
     _enrich_sheet_with_trace2,
     _resolve_diff_row_to_key,
@@ -392,130 +391,6 @@ class TestTrace2GpuOpUidSetForLca:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _build_trace2_time_lookup (gpu_op_uid only)
-# ---------------------------------------------------------------------------
-class TestBuildTrace2TimeLookup:
-    def test_empty_df(self):
-        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame())
-        assert lookup == {} and lca_ids == {} and lc == {}
-
-    def test_empty_uid_map_returns_empty(self):
-        rows = [
-            _make_diff_stats_row(
-                "k",
-                "aten::mm",
-                "trace1",
-                100.0,
-                "mm",
-                10,
-                busy_time=100.0,
-                gpu_op_uid=1,
-            ),
-            _make_diff_stats_row(
-                "k", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
-            ),
-        ]
-        lookup, lca_ids, lc = _build_trace2_time_lookup(pd.DataFrame(rows))
-        assert lookup == {}
-
-    def test_single_lca_single_kernel(self):
-        rows = [
-            _make_diff_stats_row(
-                "k1",
-                "aten::mm",
-                "trace1",
-                100.0,
-                "mm",
-                10,
-                busy_time=100.0,
-                gpu_op_uid=1,
-            ),
-            _make_diff_stats_row(
-                "k2", "aten::mm", "trace2", 80.0, "mm", 10, busy_time=80.0, gpu_op_uid=2
-            ),
-        ]
-        # uid 1 (trace1) maps to perf-summary row 0
-        uid_map = {1: 0, 2: 1}
-        lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), uid_to_row_idx=uid_map
-        )
-        assert lookup == {0: 80.0}
-        assert lc == {0: 1}
-
-    def test_multiple_lcas_same_row_idx_aggregate(self):
-        rows = [
-            _make_diff_stats_row(
-                "k1", "aten::mm", "trace1", 50.0, "mm", 10, busy_time=50.0, gpu_op_uid=1
-            ),
-            _make_diff_stats_row(
-                "k2", "aten::mm", "trace2", 40.0, "mm", 10, busy_time=40.0, gpu_op_uid=2
-            ),
-            _make_diff_stats_row(
-                "k3", "aten::mm", "trace1", 60.0, "mm", 20, busy_time=60.0, gpu_op_uid=3
-            ),
-            _make_diff_stats_row(
-                "k4", "aten::mm", "trace2", 45.0, "mm", 20, busy_time=45.0, gpu_op_uid=4
-            ),
-        ]
-        # uids 1 and 3 (trace1) both map to row 0; t2 kernels to distinct rows
-        uid_map = {1: 0, 3: 0, 2: 1, 4: 2}
-        lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), uid_to_row_idx=uid_map
-        )
-        assert lookup == {0: 40.0 + 45.0}
-        assert lc == {0: 2}
-
-    def test_trace1_only_lca_records_zero_trace2_time(self):
-        rows = [
-            _make_diff_stats_row(
-                "k1",
-                "aten::mm",
-                "trace1",
-                100.0,
-                "mm",
-                10,
-                busy_time=100.0,
-                gpu_op_uid=1,
-            ),
-        ]
-        uid_map = {1: 0}
-        lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), uid_to_row_idx=uid_map
-        )
-        assert lookup == {0: 0.0}
-        assert lc == {0: 0}
-
-    def test_unmatched_gpu_uid_skipped(self):
-        rows = [
-            _make_diff_stats_row(
-                "k1",
-                "aten::mm",
-                "trace1",
-                100.0,
-                "mm",
-                10,
-                busy_time=100.0,
-                gpu_op_uid=999,
-            ),
-            _make_diff_stats_row(
-                "k2",
-                "aten::mm",
-                "trace2",
-                80.0,
-                "mm",
-                10,
-                busy_time=80.0,
-                gpu_op_uid=888,
-            ),
-        ]
-        uid_map = {1: 0}  # 999 and 888 not in map
-        lookup, _, lc = _build_trace2_time_lookup(
-            pd.DataFrame(rows), uid_to_row_idx=uid_map
-        )
-        assert lookup == {}
-
-
-# ---------------------------------------------------------------------------
 # Tests: _enrich_sheet_with_trace2
 # ---------------------------------------------------------------------------
 class TestEnrichSheetWithTrace2:
@@ -560,10 +435,11 @@ class TestEnrichSheetWithTrace2:
                 "lca_names": ["mm"],
                 "lca_total_kernel_time_trace1_us": 100.0,
                 "lca_total_kernel_time_trace2_us": 80.0,
+                "lca_count_trace2": 3,
             }
         }
         result = _enrich_sheet_with_trace2(
-            df, "Kernel Time (µs)_sum", count_lookup={0: 3}, lca_metadata=meta
+            df, "Kernel Time (µs)_sum", lca_metadata=meta
         )
         assert result.iloc[0]["speedup (trace2/trace1)"] == pytest.approx(80.0 / 100.0)
         assert result.iloc[0]["delta_us (trace2 - trace1)"] == pytest.approx(-20.0)
@@ -639,12 +515,12 @@ class TestEnrichSheetWithTrace2:
                 "lca_names": ["mm_scope_a", "mm_scope_b"],
                 "lca_total_kernel_time_trace1_us": 50.0,
                 "lca_total_kernel_time_trace2_us": 40.0,
+                "lca_count_trace2": 2,
             }
         }
         result = _enrich_sheet_with_trace2(
             df,
             "Kernel Time (µs)_sum",
-            count_lookup={0: 2},
             lca_metadata=meta,
         )
         assert "101" in str(result.iloc[0]["lca_id"])
@@ -760,6 +636,17 @@ class TestBuildLCAMetadata:
         assert meta[0]["lca_names"] == ["mm"]
         assert meta[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(100.0)
         assert meta[0]["lca_total_kernel_time_trace2_us"] == pytest.approx(80.0)
+        assert meta[0]["lca_count_trace2"] == 1
+
+    def test_single_op_lca_no_trace2_match(self):
+        rows = [
+            _make_diff_stats_row(
+                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=1
+            ),
+        ]
+        uid_map = {1: 0}
+        meta = _build_lca_metadata(pd.DataFrame(rows), uid_map)
+        assert meta[0]["lca_count_trace2"] == 0
 
     def test_multi_op_lca(self):
         rows = [
@@ -803,6 +690,8 @@ class TestBuildLCAMetadata:
         assert meta[0]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
         assert meta[0]["lca_total_kernel_time_trace2_us"] == pytest.approx(300.0)
         assert meta[1]["lca_total_kernel_time_trace1_us"] == pytest.approx(525.0)
+        assert meta[0]["lca_count_trace2"] == 1
+        assert meta[1]["lca_count_trace2"] == 1
 
 
 # ---------------------------------------------------------------------------
