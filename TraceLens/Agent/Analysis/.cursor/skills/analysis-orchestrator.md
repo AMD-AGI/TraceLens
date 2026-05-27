@@ -178,7 +178,7 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | scope | value |
 |-------|-------|
 | `standalone` | none |
-| `comparative` trace1 | `--extension_file TraceLens/Reporting/tracediff_comparison_extension.py --extension_args <trace2_path>` |
+| `comparative` trace1 | `--comparison_json_path <trace2_path>` |
 | `comparative` trace2 | none |
 
 ---
