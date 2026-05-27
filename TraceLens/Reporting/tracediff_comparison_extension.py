@@ -263,6 +263,7 @@ def _build_lca_metadata(
             t1_total = 0.0
 
         t2_total = float(lca_trace2_time.get(lca_id, 0.0))
+        has_trace2_match = bool(_trace2_gpu_op_uid_set_for_lca(trace2, lca_id))
 
         names = grp["lowest_common_ancestor_name"].dropna()
         lca_display_name = str(names.iloc[0]) if not names.empty else None
@@ -281,6 +282,7 @@ def _build_lca_metadata(
                     "lca_names": [lca_display_name],
                     "lca_total_kernel_time_trace1_us": t1_total,
                     "lca_total_kernel_time_trace2_us": t2_total,
+                    "lca_count_trace2": 1 if has_trace2_match else 0,
                 }
             else:
                 existing = out[key]
@@ -289,41 +291,10 @@ def _build_lca_metadata(
                     existing["lca_names"].append(lca_display_name)
                     existing["lca_total_kernel_time_trace1_us"] += t1_total
                     existing["lca_total_kernel_time_trace2_us"] += t2_total
+                    if has_trace2_match:
+                        existing["lca_count_trace2"] += 1
 
     return out
-
-
-def _build_trace2_count_lookup(
-    diff_stats_df: pd.DataFrame,
-    uid_to_row_idx: Dict[Any, Any],
-) -> Dict[Any, int]:
-    """Map unified_perf_summary row index → count of distinct trace2 LCA groups."""
-    if diff_stats_df.empty or not uid_to_row_idx:
-        return {}
-
-    df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
-    if df.empty:
-        return {}
-
-    trace1 = df[df["source"] == "trace1"]
-    trace2 = df[df["source"] == "trace2"]
-    if trace1.empty:
-        return {}
-
-    lca_id_sets: Dict[Any, Set[Any]] = {}
-    for lca_id, grp in trace1.groupby("lowest_common_ancestor_id"):
-        t2_uid_set = _trace2_gpu_op_uid_set_for_lca(trace2, lca_id)
-        if not t2_uid_set:
-            continue
-        seen: Set[Any] = set()
-        for _, row in grp.iterrows():
-            key = _resolve_diff_row_to_key(row, uid_to_row_idx)
-            if key is None or key in seen:
-                continue
-            seen.add(key)
-            lca_id_sets.setdefault(key, set()).add(lca_id)
-
-    return {k: len(v) for k, v in lca_id_sets.items()}
 
 
 _TRACE2_OP_COUNT_COL = "lca_count_trace2"
@@ -333,7 +304,6 @@ def _enrich_sheet_with_trace2(
     df_sheet: pd.DataFrame,
     kernel_time_col: str,
     *,
-    count_lookup: Optional[Dict[Any, int]] = None,
     lca_metadata: Optional[Dict[Any, Dict[str, Any]]] = None,
 ) -> pd.DataFrame:
     """Add LCA columns, speedup, delta, and trace2 op counts to unified_perf_summary.
@@ -347,7 +317,6 @@ def _enrich_sheet_with_trace2(
         return df_sheet
 
     df = df_sheet.copy()
-    clookup = count_lookup if count_lookup is not None else {}
 
     trace2_counts: List[float] = []
     lca_id_vals: List[Any] = []
@@ -358,7 +327,7 @@ def _enrich_sheet_with_trace2(
     for idx, row in df.iterrows():
         meta = lca_metadata.get(idx)
 
-        cv = clookup.get(idx)
+        cv = meta.get("lca_count_trace2") if meta else None
         trace2_counts.append(np.nan if cv is None else float(cv))
 
         if meta:
@@ -431,13 +400,11 @@ def enrich_perf_report_dict_inplace(
         return perf_dfs
 
     lca_metadata = _build_lca_metadata(diff_stats_df, uid_to_row_idx)
-    count_lookup = _build_trace2_count_lookup(diff_stats_df, uid_to_row_idx)
 
     working = {k: v.copy() for k, v in perf_dfs.items()}
     working["unified_perf_summary"] = _enrich_sheet_with_trace2(
         ups_df,
         kt_col,
-        count_lookup=count_lookup,
         lca_metadata=lca_metadata,
     )
 
