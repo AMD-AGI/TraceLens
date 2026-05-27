@@ -1082,7 +1082,6 @@ class TraceDiff:
                                         "nn_module_parent": (
                                             parent_node.get("nn_module_stack") or [""]
                                         )[-1],
-                                        "gpu_event_uid": gpu_uid,
                                     }
                                 )
 
@@ -1179,7 +1178,6 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
-                                "gpu_event_uid": gpu_uid,
                             }
                         )
 
@@ -1253,7 +1251,6 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
-                                "gpu_event_uid": gpu_uid,
                             }
                         )
 
@@ -1274,14 +1271,6 @@ class TraceDiff:
             traverse(root_id, None)
 
         df = pd.DataFrame(rows)
-        if not df.empty and "busy_time" in df.columns:
-            df["busy_time"] = df["busy_time"].round(3)
-
-        if df.empty:
-            print("[TraceDiff] No GPU events found in either trace")
-            self.identical_traces = True
-            self.diff_stats_df = df
-            return df
 
         if df.empty:
             print("[TraceDiff] No GPU events found in either trace")
