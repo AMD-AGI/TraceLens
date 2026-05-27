@@ -360,9 +360,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Impact estimate:**
 
 <!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 8 exact columns-->
-<!-- Trace 1 ms = Kernel Time (µs)_sum / 1000. Trace 2 ms = lca_total_kernel_time_trace2_us / 1000.
-     Count T1/T2 = operation_count / lca_count_trace2 when present.
-     Difference (ms) = delta_us (trace2 - trace1) / 1000 (positive ⇒ more time on Trace 2), or —. -->
+<!-- Trace 1 ms = operations[i].time_ms. Trace 2 ms = operations[i].t2_time_ms.
+     Count T1/T2 = operations[i].count / operations[i].count_trace2 when present.
+     Difference (ms) = operations[i].difference_ms (negative ⇒ Trace 1 slower), or —. -->
 
 <a id="detailed-analysis-compute-p1"></a>
 #### 🔴 P1: <Brief Title>

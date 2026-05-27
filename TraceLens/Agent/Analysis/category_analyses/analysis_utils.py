@@ -60,6 +60,8 @@ _KERNEL_NAME_LIBRARY_RULES = [
 ]
 _COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
+_COMPARATIVE_T2_TIME_COL = "lca_total_kernel_time_trace2_us"
+_COMPARATIVE_T2_COUNT_COL = "lca_count_trace2"
 
 
 def _eff_bucket(pct):
@@ -555,6 +557,18 @@ def build_operation_metrics(
         )
         if args_str:
             op_metric["args"] = args_str
+
+        # Pre-compute comparative T2 fields from CSV
+        if comparison_scope == "comparative":
+            t2_us = row.get(_COMPARATIVE_T2_TIME_COL)
+            if t2_us is not None and not pd.isna(t2_us):
+                op_metric["t2_time_ms"] = round(float(t2_us) / 1000, 3)
+            t2_count = row.get(_COMPARATIVE_T2_COUNT_COL)
+            if t2_count is not None and not pd.isna(t2_count):
+                op_metric["count_trace2"] = int(t2_count)
+            delta_us = row.get(_COMPARATIVE_DELTA_COL)
+            if delta_us is not None and not pd.isna(delta_us):
+                op_metric["difference_ms"] = round(float(delta_us) / 1000, 3)
 
         # Kernel time variance detection (require 10+ samples, >= 5% of E2E)
         e2e_ms = e2e_ms_total
