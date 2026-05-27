@@ -350,21 +350,19 @@ def test_comparative_impact_from_operations_trace2_faster():
     assert bmm_op["efficiency"]["efficiency_percent"] == 90.0
 
     out = compute_impact_estimates(
-        operations, "gemm", min_savings_ms=0.1, baseline_ms=1000.0
+        operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0
     )
-    # Row 1: eff 120 -> savings_high 0 -> excluded; row 0 and 2 remain
+    # Row 1: eff 120 -> gap_high 0 -> excluded; row 0 and 2 remain
     assert len(out) == 2
     assert out[0]["operation"] == "aten::mm"
     assert out[0]["type"] == "kernel_tuning"
     assert out[0]["efficiency_pct"] == 50.0
-    assert out[0]["savings_ms_high"] == 5.0
-    assert out[0]["savings_ms_low"] == round(5.0 * 0.75, 3)
-    assert out[0]["savings_ms"] == round(5.0 * 0.875, 3)
-    assert out[0]["e2e_pct_high"] == 0.5
+    assert out[0]["impact_score"] == 0.44
+    assert out[0]["impact_score_high"] == 0.5
+    assert out[0]["impact_score_low"] == 0.38
     assert out[1]["operation"] == "aten::bmm"
     assert out[1]["efficiency_pct"] == 90.0
-    assert out[1]["savings_ms_high"] == 0.2
-    assert out[1]["savings_ms"] == round(0.2 * 0.875, 3)
+    assert out[1]["impact_score_high"] == 0.02
 
 
 def test_comparative_roofline_cap_clamps_savings():
@@ -389,11 +387,11 @@ def test_comparative_roofline_cap_clamps_savings():
     assert eff["efficiency_percent"] == 60.0
     assert eff["warning"] is not None
     assert "ROOFLINE CAP" in eff["warning"]
-    # savings_high = 10ms * (1 - 60/100) = 4ms (not 7.5ms)
-    out = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1, baseline_ms=1000.0)
+    # gap_high = 1 - 60/100 = 0.4; impact_high = 0.4 * 10/1000 * 100 = 0.4 (not 0.75 from unclamped 25%)
+    out = compute_impact_estimates(operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0)
     assert len(out) == 1
-    assert out[0]["savings_ms_high"] == 4.0
-    assert out[0]["savings_ms"] == round(4.0 * 0.875, 3)
+    assert out[0]["impact_score_high"] == 0.4
+    assert out[0]["impact_score"] == 0.35
 
 
 def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
@@ -414,8 +412,8 @@ def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
     eff = operations[0]["efficiency"]
     assert eff["efficiency_percent"] == 80.0
     assert eff["warning"] is None
-    out = compute_impact_estimates(operations, "gemm", min_savings_ms=0.1, baseline_ms=1000.0)
-    assert out[0]["savings_ms_high"] == 2.0
+    out = compute_impact_estimates(operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0)
+    assert out[0]["impact_score_high"] == 0.2
 
 
 def test_comparative_roofline_cap_no_roofline_column():
@@ -607,7 +605,7 @@ def test_compute_impact_estimates_comparative_at_100_pct_no_savings():
         },
     ]
     estimates = compute_impact_estimates(
-        operations, "gemm", min_savings_ms=0.1
+        operations, "gemm", min_impact_score=0.01, baseline_ms=100.0
     )
     assert len(estimates) == 0
 
