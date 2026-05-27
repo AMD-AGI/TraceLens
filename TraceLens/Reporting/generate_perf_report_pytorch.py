@@ -17,7 +17,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
+from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
 
 
@@ -249,6 +249,7 @@ def generate_perf_report_pytorch(
     topk_short_kernels: Optional[int] = None,  # include all below thresh by default
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
+    comparison_json_path: Optional[str] = None,
     extension_file: Optional[str] = None,
     extension_args: Optional[str] = None,
     # for gemm simulator
@@ -582,6 +583,7 @@ def generate_perf_report_pytorch(
 
     # Build dict_name2df - only include sheets that have data
     dict_name2df = {"gpu_timeline": df_gpu_timeline}
+    df_unified_perf: pd.DataFrame = pd.DataFrame()
 
     # Add CPU-dependent sheets only if not GPU-only
     if not perf_analyzer.gpu_only:
@@ -603,6 +605,24 @@ def generate_perf_report_pytorch(
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
+
+        # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
+        _tracediff_diff_stats: Optional[pd.DataFrame] = None
+        if comparison_json_path and not df_unified_perf.empty:
+            perf_analyzer2 = TreePerfAnalyzer.from_file(
+                profile_filepath=comparison_json_path,
+                python_path=perf_analyzer.python_path,
+                include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
+                enable_pseudo_ops=enable_pseudo_ops,
+                add_python_func=perf_analyzer.add_python_func,
+            )
+            perf_analyzer2.tree.apply_annotation(
+                name_filters=["vllm::unified_attention_with_output"]
+            )
+            td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
+            td.generate_tracediff_report()
+            _tracediff_diff_stats = td.diff_stats_df
+
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
                 df_unified_perf,
@@ -638,6 +658,17 @@ def generate_perf_report_pytorch(
                         columns=["call_stack"]
                     )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+
+            if not _tracediff_diff_stats.empty:
+                from TraceLens.Reporting.tracediff_comparison_extension import (
+                    enrich_perf_report_dict_inplace,
+                )
+                dict_name2df = enrich_perf_report_dict_inplace(
+                    dict_name2df,
+                    _tracediff_diff_stats,
+                    df_unified_perf=df_unified_perf,
+                )
+                dict_name2df["diff_stats"] = _tracediff_diff_stats
 
             if include_overlap_info:
                 df_unified_perf_summary_overlapping_kernels = (
@@ -926,6 +957,17 @@ def main():
     )
 
     parser.add_argument(
+        "--comparison_json_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a second trace to compare against the primary trace. "
+            "Runs TraceDiff and adds speedup, delta, and LCA columns to "
+            "unified_perf_summary, plus a diff_stats sheet."
+        ),
+    )
+
+    parser.add_argument(
         "--extension_file",
         "--extension-file",
         type=str,
@@ -1014,6 +1056,7 @@ def main():
         topk_short_kernels=args.topk_short_kernels,
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
+        comparison_json_path=args.comparison_json_path,
         extension_file=args.extension_file,
         extension_args=args.extension_args,
         python_path=args.python_path,

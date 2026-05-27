@@ -10,45 +10,37 @@ Use with::
 
     TraceLens_generate_perf_report_pytorch \\
         --profile_json_path trace1.json \\
-        --extension-file <path/to/this/file.py> \\
-        --extension-args /path/to/trace2.json
+        --comparison_json_path trace2.json
 
 This runs TraceDiff in memory, then adds **speedup**, **delta**,
 **lca_count_trace2**, and LCA columns (``lca_id``, ``lca_name``,
 ``lca_total_kernel_time_trace1_us``, ``lca_total_kernel_time_trace2_us``)
-to ``unified_perf_summary`` (beside ``Kernel Time (µs)_sum`` /
-``operation_count``). Speedup and delta are always computed from the LCA-level
-totals (``trace2 / trace1``). For single-op LCAs, the totals equal the
-per-row values. For multi-op LCAs (several trace1 CPU ops sharing one
-``lowest_common_ancestor_id``), the totals aggregate across the group and
-``lca_id`` identifies the shared group. A ``diff_stats`` sheet
-(TraceDiff per-kernel diff rows) is included whenever ``diff_stats_df`` is
-non-empty. ``lca_id`` and ``lca_name`` are semicolon-separated lists when a
-row maps to multiple LCA groups.
+to ``unified_perf_summary``. A ``diff_stats`` sheet is also included.
 
-Matching is **gpu_op_uid only**. Every row in ``unified_perf_summary`` carries
-a ``kernel_details_summary`` / ``kernel_details`` list of kernels with
-``gpu_op_uid``. Each diff_stats row carries the ``gpu_op_uid`` of its kernel.
-Rows are aligned by mapping every gpu_op_uid to the row index of the
-``unified_perf_summary`` row that contains it. There is no fallback to CPU UID
-tree walks or to (name, args) string matching.
+Matching uses ``gpu_op_uid`` values from ``df_unified_perf``.
 """
 
 from __future__ import annotations
 
-import ast
-import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
-from TraceLens import TraceDiff, TreePerfAnalyzer
 
-# Sheets enriched with speedup/delta must use this column (unified + op-category tabs).
 _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA = "Kernel Time (µs)_sum"
 
-_KERNEL_DETAIL_COLS = ("kernel_details_summary", "kernel_details")
+_GROUPING_COLS = [
+    "name",
+    "op category",
+    "process_name",
+    "process_label",
+    "thread_name",
+    "Input Dims",
+    "Input type",
+    "Input Strides",
+    "Concrete Inputs",
+]
 
 
 def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.DataFrame:
@@ -165,81 +157,61 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
     return df_summary
 
 
+def _build_uid_to_row_idx(
+    df_unified_perf: pd.DataFrame,
+    unified_perf_summary: pd.DataFrame,
+) -> Dict[Any, Any]:
+    """Map every gpu_op_uid in df_unified_perf to its unified_perf_summary row index.
+
+    Uses the same grouping columns as summarize_df_unified_perf_table so that
+    each pre-summary row maps to the summary row it was aggregated into.  This
+    replaces the old approach of mining gpu_op_uids back out of
+    kernel_details_summary, which required _summarize_kernel_stats to embed
+    internal join state in summary output.
+    """
+    if df_unified_perf.empty or unified_perf_summary.empty:
+        return {}
+    if "kernel_details" not in df_unified_perf.columns:
+        return {}
+
+    # Build group_key → row index from unified_perf_summary.
+    present_grouping = [c for c in _GROUPING_COLS if c in unified_perf_summary.columns]
+    group_key_to_row_idx: Dict[tuple, Any] = {}
+    for idx, row in unified_perf_summary.iterrows():
+        key = tuple(str(row.get(c, "")) for c in present_grouping)
+        group_key_to_row_idx[key] = idx
+
+    # Build gpu_op_uid → row index via df_unified_perf grouping key.
+    present_pre = [c for c in _GROUPING_COLS if c in df_unified_perf.columns]
+    uid_to_row_idx: Dict[Any, Any] = {}
+    for _, row in df_unified_perf.iterrows():
+        key = tuple(str(row.get(c, "")) for c in present_pre)
+        summary_idx = group_key_to_row_idx.get(key)
+        if summary_idx is None:
+            continue
+        kd = row.get("kernel_details")
+        if not isinstance(kd, list):
+            continue
+        for entry in kd:
+            if not isinstance(entry, dict):
+                continue
+            uid = entry.get("gpu_op_uid")
+            if uid is not None and not (isinstance(uid, float) and np.isnan(uid)):
+                uid_to_row_idx[uid] = summary_idx
+
+    return uid_to_row_idx
+
+
 def _trace2_gpu_op_uid_set_for_lca(trace2: pd.DataFrame, lca_id) -> Set[Any]:
-    """Distinct ``gpu_op_uid`` values for trace2 ``diff_stats`` rows under ``lca_id``."""
+    """Distinct gpu_op_uid values for trace2 diff_stats rows under lca_id."""
     sub = trace2[trace2["lowest_common_ancestor_id"] == lca_id]
     if sub.empty or "gpu_op_uid" not in sub.columns:
         return set()
     return set(sub["gpu_op_uid"].dropna().tolist())
 
 
-def _parse_kernel_details(kds):
-    """Normalize ``kernel_details`` / ``kernel_details_summary`` into a list of dicts.
-
-    Returns an empty list when the value is missing, unparseable, or the wrong type.
-    Accepts both an already-parsed list (op-category sheets write it that way) and
-    the string form that Excel/CSV round-trips yield for ``kernel_details_summary``.
-    """
-    if kds is None:
-        return []
-    if isinstance(kds, float) and pd.isna(kds):
-        return []
-    if isinstance(kds, list):
-        return kds
-    if isinstance(kds, str):
-        try:
-            parsed = ast.literal_eval(
-                re.sub(r"np\.(?:float|int)\d*\((.*?)\)", r"\1", kds)
-            )
-        except (ValueError, SyntaxError):
-            return []
-        return parsed if isinstance(parsed, list) else []
-    return []
-
-
-def _iter_row_gpu_op_uids(row) -> List[Any]:
-    """All ``gpu_op_uid`` values found in a perf-row's kernel_details column(s)."""
-    uids: List[Any] = []
-    for col in _KERNEL_DETAIL_COLS:
-        if col not in row.index:
-            continue
-        for kd in _parse_kernel_details(row.get(col)):
-            if not isinstance(kd, dict):
-                continue
-            # Prefer the list of all-instance uids added by the tree_perf fix;
-            # fall back to the singular uid (template instance only).
-            multi = kd.get("gpu_op_uids")
-            if isinstance(multi, list) and multi:
-                uids.extend(u for u in multi if u is not None)
-            else:
-                uid = kd.get("gpu_op_uid")
-                if uid is not None and not (isinstance(uid, float) and pd.isna(uid)):
-                    uids.append(uid)
-        if uids:
-            break
-    return uids
-
-
-def _build_uid_to_row_idx(ups: pd.DataFrame) -> Dict[Any, Any]:
-    """Map every ``gpu_op_uid`` in ``unified_perf_summary`` to its row index.
-
-    This is the only index used for diff_stats → perf-row matching.
-    """
-    mapping: Dict[Any, Any] = {}
-    if ups is None or ups.empty:
-        return mapping
-    if not any(c in ups.columns for c in _KERNEL_DETAIL_COLS):
-        return mapping
-    for idx, row in ups.iterrows():
-        for uid in _iter_row_gpu_op_uids(row):
-            mapping[uid] = idx
-    return mapping
-
-
-def _resolve_diff_row_to_key(
-    row, uid_to_row_idx: Dict[Any, Any]
-) -> Optional[Any]:
-    """Row index for a diff_stats row via its ``gpu_op_uid``."""
+def _resolve_diff_row_to_key(row, uid_to_row_idx: Dict[Any, Any]) -> Optional[Any]:
+    """Row index for a diff_stats row via its gpu_op_uid."""
     if not uid_to_row_idx or "gpu_op_uid" not in row.index:
         return None
     gpu_uid = row.get("gpu_op_uid")
@@ -252,16 +224,11 @@ def _build_lca_metadata(
     diff_stats_df: pd.DataFrame,
     uid_to_row_idx: Dict[Any, Any],
 ) -> Dict[Any, Dict[str, Any]]:
-    """Map perf-summary row index → LCA metadata from ``diff_stats``.
+    """Map unified_perf_summary row index → LCA metadata from diff_stats.
 
-    For each trace1 row, the row index is resolved via ``uid_to_row_idx``.
-    Every mapped row carries lists of ``lca_ids`` and ``lca_names`` (one entry
-    per LCA group that maps to this key), plus accumulated
-    ``lca_total_kernel_time_trace1_us`` and ``lca_total_kernel_time_trace2_us``
-    (summed across all LCA groups).
-
-    A single perf-summary row can map to multiple LCA groups when its kernels
-    participate in different TraceDiff matching scopes.
+    Each mapped row carries lists of lca_ids and lca_names (one entry per LCA
+    group that maps to this summary row), plus accumulated
+    lca_total_kernel_time_trace1_us and lca_total_kernel_time_trace2_us.
     """
     out: Dict[Any, Dict[str, Any]] = {}
     if diff_stats_df.empty or not uid_to_row_idx:
@@ -302,10 +269,12 @@ def _build_lca_metadata(
         if lca_display_name == "":
             lca_display_name = None
 
+        seen: Set[Any] = set()
         for _, row in grp.iterrows():
             key = _resolve_diff_row_to_key(row, uid_to_row_idx)
-            if key is None:
+            if key is None or key in seen:
                 continue
+            seen.add(key)
             if key not in out:
                 out[key] = {
                     "lca_ids": [lca_id],
@@ -324,58 +293,37 @@ def _build_lca_metadata(
     return out
 
 
-def _build_trace2_time_lookup(
+def _build_trace2_count_lookup(
     diff_stats_df: pd.DataFrame,
-    uid_to_row_idx: Optional[Dict[Any, Any]] = None,
-    gpu_uid_to_canonical: Optional[Dict[Any, Any]] = None,  # deprecated, ignored
-) -> Tuple[Dict[Any, float], Dict[Any, List], Dict[Any, int]]:
+    uid_to_row_idx: Dict[Any, Any],
+) -> Dict[Any, int]:
+    """Map unified_perf_summary row index → count of distinct trace2 LCA groups."""
     if diff_stats_df.empty or not uid_to_row_idx:
-        return {}, {}, {}
+        return {}
 
     df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
     if df.empty:
-        return {}, {}, {}
+        return {}
 
     trace1 = df[df["source"] == "trace1"]
     trace2 = df[df["source"] == "trace2"]
-
     if trace1.empty:
-        return {}, {}, {}
+        return {}
 
-    _has_busy = "busy_time" in trace2.columns and trace2["busy_time"].notna().any()
-    if _has_busy:
-        lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")[
-            "busy_time"
-        ].first()
-    else:
-        lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")[
-            "kernel_time"
-        ].sum()
-
-    lca_groups = trace1.groupby("lowest_common_ancestor_id")
-
-    lookup: Dict[Any, float] = {}
-    lca_ids_lookup: Dict[Any, List] = {}
-    lookup_uid_sets: Dict[Any, Set[Any]] = {}
-    for lca_id, grp in lca_groups:
-        t2_time = float(lca_trace2_time.get(lca_id, 0.0))
+    lca_id_sets: Dict[Any, Set[Any]] = {}
+    for lca_id, grp in trace1.groupby("lowest_common_ancestor_id"):
         t2_uid_set = _trace2_gpu_op_uid_set_for_lca(trace2, lca_id)
-
-        all_keys: Set[Any] = set()
+        if not t2_uid_set:
+            continue
+        seen: Set[Any] = set()
         for _, row in grp.iterrows():
             key = _resolve_diff_row_to_key(row, uid_to_row_idx)
-            if key is not None:
-                all_keys.add(key)
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            lca_id_sets.setdefault(key, set()).add(lca_id)
 
-        for key in all_keys:
-            lookup[key] = lookup.get(key, 0.0) + t2_time
-            lookup_uid_sets[key] = lookup_uid_sets.get(key, set()).union(t2_uid_set)
-            lca_ids_lookup.setdefault(key, [])
-            if t2_uid_set:
-                lca_ids_lookup[key].append(lca_id)
-
-    lookup_count = {k: len(v) for k, v in lca_ids_lookup.items()}
-    return lookup, lca_ids_lookup, lookup_count
+    return {k: len(v) for k, v in lca_id_sets.items()}
 
 
 _TRACE2_OP_COUNT_COL = "lca_count_trace2"
@@ -388,22 +336,18 @@ def _enrich_sheet_with_trace2(
     count_lookup: Optional[Dict[Any, int]] = None,
     lca_metadata: Optional[Dict[Any, Dict[str, Any]]] = None,
 ) -> pd.DataFrame:
-    """Add LCA columns, speedup, delta, and trace2 op counts to a perf sheet.
+    """Add LCA columns, speedup, delta, and trace2 op counts to unified_perf_summary.
 
-    Speedup is computed from LCA-level aggregates (``lca_total_kernel_time_trace2_us``
-    / ``lca_total_kernel_time_trace1_us``). Delta uses the per-row
-    ``kernel_time_col`` (``Kernel Time (µs)_sum``) as the trace1 reference so
-    that each row's delta reflects the row's own kernel time rather than the
-    full LCA group total.
-    ``lca_id`` and ``lca_name`` are semicolon-separated lists when a row
-    maps to multiple LCA groups.
+    Speedup is computed from LCA-level aggregates
+    (lca_total_kernel_time_trace2_us / lca_total_kernel_time_trace1_us).
+    lca_id and lca_name are semicolon-separated when a row maps to multiple
+    LCA groups.
     """
     if df_sheet.empty or not lca_metadata:
         return df_sheet
 
     df = df_sheet.copy()
     clookup = count_lookup if count_lookup is not None else {}
-    lca_meta = lca_metadata
 
     trace2_counts: List[float] = []
     lca_id_vals: List[Any] = []
@@ -412,7 +356,7 @@ def _enrich_sheet_with_trace2(
     lca_t2_vals: List[float] = []
 
     for idx, row in df.iterrows():
-        meta = lca_meta.get(idx)
+        meta = lca_metadata.get(idx)
 
         cv = clookup.get(idx)
         trace2_counts.append(np.nan if cv is None else float(cv))
@@ -459,108 +403,50 @@ def _enrich_sheet_with_trace2(
     return df
 
 
-def _enrich_consolidated_perf_sheets(
-    perf_dfs: Dict[str, pd.DataFrame],
-    *,
-    count_lookup: Optional[Dict[Any, int]] = None,
-    lca_metadata: Optional[Dict[Any, Dict[str, Any]]] = None,
-) -> Dict[str, pd.DataFrame]:
-    """Add speedup, delta, LCA columns to ``unified_perf_summary``."""
-    result: Dict[str, pd.DataFrame] = {}
-    kt_col = _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA
-    for sheet_name, df_sheet in perf_dfs.items():
-        if sheet_name != "unified_perf_summary":
-            result[sheet_name] = df_sheet
-            continue
-        if "name" not in df_sheet.columns or not lca_metadata:
-            result[sheet_name] = df_sheet
-            continue
-        if kt_col not in df_sheet.columns:
-            result[sheet_name] = df_sheet
-            continue
-        result[sheet_name] = _enrich_sheet_with_trace2(
-            df_sheet,
-            kt_col,
-            count_lookup=count_lookup,
-            lca_metadata=lca_metadata,
-        )
-    return result
-
-
 def enrich_perf_report_dict_inplace(
     perf_dfs: Dict[str, pd.DataFrame],
     diff_stats_df: pd.DataFrame,
-    trace1_tree=None,  # kept for backward-compat; no longer used
-    debug: bool = False,
+    df_unified_perf: Optional[pd.DataFrame] = None,
 ) -> Dict[str, pd.DataFrame]:
-    del trace1_tree  # matching is gpu_op_uid-only; tree is not needed
-    del debug  # lca_id column now always carries the full list
+    """Enrich unified_perf_summary with TraceDiff comparison columns.
 
+    When df_unified_perf is provided (the pre-summary DataFrame from
+    build_df_unified_perf_table), the uid→row mapping is built from its
+    kernel_details column where each concrete GPU event has a single
+    gpu_op_uid.
+    """
     if diff_stats_df.empty:
         return perf_dfs
 
     ups = perf_dfs.get("unified_perf_summary")
     ups_df = ups if isinstance(ups, pd.DataFrame) else pd.DataFrame()
-    uid_to_row_idx = _build_uid_to_row_idx(ups_df)
+
+    uid_to_row_idx = _build_uid_to_row_idx(df_unified_perf, ups_df)
+
     if not uid_to_row_idx:
         return perf_dfs
 
-    working = {k: v.copy() for k, v in perf_dfs.items()}
+    kt_col = _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA
+    if kt_col not in ups_df.columns:
+        return perf_dfs
+
     lca_metadata = _build_lca_metadata(diff_stats_df, uid_to_row_idx)
-    _, _, diff_count_lookup = _build_trace2_time_lookup(
-        diff_stats_df,
-        uid_to_row_idx=uid_to_row_idx,
-    )
-    return _enrich_consolidated_perf_sheets(
-        working,
-        count_lookup=diff_count_lookup,
+    count_lookup = _build_trace2_count_lookup(diff_stats_df, uid_to_row_idx)
+
+    working = {k: v.copy() for k, v in perf_dfs.items()}
+    working["unified_perf_summary"] = _enrich_sheet_with_trace2(
+        ups_df,
+        kt_col,
+        count_lookup=count_lookup,
         lca_metadata=lca_metadata,
     )
 
-
-def postprocess_perf_report_dataframes_extension(
-    dict_name2df: Dict[str, Any],
-    perf_analyzer,
-    *,
-    extension_args: Optional[str] = None,
-    extension_file: Optional[str] = None,
-    enable_pseudo_ops: bool = True,
-) -> Dict[str, Any]:
-    if not extension_args or not str(extension_args).strip():
-        return dict_name2df
-
-    parts = str(extension_args).strip().split()
-    trace2_path = parts[0]
-    debug = "debug" in parts[1:]
-
-    perf_analyzer2 = TreePerfAnalyzer.from_file(
-        profile_filepath=trace2_path,
-        arch=perf_analyzer.arch,
-        python_path=perf_analyzer.python_path,
-        include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
-        enable_pseudo_ops=enable_pseudo_ops,
-        add_python_func=perf_analyzer.add_python_func,
+    print(
+        "[TraceDiff] Added speedup, delta, lca_count_trace2, "
+        "and LCA columns (lca_id, lca_name, "
+        "lca_total_kernel_time_trace1_us, lca_total_kernel_time_trace2_us) "
+        "to unified_perf_summary; added diff_stats sheet."
     )
-    perf_analyzer2.tree.apply_annotation(
-        name_filters=["vllm::unified_attention_with_output"]
-    )
-    td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
-    td.generate_tracediff_report()
+    return working
 
-    diff_stats_df = td.diff_stats_df
 
-    out = dict(dict_name2df)
-    if not diff_stats_df.empty:
-        enriched = enrich_perf_report_dict_inplace(
-            dict_name2df, diff_stats_df, debug=debug
-        )
-        out.update(enriched)
-        out["diff_stats"] = diff_stats_df
-        print(
-            "[TraceDiff] Added speedup, delta, lca_count_trace2, "
-            "and LCA columns (lca_id, lca_name, "
-            "lca_total_kernel_time_trace1_us, lca_total_kernel_time_trace2_us) "
-            "to unified_perf_summary; added diff_stats sheet."
-        )
-
-    return out

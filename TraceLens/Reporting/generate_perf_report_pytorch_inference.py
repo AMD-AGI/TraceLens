@@ -1086,7 +1086,9 @@ def generate_perf_report_pytorch(
                 extension, "get_additional_dataframes_extension"
             )
             if "extension_args" in inspect.signature(get_additional_dfs).parameters:
-                additional_dfs = get_additional_dfs(perf_analyzer.tree, extension_args=extension_args)
+                additional_dfs = get_additional_dfs(
+                    perf_analyzer.tree, extension_args=extension_args
+                )
             else:
                 additional_dfs = get_additional_dfs(perf_analyzer.tree)
             if additional_dfs:
@@ -1099,7 +1101,9 @@ def generate_perf_report_pytorch(
             )
             post = getattr(extension, "postprocess_perf_report_dataframes_extension")
             if "extension_args" in inspect.signature(post).parameters:
-                dict_name2df = post(dict_name2df, perf_analyzer, extension_args=extension_args)
+                dict_name2df = post(
+                    dict_name2df, perf_analyzer, extension_args=extension_args
+                )
             else:
                 dict_name2df = post(dict_name2df, perf_analyzer)
 

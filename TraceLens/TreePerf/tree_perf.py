@@ -1294,12 +1294,8 @@ class TreePerfAnalyzer:
             )
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
-        # Collect per-position durations and gpu_op_uids across all instances.
-        # gpu_op_uids is needed by downstream tracediff matching; the template's
-        # single gpu_op_uid only points at the first instance, so without this
-        # consumers see a tiny subset of the kernels actually in the group.
+        # Collect per-position durations across all instances.
         all_durations = [[] for _ in template]
-        all_gpu_op_uids = [[] for _ in template]
 
         for kernel_list in series_of_kernel_lists:
             if isinstance(kernel_list, list):
@@ -1319,11 +1315,6 @@ class TreePerfAnalyzer:
                             UserWarning,
                         )
                         continue
-                    uid = kernel.get("gpu_op_uid")
-                    if uid is None:
-                        uid = kernel.get("UID")
-                    if uid is not None:
-                        all_gpu_op_uids[i].append(uid)
 
         summary_list = copy.deepcopy(template)
 
@@ -1336,7 +1327,6 @@ class TreePerfAnalyzer:
 
             kernel_summary["count"] = len(dur_arr)
             kernel_summary["total_duration_us"] = np.sum(dur_arr)
-            kernel_summary["gpu_op_uids"] = list(all_gpu_op_uids[i])
 
             if not durations_for_this_index:
                 continue
