@@ -27,7 +27,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
-
 _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA = "Kernel Time (µs)_sum"
 
 _GROUPING_COLS = [
@@ -395,5 +394,3 @@ def enrich_perf_report_dict_inplace(
         "to unified_perf_summary; added diff_stats sheet."
     )
     return working
-
-

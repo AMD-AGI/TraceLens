@@ -641,7 +641,14 @@ class TestBuildLCAMetadata:
     def test_single_op_lca_no_trace2_match(self):
         rows = [
             _make_diff_stats_row(
-                "k1", "aten::mm", "trace1", 100.0, "mm", 10, busy_time=100.0, gpu_op_uid=1
+                "k1",
+                "aten::mm",
+                "trace1",
+                100.0,
+                "mm",
+                10,
+                busy_time=100.0,
+                gpu_op_uid=1,
             ),
         ]
         uid_map = {1: 0}

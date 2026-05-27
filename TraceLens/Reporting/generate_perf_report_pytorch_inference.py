@@ -949,6 +949,7 @@ def generate_perf_report_pytorch(
                 from TraceLens.Reporting.tracediff_comparison_extension import (
                     enrich_perf_report_dict_inplace,
                 )
+
                 dict_name2df = enrich_perf_report_dict_inplace(
                     dict_name2df,
                     _tracediff_diff_stats,
