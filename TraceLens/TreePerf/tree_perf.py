@@ -28,6 +28,7 @@ from ..PerfModel.torch_op_mapping import (
     categorize_torch_op,
     dict_cat2names,
     op_to_perf_model_class_map,
+    resolve_perf_model_class,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
@@ -367,19 +368,7 @@ class TreePerfAnalyzer:
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
-        if perf_model_class is None:
-            name = event.get("name", "")
-            if (
-                name.startswith("triton_poi_")
-                or name.startswith("triton_red_")
-                or name.startswith("triton_per_")
-            ):
-                from TraceLens.PerfModel.triton_compiled_perf_model import (
-                    TritonCompiledPerfModel,
-                )
-
-                perf_model_class = TritonCompiledPerfModel
+            perf_model_class = resolve_perf_model_class(event["name"])
         perf_model = perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
@@ -1559,7 +1548,7 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
-        return event.get("name") in self.op_to_perf_model_class_map
+        return resolve_perf_model_class(event.get("name", "")) is not None
 
     def _is_leaf_cpu_op(self, event):
         """
@@ -2061,30 +2050,7 @@ class TreePerfAnalyzer:
                     row["perf_params"] = None
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
-                # Opportunistically try TritonCompiledPerfModel for torch.compile kernels.
-                # If Inductor artifacts are absent, this silently leaves metrics blank.
-                name = event.get("name", "")
-                if include_perf_metrics and (
-                    name.startswith("triton_poi_")
-                    or name.startswith("triton_red_")
-                    or name.startswith("triton_per_")
-                ):
-                    try:
-                        metrics = self.compute_perf_metrics(event, bwd=False)
-                        for col in perf_cols:
-                            if col in metrics:
-                                row[col] = metrics[col]
-                        perf_params = {
-                            k.replace("param: ", ""): v
-                            for k, v in metrics.items()
-                            if k.startswith("param: ")
-                        }
-                        row["perf_params"] = perf_params if perf_params else None
-                        row["has_perf_model"] = True
-                    except Exception:
-                        row["perf_params"] = None
-                else:
-                    row["perf_params"] = None
+                row["perf_params"] = None
 
                 gpu_event_uids = event.get("gpu_events", [])
                 if gpu_event_uids:
