@@ -8,13 +8,13 @@ See LICENSE for license information.
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-The TraceLens Agentic Analysis module is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a **prioritized bottleneck list**. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence , the reasoning behind the call-out and a possible concrete resolution.
+The TraceLens Agent is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
 
 ## Analysis Modes
 
-**Standalone** — single-trace roofline analysis. Suitable when a single trace is available and the goal is to identify where performance falls short of hardware limits.
+**Standalone**: Single-trace roofline analysis. Suitable when a single trace is available and the goal is to identify where performance falls short of hardware limits. Recommended default for performance analysis.
 
-**Comparative** — two-trace gap analysis. The agent profiles a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference.
+**Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, or both from SGLang). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
 
 ### Supported Analyses
 
@@ -24,12 +24,9 @@ The TraceLens Agentic Analysis module is an agentic performance analysis tool th
 | **Graph + Capture** | ✅ | ❌ |
 | **Graph** | ❌ | ❌ |
 
-> **Note:** Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, or both from SGLang). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
-
 ---
 
 ## Prerequisites
-
 
 ### 1. Install TraceLens
 
@@ -103,7 +100,7 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 
 ### To run via CLI (headless):
 
-Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment (local or cluster) in the prompt.
+Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment in the prompt.
 
 #### Install the Cursor CLI
 
@@ -287,7 +284,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 The orchestrator and all 13 sub-agents currently run on **`claude-opus-4-7-high`**, declared in each agent file's front matter under `.cursor/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
 
-## Supported Analysis Modes
+### Supported Standalone Analysis Modes
 
 The orchestrator supports two analysis modes, selected during Step 0:
 
@@ -332,6 +329,8 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 
 *Note: All performance data shown here are example outputs from TraceLens, intended to illustrate the agent's capabilities. They are not official performance benchmarks.*
 
+#### Compute Analysis
+
 > <a id="detailed-analysis-compute-p1"></a>
 > <!-- reasoning-candidate tier=compute rank=1 -->
 > #### 🔴 P1: Compute-bound BF16 GEMMs underrunning roofline (Tensile)
@@ -356,6 +355,8 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 > - Low end impact_score: 12.97
 > - High end impact_score: 17.27
 > <!-- impact-end -->
+
+#### Kernel Fusion Analysis
 
 > <a id="detailed-analysis-fusion-P1"></a>
 > <!-- reasoning-candidate tier=system rank=1 -->
@@ -389,7 +390,7 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 
 ### Programmatic Interface
 
-Every report embeds HTML comment markers that a system can leverage without parsing prose:
+Every report embeds HTML comment markers that a downstream system can leverage without parsing prose:
 
 - `<!-- impact-begin kind=p_item category=<cat> low=<x> mid=<y> high=<z> -->` … `<!-- impact-end -->` wraps every P-item's Impact line. `mid` is the canonical `impact_score`. `<cat>` is the analyzer category (`gemm`, `sdpa_fwd`, `elementwise`, `norm_fwd`, etc.).
 - `<!-- impact-begin kind=top_ops -->` … `<!-- impact-end -->` wraps the Top Operations table at the start of the Compute Kernel Optimizations section.
