@@ -31,7 +31,7 @@ def main():
     parser.add_argument(
         "--category",
         default="norm",
-        help="Category name prefix used for input/output files (default: norm)"
+        help="Category name prefix used for input/output files (default: norm)",
     )
     parser.add_argument(
         "--comparison_scope",
@@ -40,7 +40,7 @@ def main():
         help=(
             "standalone: roofline efficiency in operations[].efficiency; "
             "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
-        )
+        ),
     )
     args = parser.parse_args()
 

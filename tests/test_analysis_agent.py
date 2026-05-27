@@ -376,11 +376,13 @@ def test_comparative_roofline_cap_clamps_savings():
             "count": [1],
             "Kernel Time (µs)_sum": [10_000.0],
             "delta_us (trace2 - trace1)": [-7_500.0],  # comp_pct = 25%
-            "Pct Roofline_mean": [60.0],               # roofline floor
+            "Pct Roofline_mean": [60.0],  # roofline floor
         }
     )
     metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
-    operations = build_operation_metrics(df, metadata, {}, comparison_scope="comparative")
+    operations = build_operation_metrics(
+        df, metadata, {}, comparison_scope="comparative"
+    )
     mm_op = operations[0]
     eff = mm_op["efficiency"]
     # efficiency_percent clamped to roofline (60), not raw comp_pct (25)
@@ -388,7 +390,9 @@ def test_comparative_roofline_cap_clamps_savings():
     assert eff["warning"] is not None
     assert "ROOFLINE CAP" in eff["warning"]
     # gap_high = 1 - 60/100 = 0.4; impact_high = 0.4 * 10/1000 * 100 = 0.4 (not 0.75 from unclamped 25%)
-    out = compute_impact_estimates(operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0)
+    out = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0
+    )
     assert len(out) == 1
     assert out[0]["impact_score_high"] == 0.4
     assert out[0]["impact_score"] == 0.35
@@ -408,11 +412,15 @@ def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
         }
     )
     metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
-    operations = build_operation_metrics(df, metadata, {}, comparison_scope="comparative")
+    operations = build_operation_metrics(
+        df, metadata, {}, comparison_scope="comparative"
+    )
     eff = operations[0]["efficiency"]
     assert eff["efficiency_percent"] == 80.0
     assert eff["warning"] is None
-    out = compute_impact_estimates(operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0)
+    out = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0
+    )
     assert out[0]["impact_score_high"] == 0.2
 
 
@@ -428,7 +436,9 @@ def test_comparative_roofline_cap_no_roofline_column():
         }
     )
     metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
-    operations = build_operation_metrics(df, metadata, {}, comparison_scope="comparative")
+    operations = build_operation_metrics(
+        df, metadata, {}, comparison_scope="comparative"
+    )
     eff = operations[0]["efficiency"]
     assert eff["efficiency_percent"] == 25.0
     assert eff["warning"] is None
@@ -544,7 +554,6 @@ def test_build_operation_metrics(output_dir_with_category_data):
         assert "efficiency_percent" in o["efficiency"] or "efficiency" in o
 
 
-
 def test_build_operation_metrics_comparative_uses_delta():
     """comparative scope falls back to delta column when speedup is absent."""
     df = pd.DataFrame(
@@ -592,7 +601,6 @@ def test_build_operation_metrics_comparative_no_comparative_cols_yields_none():
 
 
 # ----- Unit tests: compute_impact_estimates (comparative mode) -----
-
 
 
 def test_compute_impact_estimates_comparative_at_100_pct_no_savings():
@@ -839,4 +847,3 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
         assert "operations" in m
         assert "impact_estimates" in m
         assert m.get("comparison_scope") == "standalone"
-

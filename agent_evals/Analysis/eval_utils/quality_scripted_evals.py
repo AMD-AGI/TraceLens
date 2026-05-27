@@ -114,13 +114,15 @@ def _check_csv_alignment_dirs(gen_dir: str, ref_dir: str) -> tuple[str, str]:
     return "PASS", ""
 
 
-def _pre_check_gates(output_dir: str, reference_dir: str, comparison_scope: str) -> str | None:
+def _pre_check_gates(
+    output_dir: str, reference_dir: str, comparison_scope: str
+) -> str | None:
     """Return a failure reason if a hard pre-check gate trips, else None."""
     if not os.path.isdir(output_dir):
         return "generated output directory does not exist"
     if not os.path.isdir(reference_dir):
         return "reference directory does not exist"
-    
+
     if comparison_scope == "comparative":
         csv_dir = "perf_report_trace1_csvs"
     else:
@@ -140,12 +142,21 @@ def _pre_check_gates(output_dir: str, reference_dir: str, comparison_scope: str)
     return None
 
 
-def run(output_dir: str, reference_dir: str, results_path: str, comparison_scope: str = "standalone") -> list[dict]:
+def run(
+    output_dir: str,
+    reference_dir: str,
+    results_path: str,
+    comparison_scope: str = "standalone",
+) -> list[dict]:
     rows = []
 
     gate_fail = _pre_check_gates(output_dir, reference_dir, comparison_scope)
     if gate_fail is not None:
-        index = "quality_eval_1" if comparison_scope == "standalone" else "quality_eval_1_trace1"
+        index = (
+            "quality_eval_1"
+            if comparison_scope == "standalone"
+            else "quality_eval_1_trace1"
+        )
         rows.append(
             {
                 "index": index,
@@ -175,7 +186,11 @@ def run(output_dir: str, reference_dir: str, results_path: str, comparison_scope
                 "result": result,
                 "details": details,
                 "root_cause": "data" if result == "FAIL" else "",
-                "recommended_fix": "Regenerate golden refs with current TraceLens version" if result == "FAIL" else "",
+                "recommended_fix": (
+                    "Regenerate golden refs with current TraceLens version"
+                    if result == "FAIL"
+                    else ""
+                ),
             }
         )
     else:
@@ -192,7 +207,11 @@ def run(output_dir: str, reference_dir: str, results_path: str, comparison_scope
                     "result": result,
                     "details": details,
                     "root_cause": "data" if result == "FAIL" else "",
-                    "recommended_fix": "Regenerate golden refs with current TraceLens version" if result == "FAIL" else "",
+                    "recommended_fix": (
+                        "Regenerate golden refs with current TraceLens version"
+                        if result == "FAIL"
+                        else ""
+                    ),
                 }
             )
 

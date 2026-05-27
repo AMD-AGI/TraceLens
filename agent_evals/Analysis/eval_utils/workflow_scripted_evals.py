@@ -20,7 +20,6 @@ import os
 import re
 import sys
 
-
 CSV_COLUMNS = [
     "index",
     "category",
@@ -153,9 +152,13 @@ def _check_model_info(output_dir: str) -> tuple[str, str]:
     return "PASS", ""
 
 
-def _check_unified_perf_report(output_dir: str, comparison_scope: str = "standalone") -> tuple[str, str]:
+def _check_unified_perf_report(
+    output_dir: str, comparison_scope: str = "standalone"
+) -> tuple[str, str]:
     if comparison_scope == "comparative":
-        path = os.path.join(output_dir, "perf_report_trace1_csvs", "unified_perf_summary.csv")
+        path = os.path.join(
+            output_dir, "perf_report_trace1_csvs", "unified_perf_summary.csv"
+        )
         label = "perf_report_trace1_csvs/unified_perf_summary.csv"
     else:
         path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
@@ -411,7 +414,9 @@ def _load_gpu_timeline(output_dir, comparison_scope="standalone", trace_num=1):
     if comparison_scope == "standalone":
         path = os.path.join(output_dir, "perf_report_csvs", "gpu_timeline.csv")
     else:
-        path = os.path.join(output_dir, f"perf_report_trace{trace_num}_csvs", "gpu_timeline.csv")
+        path = os.path.join(
+            output_dir, f"perf_report_trace{trace_num}_csvs", "gpu_timeline.csv"
+        )
     if not os.path.isfile(path):
         return None
     data = {}
@@ -510,10 +515,31 @@ _EXEC_SUMMARY_CHECKS_STANDALONE = [
 # None csv_type means no CSV cross-check for that trace
 _EXEC_SUMMARY_CHECKS_COMPARATIVE = [
     ("total_time", ["Total Compute Time", "Total Time"], None, None, None, None),
-    ("compute_pct", ["Computation", "Compute %", "Compute"], "computation_time", 1.0, "computation_time", 1.0),
+    (
+        "compute_pct",
+        ["Computation", "Compute %", "Compute"],
+        "computation_time",
+        1.0,
+        "computation_time",
+        1.0,
+    ),
     ("idle_pct", ["Idle Time", "Idle %", "Idle"], "idle_time", 1.0, "idle_time", 1.0),
-    ("comm_pct", ["Exposed Communication", "Exposed Communication %"], None, None, None, None),
-    ("bottleneck", ["Top Bottleneck Category", "Top Bottleneck"], None, None, None, None),
+    (
+        "comm_pct",
+        ["Exposed Communication", "Exposed Communication %"],
+        None,
+        None,
+        None,
+        None,
+    ),
+    (
+        "bottleneck",
+        ["Top Bottleneck Category", "Top Bottleneck"],
+        None,
+        None,
+        None,
+        None,
+    ),
 ]
 
 
@@ -595,7 +621,14 @@ def _check_exec_summary_comparative(output_dir, exec_section):
     csv_t2 = _load_gpu_timeline(output_dir, comparison_scope="comparative", trace_num=2)
     rows = []
 
-    for key, labels, csv_type_t1, tol_t1, csv_type_t2, tol_t2 in _EXEC_SUMMARY_CHECKS_COMPARATIVE:
+    for (
+        key,
+        labels,
+        csv_type_t1,
+        tol_t1,
+        csv_type_t2,
+        tol_t2,
+    ) in _EXEC_SUMMARY_CHECKS_COMPARATIVE:
         cells = _find_table_row_all_cells(exec_section, labels)
         if cells is None:
             rows.append(
@@ -636,7 +669,9 @@ def _check_exec_summary_comparative(output_dir, exec_section):
                             f"T1 mismatch: report={report_val:.1f}%, csv={csv_val:.2f}%, diff={diff:.2f}%"
                         )
                     else:
-                        detail_parts.append(f"T1 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)")
+                        detail_parts.append(
+                            f"T1 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)"
+                        )
 
         # Cross-check T2
         if csv_type_t2 and csv_t2 and tol_t2:
@@ -651,7 +686,9 @@ def _check_exec_summary_comparative(output_dir, exec_section):
                             f"T2 mismatch: report={report_val:.1f}%, csv={csv_val:.2f}%, diff={diff:.2f}%"
                         )
                     else:
-                        detail_parts.append(f"T2 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)")
+                        detail_parts.append(
+                            f"T2 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)"
+                        )
 
         # Check Difference column exists
         if len(cells) < 4:
@@ -847,8 +884,15 @@ def _marker_attrs_from_inner(inner):
 
 
 def _make_marker_row(index, summary, result, details, root_cause="", fix=""):
-    return _make_row(index, summary, result, details, root_cause, fix,
-                     category="Marker Identification")
+    return _make_row(
+        index,
+        summary,
+        result,
+        details,
+        root_cause,
+        fix,
+        category="Marker Identification",
+    )
 
 
 def _check_marker_top_ops(output_dir):
@@ -882,7 +926,7 @@ def _check_marker_top_ops(output_dir):
         if end_after is None:
             errors.append("kind=top_ops marker has no matching <!-- impact-end -->")
         else:
-            block = content[top_ops_begin.end():end_after.start()]
+            block = content[top_ops_begin.end() : end_after.start()]
             row_markers = list(_TOP_OPS_ROW_RE.finditer(block))
             if not row_markers:
                 errors.append(
@@ -1056,7 +1100,9 @@ def _check_marker_detail_estimates(output_dir):
     for i, match in enumerate(matches):
         pnum = int(match.group(1))
         start = match.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(compute_subsection)
+        end = (
+            matches[i + 1].start() if i + 1 < len(matches) else len(compute_subsection)
+        )
         block = compute_subsection[start:end]
 
         errors = []
@@ -1130,12 +1176,16 @@ _GATE_FAIL_NEW_EVALS = [
 ]
 
 
-def run(output_dir: str, results_path: str, comparison_scope: str = "standalone") -> list[dict]:
+def run(
+    output_dir: str, results_path: str, comparison_scope: str = "standalone"
+) -> list[dict]:
     rows = []
 
     gate_fail = _pre_check_gates(output_dir)
     if gate_fail is not None:
-        for i, (summary, _func, rc, fix, _mode_aware) in enumerate(EVAL_REGISTRY, start=1):
+        for i, (summary, _func, rc, fix, _mode_aware) in enumerate(
+            EVAL_REGISTRY, start=1
+        ):
             rows.append(
                 {
                     "index": f"workflow_eval_{i}",
@@ -1166,7 +1216,9 @@ def run(output_dir: str, results_path: str, comparison_scope: str = "standalone"
         return rows
 
     for i, (summary, func, rc, fix, mode_aware) in enumerate(EVAL_REGISTRY, start=1):
-        result, details = func(output_dir, comparison_scope) if mode_aware else func(output_dir)
+        result, details = (
+            func(output_dir, comparison_scope) if mode_aware else func(output_dir)
+        )
         rows.append(
             {
                 "index": f"workflow_eval_{i}",

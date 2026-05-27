@@ -91,6 +91,7 @@ def perf_report_csv_dir(output_dir: str) -> str:
             return os.path.join(output_dir, "perf_report_trace1_csvs")
     return os.path.join(output_dir, "perf_report_csvs")
 
+
 _SKIP_PY_PATTERNS = (
     "torch/",
     "_functorch/",
@@ -279,9 +280,7 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
     return fallback_maf
 
 
-def comparative_efficiency(
-    result: Dict[str, Any], row: pd.Series
-) -> None:
+def comparative_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
     """
     When comparative columns support it, set ``efficiency_percent`` to
     ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped by trace1 roofline
@@ -332,9 +331,7 @@ def comparative_efficiency(
         result["warning"] = None
 
 
-def standalone_efficiency(
-    result: Dict[str, Any], row: pd.Series
-) -> None:
+def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
     """
     Set ``efficiency_percent`` from ``Pct Roofline_mean`` (roofline utilization %)
     and roofline anomaly flags when above 110%.
@@ -477,8 +474,11 @@ def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
 
 
 def build_operation_metrics(
-    ops_df: pd.DataFrame, metadata: dict, category_config: dict,
-    callstacks_df: Optional[pd.DataFrame] = None, comparison_scope: str = "standalone"
+    ops_df: pd.DataFrame,
+    metadata: dict,
+    category_config: dict,
+    callstacks_df: Optional[pd.DataFrame] = None,
+    comparison_scope: str = "standalone",
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
@@ -924,7 +924,7 @@ def run_category_analysis(
         ops_df, extra = pre_process_fn(ops_df, metadata)
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    
+
     callstacks_df = None
     cs_path = os.path.join(
         perf_report_csv_dir(output_dir), "unified_perf_callstacks.csv"
@@ -933,7 +933,11 @@ def run_category_analysis(
         callstacks_df = pd.read_csv(cs_path)
 
     operations = build_operation_metrics(
-        ops_df, metadata, config, callstacks_df=callstacks_df, comparison_scope=comparison_scope
+        ops_df,
+        metadata,
+        config,
+        callstacks_df=callstacks_df,
+        comparison_scope=comparison_scope,
     )
     category_specific = extract_fn(ops_df, metadata)
 
@@ -947,7 +951,9 @@ def run_category_analysis(
     else:
         impact_estimates = []
 
-    category_findings = build_category_findings(impact_estimates, comparison_scope=comparison_scope)
+    category_findings = build_category_findings(
+        impact_estimates, comparison_scope=comparison_scope
+    )
 
     metrics = {
         "category": category,

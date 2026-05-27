@@ -74,9 +74,7 @@ _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
 _KF_IMPACT_STANDALONE_RE = re.compile(
     r"impact_score:\s*[\d.]+\s*\(perf-model coverage \d+/\d+ kernels\)"
 )
-_KF_IMPACT_COMPARATIVE_RE = re.compile(
-    r"impact_score:\s*[\d.]+\s*$"
-)
+_KF_IMPACT_COMPARATIVE_RE = re.compile(r"impact_score:\s*[\d.]+\s*$")
 
 _REQUIRED_REPORT_HEADERS = [
     "Executive Summary",
@@ -215,7 +213,9 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
     if tier == "compute":
-        errors.extend(_validate_compute_data_tables(content, filepath, comparison_scope))
+        errors.extend(
+            _validate_compute_data_tables(content, filepath, comparison_scope)
+        )
 
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -625,7 +625,9 @@ def validate_report(output_dir, comparison_scope=None):
 
     missing.extend(_validate_report_args_column(content, output_dir))
 
-    missing.extend(_validate_report_comparison_scope_diffs(content, output_dir, comparison_scope))
+    missing.extend(
+        _validate_report_comparison_scope_diffs(content, output_dir, comparison_scope)
+    )
 
     missing.extend(_validate_report_priority_consistency(content, output_dir))
 

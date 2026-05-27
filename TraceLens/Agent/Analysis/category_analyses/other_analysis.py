@@ -141,7 +141,7 @@ def main():
     }
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
-    
+
     callstacks_df = None
     cs_path = os.path.join(
         perf_report_csv_dir(args.output_dir), "unified_perf_callstacks.csv"
@@ -164,7 +164,9 @@ def main():
         category,
         baseline_ms=baseline_ms,
     )
-    category_findings = build_category_findings(impact_estimates, comparison_scope=args.comparison_scope)
+    category_findings = build_category_findings(
+        impact_estimates, comparison_scope=args.comparison_scope
+    )
 
     metrics = {
         "category": category,

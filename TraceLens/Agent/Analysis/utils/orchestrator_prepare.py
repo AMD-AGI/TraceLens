@@ -84,7 +84,7 @@ _LAYOUT_TRANSFORM_PATTERNS = [
 
 # Case-A gate constants (comparative mode)
 _CASE_A_MAX_DELTA = 15  # G2: |n1 - n2| must be <= this
-_CASE_A_MAX_N1 = 30     # G3: n1 must be <= this
+_CASE_A_MAX_N1 = 30  # G3: n1 must be <= this
 
 # Event categories that are never fusion candidate containers
 _SKIP_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}
@@ -94,19 +94,15 @@ _SKIP_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_
 # Module-level helpers shared by standalone and comparative extraction
 # ---------------------------------------------------------------------------
 
+
 def _strip_module_index(name):
-    prefix = (
-        name[len("nn.Module: "):]
-        if name.startswith("nn.Module: ")
-        else name
-    )
+    prefix = name[len("nn.Module: ") :] if name.startswith("nn.Module: ") else name
     return _MODULE_INDEX_RE.sub("", prefix)
 
 
 def _has_fused_kernel(kernel_list):
     return any(
-        any(p in k["name"].lower() for p in FUSION_ALREADY_FUSED)
-        for k in kernel_list
+        any(p in k["name"].lower() for p in FUSION_ALREADY_FUSED) for k in kernel_list
     )
 
 
@@ -119,7 +115,7 @@ def _build_parent_chain(ev, tree) -> list:
         pname = ancestor.get("name", "")
         if pname:
             if pname.startswith("nn.Module: "):
-                pname = pname[len("nn.Module: "):]
+                pname = pname[len("nn.Module: ") :]
             elif "/" in pname:
                 pname = pname.rsplit("/", 1)[-1]
             parent_chain.append(pname)
@@ -151,6 +147,7 @@ def _dedup_by_kernel_set(candidates: list, kernels_field: str, score_fn) -> list
 # _extract_comparative_fusion_candidates)
 # ---------------------------------------------------------------------------
 
+
 def _is_case_a_fusion_gap(trace1_kernels: list, trace2_kernels: list) -> bool:
     """Return True if Case-A gates pass (trace1 has more kernels than trace2).
 
@@ -161,13 +158,13 @@ def _is_case_a_fusion_gap(trace1_kernels: list, trace2_kernels: list) -> bool:
       G4: n2 >= 1              — cannot do gap analysis with nothing on trace2
     """
     n1, n2 = len(trace1_kernels), len(trace2_kernels)
-    if n1 <= n2:                          # G1
+    if n1 <= n2:  # G1
         return False
-    if (n1 - n2) > _CASE_A_MAX_DELTA:    # G2
+    if (n1 - n2) > _CASE_A_MAX_DELTA:  # G2
         return False
-    if n1 > _CASE_A_MAX_N1:              # G3
+    if n1 > _CASE_A_MAX_N1:  # G3
         return False
-    if n2 < 1:                           # G4
+    if n2 < 1:  # G4
         return False
     return True
 
@@ -194,11 +191,13 @@ def _build_diff_stats_lookups(df):
                 "gpu_event_uid": uid,
             }
         elif row["source"] == "trace2":
-            lca_to_t2[lca_id].append({
-                "name": kname,
-                "type": ktype,
-                "dur_us": dur_us,
-            })
+            lca_to_t2[lca_id].append(
+                {
+                    "name": kname,
+                    "type": ktype,
+                    "dur_us": dur_us,
+                }
+            )
 
     return uid_to_t1, dict(lca_to_t2)
 
@@ -229,7 +228,13 @@ def _apply_comparative_gates(t1_kernels, t2_kernels):
 
 
 def _make_comparative_candidate(
-    module_name, base_name, t1_kernels, t2_kernels, parent_chain=None, input_dims=None, lca_id=None,
+    module_name,
+    base_name,
+    t1_kernels,
+    t2_kernels,
+    parent_chain=None,
+    input_dims=None,
+    lca_id=None,
 ):
     """Build a comparative candidate dict from trace1/trace2 kernel lists."""
     n1, n2 = len(t1_kernels), len(t2_kernels)
@@ -261,7 +266,9 @@ def _make_comparative_candidate(
 
 
 def _extract_comparative_fusion_candidates(
-    trace1_csv_dir: str, analyzer=None, tree=None,
+    trace1_csv_dir: str,
+    analyzer=None,
+    tree=None,
 ) -> list:
     """Extract fusion candidates from diff_stats.csv (comparative mode).
 
@@ -304,7 +311,7 @@ def _extract_comparative_fusion_candidates(
         base = _strip_module_index(name)
         if not base:
             continue
-        
+
         # Gather trace1 kernels that appear in diff_stats
         t1_kernels = []
         matched_lca_ids = set()
@@ -367,6 +374,7 @@ def _extract_comparative_fusion_candidates(
 # Standalone fusion extraction helpers (used only by
 # _extract_standalone_fusion_candidates)
 # ---------------------------------------------------------------------------
+
 
 def _is_fusion_eligible(name):
     lower = name.lower()
@@ -648,9 +656,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                 if k.get("data_in_mb") is not None:
                     continue
                 kname = k.get("name", k.get("kernel_name", ""))
-                entry = shape_aware_lookup(
-                    perf_lookup, kname, c.get("input_dims")
-                )
+                entry = shape_aware_lookup(perf_lookup, kname, c.get("input_dims"))
                 if entry.get("data_in_mb") is not None:
                     k["data_in_mb"] = entry["data_in_mb"]
                     k["data_out_mb"] = entry["data_out_mb"]
@@ -749,8 +755,6 @@ def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) ->
         ),
         "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
     }
-
-
 
 
 def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
@@ -1174,9 +1178,7 @@ def main():
         # ====================================================================
         print("\n[STEP 4b] Extracting Kernel Fusion Candidates...")
 
-        fusion_candidates_file = (
-            f"{output_dir}/category_data/fusion_candidates.json"
-        )
+        fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
 
         try:
             if comparison_scope == "comparative":
@@ -1185,7 +1187,9 @@ def main():
                 diff_stats_csv = os.path.join(trace1_csv_dir, "diff_stats.csv")
                 if os.path.exists(diff_stats_csv):
                     fusion_candidates = _extract_comparative_fusion_candidates(
-                        trace1_csv_dir, analyzer=analyzer, tree=tree,
+                        trace1_csv_dir,
+                        analyzer=analyzer,
+                        tree=tree,
                     )
                     print(
                         f"  ✓ Comparative fusion: {len(fusion_candidates)} candidates "
