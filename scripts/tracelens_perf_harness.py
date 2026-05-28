@@ -167,7 +167,7 @@ def emit_otlp_metrics(results, metadata):
         OTLPMetricExporter,
     )
     from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
     from opentelemetry.sdk.resources import Resource
 
     otlp_endpoint = os.environ.get("GRAFANA_CLOUD_OTLP_ENDPOINT")
@@ -193,7 +193,10 @@ def emit_otlp_metrics(results, metadata):
     if not otlp_endpoint.endswith("/v1/metrics"):
         otlp_endpoint = otlp_endpoint.rstrip("/") + "/v1/metrics"
     exporter = OTLPMetricExporter(endpoint=otlp_endpoint, headers=headers)
-    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=30000)
+
+    # InMemoryMetricReader has no background thread — it holds metrics in memory
+    # and only exports when we explicitly call collect() + exporter.export().
+    reader = InMemoryMetricReader()
     provider = MeterProvider(resource=otel_resource, metric_readers=[reader])
     metrics.set_meter_provider(provider)
 
@@ -246,8 +249,11 @@ def emit_otlp_metrics(results, metadata):
             },
         )
 
-    provider.force_flush()
+    # All gauges are set — collect from memory and export exactly once.
+    metrics_data = reader.get_metrics_data()
+    exporter.export(metrics_data.resource_metrics)
     provider.shutdown()
+    print("OTLP metrics emitted successfully")
     print("OTLP metrics emitted successfully")
 
 
