@@ -380,8 +380,10 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Impact estimate:** [Rendered from metadata → impact_estimates]
 
 ### Kernel Fusion Insights
-
+<!-- === STANDALONE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
+<!-- === COMPARATIVE Kernel Fusion === -->
+> **Note:** Kernel fusion analysis is experimental.
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
 <!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
