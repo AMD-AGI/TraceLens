@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -273,9 +273,12 @@ def run_manifest(manifest_path, output_dir, filter_ids=None):
                 [
                     sys.executable,
                     __file__,
-                    "--trace-file", str(trace_path),
-                    "--trace-id", tid,
-                    "--output-dir", tmp_dir,
+                    "--trace-file",
+                    str(trace_path),
+                    "--trace-id",
+                    tid,
+                    "--output-dir",
+                    tmp_dir,
                 ],
                 check=False,
                 stdout=subprocess.PIPE,
@@ -295,7 +298,9 @@ def run_manifest(manifest_path, output_dir, filter_ids=None):
             tmp_prof = os.path.join(tmp_dir, f"{tid}_profile.prof")
             if os.path.exists(tmp_prof):
                 shutil.move(tmp_prof, os.path.join(output_dir, f"{tid}_profile.prof"))
-                result["cprofile_artifact"] = os.path.join(output_dir, f"{tid}_profile.prof")
+                result["cprofile_artifact"] = os.path.join(
+                    output_dir, f"{tid}_profile.prof"
+                )
 
         results.append(result)
 
