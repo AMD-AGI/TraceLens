@@ -434,6 +434,10 @@ class TritonCompiledPerfModel:
         in_out_extra = sum(self._meta.get("in_out_extra_bytes", []))
         return float((sum(ptr_bytes) + in_out_extra) * xnumel)
 
+    @staticmethod
+    def can_model(event):
+        return _meta_from_trace_args(event) is not None
+
     def get_maf_type(self):
         return "vector" if self._meta is not None else None
 

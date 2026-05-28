@@ -1552,7 +1552,12 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
-        return resolve_perf_model_class(event.get("name", "")) is not None
+        cls = resolve_perf_model_class(event.get("name", ""))
+        if cls is None:
+            return False
+        if hasattr(cls, "can_model"):
+            return cls.can_model(event)
+        return True
 
     def _is_leaf_cpu_op(self, event):
         """
