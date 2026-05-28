@@ -12,6 +12,11 @@ via pstats, records peak RSS, outputs structured timing JSON, and optionally
 emits OTLP metrics to Grafana Cloud.
 
 Usage:
+    # Single trace file
+    python scripts/tracelens_perf_harness.py \
+        --trace-file /path/to/trace.json.gz \
+        --output-dir ./perf_results
+
     # Manifest-driven, with OTLP emission
     python scripts/tracelens_perf_harness.py \
         --manifest config/trace_manifest.yaml \
@@ -251,14 +256,14 @@ def run_manifest(manifest_path, output_dir, filter_ids=None):
         if filter_ids and tid not in filter_ids:
             continue
 
-        trace_path = PROJECT_ROOT / trace_entry["trace_path"]
+        trace_path = Path(trace_entry["trace_path"])
 
         if not os.path.exists(trace_path):
             print(f"Warning: trace file not found: {trace_path}, skipping {tid}")
             continue
 
         print(f"Profiling trace: {tid}")
-        result = profile_trace(trace_path, tid, output_dir)
+        result = profile_trace(str(trace_path), tid, output_dir)
         result["trace_id"] = tid
         results.append(result)
 
@@ -268,6 +273,10 @@ def run_manifest(manifest_path, output_dir, filter_ids=None):
 def main():
     parser = argparse.ArgumentParser(
         description="TraceLens profiling harness for nightly performance dashboard"
+    )
+    parser.add_argument(
+        "--trace-file",
+        help="Path to a single trace file (bypasses manifest)",
     )
     parser.add_argument(
         "--manifest",
@@ -300,16 +309,25 @@ def main():
         emit_otlp_metrics(data["traces"], data["metadata"])
         return
 
-    if not args.manifest or not args.output_dir:
-        parser.error("--manifest and --output-dir are required")
+    if not args.output_dir:
+        parser.error("--output-dir is required")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    filter_ids = None
-    if args.filter:
-        filter_ids = set(args.filter.split(","))
-
-    results = run_manifest(args.manifest, args.output_dir, filter_ids)
+    if args.trace_file:
+        trace_path = Path(args.trace_file)
+        trace_id = trace_path.name.split(".")[0]
+        print(f"Profiling trace: {trace_id}")
+        result = profile_trace(str(trace_path), trace_id, args.output_dir)
+        result["trace_id"] = trace_id
+        results = [result]
+    elif args.manifest:
+        filter_ids = None
+        if args.filter:
+            filter_ids = set(args.filter.split(","))
+        results = run_manifest(args.manifest, args.output_dir, filter_ids)
+    else:
+        parser.error("either --trace-file or --manifest is required")
 
     if not results:
         print("No traces were profiled")
