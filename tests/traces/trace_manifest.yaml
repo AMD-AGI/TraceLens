@@ -1,0 +1,61 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+traces:
+  - trace_id: "trace_id_1"
+    trace_path: "/path/to/trace_1.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_2"
+    trace_path: "/path/to/trace_2.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_3"
+    trace_path: "/path/to/trace_3.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_4"
+    trace_path: "/path/to/trace_4.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_5"
+    trace_path: "/path/to/trace_5.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_6"
+    trace_path: "/path/to/trace_6.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_7"
+    trace_path: "/path/to/trace_7.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_8"
+    trace_path: "/path/to/trace_8.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_9"
+    trace_path: "/path/to/trace_9.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_10"
+    trace_path: "/path/to/trace_10.json.gz"
+    enabled: true
+    notes: ""
+
+  - trace_id: "trace_id_11"
+    trace_path: "/path/to/trace_11.json.gz"
+    enabled: true
+    notes: ""
