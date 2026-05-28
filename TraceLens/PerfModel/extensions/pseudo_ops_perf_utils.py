@@ -42,6 +42,9 @@ def get_pseudo_op_mappings():
         # MoE - GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
         "pseudo_op::moe_gptq_awq_up": moe_perf_model_extensions.moe_gptq_awq_up,
         "pseudo_op::moe_gptq_awq_down": moe_perf_model_extensions.moe_gptq_awq_down,
+        # MoE flydsl two-stage (under aiter::fused_moe_)
+        "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
+        "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
