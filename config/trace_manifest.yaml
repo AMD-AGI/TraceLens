@@ -11,6 +11,12 @@ traces:
     workload_family: "nlp"
     enabled: true
     notes: ""
+  
+  - trace_id: "facebook_timesformer"
+    source_location: "sharepoint:Documents/tracelens-private-traces/traces/facebook_timesformer-base-finetuned-k400__1016002.json.gz"
+    workload_family: "video"
+    enabled: true
+    notes: ""
 
   - trace_id: "gpt3_fsdp_example0"
     source_location: "sharepoint:Documents/tracelens-private-traces/traces/gpt3_fsdp_example0.json.gz"
