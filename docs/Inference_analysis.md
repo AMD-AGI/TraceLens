@@ -81,7 +81,7 @@ A unified build script is provided that supports multiple vLLM versions. It take
 | `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      | `config_vllm_v0.18.0.patch` |
 | `v19`   | `vllm/vllm-openai-rocm:v0.19.0`                               | v0.19.0      | `config_vllm_v0.19.0.patch` |
 | `v20`   | `rocm/vllm-dev:preview_v0.20.0_20260429`                      | v0.20.0      | `config_vllm_v0.20.0.patch` |
-| `v21`   | `rocm/vllm-openai-rocm:v0.21.0`                               | v0.21.0      | `config_vllm_v0.21.0.patch` |
+| `v21`   | `vllm/vllm-openai-rocm:v0.21.0`                               | v0.21.0      | `config_vllm_v0.21.0.patch` |
 
 
 ```bash
