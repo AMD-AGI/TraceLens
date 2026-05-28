@@ -251,7 +251,7 @@ def emit_otlp_metrics(results, metadata):
 
     # All gauges are set — collect from memory and export exactly once.
     metrics_data = reader.get_metrics_data()
-    exporter.export(metrics_data.resource_metrics)
+    exporter.export(metrics_data)
     provider.shutdown()
     print("OTLP metrics emitted successfully")
     print("OTLP metrics emitted successfully")
