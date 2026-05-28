@@ -783,7 +783,7 @@ def _check_issue_template(output_dir, comparison_scope="standalone"):
 _MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
 
 
-def _check_model_id(output_dir):
+def _check_model_id(output_dir, comparison_scope=None):
     """Eval 13 — per-field check for model_info.json values in Appendix."""
     model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
     report_path = os.path.join(output_dir, "analysis.md")
@@ -895,7 +895,7 @@ def _make_marker_row(index, summary, result, details, root_cause="", fix=""):
     )
 
 
-def _check_marker_top_ops(output_dir):
+def _check_marker_top_ops(output_dir, comparison_scope=None):
     """Marker eval 1: top_ops wrapper + inline top-ops-row markers."""
     content = _read_report(output_dir)
     if content is None:
@@ -961,7 +961,7 @@ def _check_marker_top_ops(output_dir):
     ]
 
 
-def _check_marker_p_items(output_dir):
+def _check_marker_p_items(output_dir, comparison_scope=None):
     """Marker eval 2: kind=p_item markers for each compute P-item."""
     content = _read_report(output_dir)
     if content is None:
@@ -1045,7 +1045,7 @@ def _check_marker_p_items(output_dir):
     return rows
 
 
-def _check_marker_detail_estimates(output_dir):
+def _check_marker_detail_estimates(output_dir, comparison_scope=None):
     """Marker eval 3: kind=detail_estimate markers in Detailed Analysis."""
     content = _read_report(output_dir)
     if content is None:
