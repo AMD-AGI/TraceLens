@@ -16,8 +16,9 @@ This document provides detailed explanations of the columns in each sheet of the
    - [2.2 ops_summary_by_category](#22-ops_summary_by_category-most-aggregated)
    - [2.3 ops_summary](#23-ops_summary-by-operation-name)
    - [2.4 ops_unique_args](#24-ops_unique_args-most-detailed)
-3. [Performance Metrics Sheets (Roofline Analysis)](#3-performance-metrics-sheets-roofline-analysis)
+3. [Unified Perf Summary and Roofline Metrics](#3-unified-perf-summary-and-roofline-metrics)
    - [Understanding the Metrics Pipeline](#understanding-the-metrics-pipeline)
+   - [Preferred Output: unified_perf_summary](#preferred-output-unified_perf_summary)
    - [Operation Parameters Reference](#operation-parameters-reference)
    - [Why This Matters: Roofline Analysis](#why-this-matters-roofline-analysis)
 4. [Collective Communication Analysis](#4-collective-communication-analysis)
@@ -36,8 +37,9 @@ The performance report Excel file contains multiple sheets analyzing different a
 3. **ops_summary_by_category** - Operations summarized by category
 4. **ops_summary** - Operations summarized by name
 5. **ops_unique_args** - Operations summarized by unique argument combinations
+6. **unified_perf_summary** - Preferred sheet for modeled FLOPs/bytes, runtime TFLOPS/s/TB/s, compute spec, and roofline metrics when available
 
-Additional sheets may include op-specific analysis (GEMM, SDPA_fwd, CONV_fwd, etc.), kernel summary, short kernels, and collective analysis.
+Additional sheets may include legacy op-specific analysis (GEMM, SDPA_fwd, CONV_fwd, etc.), kernel summary, short kernels, and collective analysis.
 
 **Unit Conventions**:
 - **Time**: All times from the trace are in **microseconds (µs)** unless explicitly stated otherwise (e.g., `time ms` in `gpu_timeline` is in milliseconds)
@@ -583,9 +585,9 @@ This is particularly useful for creating standalone reproducers or benchmarking 
 
 ---
 
-## 3. Performance Metrics Sheets (Roofline Analysis)
+## 3. Unified Perf Summary and Roofline Metrics
 
-For certain operation categories (GEMM, CONV, SDPA, UnaryElementwise, BinaryElementwise), TraceLens generates additional sheets with **roofline model metrics**. These sheets help you understand how efficiently operations are using the GPU's computational and memory bandwidth capabilities.
+`unified_perf_summary` is the main TraceLens sheet for perf-model and roofline analysis. It helps you understand how efficiently operations are using the GPU's computational and memory bandwidth capabilities. The report still emits older per-category performance sheets for compatibility, but new analysis should generally start from `unified_perf_summary`.
 
 **Important Context**: While hardware counter profilers like `rocprof compute` and `nsight compute` reveal what the GPU actually executed—including effects of padding, redundant memory movement, and cache behavior—TraceLens focuses on the useful work dictated by operator semantics. Used together, these two perspectives provide a richer picture: hardware counters expose low-level execution characteristics, while TraceLens reveals the efficiency of the computation in context.
 
@@ -741,15 +743,39 @@ addmm(6144×2048 × 2048×8192) 762       0.59    ~203         Compute-bound, 58
 
 **Important**: Arithmetic intensity (FLOPs/Byte) determines whether an operation is compute-bound or memory-bound. The percentage of peak achieved indicates optimization quality within that constraint. See [NVIDIA's GEMM Performance Guide](https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html) for more details on this distinction.
 
-### What These Sheets Contain
+### Preferred Output: `unified_perf_summary`
 
-Performance metrics sheets are generated for operations with available performance models:
+`unified_perf_summary` is the preferred sheet for perf-model output. It combines modeled ops and leaf GPU-launching ops into one table, grouped by operation name and input arguments. Start here before using the older per-category sheets. When `--detect_recompute` is enabled, the table also includes `is_recompute` so recomputed and non-recomputed instances of the same op can be split.
+
+Rows with a registered performance model include:
+- **Static metrics**: GFLOPS, Data Moved (MB), FLOPS/Byte (calculated once from parameters)
+- **Runtime metrics**: Kernel Time (µs), TFLOPS/s, TB/s (statistics across all occurrences)
+- **Compute Spec**: Combined compute type and precision (e.g., `matrix_bf16`, `vector_fp32`)
+- **Roofline metrics** (when `--gpu_arch_json_path` provided): Roofline Time (µs), Pct Roofline - compares achieved time to theoretical roofline bound
+
+`Compute Spec` is produced by the perf model and combines:
+- Compute type: `matrix_*` for matrix-core style work such as GEMM, CONV, and SDPA; `vector_*` for vector/SIMD-style work such as elementwise ops.
+- Precision: `fp8`, `fp16`, `bf16`, `fp32`, `fp64`, or another dtype supported by the model.
+
+When `--gpu_arch_json_path` is provided, TraceLens uses the GPU architecture file to add roofline columns. The architecture file provides `mem_bw_gbps` plus `max_achievable_tflops` values keyed by compute spec (for example `matrix_bf16` or `vector_fp32`). See [GPU Architecture Specifications](../examples/gpu_arch_example.md) for the expected format.
+
+Rows without a registered performance model can still appear in `unified_perf_summary` if they are leaf ops that launch GPU kernels. These rows have timing and categorization information, but FLOPs/bytes-derived columns are unavailable because TraceLens does not know the theoretical work for the op.
+
+`op_category_extension` only controls the `op category` label for category-only ops. To populate GFLOPS, Data Moved, FLOPS/Byte, TFLOPS/s, and TB/s, add a native perf model or provide one through `perf_model_extension`.
+
+**Code Reference**: Generated by `TreePerfAnalyzer.build_df_unified_perf_table()` and `TreePerfAnalyzer.summarize_df_unified_perf_table()`.
+
+### Legacy Per-Category Performance Sheets
+
+The report also emits older per-category performance sheets for compatibility and focused analysis. These sheets are useful when a workflow already expects separate tabs such as `GEMM` or `SDPA_fwd`, but new analysis should generally start from `unified_perf_summary`.
+
+Legacy per-category sheets are generated for operations with available performance models:
 - **GEMM**: Matrix multiply operations (addmm, mm, bmm, baddbmm, etc.). See [GEMMs in AI Workloads](./conceptual/aimodels_gemms.md) for how model dimensions (batch size, sequence length, hidden dimension) map to GEMM shapes.
 - **CONV_fwd / CONV_bwd**: Convolution operations
 - **SDPA_fwd / SDPA_bwd**: Scaled dot-product attention
 - **UnaryElementwise / BinaryElementwise**: Element-wise operations
 
-Each sheet contains:
+Each legacy sheet contains:
 - All columns from `ops_unique_args` (operation name, arguments, occurrences, etc.)
 - **Static metrics**: GFLOPS, Data Moved (MB), FLOPS/Byte (calculated once from parameters)
 - **Compute Spec**: Combined compute type and precision (e.g., `matrix_bf16`, `vector_fp32`). This indicates:
@@ -762,7 +788,7 @@ Each sheet contains:
   - `std_dev`: Variability - high std_dev (>10% of mean) suggests inconsistent performance
   - `min`, `max`: Range - large spread may indicate outliers worth investigating
 
-**Note**: These sheets contain all the columns from `ops_unique_args`, so you can replay operations from these sheets using the same approach described in [Replaying from Perf Report](#replaying-from-perf-report-no-trace-required). Simply read the desired performance metrics sheet (e.g., `GEMM`, `SDPA_fwd`) instead of `ops_unique_args`.
+**Note**: These legacy sheets contain all the columns from `ops_unique_args`, so you can replay operations from these sheets using the same approach described in [Replaying from Perf Report](#replaying-from-perf-report-no-trace-required). Simply read the desired performance metrics sheet (e.g., `GEMM`, `SDPA_fwd`) instead of `ops_unique_args`.
 
 **Code Reference**: Generated by `TreePerfAnalyzer.build_df_perf_metrics()` and `TreePerfAnalyzer.summarize_df_perf_metrics()`
 
@@ -841,14 +867,67 @@ For binary ops (add, mul, etc.), two shapes are extracted and broadcasting is ha
 
 **FLOPs and Bytes Calculation**: For the specific formulas used to calculate FLOPs and memory traffic from these parameters, see the performance model implementations in `TraceLens/PerfModel/perf_model.py`.
 
-**Extending with Custom Operations**: Performance metrics sheets are only generated for operations that have a registered performance model. If your workload includes custom operations (e.g., from Megatron, vLLM, or other libraries), you can extend TraceLens by:
-1. Creating a performance model class for your operation (inherit from `GEMM`, `CONV`, `SDPA`, etc.)
-2. Implementing `get_param_details()`, `flops()`, and `bytes()` methods
-3. Passing an extension file via `--extension_file` when generating the report
+### Extending TraceLens With Custom Perf Models
 
-See `examples/megatron_extension.py` for a complete example of extending TraceLens with custom Megatron operations.
+Perf-model output is primarily consumed through `unified_perf_summary`. If an operation only needs to be labeled in that table, use `op_category_extension` instead of adding a perf model. Add a perf model when TraceLens should calculate theoretical FLOPs, bytes moved, arithmetic intensity, TFLOPS/s, or TB/s for the op.
 
-**Note**: If your custom operation is frequently used across multiple projects, we can work to add it as a native operation in TraceLens. Please open an issue or reach out to discuss integration.
+For generally useful operators, add the model natively in TraceLens:
+
+1. Create a performance model class in `TraceLens/PerfModel/perf_model.py` or a focused module under `TraceLens/PerfModel/extensions/`.
+2. Inherit from the closest existing base (`GEMM`, `CONV`, `SDPA`, `Normalization`, `UnaryElementwise`, etc.) when possible.
+3. Set `category` on the class, for example `category = "GEMM"` or `category = "NORM_bwd"`. Use `bwd_category` only when a forward model intentionally computes linked backward metrics. Use `sheet_category` only when the legacy sheet name should differ from the runtime category.
+4. Implement `get_param_details(event)` to parse the trace event's `args` into the parameters needed by the model.
+5. Implement or inherit `flops()` and `bytes()`.
+6. Make sure the model reports the right compute spec. Existing bases usually provide this; custom bases should implement `get_maf_type()` (for example `matrix` or `vector`) and `get_compute_precision()` so `--gpu_arch_json_path` can look up the matching MAF entry such as `matrix_bf16`.
+7. Register the op name in `TraceLens/PerfModel/torch_op_mapping.py` via `op_to_perf_model_class_map`.
+8. Add tests for categorization and model behavior. At minimum, make sure `tests/test_torch_op_categorization_registry.py` covers the new op category.
+
+For private or customer-specific operators that should not live in the shared source tree, use an extension file and pass it with `--extension_file`:
+
+```python
+from TraceLens.PerfModel.perf_model import GEMM, name2bpe
+
+
+class my_custom_gemm(GEMM):
+    category = "GEMM"
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+        M, K = input_dims[0]
+        _, N = input_dims[1]
+        return {
+            "M": M,
+            "K": K,
+            "N": N,
+            "bias": False,
+            "dtype_A_B": (input_types[0], input_types[1]),
+        }
+
+    def bytes(self):
+        dtype_a, dtype_b = self.param_details["dtype_A_B"]
+        bpe_a = name2bpe(dtype_a)
+        bpe_b = name2bpe(dtype_b)
+        # Assume the output uses the same dtype as A for this example.
+        return super().bytes(
+            bpe_mat1=bpe_a,
+            bpe_mat2=bpe_b,
+            bpe_bias=bpe_a,
+            bpe_output=bpe_a,
+        )
+
+
+perf_model_extension = {
+    "my_namespace::custom_gemm": my_custom_gemm,
+}
+
+op_category_extension = {
+    "my_namespace::custom_attention_backward_without_model": "SDPA_bwd",
+}
+```
+
+See `examples/example_megatron_extension.py` for a complete extension example.
 
 ---
 
@@ -942,8 +1021,6 @@ Depending on the command-line arguments used when generating the report, additio
 - **kernel_summary**: Per-kernel statistics aggregated by kernel name (enabled with `--kernel_summary`)
 
 - **short_kernel_histogram**, **short_kernels_summary**: Analysis of very short kernels (enabled with `--short_kernel_study`)
-
-- **unified_perf_summary**: Unified perf metrics for all ops with perf models or leaf ops that launch GPU kernels. Includes GFLOPS, TFLOPS/s, Data Moved, FLOPS/Byte, TB/s metrics aggregated by unique args. When `--detect_recompute` is enabled, an `is_recompute` column is added to split rows by recompute status.
 
 ---
 
