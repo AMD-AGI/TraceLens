@@ -209,7 +209,14 @@ def _meta_from_trace_args(event: dict) -> dict | None:
     is_reduction = name.startswith("triton_red_") or name.startswith("triton_per_")
     is_pointwise = name.startswith("triton_poi_")
 
-    scalars = [int(v) for v in concrete if v != ""]
+    scalars = []
+    for v in concrete:
+        if v == "":
+            continue
+        try:
+            scalars.append(int(v))
+        except (ValueError, TypeError):
+            continue
     if is_reduction and len(scalars) >= 2:
         xnumel, rnumel = scalars[-2], scalars[-1]
     elif scalars:
