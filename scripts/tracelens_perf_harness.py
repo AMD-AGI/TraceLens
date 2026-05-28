@@ -12,22 +12,15 @@ via pstats, records peak RSS, outputs structured timing JSON, and optionally
 emits OTLP metrics to Grafana Cloud.
 
 Usage:
-    # Single trace, local only
-    python scripts/tracelens_perf_harness.py \
-        --trace-file /path/to/trace.json \
-        --output-dir ./perf_results
-
     # Manifest-driven, with OTLP emission
     python scripts/tracelens_perf_harness.py \
         --manifest config/trace_manifest.yaml \
-        --trace-dir /tmp/traces \
         --output-dir ./perf_results \
         --emit-otlp
 
     # Manifest with filter
     python scripts/tracelens_perf_harness.py \
         --manifest config/trace_manifest.yaml \
-        --trace-dir /tmp/traces \
         --output-dir ./perf_results \
         --filter "trace_001,trace_003"
 """
@@ -256,7 +249,7 @@ def emit_otlp_metrics(results, metadata):
     print("OTLP metrics emitted successfully")
 
 
-def run_manifest(manifest_path, trace_dir, output_dir, filter_ids=None):
+def run_manifest(manifest_path, output_dir, filter_ids=None):
     """Profile all enabled traces from a manifest and return list of result dicts."""
     traces = load_manifest(manifest_path)
     results = []
@@ -269,8 +262,7 @@ def run_manifest(manifest_path, trace_dir, output_dir, filter_ids=None):
         if filter_ids and tid not in filter_ids:
             continue
 
-        trace_filename = Path(trace_entry["source_location"]).name
-        trace_path = os.path.join(trace_dir, trace_filename)
+        trace_path = PROJECT_ROOT / trace_entry["trace_path"]
 
         if not os.path.exists(trace_path):
             print(f"Warning: trace file not found: {trace_path}, skipping {tid}")
@@ -292,10 +284,6 @@ def main():
     parser.add_argument(
         "--manifest",
         help="Path to trace manifest YAML",
-    )
-    parser.add_argument(
-        "--trace-dir",
-        help="Directory containing trace files",
     )
     parser.add_argument(
         "--output-dir",
@@ -324,8 +312,8 @@ def main():
         emit_otlp_metrics(data["traces"], data["metadata"])
         return
 
-    if not args.manifest or not args.trace_dir or not args.output_dir:
-        parser.error("--manifest, --trace-dir, and --output-dir are required")
+    if not args.manifest or not args.output_dir:
+        parser.error("--manifest and --output-dir are required")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -333,7 +321,7 @@ def main():
     if args.filter:
         filter_ids = set(args.filter.split(","))
 
-    results = run_manifest(args.manifest, args.trace_dir, args.output_dir, filter_ids)
+    results = run_manifest(args.manifest, args.output_dir, filter_ids)
 
     if not results:
         print("No traces were profiled")

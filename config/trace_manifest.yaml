@@ -7,67 +7,67 @@
 version: 1
 traces:
   - trace_id: "distributed_transformer_example0"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/distributed_transformer_example0.json.gz"
+    trace_path: "traces/distributed_transformer_example0.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
-  
+
   - trace_id: "facebook_timesformer"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/facebook_timesformer-base-finetuned-k400__1016002.json.gz"
+    trace_path: "traces/facebook_timesformer-base-finetuned-k400__1016002.json.gz"
     workload_family: "video"
     enabled: true
     notes: ""
 
   - trace_id: "gpt3_fsdp_example0"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/gpt3_fsdp_example0.json.gz"
+    trace_path: "traces/gpt3_fsdp_example0.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "gptoss_vllm_example0"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/gptoss_vllm_example0.json.gz"
+    trace_path: "traces/gptoss_vllm_example0.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "huvideo_rank4_step3"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/huvideo_rank4_step3.json.gz"
+    trace_path: "traces/huvideo_rank4_step3.json.gz"
     workload_family: "video"
     enabled: true
     notes: ""
 
   - trace_id: "mi355_dsr1fp4_sglang_tp3"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/mi355_dsr1fp4_sglang_tp3.json.gz"
+    trace_path: "traces/mi355_dsr1fp4_sglang_tp3.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "mixtral_8x22b_b200"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/mixtral_8x22b_b200.json.gz"
+    trace_path: "traces/mixtral_8x22b_b200.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "tensorrtllm_example0"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/tensorrtllm_example0.json.gz"
+    trace_path: "traces/tensorrtllm_example0.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "vllm_example0"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/vllm_example0.json.gz"
+    trace_path: "traces/vllm_example0.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "vllm_example1"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/vllm_example1.json.gz"
+    trace_path: "traces/vllm_example1.json.gz"
     workload_family: "nlp"
     enabled: true
     notes: ""
 
   - trace_id: "wan_rank0"
-    source_location: "sharepoint:Documents/tracelens-private-traces/traces/wan_rank0.json.gz"
+    trace_path: "traces/wan_rank0.json.gz"
     workload_family: "video"
     enabled: true
     notes: ""
