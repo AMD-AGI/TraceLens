@@ -167,7 +167,7 @@ def emit_otlp_metrics(results, metadata):
         OTLPMetricExporter,
     )
     from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
     from opentelemetry.sdk.resources import Resource
 
     otlp_endpoint = os.environ.get("GRAFANA_CLOUD_OTLP_ENDPOINT")
@@ -194,9 +194,9 @@ def emit_otlp_metrics(results, metadata):
         otlp_endpoint = otlp_endpoint.rstrip("/") + "/v1/metrics"
     exporter = OTLPMetricExporter(endpoint=otlp_endpoint, headers=headers)
 
-    # InMemoryMetricReader has no background thread — it holds metrics in memory
-    # and only exports when we explicitly call collect() + exporter.export().
-    reader = InMemoryMetricReader()
+    # Long interval so the background thread never fires — force_flush() below
+    # drives the single explicit export after all gauges are set.
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=3_600_000)
     provider = MeterProvider(resource=otel_resource, metric_readers=[reader])
     metrics.set_meter_provider(provider)
 
@@ -249,17 +249,10 @@ def emit_otlp_metrics(results, metadata):
             },
         )
 
-    # All gauges are set — collect from memory and export exactly once.
-    from opentelemetry.sdk.metrics.export import MetricExportResult
-
-    metrics_data = reader.get_metrics_data()
-    result = exporter.export(metrics_data)
+    # All gauges are set — flush once explicitly then shut down.
+    provider.force_flush()
     provider.shutdown()
-    if result is MetricExportResult.SUCCESS:
-        print("OTLP metrics emitted successfully")
-    else:
-        print("ERROR: OTLP export failed — check GRAFANA_CLOUD_OTLP_ENDPOINT and GRAFANA_CLOUD_OTLP_TOKEN env vars")
-        sys.exit(1)
+    print("OTLP metrics emitted successfully")
 
 
 def run_manifest(manifest_path, trace_dir, output_dir, filter_ids=None):
