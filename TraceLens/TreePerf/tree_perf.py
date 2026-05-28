@@ -2887,6 +2887,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
+        self.inductor_cache_dir = None
         self.event_to_category = event_to_category
         self.pb_file_name = pb_file_name
         self.arch = arch
