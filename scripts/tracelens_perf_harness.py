@@ -153,6 +153,7 @@ def build_metadata():
     """Build metadata dict for the timing JSON output."""
     return {
         "commit_sha": get_commit_sha(),
+        "test": "test",
         "run_date": datetime.now(timezone.utc).isoformat(),
         "python_version": platform.python_version(),
         "tracelens_version": get_tracelens_version(),
