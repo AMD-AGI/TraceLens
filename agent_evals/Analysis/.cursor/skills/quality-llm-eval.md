@@ -25,6 +25,7 @@ When triggered, the prompt will specify:
 - **output_dir**: path to the generated `analysis_output/` directory
 - **reference_dir**: path to the `analysis_output_ref/` directory
 - **results_path**: path to write the results CSV
+- **comparison_scope**: `standalone` (default) or `comparative`
 
 ## Files to Read
 
@@ -67,8 +68,10 @@ Evaluate BOTH checks below. Write BOTH rows to the results CSV.
 Compare the P-item titles in the generated `analysis.md` against the reference report. For each P-item in the reference (lines matching `### ... P1:`, `### ... P2:`, etc.):
 
 - Check if the generated report identifies the **same bottleneck** at the same or similar priority level
-- This is a **semantic** comparison, not a string match.
+- This is a **semantic** comparison, not a string match
 - A P-item in the reference that has no semantic match in the generated report is a miss
+
+**comparison_scope=comparative note:** P-items in a comparative report describe **deltas between traces**. Correctness means the same cross-trace delta or bottleneck is identified — not an absolute single-trace bottleneck. Apply the scoring guide with this context in mind.
 
 **Scoring guide:**
 - **correctness**: Do matched titles describe the same bottleneck? (10=same bottleneck e.g. both say "GEMM low CU occupancy", 7=same category and root cause but framed differently e.g. "low CU occupancy due to small tiles" vs "insufficient tile coverage on CUs", 4=same category but different root cause e.g. "occupancy" vs "memory bandwidth", 0=wrong category or fabricated bottleneck)
@@ -82,14 +85,15 @@ Compare the P-item titles in the generated `analysis.md` against the reference r
 **Category:** Quality
 **Issue Summary:** Compute Issue Content Alignment
 
-For each matched P-item pair (from eval 2), compare the content values. **Only compare Compute Kernel P-items** (under `## Compute Kernel Optimizations`). **Skip System-Level P-items** (under `## System-Level Optimizations`) entirely -- system P-items have no `**Impact**` field and no numeric gain to compare.
+For each matched P-item pair (from eval 2), compare the content values. **Only compare Compute Kernel P-items** (under `## Compute Kernel Optimizations`). **Skip System-Level P-items** (under `## System-Level Optimizations`) entirely — system P-items have no `**Impact**` field and no numeric gain to compare.
 
 For each matched compute P-item pair:
 
 - **Performance numbers**: kernel time, efficiency percentage, achieved bandwidth/TFLOPS. Numeric tolerance: 2% relative difference.
 - **Shapes**: matrix dimensions, batch sizes. Must match exactly.
 - **Gap to roofline**: the efficiency percentage or fraction of peak. Tolerance: 2%.
-- **Estimated gain**: savings in ms from pre-computed `kernel_tuning` estimates (format: `~X.X ms savings from closing efficiency gaps (pre-computed)` or `Not quantifiable from trace data`). Tolerance: 2%. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
+- **Estimated gain**: savings in ms or speedup factor. Tolerance: 2% relative. **For estimated savings values < 5 ms, accept differences up to 1 ms absolute regardless of relative percentage**. When both reference and generated P-items have no numeric estimated gain (e.g., both say "Not quantifiable" or equivalent non-numeric text), treat as aligned. Flag a mismatch only when one side has a numeric gain and the other does not.
+- **Diff values** (comparison_scope=comparative only): cross-trace deltas expressed as "−12.3 ms" or "2.1× slower". Treat these like performance numbers with 2% relative tolerance.
 
 When comparing Impact/savings fields, accept format variants as equivalent: `**Estimated Savings**` tables, `**Impact** kernel_tuning` inline text, and `~X.X ms savings (pre-computed)` patterns all convey the same information. Compare the numeric values regardless of formatting. Do not flag a mismatch solely because the label or structure differs between reference and generated.
 
@@ -113,4 +117,5 @@ Use `quality_eval_2` and `quality_eval_3` as the `index` values.
 In the `details` column, include the scoring breakdown in the format:
 `correctness=N/10 completeness=N/10 precision=N/10 overall=N.N | <explanation>`
 
+**Replace all commas in the `details` explanation text with semicolons** to avoid breaking CSV parsing.
 Do not add any other columns.
