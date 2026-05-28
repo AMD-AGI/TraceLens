@@ -171,24 +171,24 @@ def _is_case_a_fusion_gap(trace1_kernels: list, trace2_kernels: list) -> bool:
 
 def _build_diff_stats_lookups(df):
     """Build UID→kernel and LCA→trace2-kernels mappings from diff_stats DataFrame."""
-    uid_to_t1 = {}  # gpu_event_uid → {name, type, dur_us, lca_id}
+    uid_to_t1 = {}  # gpu_op_uid → {name, type, dur_us, lca_id}
     lca_to_t2: dict = defaultdict(list)  # lca_id → [kernel dicts]
 
-    has_uid = "gpu_event_uid" in df.columns
+    has_uid = "gpu_op_uid" in df.columns
     for _, row in df.iterrows():
         kname = row["name"]
         ktype, *_ = classify_kernel(kname)
         lca_id = row["lowest_common_ancestor_id"]
         dur_us = float(row.get("kernel_time", 0) or 0)
 
-        if row["source"] == "trace1" and has_uid and pd.notna(row.get("gpu_event_uid")):
-            uid = int(row["gpu_event_uid"])
+        if row["source"] == "trace1" and has_uid and pd.notna(row.get("gpu_op_uid")):
+            uid = int(row["gpu_op_uid"])
             uid_to_t1[uid] = {
                 "name": kname,
                 "type": ktype,
                 "dur_us": dur_us,
                 "lca_id": lca_id,
-                "gpu_event_uid": uid,
+                "gpu_op_uid": uid,
             }
         elif row["source"] == "trace2":
             lca_to_t2[lca_id].append(
@@ -507,7 +507,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                             "type": ktype,
                             "dur_us": k.get("dur", 0),
                             "eligible": _is_fusion_eligible(kname),
-                            "gpu_event_uid": uid,
+                            "gpu_op_uid": uid,
                         }
                     )
             except (KeyError, IndexError):
@@ -559,7 +559,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                     "kernel_type": ktype,
                     "kernel_name": kname,
                     "dur_us": k.get("dur", 0),
-                    "gpu_event_uid": gpu_uids[0],
+                    "gpu_op_uid": gpu_uids[0],
                 }
             )
         except (KeyError, IndexError):
