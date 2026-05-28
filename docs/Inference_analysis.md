@@ -69,7 +69,7 @@ The remainder of Step 2 covers manual trace collection — building or patching 
 
 ###### vLLM Script
 
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, or `v20`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, `v20`, or `v21`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
 | Version | Base Image                                                    | vLLM Version | Patch File                  |
@@ -81,6 +81,7 @@ A unified build script is provided that supports multiple vLLM versions. It take
 | `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      | `config_vllm_v0.18.0.patch` |
 | `v19`   | `vllm/vllm-openai-rocm:v0.19.0`                               | v0.19.0      | `config_vllm_v0.19.0.patch` |
 | `v20`   | `rocm/vllm-dev:preview_v0.20.0_20260429`                      | v0.20.0      | `config_vllm_v0.20.0.patch` |
+| `v21`   | `vllm/vllm-openai-rocm:v0.21.0`                               | v0.21.0      | `config_vllm_v0.21.0.patch` |
 
 
 ```bash
