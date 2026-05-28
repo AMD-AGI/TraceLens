@@ -45,7 +45,7 @@ the fallback:
 # TritonCompiledPerfModel.__init__
 self._meta = _meta_from_trace_args(event)   # V2: trace event args
 if self._meta is None:
-    self._meta = _lookup(self.name)          # V1: Inductor cache files
+    self._meta = _lookup(self.name, kwargs.get("inductor_cache_dir"))  # V1: cache fallback
 ```
 
 ### V2: Trace-Intrinsic (primary)
@@ -67,15 +67,21 @@ self-contained.
 
 | Field | What it provides |
 |-------|-----------------|
-| `Concrete Inputs` | Scalar values including `xnumel` and `rnumel` (exact, not rounded) |
+| `Concrete Inputs` | Scalar values including `xnumel` and `rnumel` (exact, not rounded). Non-integer values (floats, booleans) are skipped; only integer scalars are used for element counts. |
 | `Input Dims` | Per-tensor shapes for exact byte calculation |
 | `Input type` | C10 dtype strings (`c10::BFloat16` = 2 bytes, `c10::Float` = 4 bytes) |
 
 ### V1: Cache-Based (fallback)
 
-Parses the Inductor wrapper `.py` files from the torch.compile cache directory
-(`/tmp/torchinductor_<user>/`).  Used when trace args are missing (older
-PyTorch traces) or when the trace was collected without `record_shapes=True`.
+Parses the Inductor wrapper `.py` files from the torch.compile cache directory.
+Used when trace args are missing (older PyTorch traces) or when the trace was
+collected without `record_shapes=True`.
+
+Cache dirs searched (first match wins):
+1. `--inductor_cache_dir` CLI argument (explicit)
+2. `$TORCHINDUCTOR_CACHE_DIR` environment variable
+3. `~/.cache/torchinductor`
+4. `/tmp/torchinductor_<user>`
 
 Three fields are extracted via regex:
 
@@ -97,6 +103,7 @@ size_hints=[268435456]                # older list format
 |--|----------------------|-------------------|
 | Data source | Chrome trace `event["args"]` | Inductor cache `.py` files on disk |
 | PyTorch version | 2.4+ | Any |
+| ATen ops source | Parsed from kernel name via DP segmentation against `_known_aten_ops.json` | `Original ATen: [...]` comment in cache file |
 | Element counts | Exact (from `Concrete Inputs`) | Rounded to power-of-2 (`size_hints`) |
 | Bytes calculation | Per-tensor: `prod(shape) * bytes_per_elem` | Per-pointer: `ptr_bytes * xnumel` |
 | External dependency | None — trace is self-contained | Requires cache directory on disk |
@@ -119,9 +126,10 @@ Input type:      ['c10::BFloat16', 'c10::BFloat16', 'Scalar']
 
 ### 3.2 Element count extraction
 
-Scalars from `Concrete Inputs` (non-empty values): `[268435456]`
+Integer scalars from `Concrete Inputs` (empty strings and non-integer values
+like floats or booleans are skipped): `[268435456]`
 
-Pointwise kernel → last scalar is `xnumel`:
+Pointwise kernel → last integer scalar is `xnumel`:
 - `xnumel = 268,435,456` (= 8 x 4,096 x 8,192)
 - `rnumel = 1`
 
@@ -211,9 +219,9 @@ Input type:      ['c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', 'Scalar', '
 
 ### 4.2 Element count extraction
 
-Scalars from `Concrete Inputs`: `[32768, 2048]`
+Integer scalars from `Concrete Inputs` (non-integer values skipped): `[32768, 2048]`
 
-Reduction kernel → last two scalars are `xnumel` and `rnumel`:
+Reduction kernel → last two integer scalars are `xnumel` and `rnumel`:
 - `xnumel = 32,768` (= 8 x 4,096 = batch x seq_len)
 - `rnumel = 2,048` (= hidden_dim, the reduction axis)
 
@@ -325,8 +333,8 @@ read and written — they appear once in the signature but move data twice.
 
 ### Throughput
 
-All throughput metrics use the GPU kernel execution time from the Chrome trace
-(not the CPU launch time):
+All throughput metrics use the **busy kernel time** from `GPUEventAnalyser`
+(aggregated GPU execution time, not the CPU-side `event["dur"]`):
 
 ```
 TB/s     = (bytes_moved / 1e12) / (kernel_time_us / 1e6)
@@ -342,16 +350,21 @@ Data Moved (MB) = bytes_moved / (1024 * 1024)
 ```
 Chrome Trace (.json.gz)
 │
-├── event["args"]                          event["dur"]
+├── event["name"]
+│   │
+│   └── resolve_perf_model_class()
+│       └── _match_triton_compiled() → TritonCompiledPerfModel
+│
+├── event["args"]                          GPU events
 │   ├── Concrete Inputs                         │
 │   ├── Input Dims                              │
 │   └── Input type                              │
 │         │                                     │
 │    ┌────┴─────┐                               │
 │    │ V2 path  │ ──── _meta_from_trace_args()  │
-│    └────┬─────┘                               │
-│         │                                     │
-│     success?                                  │
+│    └────┬─────┘      ├── scalars → xnumel, rnumel
+│         │            ├── dims + dtypes → total_bytes
+│     success?         └── _parse_kernel_name() → aten_ops
 │     ├── yes ── _meta ─────────┐               │
 │     └── no                    │               │
 │          │                    │               │
@@ -361,8 +374,8 @@ Chrome Trace (.json.gz)
 │          │                    │               │
 │   Inductor Cache (.py)        │               │
 │   ├── Original ATen           │               │
-│   ├── size_hints              │               │
-│   └── signature               │               │
+│   ├── size_hints              │        GPUEventAnalyser
+│   └── signature               │          busy_time
 │          │                    │               │
 │          └── _lookup() ── _meta               │
 │                               │               │
@@ -374,7 +387,7 @@ Chrome Trace (.json.gz)
 │                               └───────┬───────┘
 │                                       │
 │                                  TB/s, TFLOPS/s
-│                              (tree_perf.py:421)
+│                          (tree_perf.py:compute_perf_metrics)
 ```
 
 ---
