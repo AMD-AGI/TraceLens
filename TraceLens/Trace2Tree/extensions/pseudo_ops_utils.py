@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -93,6 +93,7 @@ def inject_pseudo_op(
 
     set_bookkeeping_attr(tree, pseudo_evt)
 
+    pseudo_evt["parent"] = orig_cpu_evt["UID"]
     children = orig_cpu_evt["children"]
     children.remove(launcher_evt["UID"])
     children.append(pseudo_evt["UID"])
@@ -173,6 +174,77 @@ def inject_pseudo_op_wrap_children(
     tree.cpu_root_nodes.append(pseudo_evt["UID"])
 
 
+def inject_pseudo_op_above_event(
+    tree,
+    target_evt,
+    name,
+    shape_donor_evt=None,
+    extra_args=None,
+):
+    """
+    Insert a new pseudo cpu_op between target_evt and its current parent.
+
+    Resulting layout: parent -> pseudo_evt -> target_evt (target's subtree unchanged).
+    Pseudo args (Input Dims / Input type / Input Strides / Concrete Inputs /
+    Sequence number) are inherited from shape_donor_evt; if None, falls back
+    to the target's current parent.
+
+    Args:
+        tree: TraceToTree instance
+        target_evt: Existing event the pseudo op should wrap (becomes its sole child)
+        name: Name of the pseudo-op
+        shape_donor_evt: Event to inherit shapes from (uses parent if None)
+        extra_args: Additional custom args to add to pseudo-op (dict)
+
+    Returns:
+        The pseudo event dict, or None if target_evt has no parent.
+    """
+
+    parent_evt = tree.get_parent_event(target_evt)
+    if parent_evt is None:
+        logger.warning(
+            f"inject_pseudo_op_above_event: target UID {target_evt.get('UID')} "
+            f"has no parent; skipping injection of {name}"
+        )
+        return None
+
+    donor = shape_donor_evt if shape_donor_evt is not None else parent_evt
+    donor_args = donor.get("args", {})
+
+    pseudo_evt = {
+        "ph": "X",
+        "name": name,
+        "cat": "cpu_op",
+        "pid": target_evt.get("pid", parent_evt.get("pid")),
+        "tid": target_evt.get("tid", parent_evt.get("tid")),
+        "ts": target_evt.get("ts"),
+        "dur": target_evt.get("dur"),
+        "args": {
+            "Input Dims": donor_args.get("Input Dims"),
+            "Input type": donor_args.get("Input type"),
+            "Input Strides": donor_args.get("Input Strides"),
+            "Concrete Inputs": donor_args.get("Concrete Inputs"),
+            "Sequence number": donor_args.get("Sequence number", parent_evt.get("UID")),
+            "Pseudo op": True,
+        },
+        "children": [target_evt["UID"]],
+        "gpu_events": list(target_evt.get("gpu_events", [])),
+    }
+
+    if extra_args:
+        pseudo_evt["args"].update(extra_args)
+
+    set_bookkeeping_attr(tree, pseudo_evt)
+
+    pseudo_evt["parent"] = parent_evt["UID"]
+    parent_children = parent_evt["children"]
+    idx = parent_children.index(target_evt["UID"])
+    parent_children[idx] = pseudo_evt["UID"]
+    target_evt["parent"] = pseudo_evt["UID"]
+
+    return pseudo_evt
+
+
 def apply_pseudo_op_extensions(tree, verbose: bool = False):
     """
     Apply all available pseudo-op extensions to trace tree.
@@ -230,6 +302,14 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
                 logger.info(
                     "Auto-detected GPTQ/AWQ MoE operations (outplace_fused_experts)"
                 )
+
+    # MoE: flydsl 2-stage implementation (gated on aiter::fused_moe_ parent op)
+    if "aiter::fused_moe_" in tree.name2event_uids:
+        from .moe_flydsl_pseudo_ops import create_pseudo_ops_moe_flydsl
+
+        extensions.append(("MoE_Flydsl", create_pseudo_ops_moe_flydsl))
+        if verbose:
+            logger.info("Auto-detected flydsl MoE operations under aiter::fused_moe_")
 
     # MLA Decode: AITER implementation
     if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:

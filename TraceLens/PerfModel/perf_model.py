@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -15,7 +15,7 @@ import warnings
 
 from .kernel_name_parser import gemm_name_parser
 
-from .utils import name2bpe, simulation_dtype_map, torch_dtype_map
+from .utils import name2bpe, parse_bool, simulation_dtype_map, torch_dtype_map
 
 
 # 1. GEMM
@@ -5368,3 +5368,530 @@ class mamba_ssd_fwd(MambaSSD):
     """MambaSplitConv1dScanCombinedFn forward pass."""
 
     pass
+
+
+# ---------------------------------------------------------------------------
+# primus_turbo FP8 ops (#626)
+# ---------------------------------------------------------------------------
+
+
+class hipblaslt_gemm_fp8(GEMM):
+    """
+    primus_turbo_cpp_extension::hipblaslt_gemm_fp8 — FP8 GEMM via hipBLASLt.
+
+    9-slot input layout (from Primus-Turbo C++ binding):
+      hipblaslt_gemm_fp8(A, scaleA_inv, B, scaleB_inv,
+                         out_dtype, transA, transB, transC, granularity)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (), (B0, B1), (), (), (), (), (), ())
+      Input type:  (fp8, float, fp8, float, Scalar, ...)
+      Concrete Inputs: ('', '', '', '', '<dtype_enum>', '<transA>', '<transB>', '<transC>', '')
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        # Concrete Inputs may be missing (older traces) or present-but-None
+        # (some kineto exporters); normalize to [] for both cases.
+        concrete = event["args"].get("Concrete Inputs") or []
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[2])
+
+        trans_a = parse_bool(concrete[5]) if len(concrete) > 5 else False
+        trans_b = parse_bool(concrete[6]) if len(concrete) > 6 else False
+        trans_c = parse_bool(concrete[7]) if len(concrete) > 7 else False
+
+        # Replicate C++ transC swap (hipblaslt_gemm.cpp)
+        if trans_c:
+            A_shape, B_shape = B_shape, A_shape
+            trans_a, trans_b = not trans_b, not trans_a
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K = A_shape[0] if trans_a else A_shape[1]
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        dtype_A_B = (event["args"]["Input type"][0], event["args"]["Input type"][2])
+        input_types = event["args"]["Input type"]
+        dtype_scaleA = input_types[1] if len(input_types) > 1 else None
+        dtype_scaleB = input_types[3] if len(input_types) > 3 else None
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][2])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+            "dtype_scaleA": dtype_scaleA,
+            "dtype_scaleB": dtype_scaleB,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpeA = name2bpe(dtype_A_B[0])
+        bpeB = name2bpe(dtype_A_B[1])
+        assert (
+            bpeA is not None and bpeB is not None
+        ), f"Data types of A and B are not supported: {dtype_A_B}"
+        self.bpe = bpeA
+        # FP8 inputs (1 byte), BF16/FP16 output (2 bytes)
+        out_bpe = 2 if self.bpe == 1 else self.bpe
+        return super().bytes(
+            bpe_mat1=self.bpe,
+            bpe_mat2=bpeB,
+            bpe_bias=self.bpe,
+            bpe_output=out_bpe,
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp8 is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp8 is not defined."
+        )
+
+
+class primus_turbo_quantize_fp8(UnaryElementwise):
+    """
+    primus_turbo_cpp_extension::quantize_fp8_tensorwise
+
+    BF16 → FP8 per-tensor quantize for delayed-scaling tensorwise recipe.
+    Trace arg layout: (tensor, scale_inv, amax) where tensor is BF16 2-D,
+    scale_inv and amax are scalars.
+
+    Memory-bandwidth bound: reads 2·M·N bytes (BF16), writes M·N bytes (FP8).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, "c10::Float8_e4m3fnuz"),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# primus fused_ln_modulate (#627)
+# ---------------------------------------------------------------------------
+
+
+class FusedLnModulate(Normalization):
+    """
+    primus::fused_ln_modulate — forward
+
+    Fused LayerNorm + scale/shift modulation for MM-DiT / DiT blocks.
+    Input: x:(T,B,H), scale:(B,H), shift:(B,H), eps (scalar).
+
+    Memory-bandwidth bound:
+      fwd bytes = 2·T·B·H·bpe (read x, write y) + 2·B·H·bpe (read scale, shift)
+                  + 2·T·B·4 (write mean, rstd as float32, one per row)
+      flops ≈ T·B·H·12 (LN: subtract mean, square, sum, rsqrt, normalize ≈ 8;
+              modulate: scale + shift ≈ 2; residual: 2)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        x_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+
+        T, B, H = x_shape[0], x_shape[1], x_shape[2]
+        return {
+            "op_shape": x_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": H,
+            "has_bias": True,
+            "is_affine": True,
+            "is_training": True,
+        }
+
+    def flops(self):
+        return self.num_elems * 12
+
+    def bytes(self):
+        bpe = self.bpe_in
+        T = self.param_details["op_shape"][0]
+        B = self.param_details["op_shape"][1]
+        H = self.num_channels
+        T_B_H = self.num_elems
+        read_x = T_B_H * bpe
+        write_y = T_B_H * bpe
+        read_scale_shift = 2 * B * H * bpe
+        write_mean_rstd = 2 * T * B * 4
+        return read_x + write_y + read_scale_shift + write_mean_rstd
+
+    def flops_bwd(self):
+        raise NotImplementedError("Use FusedLnModulateBackward for the backward pass.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Use FusedLnModulateBackward for the backward pass.")
+
+
+class FusedLnModulateBackward(Normalization):
+    """
+    primus::fused_ln_modulate_backward
+
+    Backward pass of the fused LN+modulate kernel.
+    Input: grad_out:(T,B,H), x_norm:(T,B,H), mean:(B*T,), rstd:(B*T,), mod_grad:(B,H)
+
+    Memory-bandwidth bound:
+      bwd bytes = 2·T·B·H·bpe (read grad_out, x_norm) + 2·T·B·4 (read mean, rstd)
+                  + T·B·H·bpe (write x_grad) + 2·B·H·bpe (write scale_grad, shift_grad)
+                  + B·H·bpe (read modulation_grad)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        grad_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+
+        T, B, H = grad_shape[0], grad_shape[1], grad_shape[2]
+        return {
+            "op_shape": grad_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": H,
+            "has_bias": True,
+            "is_affine": True,
+            "is_training": True,
+            "output_mask": [True, True, True],
+        }
+
+    def flops(self):
+        return self.num_elems * 15
+
+    def bytes(self):
+        bpe = self.bpe_in
+        T_B_H = self.num_elems
+        B = self.param_details["op_shape"][1]
+        T = self.param_details["op_shape"][0]
+        H = self.num_channels
+        read_grad_x_norm = 2 * T_B_H * bpe
+        read_mean_rstd = 2 * B * T * 4
+        write_x_grad = T_B_H * bpe
+        write_scale_shift_grad = 2 * B * H * bpe
+        read_mod_grad = B * H * bpe
+        return (
+            read_grad_x_norm
+            + read_mean_rstd
+            + write_x_grad
+            + write_scale_shift_grad
+            + read_mod_grad
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError
+
+    def bytes_bwd(self):
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# primus_turbo MXFP4 ops (#637)
+# ---------------------------------------------------------------------------
+
+
+class hipblaslt_gemm_fp4(GEMM):
+    """
+    primus_turbo_cpp_extension::hipblaslt_gemm_fp4 — MXFP4 GEMM via hipBLASLt.
+
+    9-slot input layout (from Primus-Turbo C++ binding `hipblaslt_gemm_fp4`):
+      hipblaslt_gemm_fp4(A, scaleA_inv, B, scaleB_inv,
+                         out_dtype, transA, transB, transC, granularity)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (scA0, scA1), (B0, B1), (scB0, scB1),
+                    (), (), (), (), ())
+      Input type:  (Float4_e2m1fn_x2, Float8_e8m0fnu,
+                    Float4_e2m1fn_x2, Float8_e8m0fnu, Scalar, ...)
+      Concrete Inputs: ('', '', '', '', '<dtype_enum>',
+                        '<transA>', '<transB>', '<transC>', '<granularity>')
+
+    Key differences from `hipblaslt_gemm_fp8`:
+      1. K is packed: `Float4_e2m1fn_x2` packs two FP4 values per byte. The
+         traced tensor shape uses K_packed = K/2. The perf model multiplies
+         K by 2 to recover the logical K, mirroring the C++ binding.
+      2. Scale slots 1 and 3 are 2-D E8M0 tensors of shape (M, K/32) and
+         (N, K/32) (MXFP4 block-wise, 32-element blocks). Their bytes are
+         folded into the model.
+      3. The transC swap is identical to FP8 (A↔B with transA/transB inversion).
+      4. hipBLASLt only supports the NT layout for MXFP4. The model still
+         accepts other flags so it tolerates future relaxations and avoids
+         silently failing on legacy traces.
+    """
+
+    MXFP4_BLOCK_SIZE = 32
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs") or []
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[2])
+
+        trans_a = parse_bool(concrete[5]) if len(concrete) > 5 else False
+        trans_b = parse_bool(concrete[6]) if len(concrete) > 6 else False
+        trans_c = parse_bool(concrete[7]) if len(concrete) > 7 else False
+
+        if trans_c:
+            A_shape, B_shape = B_shape, A_shape
+            trans_a, trans_b = not trans_b, not trans_a
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K_packed = A_shape[0] if trans_a else A_shape[1]
+        K = K_packed * 2
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        input_types = event["args"]["Input type"]
+        dtype_A_B = (input_types[0], input_types[2])
+        dtype_scaleA = input_types[1] if len(input_types) > 1 else None
+        dtype_scaleB = input_types[3] if len(input_types) > 3 else None
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][2])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+            "dtype_scaleA": dtype_scaleA,
+            "dtype_scaleB": dtype_scaleB,
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpeA = name2bpe(dtype_A_B[0])
+        bpeB = name2bpe(dtype_A_B[1])
+        assert (
+            bpeA is not None and bpeB is not None
+        ), f"Data types of A and B are not supported: {dtype_A_B}"
+        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
+        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
+        # bypass it and compute bytes explicitly so we can fold in the
+        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
+        M, N, K = self.M, self.N, self.K
+        block = self.MXFP4_BLOCK_SIZE
+        scales_per_row = (K + block - 1) // block
+        bytes_A = M * (K // 2) * bpeA
+        bytes_B = N * (K // 2) * bpeB
+        bpe_scaleA = name2bpe(self.param_details.get("dtype_scaleA")) or 1
+        bpe_scaleB = name2bpe(self.param_details.get("dtype_scaleB")) or 1
+        bytes_scaleA = M * scales_per_row * bpe_scaleA
+        bytes_scaleB = N * scales_per_row * bpe_scaleB
+        # MXFP4 output is BF16/FP16 (2 bytes). The binding asserts a 16-bit
+        # floating-point output dtype so we hard-code 2 here.
+        bytes_out = M * N * 2
+        return bytes_A + bytes_B + bytes_scaleA + bytes_scaleB + bytes_out
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp4 is not defined."
+        )
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError(
+            "Backward pass for hipblaslt_gemm_fp4 is not defined."
+        )
+
+
+class primus_turbo_quantize_mxfp4_dual(UnaryElementwise):
+    """
+    primus_turbo_cpp_extension::quantize_mxfp4_dual
+
+    Dual rowwise+colwise BF16 → MXFP4 quantize for the NT GEMM layout
+    (row-packed A for the forward pass, col-packed copy for the weight-grad
+    backward pass). Produces both packed outputs and their E8M0 block-wise
+    scales in a single kernel.
+
+    12-slot input layout (from `quantize_mxfp4_dual` C++ binding):
+      (input, dest_dtype, rowwise_use_2d_block, rowwise_use_sr, rowwise_use_rht,
+       colwise_use_2d_block, colwise_use_sr, colwise_use_rht,
+       shuffle_rowwise_scale, shuffle_rowwise,
+       shuffle_colwise_scale, shuffle_colwise)
+
+    Trace arg layout: tensor at slot 0 (BF16/FP16 2-D); all other slots are
+    scalars and contribute no extra memory traffic.
+
+    Memory-bandwidth bound (approx 3.06·M·N for the typical BF16-in case):
+      read  = M*N * bpe_in                         (BF16 input)
+      write = 2 * M*N / 2                          (rowwise + colwise FP4)
+            + M * ceil(N/32) + N * ceil(M/32)      (rowwise + colwise scales)
+    """
+
+    MXFP4_BLOCK_SIZE = 32
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        dtype_in = event["args"]["Input type"][0]
+        try:
+            stride_input = tuple(event["args"]["Input Strides"][0])
+        except (KeyError, IndexError):
+            stride_input = None
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, "c10::Float4_e2m1fn_x2"),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def bytes(self):
+        M, N = self.param_details["op_shape"]
+        bpe_in = self.bpe_in
+        if bpe_in is None:
+            return None
+        block = self.MXFP4_BLOCK_SIZE
+        read_in = M * N * bpe_in
+        write_rowwise_fp4 = (
+            M * N + 1
+        ) // 2  # packed FP4, ceil-div for odd element counts
+        write_colwise_fp4 = (N * M + 1) // 2
+        write_rowwise_scale = M * ((N + block - 1) // block)
+        write_colwise_scale = N * ((M + block - 1) // block)
+        return (
+            read_in
+            + write_rowwise_fp4
+            + write_colwise_fp4
+            + write_rowwise_scale
+            + write_colwise_scale
+        )
+
+
+# ---------------------------------------------------------------------------
+# aiter MXFP4 GEMM ops (#644)
+# ---------------------------------------------------------------------------
+
+
+class aiter_gemm_a4w4(GEMM):
+    """
+    aiter::gemm_a4w4 — MXFP4 GEMM via the AITER native FP4 ASM backend.
+
+    9-positional-arg layout (from aiter/ops/gemm_op_a4w4.py):
+      aiter::gemm_a4w4(A, B, scaleA, scaleB, out, dtype, alpha, beta, bpreshuffle)
+
+    Trace event layout:
+      Input Dims:  ((A0, A1), (B0, B1), (scA0, scA1), (scB0, scB1),
+                    (), (), (), (), ())
+      Input type:  (Float4_e2m1fn_x2, Float4_e2m1fn_x2,
+                    Float8_e8m0fnu,   Float8_e8m0fnu,
+                    '', 'Scalar', 'Scalar', 'Scalar', 'Scalar')
+      Concrete Inputs: ('', '', '', '', '', '<dtype_enum>',
+                        '<alpha>', '<beta>', '<bpreshuffle>')
+
+    Differences vs `hipblaslt_gemm_fp4`:
+      - Slot ordering: (A, B, scaleA, scaleB) at slots (0, 1, 2, 3) instead of
+        the hipBLASLt layout (A, scaleA, B, scaleB) at slots (0, 1, 2, 3).
+      - Trailing scalars are (dtype, alpha, beta, bpreshuffle) instead of
+        (transA, transB, transC, granularity); transA/transB/transC are not
+        in the trace because the aiter binding only supports the NT layout
+        (transA=False, transB=True) and BF16 output.
+      - `bpreshuffle=True` changes the in-memory layout of A/B/scales (and
+        their padding to [16, 16] tiles) but does not change the byte count
+        touched at roofline granularity, so bytes() is reused unchanged.
+
+    The internal `aiter::_gemm_a4w4_asm` cpu_op (the leaf launching the GPU
+    kernel) uses the same first 4 slots plus an output tensor at slot 4;
+    both events share this class. See `op_to_perf_model_class_map`.
+
+    `primus_turbo::gemm_fp4_impl` (the dispatcher wrapper around either this
+    op or `hipblaslt_gemm_fp4`) is intentionally NOT registered: it is a
+    pass-through that never launches a kernel of its own, so the tree-perf
+    leaf-walker attributes all GPU time to the inner cpu_op (this class or
+    `hipblaslt_gemm_fp4`) and the dispatcher contributes 0 GPU time to any
+    category breakdown.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+
+        A_shape = list(input_dims[0])
+        B_shape = list(input_dims[1])
+
+        # The aiter binding only supports the NT layout; transA/transB/transC
+        # are not in the trace. Hard-code NT and skip the transC swap that
+        # hipblaslt_gemm_fp4 inherits.
+        trans_a = False
+        trans_b = True
+
+        M = A_shape[1] if trans_a else A_shape[0]
+        K_packed = A_shape[0] if trans_a else A_shape[1]
+        K = K_packed * 2  # FP4 packing: 2 logical elements per byte
+        N = B_shape[0] if trans_b else B_shape[1]
+
+        dtype_A_B = (input_types[0], input_types[1])
+        dtype_scaleA = input_types[2] if len(input_types) > 2 else None
+        dtype_scaleB = input_types[3] if len(input_types) > 3 else None
+
+        try:
+            stride_A = tuple(event["args"]["Input Strides"][0])
+            stride_B = tuple(event["args"]["Input Strides"][1])
+        except (KeyError, IndexError):
+            stride_A = stride_B = None
+
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "stride_A": stride_A,
+            "stride_B": stride_B,
+            "dtype_A_B": dtype_A_B,
+            "dtype_scaleA": dtype_scaleA,
+            "dtype_scaleB": dtype_scaleB,
+        }
+
+    # MXFP4 block size (32-element granularity) is intrinsic to the FP4 GEMM
+    # bytes formula and is reused from hipblaslt_gemm_fp4.
+    MXFP4_BLOCK_SIZE = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
+
+    def bytes(self):
+        # Same workload, same byte count — aiter's bpreshuffle layout changes
+        # the in-memory arrangement of A/B/scales but not the bytes touched.
+        # Delegate to hipblaslt_gemm_fp4.bytes which only reads M/N/K and
+        # param_details (dtype_A_B, dtype_scaleA, dtype_scaleB), all of which
+        # this class populates identically.
+        return hipblaslt_gemm_fp4.bytes(self)
