@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Read Triton kernel metadata from a Chrome trace file.
 
 Shows the event["args"] fields that V2 uses to compute perf metrics:
