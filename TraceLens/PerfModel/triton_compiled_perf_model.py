@@ -26,10 +26,8 @@ Cache dirs searched by V1 (first wins):
 
 import getpass
 import glob
-import json
 import os
 import re
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # FLOPs per element for ATen ops that commonly appear in fused Triton kernels.
@@ -107,11 +105,10 @@ _C10_DTYPE_BYTES: dict[str, int] = {
 # Inductor sorts ops alphabetically, which disambiguates most cases.
 # Includes ops from torch.ops.aten plus torch.distributed (for collective
 # ops like all_to_all_single that Inductor can fuse into Triton kernels).
-_ALL_KNOWN_OPS: set[str] = set()
-_ops_json = Path(__file__).parent / "_known_aten_ops.json"
-if _ops_json.exists():
-    with open(_ops_json) as _f:
-        _ALL_KNOWN_OPS = set(json.load(_f))
+try:
+    from TraceLens.PerfModel._known_aten_ops import KNOWN_OPS as _ALL_KNOWN_OPS
+except ImportError:
+    _ALL_KNOWN_OPS: set[str] = set()
 
 # -- Approach 2 (previous, kept for reference): greedy longest-match ---------
 # Used a hardcoded dictionary from _FLOPS_PER_ELEM, sorted longest-first.
