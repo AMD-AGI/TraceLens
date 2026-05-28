@@ -91,7 +91,8 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
 
 <!-- Top Bottleneck Category X% = top category's gpu_kernel_time_ms / (manifest.gpu_utilization.total_time_ms * manifest.gpu_utilization.computation_time_percent / 100)
-     Top Bottleneck Category Y% = top category's gpu_kernel_time_ms / (manifest.trace2_gpu_utilization.total_time_ms * manifest.trace2_gpu_utilization.computation_time_percent / 100) -->
+     Top Bottleneck Category Y% = top category's gpu_kernel_time_ms / (manifest.trace2_gpu_utilization.total_time_ms * manifest.trace2_gpu_utilization.computation_time_percent / 100)
+     Difference = Trace 2 value − Trace 1 value -->
 | Metric | Trace 1 - (<Platform1>) | Trace 2 - (<Platform2>) | Difference |
 |--------|----------------------------|-------------------------------|------------|
 | Total Time | X ms | Y ms | +/-Z ms (+/-W%) |
@@ -142,10 +143,11 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 <!-- === COMPARATIVE Top Operations === -->
 `Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match.
+`Difference (ms)` = Trace 2 Time − Trace 1 Time.
 <!-- impact-begin kind=top_ops -->
 | Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
 |------|----------|-------------------|-------------------|-------------------|-----|-----------------|
-| 1 | ... | ... | ... | ... | ... | +/-X.X or — | ~X–Y ms (X–Y%) or — |
+| 1 | ... | ... | ... | ... | ... | +/-X.X or — | <!-- top-ops-row low=<impact_score_low> high=<impact_score_high> -->
 <!-- impact-end -->
 
 <!-- === NO ACTIONABLE FINDINGS (all quantified compute categories have empty category_findings[] in *_metrics.json) === -->
