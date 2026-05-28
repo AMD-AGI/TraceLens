@@ -51,6 +51,16 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze Triton kernels")
     parser.add_argument("--output-dir", required=True, help="Output directory")
+
+    parser.add_argument(
+        "--comparison_scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: roofline efficiency in operations[].efficiency; "
+            "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
+        ),
+    )
     args = parser.parse_args()
 
     run_category_analysis(
@@ -62,6 +72,7 @@ def main():
         },
         extract_fn=extract_category_specific,
         compute_impact=False,
+        comparison_scope=args.comparison_scope,
     )
 
 

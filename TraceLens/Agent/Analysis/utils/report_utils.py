@@ -26,14 +26,28 @@ def load_manifest(output_dir: str) -> dict:
         return json.load(f)
 
 
-def extract_condensed_op_info(output_dir: str) -> bool:
+def extract_condensed_op_info(
+    output_dir: str, comparison_scope: str = "standalone"
+) -> bool:
     """Extract name, Input type, Input Dims to metadata/condensed_op_info.csv.
 
-    Reads perf_report_csvs/unified_perf_summary.csv and writes the three columns
-    for the condensed op info subagent. Returns True on success.
+    Reads unified_perf_summary.csv from the appropriate perf report CSV
+    directory and writes the three columns for the model-identification
+    subagent.  Returns True on success.
+
+    Args:
+        output_dir: Base analysis output directory.
+        comparison_scope: ``"standalone"`` (default) reads from
+            ``perf_report_csvs/``; ``"comparative"`` reads from
+            ``perf_report_trace1_csvs/``.
     """
     _CONDENSED_OP_INFO_COLUMNS = ("name", "Input type", "Input Dims")
-    csv_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+    csv_dir = (
+        "perf_report_trace1_csvs"
+        if comparison_scope == "comparative"
+        else "perf_report_csvs"
+    )
+    csv_path = os.path.join(output_dir, csv_dir, "unified_perf_summary.csv")
     if not os.path.isfile(csv_path):
         return False
     try:
@@ -174,9 +188,8 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
     table, and the optional detailed extension plot.
 
     Produces four top-level arrays:
-      - ``findings``: per-(category, bound_type, library) groups, concatenated
-        from each ``_metrics.json::category_findings`` (already grouped and
-        gated by ``MIN_PITEM_IMPACT_SCORE`` in the analyzer script). Sorted
+      - ``findings``: per-(category, bound_type, library, eff_bucket) groups
+        from each ``_metrics.json::category_findings``. Sorted
         globally by ``impact_score`` with ``global_rank`` / ``category_rank``
         attached. Drives the report's flat P-numbering.
       - ``priorities``: ranked category list. Quantified categories are a
