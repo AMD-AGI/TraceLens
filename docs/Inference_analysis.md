@@ -105,19 +105,22 @@ Then create a container from the image.
 
 ###### SGLang Script
 
-The build script for SGLang supports SGLang 0.5.9 with ROCm 7. The script takes the path to the local TraceLens clone and the GPU type being used. It supports MI300 and MI350/MI355 (equivalent targets), defaulting to MI350.
+The build script for SGLang supports SGLang 0.5.9 and 0.5.11. It takes the path to the local TraceLens clone, the SGLang version (`--sglang-version`, default 0.5.9), and the GPU type (`--gpu-type`, default mi350). MI300 and MI350/MI355 are supported.
 
 
-| GPU Type      | Base Image                             | SGLang Version |
-| ------------- | -------------------------------------- | -------------- |
-| `MI300`       | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9         |
-| `MI350/MI355` | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9         |
+| SGLang Version | GPU Type | Base Image                              |
+| -------------- | -------- | --------------------------------------- |
+| `0.5.9`        | MI300    | `lmsysorg/sglang:v0.5.9-rocm700-mi30x`  |
+| `0.5.9`        | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x`  |
+| `0.5.11`       | MI300    | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
+| `0.5.11`       | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
 
 
 ```bash
-bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
+bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     /path/to/TraceLens \
-    mi350 \
+    --sglang-version 0.5.11 \
+    --gpu-type mi350 \
     -t tracelens-sglang
 ```
 
