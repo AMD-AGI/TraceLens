@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -37,8 +37,10 @@ import os
 import platform
 import pstats
 import resource
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -151,7 +153,6 @@ def build_metadata():
     """Build metadata dict for the timing JSON output."""
     return {
         "commit_sha": get_commit_sha(),
-        "test": "test",
         "run_date": datetime.now(timezone.utc).isoformat(),
         "python_version": platform.python_version(),
         "tracelens_version": get_tracelens_version(),
@@ -244,7 +245,11 @@ def emit_otlp_metrics(results, metadata):
 
 
 def run_manifest(manifest_path, output_dir, filter_ids=None):
-    """Profile all enabled traces from a manifest and return list of result dicts."""
+    """Profile all enabled traces from a manifest and return list of result dicts.
+
+    Each trace is profiled in a subprocess so the RSS high-water mark resets
+    between traces, giving accurate per-trace peak memory readings.
+    """
     traces = load_manifest(manifest_path)
     results = []
 
@@ -263,8 +268,40 @@ def run_manifest(manifest_path, output_dir, filter_ids=None):
             continue
 
         print(f"Profiling trace: {tid}")
-        result = profile_trace(str(trace_path), tid, output_dir)
-        result["trace_id"] = tid
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    __file__,
+                    "--trace-file",
+                    str(trace_path),
+                    "--trace-id",
+                    tid,
+                    "--output-dir",
+                    tmp_dir,
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if proc.returncode != 0:
+                print(f"Warning: profiling subprocess failed for {tid}, skipping")
+                print(proc.stdout.decode())
+                print(proc.stderr.decode())
+                continue
+
+            with open(os.path.join(tmp_dir, "timing.json")) as f:
+                data = json.load(f)
+            result = data["traces"][0]
+
+            # Move .prof artifact to main output dir
+            tmp_prof = os.path.join(tmp_dir, f"{tid}_profile.prof")
+            if os.path.exists(tmp_prof):
+                shutil.move(tmp_prof, os.path.join(output_dir, f"{tid}_profile.prof"))
+                result["cprofile_artifact"] = os.path.join(
+                    output_dir, f"{tid}_profile.prof"
+                )
+
         results.append(result)
 
     return results
@@ -277,6 +314,10 @@ def main():
     parser.add_argument(
         "--trace-file",
         help="Path to a single trace file (bypasses manifest)",
+    )
+    parser.add_argument(
+        "--trace-id",
+        help="Trace ID to use when profiling a single file (defaults to filename stem)",
     )
     parser.add_argument(
         "--manifest",
@@ -316,7 +357,7 @@ def main():
 
     if args.trace_file:
         trace_path = Path(args.trace_file)
-        trace_id = trace_path.name.split(".")[0]
+        trace_id = args.trace_id if args.trace_id else trace_path.name.split(".")[0]
         print(f"Profiling trace: {trace_id}")
         result = profile_trace(str(trace_path), trace_id, args.output_dir)
         result["trace_id"] = trace_id
