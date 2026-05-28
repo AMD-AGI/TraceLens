@@ -213,34 +213,23 @@ def emit_otlp_metrics(results, metadata):
 
     for trace_result in results:
         trace_id = trace_result["trace_id"]
-        workload_family = trace_result.get("workload_family", "unknown")
 
         for stage, duration in trace_result["stages"].items():
             stage_gauge.set(
                 duration,
-                attributes={
-                    "trace_id": trace_id,
-                    "stage": stage,
-                    "workload_family": workload_family,
-                },
+                attributes={"trace_id": trace_id, "stage": stage},
             )
 
         total_duration = trace_result["stages"].get("total_report_generation")
         if total_duration is not None:
             total_gauge.set(
                 total_duration,
-                attributes={
-                    "trace_id": trace_id,
-                    "workload_family": workload_family,
-                },
+                attributes={"trace_id": trace_id},
             )
 
         rss_gauge.set(
             trace_result["max_rss_bytes"],
-            attributes={
-                "trace_id": trace_id,
-                "workload_family": workload_family,
-            },
+            attributes={"trace_id": trace_id},
         )
 
     # All gauges are set — flush once explicitly then shut down.
@@ -271,7 +260,6 @@ def run_manifest(manifest_path, output_dir, filter_ids=None):
         print(f"Profiling trace: {tid}")
         result = profile_trace(trace_path, tid, output_dir)
         result["trace_id"] = tid
-        result["workload_family"] = trace_entry.get("workload_family", "unknown")
         results.append(result)
 
     return results
