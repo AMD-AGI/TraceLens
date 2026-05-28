@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -75,6 +75,20 @@ op_to_perf_model_class_map = {
     "primus_turbo::hipblaslt_gemm_fp8": perf_model.hipblaslt_gemm_fp8,
     "primus_turbo_cpp_extension::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
     "primus_turbo::quantize_fp8_tensorwise": perf_model.primus_turbo_quantize_fp8,
+    # Primus MXFP4 ops (hipBLASLt FP4 GEMM + dual rowwise/colwise quantize, issue #637)
+    "primus_turbo_cpp_extension::hipblaslt_gemm_fp4": perf_model.hipblaslt_gemm_fp4,
+    "primus_turbo::hipblaslt_gemm_fp4": perf_model.hipblaslt_gemm_fp4,
+    "primus_turbo_cpp_extension::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
+    "primus_turbo::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
+    "primus::quantize_mxfp4_dual": perf_model.primus_turbo_quantize_mxfp4_dual,
+    # AITER MXFP4 native FP4 ASM GEMM (issue #644).
+    # Both the public entry (aiter::gemm_a4w4) and the inner asm dispatch
+    # (aiter::_gemm_a4w4_asm) are registered. The asm op is the leaf that
+    # actually launches the kernel and gets the GPU time attribution; the
+    # public entry is registered too so it is still classified as GEMM in
+    # any report that iterates op names directly.
+    "aiter::gemm_a4w4": perf_model.aiter_gemm_a4w4,
+    "aiter::_gemm_a4w4_asm": perf_model.aiter_gemm_a4w4,
 }
 
 # Add pseudo-op extension mappings
