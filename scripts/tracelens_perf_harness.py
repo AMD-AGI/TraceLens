@@ -250,10 +250,16 @@ def emit_otlp_metrics(results, metadata):
         )
 
     # All gauges are set — collect from memory and export exactly once.
+    from opentelemetry.sdk.metrics.export import MetricExportResult
+
     metrics_data = reader.get_metrics_data()
-    exporter.export(metrics_data)
+    result = exporter.export(metrics_data)
     provider.shutdown()
-    print("OTLP metrics emitted successfully")
+    if result is MetricExportResult.SUCCESS:
+        print("OTLP metrics emitted successfully")
+    else:
+        print("ERROR: OTLP export failed — check GRAFANA_CLOUD_OTLP_ENDPOINT and GRAFANA_CLOUD_OTLP_TOKEN env vars")
+        sys.exit(1)
 
 
 def run_manifest(manifest_path, trace_dir, output_dir, filter_ids=None):
