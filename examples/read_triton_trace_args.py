@@ -24,13 +24,10 @@ def load_trace(path):
 
 def is_triton_cpu_event(event):
     name = event.get("name", "")
-    return (
-        event.get("cat") == "cpu_op"
-        and (
-            name.startswith("triton_poi_")
-            or name.startswith("triton_red_")
-            or name.startswith("triton_per_")
-        )
+    return event.get("cat") == "cpu_op" and (
+        name.startswith("triton_poi_")
+        or name.startswith("triton_red_")
+        or name.startswith("triton_per_")
     )
 
 

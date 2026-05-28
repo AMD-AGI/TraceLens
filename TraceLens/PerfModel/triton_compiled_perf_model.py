@@ -325,9 +325,7 @@ def _parse_wrapper(content: str) -> dict[str, dict]:
         in_out_extra_bytes: list[int] = []
         dtype: str | None = None
         if sig_m:
-            for dm in re.finditer(
-                r"'(\w+)':\s*'(\*\w+)'", sig_m.group(1)
-            ):
+            for dm in re.finditer(r"'(\w+)':\s*'(\*\w+)'", sig_m.group(1)):
                 param_name, ptr_dtype = dm.group(1), dm.group(2)
                 b = _PTR_DTYPE_BYTES.get(ptr_dtype)
                 if b is not None:
@@ -402,7 +400,9 @@ class TritonCompiledPerfModel:
         self.name = event["name"]
         self._meta = _meta_from_trace_args(event)  # V2: trace args
         if self._meta is None:
-            self._meta = _lookup(self.name, kwargs.get("inductor_cache_dir"))  # V1: cache fallback
+            self._meta = _lookup(
+                self.name, kwargs.get("inductor_cache_dir")
+            )  # V1: cache fallback
         self.param_details: dict = {}
         if self._meta is not None:
             self.param_details = {

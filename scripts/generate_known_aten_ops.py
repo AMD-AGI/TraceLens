@@ -31,9 +31,7 @@ for ns_name in dir(torch.ops):
         pass
 
 if hasattr(torch, "distributed"):
-    ops.update(
-        n for n in dir(torch.distributed) if not n.startswith("_") and "_" in n
-    )
+    ops.update(n for n in dir(torch.distributed) if not n.startswith("_") and "_" in n)
 
 out_path = os.path.join(
     os.path.dirname(__file__),
