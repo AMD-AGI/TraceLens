@@ -5630,6 +5630,8 @@ class FusedLnModulateBackward(Normalization):
                   + B·H·bpe (read modulation_grad)
     """
 
+    category = "NORM_bwd"
+
     @staticmethod
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,6 +14,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     build_sheet_category_to_op_names,
     categorize_torch_op,
+    get_perf_model_category,
     op_to_perf_model_class_map,
     register_op_categories,
 )
@@ -89,6 +90,26 @@ def test_registry_covers_every_perf_model_op():
         name for name in op_to_perf_model_class_map if name not in OP_CATEGORY_REGISTRY
     ]
     assert missing == []
+
+
+def test_every_perf_model_class_declares_category():
+    """Every perf model class must declare a non-None ``category`` attribute.
+
+    Guards against new perf-model PRs that forget to set ``category`` (or
+    inherit it from a base that does), which would otherwise raise
+    ``ValueError`` from ``build_op_category_registry`` at import time with
+    no indication of which class caused it.
+    """
+    missing = []
+    for op_name, perf_model_class in op_to_perf_model_class_map.items():
+        category = getattr(perf_model_class, "category", None)
+        if category is None:
+            missing.append((op_name, perf_model_class.__name__))
+    assert missing == [], (
+        "perf model classes missing a non-None 'category' attribute: "
+        f"{missing}. Declare 'category' on the class (or on a base class) "
+        "so OP_CATEGORY_REGISTRY can resolve it."
+    )
 
 
 def test_sheet_category_to_op_names_keeps_legacy_sheet_view():
