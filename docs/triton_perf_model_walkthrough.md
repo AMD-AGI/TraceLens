@@ -11,6 +11,24 @@ torch.compile-generated Triton kernels.
 
 **Source code:** `TraceLens/PerfModel/triton_compiled_perf_model.py`
 
+## Table of Contents
+
+1. [Background](#1-background)
+2. [Requirements and PyTorch Version Compatibility](#2-requirements-and-pytorch-version-compatibility)
+   - [Trace capture requirements](#21-trace-capture-requirements)
+   - [PyTorch version compatibility](#22-pytorch-version-compatibility)
+   - [`TORCHINDUCTOR_UNIQUE_KERNEL_NAMES`](#23-torchinductor_unique_kernel_names)
+   - [Summary: recommended setup](#24-summary-recommended-setup)
+3. [How It Works](#3-how-it-works)
+   - [Data flow](#31-data-flow)
+   - [Two-tier metadata extraction](#32-two-tier-metadata-extraction)
+4. [Inductor Triton Kernel Types](#4-inductor-triton-kernel-types)
+5. [Metric Formulas](#5-metric-formulas)
+6. [Worked Example: Pointwise Kernel (SwiGLU)](#6-worked-example-pointwise-kernel-swiglu)
+7. [Worked Example: Reduction Kernel (RMSNorm)](#7-worked-example-reduction-kernel-rmsnorm)
+8. [Results for the Example TransformerBlock](#8-results-for-the-example-transformerblock)
+9. [References](#references)
+
 ---
 
 ## 1. Background
