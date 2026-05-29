@@ -366,6 +366,40 @@ for op_name, op_class in norm_ops.items():
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
 
+# ---------------------------------------------------------------------------
+# Pattern-based matchers for perf models with generated kernel names.
+# Each matcher is a callable: name -> perf_model_class | None.
+# ---------------------------------------------------------------------------
+_perf_model_matchers: list = []
+
+
+def register_perf_model_matcher(matcher):
+    _perf_model_matchers.append(matcher)
+
+
+def resolve_perf_model_class(name):
+    cls = op_to_perf_model_class_map.get(name)
+    if cls is not None:
+        return cls
+    for matcher in _perf_model_matchers:
+        cls = matcher(name)
+        if cls is not None:
+            return cls
+    return None
+
+
+def _match_triton_compiled(name):
+    if name.startswith(("triton_poi_", "triton_red_", "triton_per_")):
+        from TraceLens.PerfModel.triton_compiled_perf_model import (
+            TritonCompiledPerfModel,
+        )
+
+        return TritonCompiledPerfModel
+    return None
+
+
+register_perf_model_matcher(_match_triton_compiled)
+
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
     category_only_ops=CATEGORY_ONLY_OP_MAPPING,
