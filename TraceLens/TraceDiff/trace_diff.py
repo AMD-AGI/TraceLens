@@ -207,44 +207,6 @@ class TraceDiff:
             children = tree.get_children_events(current)
             stack.extend(children)
 
-    def _get_top_level_root(self, tree: TraceToTree, start_uid: int) -> int:
-        """
-        Find the top-level root node by traversing parent pointers upward from a starting UID.
-        The root is the node with no parent, which is typically a python_function event at the
-        top of the call stack.
-
-        Args:
-            tree (TraceToTree): The trace tree to traverse.
-            start_uid (int): The UID to start traversal from (typically a CPU root node).
-
-        Returns:
-            int: The UID of the top-level root node.
-        """
-        current = tree.get_UID2event(start_uid)
-        while True:
-            parent_uid = current.get("parent")
-            if parent_uid is None:
-                root = current
-                while True:
-                    children = current.get("children", [])
-                    if len(children) == 1:
-                        child = tree.get_UID2event(children[0])
-                        child_cat = child.get("cat") or child.get("category")
-                        if child_cat in ("cpu_op", "cuda_runtime"):
-                            break
-                        current = child
-                    else:
-                        break
-                if current is not root:
-                    children = current.get("children", [])
-                    root["children"] = children
-                    root_uid = root.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-                    for child_uid in children:
-                        child_event = tree.get_UID2event(child_uid)
-                        child_event["parent"] = root_uid
-                return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
-            current = tree.get_UID2event(parent_uid)
-
     def wagner_fischer(self, items1, items2, wf_cache):
         """
         Wagner-Fischer algorithm that works with any items and name lookup functions.
@@ -589,17 +551,15 @@ class TraceDiff:
         # Collect unique top-level roots from each trace
         seen1, roots1 = set(), []
         for crn in tree1.cpu_root_nodes:
-            root = self._get_top_level_root(tree1, crn)
-            if root not in seen1:
-                seen1.add(root)
-                roots1.append(root)
+            if crn not in seen1:
+                seen1.add(crn)
+                roots1.append(crn)
 
         seen2, roots2 = set(), []
         for crn in tree2.cpu_root_nodes:
-            root = self._get_top_level_root(tree2, crn)
-            if root not in seen2:
-                seen2.add(root)
-                roots2.append(root)
+            if crn not in seen2:
+                seen2.add(crn)
+                roots2.append(crn)
 
         print(
             f"[TraceDiff] Found {len(roots1)} root trees in trace1, "
