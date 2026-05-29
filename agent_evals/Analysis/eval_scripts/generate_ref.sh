@@ -20,6 +20,7 @@ fi
 CONTAINER="${CONTAINER:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
+TEST_IDS="${TEST_IDS:-}"
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
@@ -45,7 +46,7 @@ for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_${COMPARISON_SCOPE}.tar.gz 
     target_dir="${archive%.tar.gz}"
     if [ ! -d "$target_dir" ]; then
         echo "Extracting $(basename "$archive")..."
-        tar -xzf "$archive" -C "$EVALS_DIR/analysis_tests/"
+        tar -xzf "$archive" -C "$REPO_ROOT"
     fi
 done
 
@@ -88,7 +89,7 @@ generate_single_ref() {
     fi
 
     log_status "  $tag [$(ts)] Generating golden reference..."
-    $DEXEC bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
+    "${DEXEC[@]}" bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
 
     # Run analysis with retry + backoff
     local agent_success=false
@@ -106,8 +107,8 @@ generate_single_ref() {
             fi
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
-        if head -c 2048 "$CASE_DIR/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
-            log_status "  $tag Attempt $agent_attempts/3 failed (agent unavailable). Backing off 30s..."
+        if grep -qiE 'Error:.*unavailable|Service Unavailable|usage limit|out of usage|You'\''ve reached your' "$CASE_DIR/analysis_stream.ndjson" 2>/dev/null; then
+            log_status "  $tag Attempt $agent_attempts/3 failed (agent unavailable or usage limit). Backing off 30s..."
             sleep 30
         else
             agent_success=true
@@ -115,14 +116,18 @@ generate_single_ref() {
     done
 
     if [ "$agent_success" = false ]; then
-        log_status "  $tag FAILED after 3 attempts."
+        log_status "  $tag FAILED after 3 attempts (agent unavailable or usage limit)."
+        "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
+        rm -f "$CASE_DIR/analysis_stream.ndjson"
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
     fi
 
     # Verify output was generated
     if [ ! -f "$OUTPUT_DIR/analysis.md" ]; then
-        log_status "  $tag WARNING: analysis.md not found in output."
+        log_status "  $tag WARNING: analysis.md not found in output (agent may have exited without running analysis)."
+        "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
+        rm -f "$CASE_DIR/analysis_stream.ndjson"
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
     fi
@@ -139,10 +144,12 @@ generate_single_ref() {
            "$REF_DIR/cache" \
            "$REF_DIR/perf_improvement.png" \
            "$REF_DIR/perf_improvement_base64.txt" \
-           "$REF_DIR/plot_data.json"
+           "$REF_DIR/plot_data.json" \
+           "$REF_DIR/perf_report.xlsx" \
+           "$REF_DIR/priority_data.json"
 
     # Remove intermediate analysis output (docker-owned files need container cleanup)
-    $DEXEC rm -rf "$OUTPUT_DIR"
+    "${DEXEC[@]}" rm -rf "$OUTPUT_DIR"
     rm -f "$CASE_DIR/analysis_stream.ndjson"
 
     log_status "  $tag [$(ts)] Reference saved to $reference_dir (cleaned)"
@@ -176,8 +183,20 @@ echo "  Node:         $NODE_LABEL"
 echo "  Runtime:      $RUNTIME_LABEL"
 echo "  Max parallel: $MAX_PARALLEL"
 echo "  CSV:          $TEST_TRACES_CSV"
+if [[ -n "$TEST_IDS" ]]; then
+    echo "  Test filter:  $TEST_IDS"
+fi
 echo "========================================="
 echo ""
+
+should_run_id() {
+    local id="$1"
+    [[ -z "$TEST_IDS" ]] && return 0
+    case " $TEST_IDS " in
+        *" $id "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 setup_semaphore
 
@@ -185,6 +204,7 @@ if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
     while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
         [[ -z "$id" ]] && continue
+        should_run_id "$id" || continue
 
         read -u4  # acquire semaphore slot
         (
@@ -197,10 +217,11 @@ else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
     while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
         [[ -z "$id" ]] && continue
+        should_run_id "$id" || continue
 
         read -u4  # acquire semaphore slot
         (
-            generate_single_ref "$id" "$trace_path" "" "$reference_dir" "$platform" || true
+            generate_single_ref "$id" "$trace_path" "" "$reference_dir" "$platform" "" || true
             sleep "$SLEEP_BETWEEN"
             echo >&4  # release semaphore slot
         ) &
