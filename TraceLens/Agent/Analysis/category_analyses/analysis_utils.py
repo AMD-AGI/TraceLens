@@ -36,6 +36,7 @@ TARGET_MID = 87.5
 MIN_PITEM_IMPACT_SCORE = (
     0.5  # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
 )
+_EFF_BUCKET_BOUNDARIES = (30, 60)
 
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),
@@ -57,6 +58,39 @@ _KERNEL_NAME_LIBRARY_RULES = [
     ("triton_", "Triton"),
     ("void at::native::", "PyTorch Native"),
 ]
+_COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
+_COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
+_COMPARATIVE_T2_TIME_COL = "lca_total_kernel_time_trace2_us"
+_COMPARATIVE_T2_COUNT_COL = "lca_count_trace2"
+
+
+def _eff_bucket(pct):
+    """Classify roofline efficiency into a coarse band for P-item grouping."""
+    if pct is None:
+        return "unknown"
+    if pct < _EFF_BUCKET_BOUNDARIES[0]:
+        return f"0-{_EFF_BUCKET_BOUNDARIES[0]}"
+    if pct < _EFF_BUCKET_BOUNDARIES[1]:
+        return f"{_EFF_BUCKET_BOUNDARIES[0]}-{_EFF_BUCKET_BOUNDARIES[1]}"
+    return f"{_EFF_BUCKET_BOUNDARIES[1]}-100"
+
+
+def perf_report_csv_dir(output_dir: str) -> str:
+    """
+    Directory containing perf-report CSV exports for the primary (Trace 1) trace.
+
+    When ``category_data/category_manifest.json`` exists and ``comparison_scope``
+    is ``comparative``, returns ``<output_dir>/perf_report_trace1_csvs``.
+    Otherwise returns ``<output_dir>/perf_report_csvs`` (standalone or missing manifest).
+    """
+    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            scope = json.load(f).get("comparison_scope", "standalone")
+        if scope == "comparative":
+            return os.path.join(output_dir, "perf_report_trace1_csvs")
+    return os.path.join(output_dir, "perf_report_csvs")
+
 
 _SKIP_PY_PATTERNS = (
     "torch/",
@@ -246,8 +280,78 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
     return fallback_maf
 
 
+def comparative_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
+    """
+    When comparative columns support it, set ``efficiency_percent`` to
+    ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped by trace1 roofline
+
+    t1 is trace1 ``Kernel Time (µs)_sum``; t2 from delta (trace2 - trace1) or speedup t2/t1.
+    If comparative metrics cannot be computed, leaves ``result`` unchanged for those keys.
+    """
+    kt = row.get("Kernel Time (µs)_sum")
+    if kt is None or pd.isna(kt):
+        return
+    t1_us = float(kt)
+    if t1_us <= 0:
+        return
+
+    comp_pct: Optional[float] = None
+    delta = row.get(_COMPARATIVE_DELTA_COL)
+    if delta is not None and not pd.isna(delta):
+        comp_pct = 100.0 * (t1_us + float(delta)) / t1_us
+    else:
+        speedup = row.get(_COMPARATIVE_SPEEDUP_COL)
+        if speedup is not None and not pd.isna(speedup):
+            s = float(speedup)
+            if s >= 0:
+                comp_pct = 100.0 * s
+
+    if comp_pct is None:
+        return
+
+    roofline_pct = row.get("Pct Roofline_mean")
+    roofline_floor: Optional[float] = None
+    if roofline_pct is not None and not pd.isna(roofline_pct):
+        roofline_floor = float(roofline_pct)
+
+    clamped = False
+    if roofline_floor is not None and comp_pct < roofline_floor:
+        comp_pct = roofline_floor
+        clamped = True
+
+    result["efficiency_percent"] = round(comp_pct, 2)
+    result["is_anomaly"] = False
+    if clamped:
+        result["warning"] = (
+            f"[ROOFLINE CAP] Projected efficiency clamped to roofline "
+            f"({result['efficiency_percent']:.1f}%); trace2 gap exceeds "
+            f"trace1 hardware ceiling."
+        )
+    else:
+        result["warning"] = None
+
+
+def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
+    """
+    Set ``efficiency_percent`` from ``Pct Roofline_mean`` (roofline utilization %)
+    and roofline anomaly flags when above 110%.
+    """
+    pct = row.get("Pct Roofline_mean")
+    if pct is None or pd.isna(pct):
+        return
+    result["efficiency_percent"] = round(float(pct), 2)
+    if result["efficiency_percent"] > 110:
+        result["warning"] = (
+            f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
+        )
+        result["is_anomaly"] = True
+
+
 def calculate_efficiency(
-    row: pd.Series, peak_hbm_bw: float, peak_maf_or_maf_dict
+    row: pd.Series,
+    peak_hbm_bw: float,
+    peak_maf_or_maf_dict,
+    comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
     Extract efficiency metrics for an operation from pre-computed CSV columns.
@@ -257,6 +361,9 @@ def calculate_efficiency(
         peak_hbm_bw: Peak HBM bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
             for resolving the precision-aware peak
+        comparison_scope:
+            ``standalone`` uses roofline efficiency
+            ``comparative`` uses comparative efficiency
 
     Returns:
         Dict with tflops_achieved, tb_s_achieved, efficiency_percent, bound_type, warning
@@ -303,14 +410,10 @@ def calculate_efficiency(
         balance_point = peak_maf / peak_hbm_bw
         result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
 
-    pct_roofline = row.get("Pct Roofline_mean")
-    if pct_roofline is not None and not pd.isna(pct_roofline):
-        result["efficiency_percent"] = round(float(pct_roofline), 2)
-        if result["efficiency_percent"] > 110:
-            result["warning"] = (
-                f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
-            )
-            result["is_anomaly"] = True
+    if comparison_scope == "comparative":
+        comparative_efficiency(result, row)
+    else:
+        standalone_efficiency(result, row)
 
     return result
 
@@ -375,6 +478,7 @@ def build_operation_metrics(
     metadata: dict,
     category_config: dict,
     callstacks_df: Optional[pd.DataFrame] = None,
+    comparison_scope: str = "standalone",
 ) -> List[dict]:
     """
     Build list of operation metrics for JSON output.
@@ -389,6 +493,7 @@ def build_operation_metrics(
         category_config: Category-specific configuration with:
             - extra_fields: Additional fields to extract (optional)
             - operation_classifier: Function to classify operations (optional)
+        comparison_scope: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
 
     Returns:
         List of operation metric dicts
@@ -422,7 +527,9 @@ def build_operation_metrics(
             round(time_ms / e2e_ms_total * 100, 2) if e2e_ms_total > 0 else None
         )
 
-        efficiency = calculate_efficiency(row, peak_hbm_bw, maf)
+        efficiency = calculate_efficiency(
+            row, peak_hbm_bw, maf, comparison_scope=comparison_scope
+        )
 
         op_metric = {
             "name": op_name,
@@ -450,6 +557,18 @@ def build_operation_metrics(
         )
         if args_str:
             op_metric["args"] = args_str
+
+        # Pre-compute comparative T2 fields from CSV
+        if comparison_scope == "comparative":
+            t2_us = row.get(_COMPARATIVE_T2_TIME_COL)
+            if t2_us is not None and not pd.isna(t2_us):
+                op_metric["t2_time_ms"] = round(float(t2_us) / 1000, 3)
+            t2_count = row.get(_COMPARATIVE_T2_COUNT_COL)
+            if t2_count is not None and not pd.isna(t2_count):
+                op_metric["count_trace2"] = int(t2_count)
+            delta_us = row.get(_COMPARATIVE_DELTA_COL)
+            if delta_us is not None and not pd.isna(delta_us):
+                op_metric["difference_ms"] = round(float(delta_us) / 1000, 3)
 
         # Kernel time variance detection (require 10+ samples, >= 5% of E2E)
         e2e_ms = e2e_ms_total
@@ -592,8 +711,15 @@ def compute_impact_estimates(
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
 
-def build_category_findings(estimates: List[dict]) -> List[dict]:
-    """Group one category's per-op impact estimates by (bound_type, library).
+def build_category_findings(
+    estimates: List[dict], comparison_scope: str = "standalone"
+) -> List[dict]:
+    """Group one category's per-op impact estimates into P-item findings.
+
+    Standalone mode groups by ``(bound_type, library, eff_bucket)`` so
+    kernels at different roofline-efficiency levels get separate P-items.
+    Comparative mode groups by ``(bound_type, library)`` only because
+    ``efficiency_pct`` represents a trace-time ratio, not roofline utilization.
 
     Sums impact across members, drops groups below ``MIN_PITEM_IMPACT_SCORE``,
     sorts by ``impact_score`` desc, attaches intra-category ``rank``. Each
@@ -601,6 +727,7 @@ def build_category_findings(estimates: List[dict]) -> List[dict]:
     later concatenates these arrays across categories to derive the global
     ``priority_data.json::findings[]`` ranking.
     """
+    use_eff_bucket = comparison_scope == "standalone"
     groups: dict = defaultdict(
         lambda: {
             "members": [],
@@ -610,7 +737,10 @@ def build_category_findings(estimates: List[dict]) -> List[dict]:
         }
     )
     for e in estimates:
-        key = (e.get("bound_type") or "unknown", e.get("library") or "Unknown")
+        bound = e.get("bound_type") or "unknown"
+        lib = e.get("library") or "Unknown"
+        bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
+        key = (bound, lib, bucket)
         g = groups[key]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
@@ -618,13 +748,14 @@ def build_category_findings(estimates: List[dict]) -> List[dict]:
         g["impact_score_high"] += e.get("impact_score_high", 0)
 
     findings = []
-    for (bound, lib), g in groups.items():
+    for (bound, lib, bucket), g in groups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": bound,
                 "library": lib,
+                "eff_bucket": bucket,
                 "impact_score": round(g["impact_score"], 2),
                 "impact_score_low": round(g["impact_score_low"], 2),
                 "impact_score_high": round(g["impact_score_high"], 2),
@@ -750,6 +881,7 @@ def run_category_analysis(
     pre_process_fn=None,
     no_data_check_fn=None,
     compute_impact=True,
+    comparison_scope: str = "standalone",
 ):
     """Generic runner for category analysis scripts.
 
@@ -760,13 +892,15 @@ def run_category_analysis(
         extract_fn: Callable(ops_df, metadata) -> dict of category-specific metrics
         pre_process_fn: Optional callable(ops_df, metadata) -> (ops_df, extra_dict)
             for pre-filtering or augmenting the DataFrame before analysis
-        no_data_check_fn: Optional callable(output_dir, category) -> dict or None.
+        no_data_check_fn: Optional callable(output_dir, category, comparison_scope) -> dict or None.
             If it returns a dict, that dict is written as metrics and the runner
             exits early (used for categories that may not be present, e.g. MoE).
         compute_impact: Whether to compute kernel-tuning impact estimates
+        comparison_scope: ``standalone`` (roofline efficiency) or ``comparative``
+            (TraceDiff-style ``100 * t2 / t1`` in ``operations[].efficiency``).
     """
     if no_data_check_fn:
-        no_data_metrics = no_data_check_fn(output_dir, category)
+        no_data_metrics = no_data_check_fn(output_dir, category, comparison_scope)
         if no_data_metrics is not None:
             output_path = write_metrics_json(no_data_metrics, output_dir, category)
             print(f"No data. Metrics written to: {output_path}")
@@ -775,7 +909,12 @@ def run_category_analysis(
     try:
         ops_df, metadata = load_category_data(output_dir, category)
     except FileNotFoundError as e:
-        error_metrics = {"category": category, "status": "ERROR", "error": str(e)}
+        error_metrics = {
+            "category": category,
+            "status": "ERROR",
+            "error": str(e),
+            "comparison_scope": comparison_scope,
+        }
         write_metrics_json(error_metrics, output_dir, category)
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -788,29 +927,38 @@ def run_category_analysis(
 
     callstacks_df = None
     cs_path = os.path.join(
-        output_dir, "perf_report_csvs", "unified_perf_callstacks.csv"
+        perf_report_csv_dir(output_dir), "unified_perf_callstacks.csv"
     )
     if os.path.exists(cs_path):
         callstacks_df = pd.read_csv(cs_path)
 
     operations = build_operation_metrics(
-        ops_df, metadata, config, callstacks_df=callstacks_df
+        ops_df,
+        metadata,
+        config,
+        callstacks_df=callstacks_df,
+        comparison_scope=comparison_scope,
     )
     category_specific = extract_fn(ops_df, metadata)
 
     if compute_impact:
         baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
         impact_estimates = compute_impact_estimates(
-            operations, category, baseline_ms=baseline_ms
+            operations,
+            category,
+            baseline_ms=baseline_ms,
         )
     else:
         impact_estimates = []
 
-    category_findings = build_category_findings(impact_estimates)
+    category_findings = build_category_findings(
+        impact_estimates, comparison_scope=comparison_scope
+    )
 
     metrics = {
         "category": category,
         "status": "OK",
+        "comparison_scope": comparison_scope,
         **time_metrics,
         "operations": operations,
         "category_specific": category_specific,
