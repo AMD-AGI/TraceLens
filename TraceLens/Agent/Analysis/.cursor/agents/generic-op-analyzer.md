@@ -25,6 +25,7 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 - `<cat>`: Category name (e.g., `other`, `inferenceattention`, `rmsnorm`, `multi_tensor_apply`). Substitute it everywhere below before executing.
 
 **Input files (pre-computed by orchestrator):**
@@ -68,6 +69,7 @@ Use vendor-agnostic terminology:
   TraceLens/Agent/Analysis/category_analyses/other_analysis.py \
   --category <cat> \
   --output-dir <output_dir>
+  --comparison_scope <comparison_scope> \
 ```
 
 ### Step 2: Read Metrics and Tree Data
@@ -84,6 +86,10 @@ cat <output_dir>/category_data/<cat>_tree_data.json
 ### Step 3: Render P-items from `category_findings`
 
 Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
+
+**efficiency_percent semantics:**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
 For each surviving entry:
 
@@ -147,14 +153,14 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute' '<comparison_scope>'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.
