@@ -109,7 +109,7 @@ size_hints=[268435456]                # older list format
 |--|----------------------|-------------------|
 | Data source | Chrome trace `event["args"]` | Inductor cache `.py` files on disk |
 | PyTorch version | 2.4+ | Any |
-| ATen ops source | Parsed from kernel name via DP segmentation against `_known_aten_ops.json` | `Original ATen: [...]` comment in cache file |
+| ATen ops source | Parsed from kernel name via DP segmentation against `_known_aten_ops.py` | `Original ATen: [...]` comment in cache file |
 | Element counts | Exact (from `Concrete Inputs`) | Rounded to power-of-2 (`size_hints`) |
 | Bytes calculation | Per-tensor: `prod(shape) * bytes_per_elem` | Per-pointer: `ptr_bytes * xnumel` |
 | External dependency | None — trace is self-contained | Requires cache directory on disk |
