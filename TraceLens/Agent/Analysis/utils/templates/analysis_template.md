@@ -16,7 +16,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 
 === COMPARATIVE TERMINOLOGY ===
   - **Trace 1** =  trace (primary). **Trace 2** = trace (target/comparison).
-  - Impact semantics: standalone uses roofline gap (75–100% of peak); comparative uses
+  - Impact semantics: standalone uses roofline gap; comparative uses
     trace 2 kernel time as the optimization target (gap = trace1 time − trace2 time).
   - Comparative speed semantics: express as "X% faster" or "X% slower" relative to Trace 1. If t2 < t1 → "X% faster"; if t2 > t1 → "X% slower".
     Standalone efficiency semantics: % of roofline (unchanged).
