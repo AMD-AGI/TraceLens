@@ -15,9 +15,12 @@ torch.compile-generated Triton kernels.
 
 ## 1. Background
 
-When you run `torch.compile(model)`, TorchDynamo captures the model's operations
-as an FX graph, and the Inductor backend fuses groups of ATen ops into Triton
-kernels.  Each kernel's name encodes what it does:
+When you run `torch.compile(model)`,
+[TorchDynamo](https://docs.pytorch.org/docs/stable/torch.compiler_deepdive.html)
+captures the model's operations as an FX graph, and the
+[Inductor](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
+backend fuses groups of ATen ops into Triton kernels. Each kernel's name
+encodes what it does:
 
 ```
 triton_poi_fused__unsafe_view_mul_silu_2
@@ -36,7 +39,142 @@ Two loop dimensions: `xnumel` (outer) and `rnumel` (reduction axis).
 
 ---
 
-## 2. Two-Tier Metadata Extraction
+## 2. Requirements and PyTorch Version Compatibility
+
+### 2.1 Trace capture requirements
+
+TraceLens uses a two-tier approach (V2 primary, V1 fallback) to extract
+perf metrics. For V2 to work, the trace must be captured with
+[`record_shapes=True`](https://docs.pytorch.org/docs/stable/profiler.html):
+
+```python
+with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
+    record_shapes=True,   # required for V2 metadata
+) as prof:
+    model(inputs)
+```
+
+Without `record_shapes=True`, the trace will not contain `Concrete Inputs`,
+`Input Dims`, or `Input type` — and V2 will fall back to V1.
+
+### 2.2 PyTorch version compatibility
+
+V2 requires specific trace event fields. The following table shows verified
+availability (confirmed from actual traces captured on each version):
+
+| Trace Field | PyTorch 2.4 | PyTorch 2.11 | Used By |
+|-------------|:-----------:|:------------:|---------|
+| `Concrete Inputs` | Yes | Yes | V2: element counts (`xnumel`, `rnumel`) |
+| `Input Dims` | Yes | Yes | V2: per-tensor byte calculation |
+| `Input type` | Yes | Yes | V2: bytes per element |
+| `kernel_file` | No | Yes | Not used (informational) |
+| `kernel_kwargs` | No | Yes | Not used (informational) |
+| `num_warps` | No | Yes | Not used (informational) |
+| `num_stages` | No | Yes | Not used (informational) |
+
+**V2 core fields are available since PyTorch 2.4.** The extra fields
+(`kernel_file`, `num_warps`, etc.) were added later but are not required
+by TraceLens.
+
+### 2.3 `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES`
+
+Inductor controls kernel naming via `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES`.
+When **enabled**, kernels get descriptive names that encode the kernel
+category and fused ops (e.g., `triton_poi_fused_add_mul_silu_0`).
+When **disabled**, kernels are named generically (`triton_0`, `triton_1`).
+
+This is a **compile-time** setting — it must be set when the trace is
+captured, not when TraceLens analyzes it.
+
+**Default by PyTorch version:**
+
+| PyTorch Version | Default | Notes |
+|-----------------|---------|-------|
+| 2.4 – 2.5 | **Disabled** | Must opt in: `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1` |
+| 2.6+ | **Enabled** | [Default changed to `"1"`](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/_inductor/config.py) |
+
+Source: [`torch/_inductor/config.py`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py)
+— verified at tags
+[v2.4.0](https://github.com/pytorch/pytorch/blob/v2.4.0/torch/_inductor/config.py) and
+[v2.6.0](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/_inductor/config.py).
+
+**Impact on TraceLens:**
+
+| Metric | Unique names enabled | Unique names disabled |
+|--------|---------------------|----------------------|
+| V2 element counts (`xnumel`, `rnumel`) | Works | Works |
+| V2 bytes (`Data Moved`) | Works | Works |
+| FLOPs (`_parse_kernel_name`) | Works — parses ops from name | Returns `[]` — GFLOPS = 0 |
+| V1 cache fallback | Works | Works |
+
+For users on PyTorch 2.4–2.5, set the environment variable before trace
+capture to get FLOPs:
+
+```bash
+TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1 python your_training_script.py
+```
+
+### 2.4 Summary: recommended setup
+
+For full V2 support (bytes, FLOPs, and kernel categorization):
+
+- **PyTorch 2.6+** with `record_shapes=True` — everything works out of the box
+- **PyTorch 2.4–2.5** with `record_shapes=True` + `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1` — full V2 support with one extra env var
+
+---
+
+## 3. How It Works
+
+### 3.1 Data flow
+
+```
+Chrome Trace (.json.gz)
+│
+├── event["name"]
+│   │
+│   └── resolve_perf_model_class()
+│       └── _match_triton_compiled() → TritonCompiledPerfModel
+│
+├── event["args"]                          GPU events
+│   ├── Concrete Inputs                         │
+│   ├── Input Dims                              │
+│   └── Input type                              │
+│         │                                     │
+│    ┌────┴─────┐                               │
+│    │ V2 path  │ ──── _meta_from_trace_args()  │
+│    └────┬─────┘      ├── scalars → xnumel, rnumel
+│         │            ├── dims + dtypes → total_bytes
+│     success?         └── _parse_kernel_name() → aten_ops
+│     ├── yes ── _meta ─────────┐               │
+│     └── no                    │               │
+│          │                    │               │
+│     ┌────┴─────┐              │               │
+│     │ V1 path  │              │               │
+│     └────┬─────┘              │               │
+│          │                    │               │
+│   Inductor Cache (.py)        │               │
+│   ├── Original ATen           │        GPUEventAnalyser
+│   ├── size_hints              │          busy_time
+│   └── signature               │               │
+│          │                    │               │
+│          └── _lookup() ── _meta               │
+│                               │               │
+│                          ┌────┴────┐    ┌─────┴─────┐
+│                          │ flops() │    │ kernel    │
+│                          │ bytes() │    │ time (µs) │
+│                          └────┬────┘    └─────┬─────┘
+│                               │               │
+│                               └───────┬───────┘
+│                                       │
+│                                  TB/s, TFLOPS/s
+│                          (tree_perf.py:compute_perf_metrics)
+```
+
+### 3.2 Two-tier metadata extraction
 
 TraceLens needs three pieces of information to compute metrics:
 
@@ -57,8 +195,8 @@ if self._meta is None:
 ### V2: Trace-Intrinsic (primary)
 
 Extracts metadata directly from the Chrome trace event's `args` dict.
-Available in PyTorch 2.4+ traces.  No disk I/O needed — the trace is
-self-contained.
+Available in PyTorch 2.4+ traces (see [Section 2.2](#22-pytorch-version-compatibility)).
+No disk I/O needed — the trace is self-contained.
 
 ```json
 {
@@ -103,7 +241,7 @@ size_hints=[268435456]                # older list format
 'signature': {'in_out_ptr0': '*bf16', 'in_ptr0': '*bf16', 'xnumel': 'i32'}
 ```
 
-### V1 vs V2 Comparison
+### V1 vs V2 comparison
 
 |  | V2 (Trace-Intrinsic) | V1 (Cache-Based) |
 |--|----------------------|-------------------|
@@ -117,193 +255,46 @@ size_hints=[268435456]                # older list format
 
 ---
 
-## 3. Worked Example: Pointwise Kernel (SwiGLU)
+## 4. Inductor Triton Kernel Types
 
-Kernel: `triton_poi_fused__unsafe_view_mul_silu_2`
-Operation: `silu(gate_proj(x)) * up_proj(x)` in the SwiGLU MLP
+Inductor generates Triton kernels in several categories, each with a
+distinct 3-character prefix derived from the category name (`category[:3]`).
+These 6 categories have been stable from PyTorch 2.3 through 2.11+
+(defined in [`torch/_inductor/wrapper_benchmark.py`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/wrapper_benchmark.py)):
 
-### 3.1 Trace event args (V2 input)
+| Prefix | Category | Description |
+|--------|----------|-------------|
+| `triton_poi_` | `pointwise` | Element-wise ops (add, mul, relu, silu, etc.). One loop dimension: `xnumel`. Fused ops stay in registers — no intermediate global memory writes. |
+| `triton_red_` | `reduction` | Reduction ops (sum, mean, batch norm, etc.) using a looped strategy. Two dimensions: `xnumel` (outer), `rnumel` (reduction axis). Used when the reduction axis is too large for persistent strategy. |
+| `triton_per_` | `persistent_reduction` | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's [`should_use_persistent_reduction()`](https://karthick.ai/blog/2025/Learn-By-Doing-Torchinductor-Reduction/) heuristic decides. |
+| `triton_tem_` | `template` | Complex ops like matrix multiplication (mm, addmm, _scaled_mm) using pre-defined Triton templates with optional fused epilogues. |
+| `triton_for_` | `foreach` | Fused operations across lists of tensors (e.g., optimizer step updates applied to all parameters at once). |
+| `triton_spl_` | `split_scan` | Split scan operations (e.g., cumulative sums with decoupled lookback). |
 
-```
-Concrete Inputs: ['', '', '268435456']
-Input Dims:      [[8, 4096, 8192], [32768, 8192], []]
-Input type:      ['c10::BFloat16', 'c10::BFloat16', 'Scalar']
-```
+**TraceLens coverage:**
 
-### 3.2 Element count extraction
+| Category | Modeled by TraceLens? | Notes |
+|----------|----------------------|-------|
+| `triton_poi_` | Yes | `TritonCompiledPerfModel` computes FLOPs and bytes |
+| `triton_red_` | Yes | Same perf model, two-dimensional (xnumel × rnumel) |
+| `triton_per_` | Yes | Treated identically to `triton_red_` |
+| `triton_tem_` | No (not needed) | GEMM ops already modeled by `aten_mm`, `aten_scaled_mm`, etc. |
+| `triton_for_` | No | Typically optimizer-step ops, not performance-critical |
+| `triton_spl_` | No | Scan operations, uncommon in typical workloads |
 
-Integer scalars from `Concrete Inputs` (empty strings and non-integer values
-like floats or booleans are skipped): `[268435456]`
-
-Pointwise kernel → last integer scalar is `xnumel`:
-- `xnumel = 268,435,456` (= 8 x 4,096 x 8,192)
-- `rnumel = 1`
-
-### 3.3 Bytes calculation
-
-**Step 1:** Calculate bytes for each tensor input:
-
-| Input | Dims | Type | Bytes per elem | Elements | Bytes |
-|-------|------|------|---------------|----------|-------|
-| `in_out_ptr0` | [8, 4096, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
-| `in_ptr0` | [32768, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
-| `xnumel` | [] | Scalar | — | — | skipped |
+**Naming pattern:**
 
 ```
-input_bytes = (268,435,456 * 2) + (268,435,456 * 2) = 1,073,741,824
+triton_{category}_fused_{op1}_{op2}_{...}_{index}
 ```
 
-**Step 2:** Add output write for pointwise kernels.
-
-In pointwise kernels, `in_out_ptr0` is both read and written — the output
-overwrites the input buffer.  The input bytes above already count the read.
-V2 adds one extra write of `ptr_bytes[0] * xnumel`:
-
-```
-output_write = 2 * 268,435,456 = 536,870,912
-```
-
-**Total:**
-
-```
-bytes_moved = 1,073,741,824 + 536,870,912
-            = 1,610,612,736 bytes
-            = 1,536 MB
-```
-
-### 3.4 FLOPs calculation
-
-Fused ops parsed from the kernel name: `aten._unsafe_view`, `aten.mul`, `aten.silu`
-
-| Op | FLOPs per element |
-|----|-------------------|
-| `aten._unsafe_view` | 0 (memory-only) |
-| `aten.mul` | 1 |
-| `aten.silu` | 4 |
-| **Total** | **5** |
-
-```
-flops = 5 * xnumel * rnumel
-      = 5 * 268,435,456 * 1
-      = 1,342,177,280
-GFLOPS = 1,342,177,280 / 1e9 = 1.342
-```
-
-### 3.5 Throughput metrics
-
-GPU kernel time from the Chrome trace: **505.3 us**
-
-```
-TB/s     = (1,610,612,736 / 1e12) / (505.3 / 1e6) = 3.19 TB/s
-TFLOPS/s = (1.342 / 1e3) / (505.3 / 1e6)          = 2.66 TFLOPS/s
-```
-
-### 3.6 Summary
-
-| Metric | Value |
-|--------|-------|
-| Data Moved | 1,536 MB |
-| GFLOPS | 1.342 |
-| FLOPS/Byte | 0.833 |
-| TB/s | 3.19 |
-| TFLOPS/s | 2.66 |
+The fused ops are listed alphabetically. The index is a sequential
+counter within the compiled graph. When `unique_kernel_names` is disabled,
+the entire name collapses to `triton_{index}`.
 
 ---
 
-## 4. Worked Example: Reduction Kernel (RMSNorm)
-
-Kernel: `triton_red_fused_add_mean_mul_pow_rsqrt_0`
-Operation: RMSNorm — `x * rsqrt(mean(x^2) + eps) * weight`
-
-### 4.1 Trace event args (V2 input)
-
-```
-Concrete Inputs: ['', '', '', '32768', '2048']
-Input Dims:      [[8, 4096, 2048], [2048], [8, 4096, 2048], [], []]
-Input type:      ['c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', 'Scalar', 'Scalar']
-```
-
-### 4.2 Element count extraction
-
-Integer scalars from `Concrete Inputs` (non-integer values skipped): `[32768, 2048]`
-
-Reduction kernel → last two integer scalars are `xnumel` and `rnumel`:
-- `xnumel = 32,768` (= 8 x 4,096 = batch x seq_len)
-- `rnumel = 2,048` (= hidden_dim, the reduction axis)
-
-### 4.3 Bytes calculation (V2)
-
-| Input | Dims | Type | Bytes per elem | Elements | Bytes |
-|-------|------|------|---------------|----------|-------|
-| `in_ptr0` | [8, 4096, 2048] | bf16 | 2 | 67,108,864 | 134,217,728 |
-| `in_ptr1` | [2048] | bf16 | 2 | 2,048 | 4,096 |
-| `out_ptr1` | [8, 4096, 2048] | bf16 | 2 | 67,108,864 | 134,217,728 |
-
-No extra output write for reduction kernels (the output pointer is already
-listed as a separate tensor).
-
-```
-bytes_moved = 134,217,728 + 4,096 + 134,217,728
-            = 268,439,552 bytes
-            ≈ 256 MB
-```
-
-### 4.4 Bytes calculation (V1 — for comparison)
-
-V1 uses `xnumel`, `rnumel`, and per-pointer byte widths from the signature
-instead of per-tensor shapes:
-
-```python
-signature: {'in_ptr0': '*bf16', 'in_ptr1': '*bf16', 'out_ptr1': '*bf16',
-            'xnumel': 'i32', 'r0_numel': 'i32'}
-ptr_bytes = [2, 2, 2]    # three *bf16 pointers
-```
-
-Reduction formula: all inputs read `xnumel * rnumel` elements, the output
-(last pointer) writes `xnumel` elements:
-
-```
-bytes = sum(ptr_bytes[:-1]) * xnumel * rnumel + ptr_bytes[-1] * xnumel
-      = (2 + 2) * 32,768 * 2,048 + 2 * 32,768
-      = 268,435,456 + 65,536
-      = 268,500,992 bytes
-      ≈ 256 MB
-```
-
-Note: V1 and V2 give slightly different values because V1 assumes all input
-pointers access the full `xnumel * rnumel` grid, while V2 uses exact tensor
-shapes (the weight tensor `in_ptr1` is only [2048], not [32768, 2048]).
-
-### 4.5 FLOPs calculation
-
-Fused ops: `aten.add`, `aten.mean`, `aten.mul`, `aten.pow`, `aten.rsqrt`
-
-| Op | FLOPs per element |
-|----|-------------------|
-| `aten.add` | 1 |
-| `aten.mean` | 1 |
-| `aten.mul` | 1 |
-| `aten.pow` | 2 |
-| `aten.rsqrt` | 2 |
-| **Total** | **7** |
-
-```
-flops = 7 * 32,768 * 2,048 = 469,762,048
-GFLOPS = 0.470
-```
-
-### 4.6 Throughput metrics
-
-GPU kernel time: **79.4 us**
-
-```
-TB/s     = (268,439,552 / 1e12) / (79.4 / 1e6)  = 3.38 TB/s
-TFLOPS/s = (0.470 / 1e3) / (79.4 / 1e6)         = 5.92 TFLOPS/s
-```
-
----
-
-## 5. Metric Formulas Reference
+## 5. Metric Formulas
 
 ### FLOPs
 
@@ -351,54 +342,193 @@ Data Moved (MB) = bytes_moved / (1024 * 1024)
 
 ---
 
-## 6. Data Flow Diagram
+## 6. Worked Example: Pointwise Kernel (SwiGLU)
+
+Kernel: `triton_poi_fused__unsafe_view_mul_silu_2`
+Operation: `silu(gate_proj(x)) * up_proj(x)` in the SwiGLU MLP
+
+### 6.1 Trace event args (V2 input)
 
 ```
-Chrome Trace (.json.gz)
-│
-├── event["name"]
-│   │
-│   └── resolve_perf_model_class()
-│       └── _match_triton_compiled() → TritonCompiledPerfModel
-│
-├── event["args"]                          GPU events
-│   ├── Concrete Inputs                         │
-│   ├── Input Dims                              │
-│   └── Input type                              │
-│         │                                     │
-│    ┌────┴─────┐                               │
-│    │ V2 path  │ ──── _meta_from_trace_args()  │
-│    └────┬─────┘      ├── scalars → xnumel, rnumel
-│         │            ├── dims + dtypes → total_bytes
-│     success?         └── _parse_kernel_name() → aten_ops
-│     ├── yes ── _meta ─────────┐               │
-│     └── no                    │               │
-│          │                    │               │
-│     ┌────┴─────┐              │               │
-│     │ V1 path  │              │               │
-│     └────┬─────┘              │               │
-│          │                    │               │
-│   Inductor Cache (.py)        │               │
-│   ├── Original ATen           │               │
-│   ├── size_hints              │        GPUEventAnalyser
-│   └── signature               │          busy_time
-│          │                    │               │
-│          └── _lookup() ── _meta               │
-│                               │               │
-│                          ┌────┴────┐    ┌─────┴─────┐
-│                          │ flops() │    │ kernel    │
-│                          │ bytes() │    │ time (µs) │
-│                          └────┬────┘    └─────┬─────┘
-│                               │               │
-│                               └───────┬───────┘
-│                                       │
-│                                  TB/s, TFLOPS/s
-│                          (tree_perf.py:compute_perf_metrics)
+Concrete Inputs: ['', '', '268435456']
+Input Dims:      [[8, 4096, 8192], [32768, 8192], []]
+Input type:      ['c10::BFloat16', 'c10::BFloat16', 'Scalar']
+```
+
+### 6.2 Element count extraction
+
+Integer scalars from `Concrete Inputs` (empty strings and non-integer values
+like floats or booleans are skipped): `[268435456]`
+
+Pointwise kernel → last integer scalar is `xnumel`:
+- `xnumel = 268,435,456` (= 8 x 4,096 x 8,192)
+- `rnumel = 1`
+
+### 6.3 Bytes calculation
+
+**Step 1:** Calculate bytes for each tensor input:
+
+| Input | Dims | Type | Bytes per elem | Elements | Bytes |
+|-------|------|------|---------------|----------|-------|
+| `in_out_ptr0` | [8, 4096, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
+| `in_ptr0` | [32768, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
+| `xnumel` | [] | Scalar | — | — | skipped |
+
+```
+input_bytes = (268,435,456 * 2) + (268,435,456 * 2) = 1,073,741,824
+```
+
+**Step 2:** Add output write for pointwise kernels.
+
+In pointwise kernels, `in_out_ptr0` is both read and written — the output
+overwrites the input buffer.  The input bytes above already count the read.
+V2 adds one extra write of `ptr_bytes[0] * xnumel`:
+
+```
+output_write = 2 * 268,435,456 = 536,870,912
+```
+
+**Total:**
+
+```
+bytes_moved = 1,073,741,824 + 536,870,912
+            = 1,610,612,736 bytes
+            = 1,536 MB
+```
+
+### 6.4 FLOPs calculation
+
+Fused ops parsed from the kernel name: `aten._unsafe_view`, `aten.mul`, `aten.silu`
+
+| Op | FLOPs per element |
+|----|-------------------|
+| `aten._unsafe_view` | 0 (memory-only) |
+| `aten.mul` | 1 |
+| `aten.silu` | 4 |
+| **Total** | **5** |
+
+```
+flops = 5 * xnumel * rnumel
+      = 5 * 268,435,456 * 1
+      = 1,342,177,280
+GFLOPS = 1,342,177,280 / 1e9 = 1.342
+```
+
+### 6.5 Throughput metrics
+
+GPU kernel time from the Chrome trace: **505.3 us**
+
+```
+TB/s     = (1,610,612,736 / 1e12) / (505.3 / 1e6) = 3.19 TB/s
+TFLOPS/s = (1.342 / 1e3) / (505.3 / 1e6)          = 2.66 TFLOPS/s
+```
+
+### 6.6 Summary
+
+| Metric | Value |
+|--------|-------|
+| Data Moved | 1,536 MB |
+| GFLOPS | 1.342 |
+| FLOPS/Byte | 0.833 |
+| TB/s | 3.19 |
+| TFLOPS/s | 2.66 |
+
+---
+
+## 7. Worked Example: Reduction Kernel (RMSNorm)
+
+Kernel: `triton_red_fused_add_mean_mul_pow_rsqrt_0`
+Operation: RMSNorm — `x * rsqrt(mean(x^2) + eps) * weight`
+
+### 7.1 Trace event args (V2 input)
+
+```
+Concrete Inputs: ['', '', '', '32768', '2048']
+Input Dims:      [[8, 4096, 2048], [2048], [8, 4096, 2048], [], []]
+Input type:      ['c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', 'Scalar', 'Scalar']
+```
+
+### 7.2 Element count extraction
+
+Integer scalars from `Concrete Inputs` (non-integer values skipped): `[32768, 2048]`
+
+Reduction kernel → last two integer scalars are `xnumel` and `rnumel`:
+- `xnumel = 32,768` (= 8 x 4,096 = batch x seq_len)
+- `rnumel = 2,048` (= hidden_dim, the reduction axis)
+
+### 7.3 Bytes calculation (V2)
+
+| Input | Dims | Type | Bytes per elem | Elements | Bytes |
+|-------|------|------|---------------|----------|-------|
+| `in_ptr0` | [8, 4096, 2048] | bf16 | 2 | 67,108,864 | 134,217,728 |
+| `in_ptr1` | [2048] | bf16 | 2 | 2,048 | 4,096 |
+| `out_ptr1` | [8, 4096, 2048] | bf16 | 2 | 67,108,864 | 134,217,728 |
+
+No extra output write for reduction kernels (the output pointer is already
+listed as a separate tensor).
+
+```
+bytes_moved = 134,217,728 + 4,096 + 134,217,728
+            = 268,439,552 bytes
+            ≈ 256 MB
+```
+
+### 7.4 Bytes calculation (V1 — for comparison)
+
+V1 uses `xnumel`, `rnumel`, and per-pointer byte widths from the signature
+instead of per-tensor shapes:
+
+```python
+signature: {'in_ptr0': '*bf16', 'in_ptr1': '*bf16', 'out_ptr1': '*bf16',
+            'xnumel': 'i32', 'r0_numel': 'i32'}
+ptr_bytes = [2, 2, 2]    # three *bf16 pointers
+```
+
+Reduction formula: all inputs read `xnumel * rnumel` elements, the output
+(last pointer) writes `xnumel` elements:
+
+```
+bytes = sum(ptr_bytes[:-1]) * xnumel * rnumel + ptr_bytes[-1] * xnumel
+      = (2 + 2) * 32,768 * 2,048 + 2 * 32,768
+      = 268,435,456 + 65,536
+      = 268,500,992 bytes
+      ≈ 256 MB
+```
+
+Note: V1 and V2 give slightly different values because V1 assumes all input
+pointers access the full `xnumel * rnumel` grid, while V2 uses exact tensor
+shapes (the weight tensor `in_ptr1` is only [2048], not [32768, 2048]).
+
+### 7.5 FLOPs calculation
+
+Fused ops: `aten.add`, `aten.mean`, `aten.mul`, `aten.pow`, `aten.rsqrt`
+
+| Op | FLOPs per element |
+|----|-------------------|
+| `aten.add` | 1 |
+| `aten.mean` | 1 |
+| `aten.mul` | 1 |
+| `aten.pow` | 2 |
+| `aten.rsqrt` | 2 |
+| **Total** | **7** |
+
+```
+flops = 7 * 32,768 * 2,048 = 469,762,048
+GFLOPS = 0.470
+```
+
+### 7.6 Throughput metrics
+
+GPU kernel time: **79.4 us**
+
+```
+TB/s     = (268,439,552 / 1e12) / (79.4 / 1e6)  = 3.38 TB/s
+TFLOPS/s = (0.470 / 1e3) / (79.4 / 1e6)         = 5.92 TFLOPS/s
 ```
 
 ---
 
-## 7. Results for the Example TransformerBlock
+## 8. Results for the Example TransformerBlock
 
 Model: `TransformerBlock(dim=2048, n_heads=16, mlp_ratio=4)`, batch=8,
 seq_len=4096, dtype=bf16.  Traced with PyTorch 2.11+rocm7.2 on MI300X.
@@ -412,100 +542,13 @@ seq_len=4096, dtype=bf16.  Traced with PyTorch 2.11+rocm7.2 on MI300X.
 
 ---
 
-## 8. Kernel Naming and PyTorch Version Compatibility
-
-### 8.1 `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES`
-
-Inductor controls kernel naming via the `unique_kernel_names` setting
-(`TORCHINDUCTOR_UNIQUE_KERNEL_NAMES` environment variable).  When **enabled**,
-kernels get descriptive names that encode the kernel category and fused ops:
-
-```
-triton_poi_fused_add_mul_silu_0
-│         │     │              │
-│         │     │              └── kernel index
-│         │     └── fused ATen ops (alphabetical)
-│         └── kernel category
-└── Triton/Inductor prefix
-```
-
-When **disabled**, kernels are named generically: `triton_0`, `triton_1`, etc.
-
-This is a **compile-time** setting — it must be set when the trace is
-captured, not when TraceLens analyzes it.  The name is baked into the
-compiled kernel and recorded in the Chrome trace.
-
-**Default by PyTorch version:**
-
-| PyTorch Version | Default | Notes |
-|-----------------|---------|-------|
-| 2.0 – 2.5 | **Disabled** | `os.environ.get("TORCHINDUCTOR_UNIQUE_KERNEL_NAMES") == "1"` — must opt in |
-| 2.6+ | **Enabled** | `os.environ.get("TORCHINDUCTOR_UNIQUE_KERNEL_NAMES", "1") == "1"` — default changed to `"1"` |
-
-Source: `torch/_inductor/config.py` in the PyTorch repository
-([v2.4.0](https://github.com/pytorch/pytorch/blob/v2.4.0/torch/_inductor/config.py),
-[v2.6.0](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/_inductor/config.py)).
-
-**Impact on TraceLens perf model:**
-
-| | Unique names enabled | Unique names disabled |
-|--|---------------------|----------------------|
-| V2 element counts (`xnumel`, `rnumel`) | Works — from `Concrete Inputs` | Works — from `Concrete Inputs` |
-| V2 bytes (`Data Moved`) | Works — from `Input Dims` + `Input type` | Works — from `Input Dims` + `Input type` |
-| FLOPs (`_parse_kernel_name`) | Works — parses ops from name | Returns `[]` — generic name has no ops |
-| V1 cache fallback | Works | Works (matches by kernel name in cache) |
-
-For users on PyTorch 2.4–2.5, set the environment variable before trace
-capture to get FLOPs:
-
-```bash
-TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1 python your_training_script.py
-```
-
-### 8.2 Inductor Triton Kernel Types
-
-Inductor generates Triton kernels in several categories, each with a
-distinct 3-character prefix derived from the category name (`category[:3]`).
-These 6 categories have been stable from PyTorch 2.3 through 2.11+
-(defined in `torch/_inductor/wrapper_benchmark.py`):
-
-| Prefix | Category | Description |
-|--------|----------|-------------|
-| `triton_poi_` | `pointwise` | Element-wise ops (add, mul, relu, silu, etc.). One loop dimension: `xnumel`. Fused ops stay in registers — no intermediate global memory writes. |
-| `triton_red_` | `reduction` | Reduction ops (sum, mean, batch norm, etc.) using a looped strategy. Two dimensions: `xnumel` (outer), `rnumel` (reduction axis). Used when the reduction axis is too large for persistent strategy. |
-| `triton_per_` | `persistent_reduction` | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's `should_use_persistent_reduction()` heuristic decides. |
-| `triton_tem_` | `template` | Complex ops like matrix multiplication (mm, addmm, _scaled_mm) using pre-defined Triton templates with optional fused epilogues. |
-| `triton_for_` | `foreach` | Fused operations across lists of tensors (e.g., optimizer step updates applied to all parameters at once). |
-| `triton_spl_` | `split_scan` | Split scan operations (e.g., cumulative sums with decoupled lookback). |
-
-**TraceLens coverage:**
-
-| Category | Modeled by TraceLens? | Notes |
-|----------|----------------------|-------|
-| `triton_poi_` | Yes | `TritonCompiledPerfModel` computes FLOPs and bytes |
-| `triton_red_` | Yes | Same perf model, two-dimensional (xnumel × rnumel) |
-| `triton_per_` | Yes | Treated identically to `triton_red_` |
-| `triton_tem_` | No (not needed) | GEMM ops already modeled by `aten_mm`, `aten_scaled_mm`, etc. |
-| `triton_for_` | No | Typically optimizer-step ops, not performance-critical |
-| `triton_spl_` | No | Scan operations, uncommon in typical workloads |
-
-**Naming pattern:**
-
-```
-triton_{category}_fused_{op1}_{op2}_{...}_{index}
-```
-
-The fused ops are listed alphabetically.  The index is a sequential
-counter within the compiled graph.  When `unique_kernel_names` is disabled,
-the entire name collapses to `triton_{index}`.
-
----
-
 ## References
 
 - [PyTorch Blog: Why Is PyTorch Compile So Fast — Kernel Fusion](https://pytorch.org/blog/why-is-pytorch-compile-so-fast-kernel-fusion/)
 - [TorchInductor GPU Profiling — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
+- [Profiling torch.compile — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_profiling_torch_compile.html)
 - [Learn by Doing: TorchInductor Reduction Kernels](https://karthick.ai/blog/2025/Learn-By-Doing-Torchinductor-Reduction/)
 - [TorchInductor — DeepWiki](https://deepwiki.com/pytorch/pytorch/2.2-torchinductor)
 - [PyTorch Inductor config.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py)
 - [PyTorch Inductor codegen/triton.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py)
+- [PyTorch Inductor wrapper_benchmark.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/wrapper_benchmark.py)
