@@ -63,6 +63,23 @@ _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
 _COMPARATIVE_T2_TIME_COL = "lca_total_kernel_time_trace2_us"
 _COMPARATIVE_T2_COUNT_COL = "lca_count_trace2"
 
+_CALL_CHAIN_MAX_OPS = 100
+_CALL_CHAIN_SKIP = frozenset(
+    {
+        "torch/nn/modules/module.py",
+        "torch/utils/_device.py",
+        "torch/overrides.py",
+        "torch/_ops.py",
+        "multiprocessing/spawn.py",
+        "torch/_dynamo/eval_frame.py",
+        "torch/_functorch/",
+        "torch/autograd/function.py",
+        "torch/_inductor/",
+        "torch/cuda/graphs.py",
+        "torch/utils/_contextlib.py",
+    }
+)
+
 
 def _eff_bucket(pct):
     """Classify roofline efficiency into a coarse band for P-item grouping."""
@@ -473,30 +490,43 @@ def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
     return ""
 
 
+def _extract_module_chain(call_stack_str: str) -> List[str]:
+    """Extract nn.Module names from a call stack string (leaf-to-root order)."""
+    if not call_stack_str or call_stack_str == "nan":
+        return []
+    return [
+        f.strip().removeprefix("nn.Module: ")
+        for f in call_stack_str.split(" => ")
+        if f.strip().startswith("nn.Module: ")
+    ]
+
+
+def _extract_call_chain(call_stack_str: str) -> List[str]:
+    """Return meaningful frames from a call stack, filtering torch dispatch internals."""
+    if not call_stack_str or call_stack_str == "nan":
+        return []
+    frames = [f.strip() for f in call_stack_str.split(" => ")]
+    return [
+        f
+        for f in frames
+        if not any(s in f for s in _CALL_CHAIN_SKIP)
+        and (f.startswith("nn.Module:") or ".py" in f or "::" in f)
+    ]
+
+
 def build_operation_metrics(
     ops_df: pd.DataFrame,
     metadata: dict,
     category_config: dict,
-    callstacks_df: Optional[pd.DataFrame] = None,
     comparison_scope: str = "standalone",
 ) -> List[dict]:
-    """
-    Build list of operation metrics for JSON output.
-
-    Automatically loads the high-confidence fusion kernel map from
-    ``kernel_fusion_metrics.json`` (if it exists) via ``metadata["output_dir"]``
-    and tags operations whose GPU kernels are covered by a fusion candidate.
+    """Build operation metric dicts for JSON output.
 
     Args:
-        ops_df: Operations DataFrame
-        metadata: Metadata dict with peak performance values
-        category_config: Category-specific configuration with:
-            - extra_fields: Additional fields to extract (optional)
-            - operation_classifier: Function to classify operations (optional)
-        comparison_scope: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
-
-    Returns:
-        List of operation metric dicts
+        ops_df: Operations DataFrame (may include a ``call_stack`` column)
+        metadata: Peak performance values and GPU utilization
+        category_config: Optional extra_fields / operation_classifier
+        comparison_scope: ``"standalone"`` or ``"comparative"``
     """
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
@@ -606,18 +636,21 @@ def build_operation_metrics(
                 op_metric["fusion_flagged"] = True
                 op_metric["fusion_candidate_name"] = matched
 
-        cs_str = ""
-        if callstacks_df is not None:
-            match = callstacks_df[
-                (callstacks_df["name"] == op_name)
-                & (callstacks_df["op category"] == row.get("op category", ""))
-            ]
-            if len(match) > 0:
-                cs_str = str(match.iloc[0].get("call_stack", ""))
+        cs_raw = row.get("call_stack")
+        cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
         launcher = _extract_launcher_path(cs_str, op_name)
         op_metric["launcher_path"] = launcher if launcher else "—"
+        op_metric["module_chain"] = _extract_module_chain(cs_str)
+        op_metric["_raw_call_stack"] = cs_str
 
         operations.append(op_metric)
+
+    if len(operations) <= _CALL_CHAIN_MAX_OPS:
+        for op in operations:
+            op["call_chain"] = _extract_call_chain(op.pop("_raw_call_stack", ""))
+    else:
+        for op in operations:
+            op.pop("_raw_call_stack", None)
 
     return operations
 
@@ -923,18 +956,10 @@ def run_category_analysis(
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
 
-    callstacks_df = None
-    cs_path = os.path.join(
-        perf_report_csv_dir(output_dir), "unified_perf_callstacks.csv"
-    )
-    if os.path.exists(cs_path):
-        callstacks_df = pd.read_csv(cs_path)
-
     operations = build_operation_metrics(
         ops_df,
         metadata,
         config,
-        callstacks_df=callstacks_df,
         comparison_scope=comparison_scope,
     )
     category_specific = extract_fn(ops_df, metadata)

@@ -250,7 +250,6 @@ This script performs:
 **Outputs:**
 - `category_data/<category>_ops.csv` - Filtered operations per category
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
-- `category_data/<category>_tree_data.json` - Pre-computed tree analysis
 - `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
@@ -402,8 +401,7 @@ Read and follow the FULL instructions in:
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
-  category_data/{category}_tree_data.json (if available),
-  category_data/{category}_metrics.json (P-items come from `category_findings[]`)
+  category_data/{category}_metrics.json (P-items come from `category_findings[]`; `operations[i].module_chain` provides model layer context)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
