@@ -11,13 +11,9 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
-from TraceLens.TraceIndex.core import (
-    execute_read_query,
-    generate_report_and_import,
-    import_report_dir,
-    scan_traces,
-    search_index,
-)
+from TraceLens.TraceIndex.importer import generate_report_and_import, import_report_dir
+from TraceLens.TraceIndex.scanner import scan_traces
+from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
 
 
 DEFAULT_DB = Path("trace_index.sqlite")
@@ -27,51 +23,79 @@ def print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, default=str))
 
 
+def create_store(args: argparse.Namespace):
+    if args.backend != "sqlite":
+        raise ValueError("only the sqlite backend is currently implemented")
+    return SQLiteTraceIndexStore(args.db)
+
+
 def scan_cmd(args: argparse.Namespace) -> int:
-    count = scan_traces(
-        db_path=args.db,
-        root=args.root,
-        peek_mb=args.peek_mb,
-        compute_md5=args.compute_md5,
-    )
-    print_json({"db": args.db, "root": args.root, "candidate_traces": count})
-    return 0
+    store = create_store(args)
+    try:
+        count = scan_traces(
+            store,
+            root=args.root,
+            peek_mb=args.peek_mb,
+            compute_md5=args.compute_md5,
+        )
+        print_json({"backend": args.backend, "db": args.db, "root": args.root, "candidate_traces": count})
+        return 0
+    finally:
+        store.close()
 
 
 def import_report_cmd(args: argparse.Namespace) -> int:
-    trace_id = import_report_dir(
-        db_path=args.db,
-        report_dir=args.report_dir,
-        trace_path=args.trace_path,
-        root=args.root,
-    )
-    print_json({"db": args.db, "trace_id": trace_id, "report_dir": args.report_dir})
-    return 0
+    store = create_store(args)
+    try:
+        trace_id = import_report_dir(
+            store,
+            report_dir=args.report_dir,
+            trace_path=args.trace_path,
+            root=args.root,
+        )
+        print_json({"backend": args.backend, "db": args.db, "trace_id": trace_id, "report_dir": args.report_dir})
+        return 0
+    finally:
+        store.close()
 
 
 def build_cmd(args: argparse.Namespace) -> int:
-    trace_id = generate_report_and_import(
-        db_path=args.db,
-        trace_path=args.trace_path,
-        report_dir=args.report_dir,
-        root=args.root,
-        force=args.force,
-        enable_pseudo_ops=args.enable_pseudo_ops,
-    )
-    print_json({"db": args.db, "trace_id": trace_id, "trace_path": args.trace_path})
-    return 0
+    store = create_store(args)
+    try:
+        trace_id = generate_report_and_import(
+            store,
+            trace_path=args.trace_path,
+            report_dir=args.report_dir,
+            root=args.root,
+            force=args.force,
+            enable_pseudo_ops=args.enable_pseudo_ops,
+        )
+        print_json({"backend": args.backend, "db": args.db, "trace_id": trace_id, "trace_path": args.trace_path})
+        return 0
+    finally:
+        store.close()
 
 
 def search_cmd(args: argparse.Namespace) -> int:
-    rows = search_index(args.db, " ".join(args.terms), limit=args.limit)
-    print_json({"rows": rows})
-    return 0
+    store = create_store(args)
+    try:
+        store.init_schema()
+        rows = [hit._asdict() for hit in store.search(" ".join(args.terms), limit=args.limit)]
+        print_json({"backend": args.backend, "rows": rows})
+        return 0
+    finally:
+        store.close()
 
 
-def sql_cmd(args: argparse.Namespace) -> int:
-    rows = execute_read_query(args.db, args.sql, limit=args.limit)
-    print_json({"rows": rows})
-    return 0
+def sqlite_sql_cmd(args: argparse.Namespace) -> int:
+    store = create_store(args)
+    try:
+        store.init_schema()
+        rows = store.execute_read_query(args.sql, limit=args.limit)
+        print_json({"backend": args.backend, "rows": rows})
+        return 0
+    finally:
+        store.close()
 
 
 def serve_cmd(args: argparse.Namespace) -> int:
@@ -89,8 +113,9 @@ def serve_cmd(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build and query a SQLite index of TraceLens reports."
+        description="Build and query a TraceIndex catalog of TraceLens reports."
     )
+    parser.add_argument("--backend", choices=["sqlite"], default="sqlite", help="TraceIndex storage backend")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite DB path")
     sub = parser.add_subparsers(dest="command")
 
@@ -125,10 +150,10 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=50)
     search.set_defaults(func=search_cmd)
 
-    sql = sub.add_parser("sql", help="Run a read-only SQL query")
+    sql = sub.add_parser("sqlite-sql", help="Run a read-only SQLite query")
     sql.add_argument("sql")
     sql.add_argument("--limit", type=int, default=500)
-    sql.set_defaults(func=sql_cmd)
+    sql.set_defaults(func=sqlite_sql_cmd)
 
     serve = sub.add_parser("serve", help="Serve read-only HTTP SQL access")
     serve.add_argument("--host", default="127.0.0.1")

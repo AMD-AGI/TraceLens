@@ -6,30 +6,33 @@ See LICENSE for license information.
 
 # TraceIndex
 
-TraceIndex builds a SQLite catalog of trace files and imports key TraceLens CSV
-report tables so a corpus can be searched without reopening every raw trace.
-It is useful when you have many profiler captures and want to answer questions
-like:
+TraceIndex builds a queryable catalog of trace files and imports key TraceLens
+CSV report tables so a corpus can be searched without reopening every raw
+trace. It is useful when you have many profiler captures and want to answer
+questions like:
 
 - Which traces contain GEMM, SDPA, convolution, collective, or short-kernel heavy workloads?
 - Which traces contain a specific backend kernel name?
 - Which trace should I open next in TraceLens or Perfetto?
 
 TraceIndex does not replace raw traces. It stores searchable summaries and paths
-back to the source traces.
+back to the source traces. The first backend is SQLite because it needs no
+service to run and works well for local or single-team workflows. The scanner,
+importer, and storage interface are separated so other backends can be added by
+implementing the same store contract.
 
 ## Quick Start
 
 Catalog trace-like files under a directory:
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite scan --root /path/to/traces
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
 ```
 
 Generate a TraceLens report for one PyTorch trace and import it into the index:
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite build \
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite build \
   --trace-path /path/to/traces/rank0_trace.json.gz \
   --report-dir ./trace_index_reports/rank0
 ```
@@ -37,7 +40,7 @@ TraceLens_trace_index --db trace_index.sqlite build \
 If you already have a TraceLens CSV report directory, import it directly:
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite import-report \
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite import-report \
   --trace-path /path/to/traces/rank0_trace.json.gz \
   --report-dir ./rank0_perf_report_csvs
 ```
@@ -45,14 +48,14 @@ TraceLens_trace_index --db trace_index.sqlite import-report \
 Search the full-text index:
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite search attention
-TraceLens_trace_index --db trace_index.sqlite search Cijk
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite search attention
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite search Cijk
 ```
 
-Run a read-only SQL query:
+Run a read-only SQLite query:
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite sql \
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite sqlite-sql \
   "SELECT op_category, COUNT(*) AS rows FROM unified_perf_rows GROUP BY op_category"
 ```
 
@@ -72,12 +75,29 @@ search:
 | `trace_summary` | Per-trace summary metrics derived during import |
 | `trace_search_FTS5` | Full-text search over traces, ops, kernels, categories, and timeline labels |
 
-## Query Server
+## Backend Model
+
+TraceIndex separates workflow code from persistence:
+
+| Module | Responsibility |
+|---|---|
+| `models.py` | Backend-neutral trace, report, and search-result objects |
+| `store.py` | `TraceIndexStore` interface for persistence/search backends |
+| `scanner.py` | File discovery and trace metadata extraction |
+| `importer.py` | TraceLens CSV report loading and import workflow |
+| `sqlite_store.py` | SQLite schema, inserts, full-text search, and read-only SQL |
+| `cli.py` | User-facing commands that call scanner/importer/store APIs |
+
+To add another backend, implement `TraceIndexStore` and wire it into the CLI
+backend selector. Backend-neutral commands such as `scan`, `build`,
+`import-report`, and `search` should not need to change.
+
+## SQLite Query Server
 
 For notebook or browser workflows, serve read-only SQL access locally:
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite serve --host 127.0.0.1 --port 8765
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite serve --host 127.0.0.1 --port 8765
 ```
 
 The server exposes:
@@ -86,9 +106,9 @@ The server exposes:
 - `GET /tables`
 - `POST /query` with `{"sql": "SELECT ...", "params": [], "limit": 500}`
 
-Only single `SELECT`, `WITH`, or `PRAGMA` statements are accepted. The server is
-read-only but does not implement authentication, so bind it to loopback unless
-you put it behind your own access control.
+Only single SQLite `SELECT`, `WITH`, or `PRAGMA` statements are accepted. The
+server is read-only but does not implement authentication, so bind it to
+loopback unless you put it behind your own access control.
 
 ## Python API
 

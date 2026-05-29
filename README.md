@@ -20,7 +20,7 @@ TraceLens is a Python library focused on **automating analysis from trace files*
 
 **Event Replay** — Isolate any operation for focused debugging. TraceLens generates minimal, self-contained replay scripts directly from trace metadata, making it simple to share IP-safe test cases with kernel developers.
 
-**Trace Corpus Indexing** — Build a searchable SQLite index over many TraceLens reports so you can find traces by op, category, kernel name, or timeline metric without reopening every raw trace.
+**Trace Corpus Indexing** — Build a searchable catalog over many TraceLens reports so you can find traces by op, category, kernel name, or timeline metric without reopening every raw trace. The first backend is local SQLite, with a storage interface for future shared backends.
 
 **Extensible SDK** — Get started instantly with ready-to-use scripts, then build your own custom workflows using a flexible and hackable Python API.
 
@@ -95,9 +95,9 @@ Detailed docs: [compare_perf_reports_pytorch.md](docs/compare_perf_reports_pytor
 ### Trace corpus indexing
 
 ```bash
-TraceLens_trace_index --db trace_index.sqlite scan --root /path/to/traces
-TraceLens_trace_index --db trace_index.sqlite build --trace-path /path/to/trace.json.gz
-TraceLens_trace_index --db trace_index.sqlite search Cijk
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite build --trace-path /path/to/trace.json.gz
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite search Cijk
 ```
 
 Detailed docs: [TraceIndex.md](docs/TraceIndex.md).
