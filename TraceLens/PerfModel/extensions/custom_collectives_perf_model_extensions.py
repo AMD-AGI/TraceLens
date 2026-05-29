@@ -14,6 +14,9 @@ from TraceLens.PerfModel.perf_model import RMSNorm
 
 
 class CustomCollective:
+    category = "CustomCollective"
+    bwd_category = None
+
     pass
 
 

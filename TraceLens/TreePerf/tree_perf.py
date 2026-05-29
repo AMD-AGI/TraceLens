@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
     categorize_torch_op,
-    dict_cat2names,
+    get_perf_model_category,
     op_to_perf_model_class_map,
+    resolve_perf_model_class,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
@@ -130,10 +131,12 @@ def get_max_achievable_tflops(perf_model, arch):
     return maf_specs.get(compute_spec)
 
 
-def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_origami):
+def _perf_model_init_kwargs(
+    perf_model_class, event, arch, python_path, enable_origami, inductor_cache_dir=None
+):
     """
-    Build keyword args for perf model construction. Only passes enable_origami when
-    the model's __init__ declares that parameter or accepts **kwargs.
+    Build keyword args for perf model construction. Only passes enable_origami
+    and inductor_cache_dir when the model's __init__ declares them or accepts **kwargs.
     """
     kwargs = {
         "event": event,
@@ -144,13 +147,13 @@ def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_o
         sig = inspect.signature(perf_model_class.__init__)
     except (TypeError, ValueError):
         return kwargs
-    if "enable_origami" in sig.parameters:
+    has_var_keyword = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if "enable_origami" in sig.parameters or has_var_keyword:
         kwargs["enable_origami"] = enable_origami
-        return kwargs
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            kwargs["enable_origami"] = enable_origami
-            break
+    if "inductor_cache_dir" in sig.parameters or has_var_keyword:
+        kwargs["inductor_cache_dir"] = inductor_cache_dir
     return kwargs
 
 
@@ -168,6 +171,48 @@ class TreePerfAnalyzer:
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
         data = DataLoader.load_data(profile_filepath)
+        # PyTorch Chrome traces carry run metadata as top-level JSON fields.
+        # Field presence varies by profiler version, profiler options, and backend, e.g.
+        # {
+        #   "schemaVersion": 1,          # usually present
+        #   "deviceProperties": [{       # usually present for GPU traces
+        #     "id": 0,
+        #     "name": "AMD Instinct MI210",
+        #     "totalGlobalMem": 68702699520,
+        #     "computeMajor": 9,
+        #     "computeMinor": 0,
+        #     "maxThreadsPerBlock": 1024,
+        #     "maxThreadsPerMultiprocessor": 2048,
+        #     "regsPerBlock": 131072,
+        #     "warpSize": 64,
+        #     "sharedMemPerBlock": 65536,
+        #     "maxSharedMemoryPerMultiProcessor": 65536,
+        #     "numSms": 104
+        #   }],
+        #   "distributedInfo": {         # optional; distributed profiler traces
+        #     "backend": "nccl",
+        #     "rank": 0,
+        #     "world_size": 1,
+        #     "pg_count": 7,
+        #     "pg_config": [{
+        #       "pg_name": "0",
+        #       "pg_desc": "default_pg",
+        #       "backend_config": "cuda:nccl",
+        #       "pg_size": 1,
+        #       "ranks": [0]
+        #     }]
+        #   },
+        #   "record_shapes": 1,              # optional; profiler option/version dependent
+        #   "with_stack": 1,                 # optional; profiler option/version dependent
+        #   "roctracer_version": 4.1,        # optional; ROCm traces only
+        #   "hip_runtime_version": 70253211, # optional; ROCm traces only
+        #   "hip_driver_version": 70253211,  # optional; ROCm traces only
+        #   "traceEvents": [...]             # required event payload
+        # }
+        # Keep these trace-level fields separate from Chrome "M" metadata events.
+        trace_metadata = {
+            key: value for key, value in data.items() if key != "traceEvents"
+        }
         data = data["traceEvents"]
 
         categorizer = (
@@ -176,7 +221,11 @@ class TreePerfAnalyzer:
             else TraceEventUtils.prepare_event_categorizer(data)
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
-        tree = TraceToTree(data, event_to_category=categorizer)
+        tree = TraceToTree(
+            data,
+            event_to_category=categorizer,
+            trace_metadata=trace_metadata,
+        )
 
         # Optionally merge capture trace into graph tree
         if capture_trace_filepath is not None:
@@ -209,10 +258,12 @@ class TreePerfAnalyzer:
         rebuild_tree=True,
         detect_recompute=False,
         enable_origami=False,
+        inductor_cache_dir=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
+        self.trace_metadata = self.tree.trace_metadata
         self.detect_recompute = detect_recompute
         if detect_recompute:
             add_python_func = True
@@ -220,6 +271,7 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
+        self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
         self.with_python_stack = any(
@@ -244,7 +296,6 @@ class TreePerfAnalyzer:
 
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
-        self.dict_cat2names = dict_cat2names
 
     def check_gpu_only(self):
         for event in self.tree.events:
@@ -368,7 +419,7 @@ class TreePerfAnalyzer:
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
+            perf_model_class = resolve_perf_model_class(event["name"])
         perf_model = perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
@@ -376,6 +427,7 @@ class TreePerfAnalyzer:
                 self.arch,
                 self.python_path,
                 self.enable_origami,
+                self.inductor_cache_dir,
             )
         )
 
@@ -1546,7 +1598,12 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
-        return event.get("name") in self.op_to_perf_model_class_map
+        cls = resolve_perf_model_class(event.get("name", ""))
+        if cls is None:
+            return False
+        if hasattr(cls, "can_model"):
+            return cls.can_model(event)
+        return True
 
     def _is_leaf_cpu_op(self, event):
         """
@@ -1662,6 +1719,10 @@ class TreePerfAnalyzer:
         """
         fwd_event, is_sole_bwd = self._get_linked_fwd_event(event)
         if not fwd_event or not is_sole_bwd:
+            return False
+
+        fwd_perf_model_class = self.op_to_perf_model_class_map.get(fwd_event["name"])
+        if get_perf_model_category(fwd_perf_model_class, bwd=True) is None:
             return False
 
         # Check if backward metrics are actually defined for this forward op
@@ -1925,6 +1986,21 @@ class TreePerfAnalyzer:
             args = event.get("args", {})
             has_own_perf_model = self._has_perf_model(event)
             is_sole_bwd = self._is_sole_bwd_with_fwd_perf_model(event)
+            linked_fwd_event = None
+            linked_bwd_category = None
+            if is_sole_bwd:
+                linked_fwd_event, _ = self._get_linked_fwd_event(event)
+                if linked_fwd_event is not None:
+                    linked_perf_model_class = self.op_to_perf_model_class_map.get(
+                        linked_fwd_event["name"]
+                    )
+                    linked_bwd_category = get_perf_model_category(
+                        linked_perf_model_class, bwd=True
+                    )
+
+            op_category = self.op_categorizer(event)
+            if not has_own_perf_model and linked_bwd_category is not None:
+                op_category = linked_bwd_category
 
             if event.get("overlap_pct") is None and event.get("gpu_events"):
                 kernels = [
@@ -1939,7 +2015,7 @@ class TreePerfAnalyzer:
 
             row = {
                 "name": event.get("name"),
-                "op category": self.op_categorizer(event),
+                "op category": op_category,
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
@@ -2041,9 +2117,8 @@ class TreePerfAnalyzer:
                             ).compute_metrics()["busy_time"]
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
-                fwd_event, _ = self._get_linked_fwd_event(event)
                 try:
-                    metrics = self.compute_perf_metrics(fwd_event, bwd=True)
+                    metrics = self.compute_perf_metrics(linked_fwd_event, bwd=True)
                     for col in perf_cols:
                         if col in metrics:
                             row[col] = metrics[col]
@@ -2876,6 +2951,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
+        self.inductor_cache_dir = None
         self.event_to_category = event_to_category
         self.pb_file_name = pb_file_name
         self.arch = arch
@@ -3385,6 +3461,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 self.arch,
                 self.python_path,
                 self.enable_origami,
+                self.inductor_cache_dir,
             )
         )
 
