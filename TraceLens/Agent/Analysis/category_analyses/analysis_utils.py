@@ -693,7 +693,6 @@ def compute_impact_estimates(
 
         if impact_score_high < min_impact_score:
             continue
-        confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
         estimate = {
             "operation": op.get("name", "Unknown"),
             "category": category,
@@ -701,7 +700,6 @@ def compute_impact_estimates(
             "impact_score": round(impact_score_mid, 2),
             "impact_score_low": round(impact_score_low, 2),
             "impact_score_high": round(impact_score_high, 2),
-            "confidence": confidence,
             "efficiency_pct": round(eff_pct, 2),
             "bound_type": eff.get("bound_type"),
             "library": op.get("library"),
