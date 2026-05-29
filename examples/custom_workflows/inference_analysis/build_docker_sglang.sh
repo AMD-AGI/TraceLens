@@ -23,6 +23,7 @@ Options:
   --sglang-version <ver>   SGLang version to patch (default: 0.5.9)
                            - 0.5.9 / v059   : sglang_roofline_patches/sglang_0_5_9/
                            - 0.5.11 / v0511 : sglang_roofline_patches/sglang_0_5_11/
+                           - 0.5.12 / v0512 : sglang_roofline_patches/sglang_0_5_12/
   --gpu-type <type>        mi300 | mi350 | mi355 (default: mi350)
   --base-image <image>     Override the default base image
   -h, --help               Show this help
@@ -35,8 +36,11 @@ Base images:
   0.5.9  MI355X : lmsysorg/sglang:v0.5.9-rocm700-mi35x
   0.5.11 MI300X : lmsysorg/sglang:v0.5.11-rocm720-mi30x
   0.5.11 MI355X : lmsysorg/sglang:v0.5.11-rocm720-mi35x
+  0.5.12 MI300X : lmsysorg/sglang:v0.5.12-rocm720-mi30x
+  0.5.12 MI355X : lmsysorg/sglang:v0.5.12-rocm720-mi35x
 
 Examples:
+  $0 /path/to/TraceLens --sglang-version 0.5.12 --gpu-type mi300 -t tracelens-sglang:0.5.12-mi300
   $0 /path/to/TraceLens --sglang-version 0.5.11 --gpu-type mi300 -t tracelens-sglang:0.5.11-mi300
   $0 /path/to/TraceLens mi350 -t tracelens-sglang:0.5.9-mi350
 EOF
@@ -114,6 +118,9 @@ normalize_version() {
         0.5.11|v0511|0511|5.11)
             echo "0.5.11"
             ;;
+        0.5.12|v0512|0512|5.12)
+            echo "0.5.12"
+            ;;
         *)
             echo ""
             ;;
@@ -122,7 +129,7 @@ normalize_version() {
 
 SGLANG_VERSION="$(normalize_version "${SGLANG_VERSION}")"
 if [ -z "${SGLANG_VERSION}" ]; then
-    echo "Error: unsupported --sglang-version. Use 0.5.9 or 0.5.11."
+    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, or 0.5.12."
     exit 1
 fi
 
@@ -141,6 +148,12 @@ resolve_base_image() {
             ;;
         0.5.11:mi350|0.5.11:mi355)
             echo "lmsysorg/sglang:v0.5.11-rocm720-mi35x"
+            ;;
+        0.5.12:mi300)
+            echo "lmsysorg/sglang:v0.5.12-rocm720-mi30x"
+            ;;
+        0.5.12:mi350|0.5.12:mi355)
+            echo "lmsysorg/sglang:v0.5.12-rocm720-mi35x"
             ;;
         *)
             echo ""

@@ -105,23 +105,51 @@ Then create a container from the image.
 
 ###### SGLang Script
 
-The build script for SGLang supports SGLang 0.5.9 and 0.5.11. It takes the path to the local TraceLens clone, the SGLang version (`--sglang-version`, default 0.5.9), and the GPU type (`--gpu-type`, default mi350). MI300 and MI350/MI355 are supported.
+The build script for SGLang supports SGLang 0.5.9, 0.5.11, and 0.5.12. It takes the path to the local TraceLens clone, the SGLang version (`--sglang-version`, default 0.5.9), and the GPU type (`--gpu-type`, default mi350). MI300 and MI350/MI355 are supported.
 
+**SGLang versions** (`--sglang-version`):
 
-| SGLang Version | GPU Type | Base Image                              |
-| -------------- | -------- | --------------------------------------- |
-| `0.5.9`        | MI300    | `lmsysorg/sglang:v0.5.9-rocm700-mi30x`  |
-| `0.5.9`        | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x`  |
-| `0.5.11`       | MI300    | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
-| `0.5.11`       | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
+| Version | Patch directory | ROCm | Description |
+| ------- | --------------- | ---- | ----------- |
+| `0.5.9` (default) | `sglang_roofline_patches/sglang_0_5_9/` | 7.0 | Legacy stack |
+| `0.5.11` | `sglang_roofline_patches/sglang_0_5_11/` | 7.2 | Previous stable |
+| `0.5.12` | `sglang_roofline_patches/sglang_0_5_12/` | 7.2 | Recommended for newer stacks |
 
+Each version subdirectory contains the same set of patch files (`cuda_graph_runner`, `fused_moe_triton_kernels`, `http_server`, `io_struct`, `kernel_shape_profiler`, `profile_utils`, `scheduler`, `scheduler_profiler_mixin`, `server_args`, `tokenizer_communicator_mixin`). Use the directory that matches your SGLang version exactly.
+
+**Base images** (overridable with `--base-image`):
+
+| SGLang Version | GPU Type | Base Image |
+| -------------- | -------- | ---------- |
+| `0.5.9` | MI300 | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` |
+| `0.5.9` | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` |
+| `0.5.11` | MI300 | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
+| `0.5.11` | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
+| `0.5.12` | MI300 | `lmsysorg/sglang:v0.5.12-rocm720-mi30x` |
+| `0.5.12` | MI350/MI355 | `lmsysorg/sglang:v0.5.12-rocm720-mi35x` |
+
+**Examples:**
 
 ```bash
+# SGLang 0.5.12 on MI300X (recommended)
+bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
+    /path/to/TraceLens \
+    --sglang-version 0.5.12 \
+    --gpu-type mi300 \
+    -t tracelens-sglang:0.5.12-mi300
+
+# SGLang 0.5.11 on MI355X
 bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     /path/to/TraceLens \
     --sglang-version 0.5.11 \
+    --gpu-type mi355 \
+    -t tracelens-sglang:0.5.11-mi355
+
+# SGLang 0.5.9 on MI350 (legacy default)
+bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
+    /path/to/TraceLens \
     --gpu-type mi350 \
-    -t tracelens-sglang
+    -t tracelens-sglang:0.5.9-mi350
 ```
 
 Then create a container from the image.
@@ -149,7 +177,7 @@ If you prefer to patch an existing environment instead of building a new image, 
   - Select by framework and version
   - Apply: `cd /path/to/framework/../ && git apply /path/to/patchfile`
   vLLM patches are in [vllm_roofline_patches](../examples/custom_workflows/inference_analysis/vllm_patches)
-  SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/)
+  SGLang patches are in [sglang_roofline_patches](../examples/custom_workflows/inference_analysis/sglang_roofline_patches/) — use the `sglang_0_5_9/`, `sglang_0_5_11/`, or `sglang_0_5_12/` subdirectory matching your SGLang version
 
 ##### Collection Parameters
 
@@ -194,7 +222,7 @@ The `config_vllm_v*.patch` patches add two `ProfilerConfig` flags that control g
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
 
-Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14–v0.20 and SGLang v0.5.9; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
+Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14–v0.20 and SGLang v0.5.9–v0.5.12; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -o ./steady_state_analysis \
@@ -232,7 +260,7 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
     --CONC 32 --OSL 1024 --R 0.8
 ```
 
-Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher, SGLang v0.5.9, and Atom 0.1.1). This is recommended if the user wants to perform analysis on an isolated execution step.
+Option 2: One tracefile per eager/graph execution step (supports vLLM v0.13 or higher, SGLang v0.5.9–v0.5.12, and Atom 0.1.1). This is recommended if the user wants to perform analysis on an isolated execution step.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz -o ./output --store-single-iteration
