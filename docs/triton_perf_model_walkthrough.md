@@ -120,10 +120,11 @@ TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1 python your_training_script.py
 
 ### 2.4 Summary: recommended setup
 
-For full V2 support (bytes, FLOPs, and kernel categorization):
+Verified on PyTorch 2.4 and 2.11 (with `record_shapes=True`):
 
-- **PyTorch 2.6+** with `record_shapes=True` — everything works out of the box
-- **PyTorch 2.4–2.5** with `record_shapes=True` + `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1` — full V2 support with one extra env var
+- **PyTorch 2.11** — recommended, everything works out of the box
+- **PyTorch 2.4–2.5** — works with `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1` for FLOPs
+- **PyTorch 2.6–2.10** — expected to work (unique names enabled by default per [source code](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/_inductor/config.py)) but not directly verified
 
 ---
 
