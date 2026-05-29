@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import warnings
+
 from . import perf_model
 from collections import defaultdict
 from .extensions import get_pseudo_op_mappings, get_pseudo_op_categories
@@ -229,6 +231,53 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
     dict_cat2names[cat].append(op_name)
 
 
+def _category_from_classified_kernel(kernel_name):
+    """Map classify_kernels() output to TraceLens op category strings."""
+    from TraceLens.Agent.Analysis.utils.classify_kernels import classify_kernel
+
+    kt, pc, conf = classify_kernel(kernel_name)
+    if not conf:
+        warnings.warn(
+            "WARNING: classify_kernel could not confidently classify a GPU kernel; "
+            "categorize_torch_op will fall back to 'other'. "
+            f"kernel_name={kernel_name[:200]!r}",
+            UserWarning,
+            stacklevel=2,
+        )
+        return None
+    ktl, knl = kt.lower(), kernel_name.lower()
+    if kt == "KV Cache Store":
+        return "InferenceAttention"
+    if pc == "GEMM-MoE" or "moe gemm" in ktl:
+        return "MoE_unfused"
+    if pc == "GEMM" or kt == "GEMM":
+        return "GEMM"
+    if pc == "Quantization" or "quant" in ktl:
+        return "GroupQuant"
+    if pc in ("SDPA", "SDPA-GDN") or "attention" in ktl:
+        return "SDPA_fwd"
+    if kt == "Rotary Embedding":
+        return "RoPE_fwd"
+    if pc == "Normalization" or kt in ("RMSNorm", "LayerNorm", "L2Norm"):
+        return "RMSNorm" if "rmsnorm" in knl or kt == "RMSNorm" else "NORM_fwd"
+    if pc == "Elementwise-MoE" or ktl.startswith("moe "):
+        return "MoE_aux"
+    if pc == "Elementwise":
+        return "elementwise"
+    if pc == "MemCpy":
+        return "other"
+    warnings.warn(
+        "WARNING: classify_kernel matched a GPU kernel but there is no TraceLens "
+        "op-category mapping in _category_from_classified_kernel; "
+        "categorize_torch_op will fall back to 'other'. "
+        f"kernel_type={kt!r}, perf_category={pc!r}, confidence={conf}, "
+        f"kernel_name={kernel_name[:200]!r}",
+        UserWarning,
+        stacklevel=2,
+    )
+    return None
+
+
 def categorize_torch_op(row):
     """
     Categorizes a row based on the 'name' and 'kernel_details' fields.
@@ -382,12 +431,16 @@ def categorize_torch_op(row):
         return "elementwise"
     elif row["name"] in dict_cat2names.get("Reduce", []):
         return "reduce"
+    kernel_name = None
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
-        # else:
-        #     raise ValueError(
-        #         f"Row does not contain 'kernel_names' or 'kernel_details' with a valid name. Row: {row}"
-        #     )
+    else:
+        op_name = row.get("name", "")
+        # TreePerf may attach GPU-only work to placeholder ops named
+        # "{parent}->{kernel} (Synthetic Op)"; classify by kernel name, not parent.
+        if "(Synthetic Op)" in op_name and "->" in op_name:
+            kernel_name = op_name.split("->", 1)[1].rsplit(" (Synthetic Op)", 1)[0]
+    if kernel_name:
         if kernel_name.startswith("void at::native"):
             if debug:
                 print("Found ATen native kernel:", kernel_name[:64])
@@ -397,5 +450,7 @@ def categorize_torch_op(row):
                 return "reduce"
             elif "multi_tensor_apply" in kernel_name:
                 return "multi_tensor_apply"
-    # if none of the above cases match, return 'other'
+        cat = _category_from_classified_kernel(kernel_name)
+        if cat is not None:
+            return cat
     return "other"
