@@ -465,15 +465,18 @@ TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1 python your_training_script.py
 ### 8.2 Inductor Triton Kernel Types
 
 Inductor generates Triton kernels in several categories, each with a
-distinct prefix when unique kernel names are enabled:
+distinct 3-character prefix derived from the category name (`category[:3]`).
+These 6 categories have been stable from PyTorch 2.3 through 2.11+
+(defined in `torch/_inductor/wrapper_benchmark.py`):
 
 | Prefix | Category | Description |
 |--------|----------|-------------|
-| `triton_poi_` | Pointwise | Element-wise ops (add, mul, relu, silu, etc.). One loop dimension: `xnumel`. Fused ops stay in registers — no intermediate global memory writes. |
-| `triton_red_` | Reduction (looped) | Reduction ops (sum, mean, batch norm, etc.) using a looped strategy. Two dimensions: `xnumel` (outer), `rnumel` (reduction axis). Used when the reduction axis is too large for persistent strategy. |
-| `triton_per_` | Reduction (persistent) | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's `should_use_persistent_reduction()` heuristic decides. |
-| `triton_tem_` | Template | Complex ops like matrix multiplication (mm, addmm, _scaled_mm) using pre-defined Triton templates with optional fused epilogues. |
-| `triton_hel_` | Helper / Foreach | Auxiliary operations such as `foreach` ops (e.g., optimizer updates applied across multiple tensors). |
+| `triton_poi_` | `pointwise` | Element-wise ops (add, mul, relu, silu, etc.). One loop dimension: `xnumel`. Fused ops stay in registers — no intermediate global memory writes. |
+| `triton_red_` | `reduction` | Reduction ops (sum, mean, batch norm, etc.) using a looped strategy. Two dimensions: `xnumel` (outer), `rnumel` (reduction axis). Used when the reduction axis is too large for persistent strategy. |
+| `triton_per_` | `persistent_reduction` | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's `should_use_persistent_reduction()` heuristic decides. |
+| `triton_tem_` | `template` | Complex ops like matrix multiplication (mm, addmm, _scaled_mm) using pre-defined Triton templates with optional fused epilogues. |
+| `triton_for_` | `foreach` | Fused operations across lists of tensors (e.g., optimizer step updates applied to all parameters at once). |
+| `triton_spl_` | `split_scan` | Split scan operations (e.g., cumulative sums with decoupled lookback). |
 
 **TraceLens coverage:**
 
@@ -483,7 +486,8 @@ distinct prefix when unique kernel names are enabled:
 | `triton_red_` | Yes | Same perf model, two-dimensional (xnumel × rnumel) |
 | `triton_per_` | Yes | Treated identically to `triton_red_` |
 | `triton_tem_` | No (not needed) | GEMM ops already modeled by `aten_mm`, `aten_scaled_mm`, etc. |
-| `triton_hel_` | No | Typically auxiliary, not performance-critical |
+| `triton_for_` | No | Typically optimizer-step ops, not performance-critical |
+| `triton_spl_` | No | Scan operations, uncommon in typical workloads |
 
 **Naming pattern:**
 
