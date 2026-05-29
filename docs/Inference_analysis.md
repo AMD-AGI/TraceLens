@@ -69,7 +69,7 @@ The remainder of Step 2 covers manual trace collection — building or patching 
 
 ###### vLLM Script
 
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, or `v20`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, `v20`, or `v21`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
 | Version | Base Image                                                    | vLLM Version | Patch File                  |
@@ -81,6 +81,7 @@ A unified build script is provided that supports multiple vLLM versions. It take
 | `v18`   | `vllm/vllm-openai-rocm:v0.18.0`                               | v0.18.0      | `config_vllm_v0.18.0.patch` |
 | `v19`   | `vllm/vllm-openai-rocm:v0.19.0`                               | v0.19.0      | `config_vllm_v0.19.0.patch` |
 | `v20`   | `rocm/vllm-dev:preview_v0.20.0_20260429`                      | v0.20.0      | `config_vllm_v0.20.0.patch` |
+| `v21`   | `vllm/vllm-openai-rocm:v0.21.0`                               | v0.21.0      | `config_vllm_v0.21.0.patch` |
 
 
 ```bash
@@ -104,19 +105,22 @@ Then create a container from the image.
 
 ###### SGLang Script
 
-The build script for SGLang supports SGLang 0.5.9 with ROCm 7. The script takes the path to the local TraceLens clone and the GPU type being used. It supports MI300 and MI350/MI355 (equivalent targets), defaulting to MI350.
+The build script for SGLang supports SGLang 0.5.9 and 0.5.11. It takes the path to the local TraceLens clone, the SGLang version (`--sglang-version`, default 0.5.9), and the GPU type (`--gpu-type`, default mi350). MI300 and MI350/MI355 are supported.
 
 
-| GPU Type      | Base Image                             | SGLang Version |
-| ------------- | -------------------------------------- | -------------- |
-| `MI300`       | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` | v0.5.9         |
-| `MI350/MI355` | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` | v0.5.9         |
+| SGLang Version | GPU Type | Base Image                              |
+| -------------- | -------- | --------------------------------------- |
+| `0.5.9`        | MI300    | `lmsysorg/sglang:v0.5.9-rocm700-mi30x`  |
+| `0.5.9`        | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x`  |
+| `0.5.11`       | MI300    | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
+| `0.5.11`       | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
 
 
 ```bash
-bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
+bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     /path/to/TraceLens \
-    mi350 \
+    --sglang-version 0.5.11 \
+    --gpu-type mi350 \
     -t tracelens-sglang
 ```
 

@@ -5,7 +5,7 @@
 ###############################################################################
 
 from collections import defaultdict
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
@@ -25,12 +25,14 @@ class BaseTraceToTree(ABC):
         compute_end_times=True,
         linking_key: str = None,
         event_to_category: Callable[[dict], str] = None,
+        trace_metadata: Optional[Dict[str, Any]] = None,
     ):
 
         self.events = [
             {**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i}
             for i, data in enumerate(events_data)
         ]
+        self.trace_metadata = dict(trace_metadata or {})
         self.events_by_uid = {
             event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event
             for event in self.events
@@ -317,6 +319,7 @@ class JaxTraceToTree(BaseTraceToTree):
         event_to_category: Callable[
             [dict], str
         ] = TraceEventUtils.prepare_event_categorizer,
+        trace_metadata: Optional[Dict[str, Any]] = None,
     ):
 
         super().__init__(
@@ -325,6 +328,7 @@ class JaxTraceToTree(BaseTraceToTree):
             compute_end_times=compute_end_times,
             linking_key=linking_key,
             event_to_category=event_to_category,
+            trace_metadata=trace_metadata,
         )
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
@@ -609,6 +613,7 @@ class TraceToTree(BaseTraceToTree):
         event_to_category: Callable[
             [dict], str
         ] = TraceLens.util.TraceEventUtils.default_categorizer,
+        trace_metadata: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
             events_data,
@@ -616,6 +621,7 @@ class TraceToTree(BaseTraceToTree):
             compute_end_times=compute_end_times,
             linking_key=linking_key,
             event_to_category=event_to_category,
+            trace_metadata=trace_metadata,
         )
         self.metadata = TraceEventUtils.get_metadata(self.events)
         self._preprocess_and_index_events()
