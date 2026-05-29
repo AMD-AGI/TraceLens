@@ -409,3 +409,99 @@ seq_len=4096, dtype=bf16.  Traced with PyTorch 2.11+rocm7.2 on MI300X.
 | `triton_red_fused__unsafe_view_add_mean_mul_pow_rsqrt_1` (RMSNorm+residual) | 0.470 | 384 | 1.17 | 4.32 | 5.04 |
 | `triton_poi_fused__unsafe_view_mul_silu_2` (SwiGLU) | 1.342 | 1,536 | 0.83 | 3.19 | 2.66 |
 | `triton_poi_fused__unsafe_view_add_3` (residual add) | 0.067 | 512 | 0.12 | 3.81 | 0.48 |
+
+---
+
+## 8. Kernel Naming and PyTorch Version Compatibility
+
+### 8.1 `TORCHINDUCTOR_UNIQUE_KERNEL_NAMES`
+
+Inductor controls kernel naming via the `unique_kernel_names` setting
+(`TORCHINDUCTOR_UNIQUE_KERNEL_NAMES` environment variable).  When **enabled**,
+kernels get descriptive names that encode the kernel category and fused ops:
+
+```
+triton_poi_fused_add_mul_silu_0
+│         │     │              │
+│         │     │              └── kernel index
+│         │     └── fused ATen ops (alphabetical)
+│         └── kernel category
+└── Triton/Inductor prefix
+```
+
+When **disabled**, kernels are named generically: `triton_0`, `triton_1`, etc.
+
+This is a **compile-time** setting — it must be set when the trace is
+captured, not when TraceLens analyzes it.  The name is baked into the
+compiled kernel and recorded in the Chrome trace.
+
+**Default by PyTorch version:**
+
+| PyTorch Version | Default | Notes |
+|-----------------|---------|-------|
+| 2.0 – 2.5 | **Disabled** | `os.environ.get("TORCHINDUCTOR_UNIQUE_KERNEL_NAMES") == "1"` — must opt in |
+| 2.6+ | **Enabled** | `os.environ.get("TORCHINDUCTOR_UNIQUE_KERNEL_NAMES", "1") == "1"` — default changed to `"1"` |
+
+Source: `torch/_inductor/config.py` in the PyTorch repository
+([v2.4.0](https://github.com/pytorch/pytorch/blob/v2.4.0/torch/_inductor/config.py),
+[v2.6.0](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/_inductor/config.py)).
+
+**Impact on TraceLens perf model:**
+
+| | Unique names enabled | Unique names disabled |
+|--|---------------------|----------------------|
+| V2 element counts (`xnumel`, `rnumel`) | Works — from `Concrete Inputs` | Works — from `Concrete Inputs` |
+| V2 bytes (`Data Moved`) | Works — from `Input Dims` + `Input type` | Works — from `Input Dims` + `Input type` |
+| FLOPs (`_parse_kernel_name`) | Works — parses ops from name | Returns `[]` — generic name has no ops |
+| V1 cache fallback | Works | Works (matches by kernel name in cache) |
+
+For users on PyTorch 2.4–2.5, set the environment variable before trace
+capture to get FLOPs:
+
+```bash
+TORCHINDUCTOR_UNIQUE_KERNEL_NAMES=1 python your_training_script.py
+```
+
+### 8.2 Inductor Triton Kernel Types
+
+Inductor generates Triton kernels in several categories, each with a
+distinct prefix when unique kernel names are enabled:
+
+| Prefix | Category | Description |
+|--------|----------|-------------|
+| `triton_poi_` | Pointwise | Element-wise ops (add, mul, relu, silu, etc.). One loop dimension: `xnumel`. Fused ops stay in registers — no intermediate global memory writes. |
+| `triton_red_` | Reduction (looped) | Reduction ops (sum, mean, batch norm, etc.) using a looped strategy. Two dimensions: `xnumel` (outer), `rnumel` (reduction axis). Used when the reduction axis is too large for persistent strategy. |
+| `triton_per_` | Reduction (persistent) | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's `should_use_persistent_reduction()` heuristic decides. |
+| `triton_tem_` | Template | Complex ops like matrix multiplication (mm, addmm, _scaled_mm) using pre-defined Triton templates with optional fused epilogues. |
+| `triton_hel_` | Helper / Foreach | Auxiliary operations such as `foreach` ops (e.g., optimizer updates applied across multiple tensors). |
+
+**TraceLens coverage:**
+
+| Category | Modeled by TraceLens? | Notes |
+|----------|----------------------|-------|
+| `triton_poi_` | Yes | `TritonCompiledPerfModel` computes FLOPs and bytes |
+| `triton_red_` | Yes | Same perf model, two-dimensional (xnumel × rnumel) |
+| `triton_per_` | Yes | Treated identically to `triton_red_` |
+| `triton_tem_` | No (not needed) | GEMM ops already modeled by `aten_mm`, `aten_scaled_mm`, etc. |
+| `triton_hel_` | No | Typically auxiliary, not performance-critical |
+
+**Naming pattern:**
+
+```
+triton_{category}_fused_{op1}_{op2}_{...}_{index}
+```
+
+The fused ops are listed alphabetically.  The index is a sequential
+counter within the compiled graph.  When `unique_kernel_names` is disabled,
+the entire name collapses to `triton_{index}`.
+
+---
+
+## References
+
+- [PyTorch Blog: Why Is PyTorch Compile So Fast — Kernel Fusion](https://pytorch.org/blog/why-is-pytorch-compile-so-fast-kernel-fusion/)
+- [TorchInductor GPU Profiling — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
+- [Learn by Doing: TorchInductor Reduction Kernels](https://karthick.ai/blog/2025/Learn-By-Doing-Torchinductor-Reduction/)
+- [TorchInductor — DeepWiki](https://deepwiki.com/pytorch/pytorch/2.2-torchinductor)
+- [PyTorch Inductor config.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py)
+- [PyTorch Inductor codegen/triton.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py)
