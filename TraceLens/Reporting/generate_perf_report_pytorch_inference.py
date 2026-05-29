@@ -1328,6 +1328,11 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.capture_folder and args.comparison_json_path:
+        parser.error(
+            "--capture_folder and --comparison_json_path cannot be used together. "
+            "The TraceDiff comparison extension does not support graph capture traces."
+        )
     if args.capture_folder:
         classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
