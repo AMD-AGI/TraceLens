@@ -47,7 +47,7 @@ standalone_section_rules:
 failure_mode_rules:
   - match_regex: "(?i)not\\s+quantifiable|impact\\s+estimate"
     likely_cause: "Impact estimate data exists but is not consistently rendered into final cards."
-    suggested_fix: "Add a guardrail to prefer pre-computed impact estimates from metadata before falling back to non-quantifiable text."
+    suggested_fix: "Verify the sub-agent emitted impact markers with correct low/high values from category_findings[]."
   - match_regex: "(?i)efficiency|alignment"
     likely_cause: "Generated reasoning drifts from metrics JSON or reference wording."
     suggested_fix: "Add a final consistency pass that checks efficiency, shapes, and gains against metrics artifacts."

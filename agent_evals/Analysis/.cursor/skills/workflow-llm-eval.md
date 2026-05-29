@@ -28,6 +28,7 @@ Reference in Appendix), which requires semantic reasoning about hardware values.
 When triggered, the prompt will specify:
 - **output_dir**: path to the `analysis_output/` directory to evaluate
 - **results_path**: path to write the results CSV
+- **comparison_scope**: `standalone` (default) or `comparative`
 
 ## Files to Read
 
@@ -86,3 +87,5 @@ Include scoring breakdown in the `details` column:
 `correctness=N/10 completeness=N/10 overall=N.N | <explanation>`
 
 Set `root_cause` to `template` and `recommended_fix` to a specific fix suggestion if the result is FAIL. Leave both empty if PASS.
+
+**Replace all commas in the `details` and `recommended_fix` text with semicolons** to avoid breaking CSV parsing.
