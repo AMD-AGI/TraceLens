@@ -154,18 +154,19 @@ class BaseTraceToTree(ABC):
 
             # Handle "event bleed": the event starts inside the stack top
             # but ends after it (e.g. hipLaunchKernel timestamped slightly
-            # inside a sibling cpu_op due to clock skew).  If popping the
-            # immediate sibling reveals a parent that fully contains the
-            # event, pop the sibling.  Otherwise the event has a corrupt
-            # duration (e.g. PyCapsule python_function spanning hundreds of
-            # ms) — drop it so it never sits on the stack and swallows
-            # subsequent events.
+            # inside a sibling cpu_op due to clock skew).  Only rescue
+            # cpu_op, cuda_runtime, and kernel events — python_function
+            # bleeds are always instrumentation artifacts (e.g. PyCapsule
+            # with corrupt durations) and rescuing them changes the tree
+            # structure in ways that break TraceDiff's root matching.
             if stack and (
                 event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                 > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
+                event_cat = self.event_to_category(event)
                 if (
-                    len(stack) >= 2
+                    event_cat in ("cpu_op", "cuda_runtime", "kernel")
+                    and len(stack) >= 2
                     and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                     <= stack[-2][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                 ):
