@@ -56,6 +56,13 @@ def _mk_ac2g(corr_id: int, pid: int, tid: int, ts: float, phase: str) -> Dict:
     return evt
 
 
+class _NonIterableEvents(list):
+    """Guard against reintroducing per-launch full-trace scans."""
+
+    def __iter__(self):
+        raise AssertionError("graph GPU lookup should use the prebuilt index")
+
+
 class TestBasicKernelLauncher:
     """Test basic cpu_op -> runtime -> kernel pattern."""
 
@@ -655,6 +662,58 @@ class TestGraphLaunch:
         assert len(launchers) == 1
         assert launchers[0]["direct_kernel_count"] == 2
         assert launchers[0]["total_direct_kernel_time"] == 60.0
+
+    def test_graph_launch_uses_prebuilt_gpu_event_index(self):
+        """Graph launches should not scan all events once per launch."""
+        corr = 875
+        events = [
+            _mk_event("cpu_op", "graph_op", ts=1000, dur=150, pid=100, tid=100),
+            _mk_event(
+                "cuda_runtime",
+                "cudaGraphLaunch",
+                ts=1010,
+                dur=8,
+                pid=100,
+                tid=100,
+                args={"correlation": corr},
+            ),
+            _mk_event(
+                "kernel",
+                "graph_kernel_1",
+                ts=1050,
+                dur=25,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_event(
+                "kernel",
+                "graph_kernel_2",
+                ts=1085,
+                dur=35,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+        ]
+
+        tree = TraceToTree(deepcopy(events))
+        tree.build_host_call_stack_tree(add_python_func=False)
+
+        # _preprocess_and_index_events has already captured the GPU events.
+        # Old _get_graph_gpu_events implementations iterated self.events here.
+        tree.events = _NonIterableEvents(tree.events)
+        tree.add_gpu_ops_to_tree()
+
+        graph_launch = next(
+            event
+            for event in tree.events_by_uid.values()
+            if event.get("name") == "cudaGraphLaunch"
+        )
+        linked_gpu_names = {
+            tree.events_by_uid[uid]["name"] for uid in graph_launch["gpu_events"]
+        }
+        assert linked_gpu_names == {"graph_kernel_1", "graph_kernel_2"}
 
 
 class TestExecutePattern:
