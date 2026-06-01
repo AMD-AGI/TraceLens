@@ -39,6 +39,7 @@ REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 
 REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
 
@@ -250,7 +251,7 @@ else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
     while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
         [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform"
+        _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform" ""
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 fi
 
