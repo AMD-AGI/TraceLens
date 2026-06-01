@@ -321,6 +321,22 @@ class GPUEventAnalyser:
                 "total_memcpy_time": total_memcpy_time,
             }
 
+    @staticmethod
+    def compute_busy_time(kernels):
+        """Return the merged busy time (µs) for an already-filtered kernel list.
+
+        Cheaper than compute_metrics() when only busy_time is needed — skips
+        the full get_gpu_event_lists() sweep-line and computes one merge pass.
+        """
+        if not kernels:
+            return 0
+        intervals = [
+            (k["ts"], k["t_end"] if "t_end" in k else k["ts"] + k["dur"])
+            for k in kernels
+        ]
+        merged = GPUEventAnalyser.merge_intervals(intervals)
+        return sum(end - start for start, end in merged)
+
     def compute_metrics(self, micro_idle_thresh_us=None):
         """
         Compute various metrics from the GPU event data.
