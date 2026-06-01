@@ -137,8 +137,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     - Compute tier only: per-block Data table shape + Args/Kernel Path cells
       verbatim vs <cat>_metrics.json (see _validate_compute_data_tables)
     - Marker structure: pairing, kind= attribute, per-kind required attrs,
-      no mixed null/numeric values, mandatory kind=p_item (except for
-      triton_findings.md)
+      no mixed null/numeric values, mandatory kind=p_item
 
     Args:
         filepath: Path to the *_findings.md file
@@ -832,7 +831,7 @@ class MarkerValidator:
         "detail_estimate": ("low", "high"),
     }
     # Compute findings files that do NOT need a p_item marker.
-    COMPUTE_NO_P_ITEM = {"triton_findings.md"}
+    COMPUTE_NO_P_ITEM: set = set()
 
     @classmethod
     def scan(cls, text, rel):
@@ -885,8 +884,7 @@ class MarkerValidator:
         """Marker checks for a sub-agent findings file.
 
         file_class must be "category_findings" or "system_findings". Adds
-        the per-tier "p_item required" check on top of `scan`, with the
-        triton exemption for category findings.
+        the per-tier "p_item required" check on top of `scan`.
         skip_p_item_required: when True (empty category_findings[] per metrics), omit kind=p_item requirement.
         """
         rel = os.path.basename(path)
