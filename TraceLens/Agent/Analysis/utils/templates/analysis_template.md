@@ -281,6 +281,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- Title format: Descriptive name only. -->
 <!-- System-level recommendations always include **Impact**: "Not quantifiable from trace data" with null markers. -->
+<!-- De-dup rule: If CPU/Idle and Multi-Kernel propose the same mechanism/action, keep one merged system card with combined evidence (do not render two near-duplicate cards). -->
 
 <!-- === TEMPLATE A: No actionable system-level issues === -->
 <!-- Use this when idle <= 15% and all multi-kernel assessments have flagged: false -->

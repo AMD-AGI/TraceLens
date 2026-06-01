@@ -207,7 +207,7 @@ Standard schema for the `**Data:**` table inside system-tier `## Detailed Analys
 **Column rules:**
 - **Metric**: Copy metric label directly from earlier findings sections — do not rename or reformat.
 - **Value**: `X.X ms` or `X.X%` or `X.X ms (X.X%)`
-- **Flagged**: `false` when the metric's threshold is exceeded; `true` otherwise.
+- **Flagged**: `true` when the metric's threshold is exceeded (issue present); `false` otherwise.
 
 ---
 
@@ -307,7 +307,7 @@ mandatory `kind=p_item` for category/system findings unless exempt) per
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
