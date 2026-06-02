@@ -21,7 +21,7 @@ Positional:
 
 Options:
   --sglang-version <ver>   SGLang version to patch (default: 0.5.9)
-                           - 0.5.9 / v059   : sglang_roofline_patches/sglang_0_5_9/
+                           - 0.5.9  / v059   : sglang_roofline_patches/sglang_0_5_9/
                            - 0.5.11 / v0511 : sglang_roofline_patches/sglang_0_5_11/
                            - 0.5.12 / v0512 : sglang_roofline_patches/sglang_0_5_12/
   --gpu-type <type>        mi300 | mi350 | mi355 (default: mi350)
