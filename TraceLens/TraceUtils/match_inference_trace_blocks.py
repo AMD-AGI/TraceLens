@@ -60,6 +60,27 @@ from TraceLens.TraceUtils.split_inference_trace_annotation import (
     preprocess_trace,
 )
 
+ANNOTATION_PATTERN = [
+    re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
+    re.compile(r"execute_new_\d+_cached_\d+"),
+    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
+]
+
+PHASE_DECODE_ONLY = "decode_only"
+PHASE_PREFILLDECODE = "prefilldecode"
+
+PER_STEP_KEYS = (
+    "context_requests",
+    "generation_requests",
+    "c_sq",
+    "c_sk",
+    "g_sq",
+    "g_sk",
+)
+
 
 def _find_events_by_pattern_quiet(events, patterns, name, cat=None):
     """Same shape as the splitter helper but without per-event spam."""
@@ -74,19 +95,6 @@ def _find_events_by_pattern_quiet(events, patterns, name, cat=None):
     if not matches:
         return None
     return matches
-
-
-ANNOTATION_PATTERN = [
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_new_\d+_cached_\d+"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-]
-
-PHASE_DECODE_ONLY = "decode_only"
-PHASE_PREFILLDECODE = "prefilldecode"
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +123,7 @@ def parse_iter_details(name: str) -> dict:
     g_req = g_sq = g_sk = g_sqsq = g_sqsk = 0
 
     if len(parts) < 10:
+        # Support for vLLM v0.13 and lower annotation format
         # execute_context_N(M)_generation_K(L)
         c_req = _safe_int(parts[2]) if len(parts) > 2 else 0
         c_sum_proxy = _safe_int(parts[3]) if len(parts) > 3 else 0
@@ -123,11 +132,14 @@ def parse_iter_details(name: str) -> dict:
         c_sq = c_sum_proxy
         g_sq = g_sum_proxy
     elif len(parts) < 12:
+        # Support for vLLM v0.14 and higher annotation format
+        # execute_X_context_R(sqAskBsqsqCsqskD)_generation_R'(...)
         c_req = _safe_int(parts[2])
         c_sq = _safe_int(parts[3])
         g_req = _safe_int(parts[7])
         g_sq = _safe_int(parts[8])
     else:
+        # Support for TraceLens vLLM annotation format
         # Full pattern: execute_X_context_R(sqAskBsqsqCsqskD)_generation_R'(...)
         c_req = _safe_int(parts[3])
         c_sq = _safe_int(parts[5])
@@ -446,16 +458,6 @@ def base_name_from_path(p: str) -> str:
         .replace(".json", "")
         .replace(".zip", "")
     )
-
-
-PER_STEP_KEYS = (
-    "context_requests",
-    "generation_requests",
-    "c_sq",
-    "c_sk",
-    "g_sq",
-    "g_sk",
-)
 
 
 def _block_steps(b: Block) -> List[dict]:
