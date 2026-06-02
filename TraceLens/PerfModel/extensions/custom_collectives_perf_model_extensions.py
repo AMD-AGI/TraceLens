@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,6 +14,9 @@ from TraceLens.PerfModel.perf_model import RMSNorm
 
 
 class CustomCollective:
+    category = "CustomCollective"
+    bwd_category = None
+
     pass
 
 

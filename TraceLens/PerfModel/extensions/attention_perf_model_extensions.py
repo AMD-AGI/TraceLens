@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -29,6 +29,9 @@ class InferenceAttention:
     ``None``. Subclasses that extend the parent dict should return early when
     ``params.get("_no_perf")`` is true.
     """
+
+    category = "InferenceAttention"
+    bwd_category = None
 
     REQUIRED_PARAM_KEYS = (
         "B",

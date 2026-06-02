@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -8,7 +8,15 @@
 Performance models for RMSNorm pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.perf_model import RMSNorm
+from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+
+
+class RMSNorm(CoreRMSNorm):
+    """Extension-side RMSNorm family reported separately from generic normalization."""
+
+    category = "RMSNorm"
+    bwd_category = None
+    sheet_category = "RMSNorm"
 
 
 class aiter_rms_norm(RMSNorm):

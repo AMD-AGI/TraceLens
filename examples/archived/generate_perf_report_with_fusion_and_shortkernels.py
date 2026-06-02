@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -9,7 +9,7 @@ import json
 import pandas as pd
 import numpy as np
 from TraceLens import TreePerfAnalyzer
-from TraceLens.PerfModel import dict_cat2names
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 
 
 def get_next_host_op(perf_analyzer, host_op):
@@ -328,13 +328,16 @@ def main():
 
     # Roofline study
     op_dfs = {}
-    for op_cat, op_names in dict_cat2names.items():
-        # Filter events belonging to the current category
+    sheet_category_to_op_names = build_sheet_category_to_op_names(
+        perf_analyzer.op_to_perf_model_class_map
+    )
+    for sheet_category, op_names in sheet_category_to_op_names.items():
+        # Filter events belonging to the current legacy sheet category
         op_events = [
             event for event in perf_analyzer.tree.events if event["name"] in op_names
         ]
 
-        if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
+        if sheet_category in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
             # For GEMM: create a single table that covers both fwd and bwd.
             df_ops = perf_analyzer.build_df_perf_metrics(
                 op_events, bwd=False, include_kernel_names=True, include_args=True
@@ -342,7 +345,7 @@ def main():
             df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
             if args.topk_roofline_ops is not None:
                 df_ops = df_ops.head(args.topk_roofline_ops)
-            op_dfs[op_cat] = df_ops
+            op_dfs[sheet_category] = df_ops
         else:
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
             df_ops_fwd = perf_analyzer.build_df_perf_metrics(
@@ -361,8 +364,8 @@ def main():
             )
             if args.topk_roofline_ops is not None:
                 df_ops_bwd = df_ops_bwd.head(args.topk_roofline_ops)
-            op_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-            op_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+            op_dfs[f"{sheet_category}_fwd"] = df_ops_fwd
+            op_dfs[f"{sheet_category}_bwd"] = df_ops_bwd
 
     # Write all DataFrames to separate sheets in an Excel workbook
     with pd.ExcelWriter(args.output_xlsx_path) as writer:

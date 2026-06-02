@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -397,6 +397,15 @@ DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"cross_device_reduce", "allreduce"),
 ]
 
+DEFAULT_COMMUNICATION_REGEXES: List[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS
+]
+
+DEFAULT_CUSTOM_COLLECTIVE_REGEXES: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+]
+
 
 class TraceEventUtils:
     class JaxOpKeys:
@@ -415,8 +424,14 @@ class TraceEventUtils:
             "fmha_fwd",  # _ZN5aiter*fmha_fwd*
         ]
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
-        TEKeys = ["transformer_engine"]
+        # "FillBuffer" was historically here but matches XLA buffer-init
+        # fusions that sit inside TE custom calls (issue #423); the
+        # metadata-aware fallback in JaxAnalyses.breakdown_compute_events
+        # now re-routes those by hlo_op instead.
+        ConvKeys = ["conv_", "conv.", "conv-"]
+        # "te_fused_attn" catches te_fused_attn_{forward,backward}_ffi
+        # XLA custom-call host events (issue #422 reproducer).
+        TEKeys = ["transformer_engine", "te_fused_attn"]
         CommunicationKeys = COMMUNICATION_KEYS  # use the generic version until we can't
         ClassCategories = {
             "GEMM": GemmKeys,
@@ -649,20 +664,16 @@ class TraceEventUtils:
     ) -> List[re.Pattern]:
         """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
 
-        When *custom_collective_patterns* is ``None``, built-in defaults from
-        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
-        are included. Pass an explicit list (possibly empty) to override that
-        set while keeping NCCL/RCCL markers.
+        When *custom_collective_patterns* is ``None``, returns the built-in defaults from
+        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``.
+        Pass an explicit list (possibly empty) to override the set while keeping NCCL/RCCL markers.
         """
-        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
-        custom = (
-            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-            if custom_collective_patterns is None
-            else custom_collective_patterns
-        )
-        for pattern, _ in custom:
-            regexes.append(re.compile(pattern, re.IGNORECASE))
-        return regexes
+        if custom_collective_patterns is None:
+            return DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES
+        return DEFAULT_COMMUNICATION_REGEXES + [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern, _ in custom_collective_patterns
+        ]
 
     @staticmethod
     def build_collective_filter_and_inference_rules(
@@ -706,7 +717,6 @@ class TraceEventUtils:
     # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
     # cat=gpu_memset matching the CUDA convention. These patterns rebucket
     # legacy traces so cross-version reports compare like-for-like.
-    # See: AMD-AGI/TraceLens-internal#357
     _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
         r"^("
         r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"

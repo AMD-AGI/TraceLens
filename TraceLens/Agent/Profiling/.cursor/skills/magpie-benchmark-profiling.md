@@ -1,0 +1,584 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
+---
+name: magpie-benchmark-profiling
+description: Run Magpie LLM inference benchmarks (vLLM/SGLang) and collect PyTorch profiler traces on remote GPU nodes. Use when the user asks to benchmark, profile, or collect traces for LLM inference workloads using the Magpie framework.
+---
+
+# Magpie Benchmark + Profiling
+
+Run LLM inference benchmarks via the Magpie framework and collect PyTorch profiler traces for downstream analysis.
+
+## Prerequisites
+
+- SSH access to a GPU node with Docker and AMD/NVIDIA GPUs
+- A conda environment with Magpie installed (`pip install -e .` from the Magpie repo root)
+- TraceLens installed on the host if TraceLens analysis is desired (`pip install -e .` from `TraceLens/`)
+- HuggingFace model weights cached or an `HF_TOKEN` for gated models
+
+## Workflow
+
+### Step 0: Gather Execution Environment Details
+
+Before doing anything else, check whether the user has provided all three of these:
+
+1. **Target node** — the hostname or IP to SSH into (e.g., `gpu-node-3`)
+2. **Conda environment name** — the env where Magpie is installed
+3. **Conda install path** — defaults to `~/miniconda3`; ask only if conda activation fails
+
+If any are missing, ask the user before proceeding. Example:
+
+> "To run the benchmark I need a few details about your execution environment:
+> 1. Which node should I SSH into?
+> 2. What is the name of the conda environment with Magpie installed?
+> 3. Is conda installed at `~/miniconda3`, or a different path?"
+
+Do not guess node names or environment names — these are site-specific and getting them wrong wastes time on SSH failures or missing-package errors.
+
+### Step 1: Read the Benchmark Config
+
+The user provides a YAML config (typically under `Magpie/examples/`). Read it to understand the run parameters.
+
+Key fields:
+
+```yaml
+benchmark:
+  framework: vllm | sglang
+  model: <HuggingFace model name>
+  precision: fp8 | fp16 | bf16 | fp4
+
+  envs:
+    TP: 8              # tensor parallelism (GPU count)
+    CONC: 32           # request concurrency
+    ISL: 1024          # input sequence length
+    OSL: 1024          # output sequence length
+
+  profiler:
+    torch_profiler:
+      enabled: true    # MUST be true to collect traces
+    system_profiler:
+      enabled: false
+
+  benchmark_script: "dsr1_fp8_mi300x.sh"  # optional override
+  timeout_seconds: 3600
+  hf_cache_path: "/path/to/hf/cache"
+```
+
+### Step 1b: Check Docker Image for Profiling Patches
+
+After reading the config, ask the user whether their Docker image already includes TraceLens profiling patches. These patches are required for capturing kernel-level detail (shapes, roofline data, call stacks) in both eager and graph-mode traces.
+
+Ask:
+
+> "Does the Docker image in your config (or the default image Magpie will select) already have TraceLens profiling patches applied? If you're unsure, I can build a patched image for you."
+
+#### If the user's image is already patched
+
+Proceed to Step 2. No changes needed.
+
+#### If the user needs a patched image
+
+Present the supported inference server and version options based on the `framework` field in the YAML config. **Do not hardcode the list of supported versions/GPU types here** — they change as new patches land. Instead, read the relevant docker build script and parse its `case` statement to discover the currently supported options, then present those to the user.
+
+**For vLLM (`framework: vllm`):**
+
+Read `examples/custom_workflows/inference_analysis/build_docker_vllm.sh` and extract each `vXX)` arm of the `case "${VLLM_VERSION}" in` block along with its `BASE_IMAGE`. Present the result as a table and ask the user to pick one, for example:
+
+> "Which vLLM version would you like to build a patched image for?
+>
+> | Option | Version Tag | Base Image |
+> |--------|-------------|------------|
+> | 1 | `vXX` | `<base image from script>` |
+> | ... | ... | ... |"
+
+Once the user selects a version, build the patched image on the remote node:
+
+```bash
+ssh <node> "cd <TraceLens_repo> && \
+  bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
+    <version_tag> \
+    <TraceLens_repo> \
+    -t tracelens-vllm"
+```
+
+Where `<version_tag>` is one of the `vXX` tags listed in the script's `case` statement.
+
+**For SGLang (`framework: sglang`):**
+
+Read `examples/custom_workflows/inference_analysis/build_docker_sglang.sh`. The script supports two dimensions selected via flags: `--sglang-version` and `--gpu-type`. Discover the currently supported combinations by parsing the script (do **not** hardcode the lists in this skill — they change as new versions land):
+
+- Parse the `normalize_version()` function to enumerate accepted SGLang version tokens (the canonical version is whatever the function `echo`s, e.g. `0.5.9`, `0.5.11`).
+- Parse the `resolve_base_image()` function's `case "${version}:${gpu}" in` block to enumerate the full `(version, gpu_type) -> base_image` matrix. Each arm pattern like `0.5.9:mi350|0.5.9:mi355)` expands to one row per `version:gpu` pair.
+
+Present the discovered matrix to the user as a table and ask them to pick one row:
+
+> "Which SGLang version + GPU combination should I build a patched image for?
+>
+> | Option | SGLang Version | GPU Type | Base Image |
+> |--------|----------------|----------|------------|
+> | 1 | `<version>` | `<gpu_type>` | `<base image from script>` |
+> | ... | ... | ... | ... |"
+
+Once the user selects, build the patched image on the remote node using the explicit flag form:
+
+```bash
+ssh <node> "cd <TraceLens_repo> && \
+  bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
+    <TraceLens_repo> \
+    --sglang-version <version> \
+    --gpu-type <gpu_type> \
+    -t tracelens-sglang"
+```
+
+The script starts a container from the resolved base image, applies the matching sglang roofline patches from `sglang_roofline_patches/sglang_<ver_with_underscores>/` (auto-derived from `--sglang-version`), and installs TraceLens inside it.
+
+**After building:** Update the `docker_image` field in the benchmark YAML config to use the newly built image:
+
+```yaml
+benchmark:
+  framework: vllm  # or sglang
+  docker_image: tracelens-vllm  # or the sglang container name
+  ...
+```
+
+This overrides the default auto-selected image from `benchmark_images.yaml`.
+
+#### If the user declines
+
+Proceed with the user's chosen image. Warn that traces may lack kernel-level detail for graph-replayed operations, and roofline analysis may not be available.
+
+### Step 2: Ensure Profiling Is Enabled
+
+If the user wants a profiler trace, verify `profiler.torch_profiler.enabled` is `true` in the YAML. If it is `false`, edit it to `true` before running.
+
+When enabled, the benchmarker automatically sets these env vars inside the container:
+- `PROFILE=1`
+- `VLLM_TORCH_PROFILER_DIR=/workspace/torch_trace`
+- `SGLANG_TORCH_PROFILER_DIR=/workspace/torch_trace`
+
+No manual env var configuration is needed.
+
+### Step 2b: Ask About Profiler Tuning
+
+Before running the benchmark, ask the user whether they want to profile a targeted steady-state window or the entire benchmark run. This applies to **both vLLM and SGLang** frameworks (the mechanism differs but the formulas are the same).
+
+#### Common profiler flags (apply for both Option A and Option B)
+
+The flags below must be applied **regardless** of whether the user chooses targeted-window or full-benchmark profiling. They enable graph-capture tracing, detailed annotations, and shape discovery that are required for downstream TraceLens analysis.
+
+##### Common vLLM flags
+
+Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any existing value):
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces --profiler-config.detailed_trace_annotation True"
+```
+
+Use the literal path `/workspace/torch_trace/capture_traces` rather than `${TRACE_DIR}/capture_traces`. Bash does not recursively expand variables — `$EXTRA_VLLM_ARGS` is word-split but its contents are not re-evaluated for variable references, so `${TRACE_DIR}` would be passed as a literal string to vLLM. For `--run-mode local`, replace `/workspace/torch_trace` with the actual host-side trace directory.
+
+- `--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces` — enables graph-capture tracing. vLLM writes separate traces for CUDA graph capture phases into this directory, which are needed for downstream TraceLens analysis of graph-replayed operations.
+- `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_inference_trace_annotation` for accurate trace splitting.
+
+##### Common SGLang flags
+
+Apply **three** edits regardless of profiling mode:
+
+**1. Add profiling env vars to the user's YAML config.**
+
+```yaml
+benchmark:
+  envs:
+    SGLANG_PROFILE_WITH_STACK: "True"
+    SGLANG_PROFILE_RECORD_SHAPE: "True"
+```
+
+These enable call-stack capture and tensor shape recording in the profiler trace, which are required for TraceLens roofline analysis and kernel attribution.
+
+**2. Add graph-capture profiling flags as `EXTRA_SGLANG_ARGS` in the user's YAML config.**
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"
+```
+
+If the YAML already has an `EXTRA_SGLANG_ARGS` field with existing flags, **append** these flags to the existing value rather than replacing it.
+
+- `--enable-profile-cuda-graph` — makes CUDA graph-replayed operations individually traced rather than appearing as a single opaque graph-launch kernel. Without this flag, the profiler cannot see inside replayed graphs and roofline analysis is incomplete.
+- `--enable-shape-discovery-for-cuda-graph-profile` — records tensor shapes for operations inside CUDA graphs, enabling accurate roofline modelling of graph-replayed kernels.
+
+**3. Patch `benchmark_serving.py` to enable shape discovery and roofline annotations in the profile request body.**
+
+The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add `shape_discovery` and `roofline_annotations` flags:
+
+```bash
+ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"shape_discovery\": True, \"roofline_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
+  <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
+```
+
+- `shape_discovery: True` — enables tensor shape recording for CUDA graph operations during profiling.
+- `roofline_annotations: True` — adds FLOPs and memory bandwidth annotations needed for roofline analysis.
+
+#### Profiling mode
+
+Ask:
+
+> "Would you like to profile a **targeted steady-state window** (recommended — smaller traces, captures steady-state decode) or the **entire benchmark** run?"
+
+##### Option A: Targeted steady-state window (delay + max iterations)
+
+Compute recommended `delay_iterations` and `max_iterations` from the YAML config values. Read `OSL`, `CONC`, and `RANDOM_RANGE_RATIO` from the `envs` section (default `RANDOM_RANGE_RATIO` to `1.0` if absent).
+
+**Formulas:**
+
+```
+max_iters = min(1024, max(256,OSL * 16 / CONC))
+
+delay_iters = ( OSL * (RANDOM_RANGE_RATIO + 1 ) * 3 ) - (max_iters/2)
+
+```
+
+Compute the values, round to integers, then present them to the user for confirmation:
+
+> "Based on your config (OSL=X, CONC=Y, RANDOM_RANGE_RATIO=Z), I'd suggest:
+> - **delay_iterations** = A  (skip A engine iterations before profiling)
+> - **max_iterations** = B  (profile B iterations then stop)
+>
+> This targets steady-state decode after warmup. Does this look good, or would you like different values?"
+
+Once the user confirms (or provides overrides), apply the framework-specific edits below.
+
+---
+
+###### vLLM targeted window
+
+Apply **two** temporary edits:
+
+**1. Add profiler iteration args as `EXTRA_VLLM_ARGS` and raise `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` in the user's YAML config.**
+
+Instead of patching the benchmark shell script, add the profiler arguments to the `EXTRA_VLLM_ARGS` environment variable in the YAML config's `envs` section. The benchmark script already passes `$EXTRA_VLLM_ARGS` to the `vllm serve` command, so no script edits are needed.
+
+Edit the user's YAML config file to add (or append to) the `EXTRA_VLLM_ARGS` field under `benchmark.envs`, and set `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` to `1200`:
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_VLLM_ARGS: "--profiler-config.delay_iterations <DELAY> --profiler-config.max_iterations <MAX> --profiler-config.ignore_frontend True"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+```
+
+If the YAML already has an `EXTRA_VLLM_ARGS` field with existing flags, **append** the profiler flags to the existing value rather than replacing it.
+
+`ignore_frontend` must be `True` when using delay/max iterations, otherwise the AsyncLLM front-end profiler captures the entire range and adds significant overhead.
+
+`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"` is required because the torch profiler adds substantial per-iteration overhead during the targeted window. The default `execute_model` watchdog timeout is too short and will abort the engine mid-profile; raising it to 1200s gives the profiled iterations enough headroom to complete.
+
+**2. MANDATORY: Increase `num_prompts` in `benchmark_lib.sh` so the benchmark runs long enough for the profiling window.**
+
+**This patch is always required when using delay + max iterations.** The `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally overrides** `num_prompts` when `PROFILE=1` — this happens *after* parsing the `--num-prompts` argument, so it stomps whatever value the calling script (e.g. `vllm_mi300x.sh`) passes. Do NOT skip this patch even if the calling script already sets a larger `--num-prompts`. Without this fix, the benchmark finishes before the delay window is reached, and no steady-state trace is captured.
+
+```bash
+ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
+  <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
+```
+
+Replace `10` with a different multiplier if the user requests it.
+
+---
+
+###### SGLang targeted window
+
+SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. The common SGLang flags (env vars, `EXTRA_SGLANG_ARGS`, `shape_discovery`, `roofline_annotations`) were already applied in the shared section above. Apply **two** additional edits for targeted windowing:
+
+**1. Patch `benchmark_serving.py` to set `start_step` and `num_steps`.**
+
+The common section already patched `benchmark_serving.py` to add `shape_discovery` and `roofline_annotations`. Now apply a second sed to set the targeted window parameters:
+
+```bash
+ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"start_step\": <DELAY>, \"num_steps\": <MAX>, \"merge_profiles\": False, \"profile_by_stage\": False/' \
+  <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
+```
+
+Where `<DELAY>` is the computed `delay_iters` and `<MAX>` is the computed `max_iters`. This maps to SGLang's `/start_profile` API:
+- `start_step` = step number at which profiling begins (equivalent to vLLM's `delay_iterations`)
+- `num_steps` = number of steps to profile (equivalent to vLLM's `max_iterations`)
+
+SGLang will skip `start_step` engine iterations (warmup), then profile for `num_steps` iterations before auto-stopping.
+
+**2. MANDATORY: Increase `num_prompts` in `benchmark_lib.sh` so the benchmark runs long enough for the profiling window.**
+
+This is the same patch as for vLLM — `benchmark_lib.sh` is shared between both frameworks:
+
+```bash
+ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
+  <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
+```
+
+Replace `10` with a different multiplier if the user requests it. Without this fix, the benchmark finishes before the `start_step` window is reached, and no steady-state trace is captured.
+
+---
+
+##### Option B: Profile the entire benchmark
+
+Do **not** add `start_step`/`delay_iterations` args or increase `num_prompts`. The common flags from the shared section above **still apply** and must be present:
+- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler_dir`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
+- **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPE`, `EXTRA_SGLANG_ARGS` with graph-capture flags, and the `shape_discovery`/`roofline_annotations` patch to `benchmark_serving.py`) must all be applied.
+- `num_prompts` stays at `CONC` — keeps the trace to a manageable size since every iteration is profiled.
+
+Warn the user that full-benchmark traces will be very large (potentially several GB per rank for large models).
+
+#### Cleanup
+
+All edits in Step 2b are temporary.
+
+**For vLLM:** The YAML config was modified (to add/update `EXTRA_VLLM_ARGS`). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up `benchmark_lib.sh` before patching:
+
+```bash
+ssh <node> "cd <magpie_repo>/InferenceX && \
+  cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak"
+```
+
+After the benchmark completes, restore `benchmark_lib.sh` and remove the `EXTRA_VLLM_ARGS` profiler flags from the YAML config (or revert to the original YAML):
+
+```bash
+ssh <node> "cd <magpie_repo>/InferenceX && \
+  mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh"
+```
+
+Then edit the user's YAML config to remove the profiler flags from `EXTRA_VLLM_ARGS` (or restore the original value if it had pre-existing flags).
+
+**For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`) and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
+
+```bash
+ssh <node> "cd <magpie_repo>/InferenceX && \
+  cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak && \
+  cp utils/bench_serving/benchmark_serving.py utils/bench_serving/benchmark_serving.py.bak"
+```
+
+After the benchmark completes, restore the remote files:
+
+```bash
+ssh <node> "cd <magpie_repo>/InferenceX && \
+  mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh && \
+  mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py"
+```
+
+Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
+
+Alternatively, if InferenceX is a git checkout, use `git checkout -- <file>` to discard changes. Or delete the entire `InferenceX` directory — Magpie re-clones it on the next run.
+
+### Step 3: Run the Benchmark
+
+SSH into the target node, activate the conda environment, and run:
+
+```bash
+ssh <node> "cd <magpie_repo_root> && \
+  source ~/miniconda3/etc/profile.d/conda.sh && \
+  conda activate <env_name> && \
+  python -m Magpie benchmark --benchmark-config <path/to/config.yaml> 2>&1"
+```
+
+Run this as a background command (`block_until_ms: 0`) since benchmarks take 5-30+ minutes depending on model size.
+
+### Step 4: Monitor Progress
+
+The main process logs are sparse during container execution. To see detailed progress:
+
+1. **Check container status:**
+   ```bash
+   ssh <node> "docker ps --filter 'name=magpie' --format '{{.Names}}\t{{.Status}}'"
+   ```
+
+2. **Check container logs for model loading and benchmark progress:**
+   ```bash
+   ssh <node> "docker logs <container_name> 2>&1 | tail -40"
+   ```
+
+3. **Key milestones in container logs:**
+   - `"The server is fired up and ready to roll!"` — model loaded, server ready
+   - `"Warming up with N requests..."` — warmup phase (pre-profiling)
+   - `"Starting profiler..."` — profiling active, benchmark running
+   - Progress bars for warmup and benchmark requests
+
+4. **Container disappears when done** (it runs with `--rm`). Once the container is gone, check the main process terminal for the final summary.
+
+### Step 5: Verify Trace Quality
+
+After completion, verify trace artifacts in the results workspace:
+
+```bash
+# List all trace files and sizes
+ls -lh <workspace>/torch_trace/
+
+# Verify trace contains GPU kernels
+python3 -c "
+import json, gzip
+with gzip.open('<workspace>/torch_trace/<trace_file>', 'rt') as f:
+    data = json.load(f)
+events = data.get('traceEvents', [])
+cats = {}
+for e in events:
+    cat = e.get('cat', 'no_cat')
+    cats[cat] = cats.get(cat, 0) + 1
+print(f'Total events: {len(events)}')
+for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
+    print(f'  {cat}: {cnt}')
+"
+```
+
+**Quality checklist:**
+
+| Check | Expected | If it fails |
+|-------|----------|-------------|
+| Trace files exist in `torch_trace/` | At least one `.trace.json.gz` per rank | Profiler not enabled; check config |
+| Each file > 100KB | SGLang: EXTEND ~4-5MB, DECODE ~150KB. vLLM: ~100-150MB per rank for large models with graph replay | Profiling window too short or no GPU ops |
+| `kernel` category present | Hundreds to thousands of kernel events | `ProfilerActivity.CUDA` not captured |
+| Multiple event categories | `cpu_op`, `kernel`, `cuda_runtime`, `python_function` | Partial trace; re-run |
+
+**SGLang trace naming convention:**
+- `<id>-TP-{rank}-DECODE.trace.json.gz` — decode phase per rank
+- `<id>-TP-{rank}-EXTEND.trace.json.gz` — prefill/extend phase per rank
+- `merged-<id>.trace.json.gz` — combined view across all ranks
+- Expect `2 * TP` per-rank files + 1 merged file
+
+**vLLM trace naming convention:**
+- `*-rank-{N}.*.pt.trace.json.gz` — one GPU trace per rank
+- `*async_llm.*.pt.trace.json.gz` — CPU-side AsyncLLM trace
+- `profiler_out_{N}.txt` — profiler summary text per rank
+- Expect `TP` rank files + 1 async_llm file + `TP` profiler_out files
+
+### Step 6: Split Traces for Analysis
+
+All vLLM and sglang traces — regardless of whether they were collected in eager mode or graph-replay mode — must be split before running TraceLens analysis. The raw per-rank traces are large (vLLM: ~100-150MB, 5-9M events; sglang: smaller but still benefit from splitting) and `TraceLens_generate_perf_report_pytorch` cannot handle them efficiently without preprocessing (it will hang or run for 10+ minutes with no output).
+
+Run trace preprocessing on the rank-0 trace file:
+
+```bash
+ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
+  cd <TraceLens_repo> && \
+  python -m TraceLens.TraceUtils.split_inference_trace_annotation \
+    <workspace>/torch_trace/<rank-0-trace>.pt.trace.json.gz \
+    -o <workspace>/torch_trace/trace_split \
+    --find-steady-state --num-steps 32 \
+    --CONC <conc> --OSL <osl> --R <r>"
+```
+
+Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
+
+This produces up to 3 trace files plus metadata in `trace_split/` (a window may be skipped if no matching run exists in the largest steady-state region):
+- `mixed_steady_state_*.json.gz` — representative DO:PD mix (closest to the reference or `--CONC/--OSL/--R`-derived ideal ratio). **Use this for analysis.**
+- `prefilldecode_steady_state_*.json.gz` — longest pure prefill-decode-mix run (capped at `--num-steps`)
+- `decode_only_steady_state_*.json.gz` — longest pure decode-only run (capped at `--num-steps`)
+- `execution_details.json` / `execution_details.csv` — per-window metadata (event counts, GPU duration/busy, phase breakdown)
+
+Then construct and print the following command for the user to run manually (do **not** execute it). Fill in the absolute paths based on the workspace and split output:
+
+```
+python <TraceLens_repo>/TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
+    --capture_folder <workspace>/torch_trace/capture_traces \
+    --profile_json_path <workspace>/torch_trace/trace_split/<split_trace>.json.gz \
+    --output_csvs_dir <workspace>/torch_trace/analysis_output \
+    --group_by_parent_module --enable_pseudo_ops --group_by_num_kernels
+```
+
+Use absolute paths for all three arguments. The `--profile_json_path` should point to the `*_annotation_iteration_0_*.json.gz` file from the split output.
+
+## Output Structure
+
+```
+results/benchmark_{framework}_{timestamp}/
+├── benchmark_report.json      # parsed benchmark metrics
+├── summary.txt                # human-readable summary
+├── config.yaml                # snapshot of run configuration
+├── benchmark_stdout.log       # container stdout
+├── benchmark_stderr.log       # container stderr
+├── server.log                 # inference server log
+├── inferencex_result.json   # raw InferenceX output
+└── torch_trace/               # PyTorch profiler traces
+    ├── *-TP-0-DECODE.trace.json.gz
+    ├── *-TP-0-EXTEND.trace.json.gz
+    ├── ...
+    └── merged-*.trace.json.gz
+```
+
+## CLI Reference
+
+```
+python -m Magpie benchmark --benchmark-config <config.yaml>
+python -m Magpie benchmark --benchmark-config <config.yaml> --run-mode local
+python -m Magpie benchmark gap-analysis --trace-dir <results_dir>
+```
+
+CLI args can override YAML fields: `--torch-profiler`, `--tp N`, `--model <name>`, `--timeout N`, `--docker-image <img>`, `--output-dir <dir>`.
+
+## Pitfalls
+
+### 1. `--log-level` is not a valid CLI argument
+
+The benchmark subcommand does not accept `--log-level`. Passing it causes an argparse error because it gets parsed as a positional argument for the `benchmark_action` sub-subparser (which only accepts `gap-analysis`). Omit it entirely.
+
+### 2. No output during Docker container startup
+
+The main Magpie process emits a "Running benchmark in container with image: ..." log line and then goes silent for several minutes while Docker starts the container, loads the model, and runs warmup. This is normal. Monitor progress by checking `docker logs` on the remote node rather than waiting for the main process.
+
+### 3. Large models need long timeouts
+
+DeepSeek-R1 and similarly large models can take 3-5 minutes just to load weights. Use `timeout_seconds: 3600` (1 hour) or more. The default is usually sufficient but do not reduce it for large models.
+
+### 4. Traces are bind-mounted, not copied
+
+The workspace directory is mounted into the container at `/workspace`. Trace files written inside the container appear directly on the host. There is no `docker cp` step. If the workspace path is wrong, traces will be missing.
+
+### 5. Container is auto-removed
+
+The container runs with `--rm`, so it disappears after completion. If you need to inspect container state after a failure, look at `benchmark_stdout.log` and `benchmark_stderr.log` in the workspace, or `server.log` for server-side issues.
+
+### 6. SSH command quoting
+
+When running the benchmark over SSH via the Shell tool, quote the entire remote command as a single string. Conda activation requires sourcing the conda init script explicitly:
+
+```bash
+ssh <node> "cd <repo> && source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && python -m Magpie benchmark ... 2>&1"
+```
+
+### 7. Config field: `torch_profiler.enabled` defaults to `true`
+
+In the Python config dataclass, `TorchProfilerConfig.enabled` defaults to `True`. But many example YAML files explicitly set it to `false`. Always check the actual YAML the user points to.
+
+### 8. `benchmark_lib.sh` unconditionally overrides `num_prompts` when profiling
+
+When `PROFILE=1`, the `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally** sets `num_prompts="$((max_concurrency * 1))"` *after* parsing all `--num-prompts` arguments. This means even if the calling benchmark script (e.g. `vllm_mi300x.sh`) explicitly passes `--num-prompts $(( $CONC * 10 ))`, that value gets overwritten. When using `delay_iterations` + `max_iterations` for steady-state profiling, you **must** patch `benchmark_lib.sh` to increase this multiplier, otherwise the benchmark ends before the profiling window starts and no trace is captured.
+
+### 9. The `hf_cache_path` field avoids re-downloading models
+
+If the node has a shared HuggingFace cache, set `hf_cache_path` in the config to avoid multi-hour model downloads. This path is mounted into the container.
+
+
+## Optional: Post-Benchmark Analysis
+
+After collecting traces, you can run additional analysis:
+
+**Gap analysis** (kernel bottleneck report):
+```bash
+python -m Magpie benchmark gap-analysis --trace-dir <results_dir> \
+    --start-pct 50 --end-pct 80 --top-k 20
+```
+
+**TraceLens analysis** (enable in YAML):
+```yaml
+  profiler:
+    tracelens:
+      enabled: true
+      export_format: csv
+      perf_report_enabled: true
+      multi_rank_report_enabled: true
+```
+
+TraceLens requires the `TraceLens` package installed on the host (not inside the container).
+

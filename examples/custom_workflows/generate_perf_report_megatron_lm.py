@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -9,7 +9,7 @@ import json
 import pandas as pd
 from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
-from TraceLens.PerfModel import dict_cat2names
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 
 from TraceLens.PerfModel import SDPA
 
@@ -129,17 +129,20 @@ def main():
     # Dictionary to hold the op-specific DataFrames
     op_dfs = {}
 
-    # update the dict_cat2names to include FusedAttnFunc
-    dict_cat2names["SDPA"].append("FusedAttnFunc")
     dict_name_to_custom_perf_model = {"FusedAttnFunc": transformer_engine_attention}
+    op_to_perf_model_class_map = dict(perf_analyzer.op_to_perf_model_class_map)
+    op_to_perf_model_class_map.update(dict_name_to_custom_perf_model)
+    sheet_category_to_op_names = build_sheet_category_to_op_names(
+        op_to_perf_model_class_map
+    )
 
-    for op_cat, op_names in dict_cat2names.items():
-        # Filter events belonging to the current category
+    for sheet_category, op_names in sheet_category_to_op_names.items():
+        # Filter events belonging to the current legacy sheet category
         op_events = [
             event for event in perf_analyzer.tree.events if event["name"] in op_names
         ]
 
-        if op_cat in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
+        if sheet_category in ["GEMM", "UnaryElementwise", "BinaryElementwise"]:
             # For GEMM: create a single table that covers both fwd and bwd.
             df_ops = perf_analyzer.build_df_perf_metrics(
                 op_events,
@@ -149,7 +152,7 @@ def main():
                 dict_name_to_perf_model=dict_name_to_custom_perf_model,
             )
             df_ops = perf_analyzer.summarize_df_perf_metrics(df_ops, agg_metrics)
-            op_dfs[op_cat] = df_ops
+            op_dfs[sheet_category] = df_ops
         else:
             # For FLASH_ATTN and CONV: create separate tables for forward and backward passes.
             df_ops_fwd = perf_analyzer.build_df_perf_metrics(
@@ -172,8 +175,8 @@ def main():
             df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
                 df_ops_bwd, agg_metrics
             )
-            op_dfs[f"{op_cat}_fwd"] = df_ops_fwd
-            op_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+            op_dfs[f"{sheet_category}_fwd"] = df_ops_fwd
+            op_dfs[f"{sheet_category}_bwd"] = df_ops_bwd
 
     # Write all DataFrames to separate sheets in an Excel workbook
     with pd.ExcelWriter(args.output_xlsx_path) as writer:

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -42,6 +42,9 @@ def get_pseudo_op_mappings():
         # MoE - GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
         "pseudo_op::moe_gptq_awq_up": moe_perf_model_extensions.moe_gptq_awq_up,
         "pseudo_op::moe_gptq_awq_down": moe_perf_model_extensions.moe_gptq_awq_down,
+        # MoE flydsl two-stage (under aiter::fused_moe_)
+        "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
+        "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
@@ -64,8 +67,6 @@ def get_pseudo_op_mappings():
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_464": perf_model_extensions.batched_gemm_a8w8,
-        ## Cache ops
-        ##"_C_cache_ops::concat_and_cache_mla": perf_model_extensions.concat_and_cache_mla,
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
         ## Activation ops
@@ -100,31 +101,3 @@ def get_pseudo_op_mappings():
     }
 
     return pseudo_op_mappings
-
-
-def get_pseudo_op_categories():
-    """
-    Return a dictionary mapping pseudo-op base classes to their performance categories.
-
-    Returns:
-        dict: Mapping of base classes to category names
-    """
-
-    pseudo_op_categories = {
-        moe_perf_model_extensions.FusedMoE: "MoE_fused",
-        moe_perf_model_extensions.UnfusedMoE_Up: "MoE_unfused",
-        moe_perf_model_extensions.UnfusedMoE_Down: "MoE_unfused",
-        attention_perf_model_extensions.InferenceAttention: "InferenceAttention",
-        perf_model_extensions.gemm_a8w8_blockscale: "GEMM",
-        perf_model_extensions.batched_gemm_a16wfp4: "GEMM",
-        attention_perf_model_extensions.mha_varlen_fwd: "InferenceAttention",
-        perf_model_extensions.GroupQuant: "GroupQuant",
-        perf_model_extensions.gemm_a16w16_atomic_: "GEMM",
-        perf_model_extensions.batched_gemm_a8w8: "GEMM",
-        rmsnorm_perf_model_extensions.RMSNorm: "RMSNorm",
-        custom_collectives_perf_model_extensions.CustomCollective: "CustomCollective",
-        custom_collectives_perf_model_extensions.custom_ar_all_reduce: "CustomCollective",
-        perf_model_extensions.aiter_silu_and_mul: "UnaryElementwise",
-    }
-
-    return pseudo_op_categories
