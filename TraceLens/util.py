@@ -665,7 +665,7 @@ class TraceEventUtils:
         """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
 
         When *custom_collective_patterns* is ``None``, returns the built-in defaults from
-        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``. 
+        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``.
         Pass an explicit list (possibly empty) to override the set while keeping NCCL/RCCL markers.
         """
         if custom_collective_patterns is None:
