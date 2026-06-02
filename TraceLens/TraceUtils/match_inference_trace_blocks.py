@@ -41,12 +41,10 @@ Usage
 """
 
 import argparse
-import gzip
 import json
 import os
 import re
 import sys
-import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -660,25 +658,15 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    timings: dict = {}
-    overall_t0 = time.perf_counter()
-
-    t0 = time.perf_counter()
     a = load_trace(args.trace_a)
-    timings["load_trace_a_s"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
     b = load_trace(args.trace_b)
-    timings["load_trace_b_s"] = time.perf_counter() - t0
 
     base_a = base_name_from_path(args.trace_a)
     base_b = base_name_from_path(args.trace_b)
 
     print("\n=== Discovering blocks in A ===")
-    t0 = time.perf_counter()
     a_blocks_full = find_blocks(a["iteration_roots"])
     a_blocks = window_blocks(a_blocks_full, args.num_steps)
-    timings["find_blocks_a_s"] = time.perf_counter() - t0
     if args.num_steps and args.num_steps > 0:
         print(
             f"  Windowing into non-overlapping chunks of --num-steps={args.num_steps}: "
@@ -698,10 +686,8 @@ def main():
         )
 
     print("\n=== Discovering blocks in B ===")
-    t0 = time.perf_counter()
     b_blocks_full = find_blocks(b["iteration_roots"])
     b_blocks = window_blocks(b_blocks_full, args.num_steps)
-    timings["find_blocks_b_s"] = time.perf_counter() - t0
     if args.num_steps and args.num_steps > 0:
         print(
             f"  Windowing into non-overlapping chunks of --num-steps={args.num_steps}: "
@@ -721,9 +707,7 @@ def main():
         )
 
     print("\n=== Matching (best per phase) ===")
-    t0 = time.perf_counter()
     matches, notes = select_best_per_phase(a_blocks, b_blocks, phases)
-    timings["match_blocks_s"] = time.perf_counter() - t0
     for m in matches:
         print(
             f"  best {m['phase']}: A[{m['a_block_index']}] <-> B[{m['b_block_index']}] "
@@ -745,12 +729,8 @@ def main():
             args.output_dir, phase, f"{label_base}_B", base_b, m["b_block"]
         )
 
-    timings["extract_traces_s"] = 0.0
-    timings["extract_a_s"] = 0.0
-    timings["extract_b_s"] = 0.0
     if not args.no_extract and matches:
         print("\n=== Extracting matched trace files ===")
-        extract_t0 = time.perf_counter()
         for m in matches:
             phase = m["phase"]
             phase_dir = os.path.join(args.output_dir, phase)
@@ -758,7 +738,6 @@ def main():
             label_base = f"{phase}_best_A{m['a_block_index']}_B{m['b_block_index']}"
 
             print(f"\n--- {phase} best (A) ---")
-            t0 = time.perf_counter()
             a_summary = extract_and_save(
                 [m["a_block"].roots],
                 a["events"],
@@ -773,12 +752,10 @@ def main():
                 a["meta_events"],
                 output_label=f"{label_base}_A",
             )
-            timings["extract_a_s"] += time.perf_counter() - t0
             if a_summary:
                 m["a_output_path"] = a_summary[0]["output_path"]
 
             print(f"\n--- {phase} best (B) ---")
-            t0 = time.perf_counter()
             b_summary = extract_and_save(
                 [m["b_block"].roots],
                 b["events"],
@@ -793,16 +770,10 @@ def main():
                 b["meta_events"],
                 output_label=f"{label_base}_B",
             )
-            timings["extract_b_s"] += time.perf_counter() - t0
             if b_summary:
                 m["b_output_path"] = b_summary[0]["output_path"]
-        timings["extract_traces_s"] = time.perf_counter() - extract_t0
 
-    t0 = time.perf_counter()
     write_reports(matches, notes, args.output_dir, base_a, base_b)
-    timings["write_reports_s"] = time.perf_counter() - t0
-
-    timings["total_s"] = time.perf_counter() - overall_t0
 
     print("\n=== Summary ===")
     print(f"  trace A: {os.path.basename(args.trace_a)}  blocks={len(a_blocks)}")
@@ -815,7 +786,6 @@ def main():
     print(f"    {os.path.join(args.output_dir, 'match_report.json')}")
     print(f"    {os.path.join(args.output_dir, 'match_report.csv')}")
     print(f"    {os.path.join(args.output_dir, 'match_notes.json')}")
-    print(f"    {os.path.join(args.output_dir, 'timings.json')}")
     if matches:
         label = (
             "extracted traces"
@@ -826,38 +796,6 @@ def main():
         for m in matches:
             print(f"    [{m['phase']}] TraceA: {m.get('a_output_path', '<unknown>')}")
             print(f"    [{m['phase']}] TraceB: {m.get('b_output_path', '<unknown>')}")
-
-    load_total = timings["load_trace_a_s"] + timings["load_trace_b_s"]
-    find_total = timings["find_blocks_a_s"] + timings["find_blocks_b_s"]
-    total = timings["total_s"]
-
-    def _pct(x: float) -> str:
-        return f"{(100.0 * x / total):5.1f}%" if total > 0 else "  n/a "
-
-    print("\n=== Runtime breakdown ===")
-    print(f"  load traces:         {load_total:7.2f}s  ({_pct(load_total)})")
-    print(f"    - trace A:         {timings['load_trace_a_s']:7.2f}s")
-    print(f"    - trace B:         {timings['load_trace_b_s']:7.2f}s")
-    print(f"  find blocks:         {find_total:7.2f}s  ({_pct(find_total)})")
-    print(f"    - trace A:         {timings['find_blocks_a_s']:7.2f}s")
-    print(f"    - trace B:         {timings['find_blocks_b_s']:7.2f}s")
-    print(
-        f"  match blocks:        {timings['match_blocks_s']:7.2f}s  ({_pct(timings['match_blocks_s'])})"
-    )
-    print(
-        f"  extract traces:      {timings['extract_traces_s']:7.2f}s  ({_pct(timings['extract_traces_s'])})"
-    )
-    if timings["extract_traces_s"] > 0:
-        print(f"    - trace A writes:  {timings['extract_a_s']:7.2f}s")
-        print(f"    - trace B writes:  {timings['extract_b_s']:7.2f}s")
-    print(
-        f"  write reports:       {timings['write_reports_s']:7.2f}s  ({_pct(timings['write_reports_s'])})"
-    )
-    print(f"  total:               {total:7.2f}s")
-
-    timings_path = os.path.join(args.output_dir, "timings.json")
-    with open(timings_path, "w") as f:
-        json.dump(timings, f, indent=2)
 
     print("Done.")
 
