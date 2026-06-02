@@ -323,11 +323,7 @@ class GPUEventAnalyser:
 
     @staticmethod
     def compute_busy_time(kernels):
-        """Return the merged busy time (µs) for an already-filtered kernel list.
-
-        Cheaper than compute_metrics() when only busy_time is needed — skips
-        the full get_gpu_event_lists() sweep-line and computes one merge pass.
-        """
+        """Return the merged busy time (µs) for an already-filtered kernel list."""
         if not kernels:
             return 0
         intervals = [
