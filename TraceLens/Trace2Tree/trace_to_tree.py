@@ -153,23 +153,22 @@ class BaseTraceToTree(ABC):
                     nn_module_stack.pop()
 
             # Handle "event bleed": the event starts inside the stack top
-            # but ends after it (e.g. hipLaunchKernel timestamped slightly
-            # inside a sibling cpu_op due to clock skew).  Only rescue
-            # cpu_op, cuda_runtime, and kernel events — python_function
-            # bleeds are always instrumentation artifacts (e.g. PyCapsule
-            # with corrupt durations) and rescuing them changes the tree
-            # structure in ways that break TraceDiff's root matching.
+            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
+            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
+            # starting a few hundred ns before a sibling cpu_op finishes).
+            # Pop the sibling and attach the event under the same parent.
+            # Larger bleeds (>= 1 us) are discarded — these are typically
+            # python_function instrumentation artifacts (e.g. PyCapsule
+            # built-ins whose duration includes GPU sync time).
             if stack and (
                 event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                 > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
-                event_cat = self.event_to_category(event)
-                if (
-                    event_cat in ("cpu_op", "cuda_runtime", "kernel")
-                    and len(stack) >= 2
-                    and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-                    <= stack[-2][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-                ):
+                overlap_us = (
+                    stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                    - event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+                )
+                if overlap_us < 1.0 and len(stack) >= 2:
                     popped_event = stack.pop()
                     if self.event_to_category(popped_event) == "cpu_op":
                         dict_pidtid2num_cpu_ops[stack_key] -= 1
