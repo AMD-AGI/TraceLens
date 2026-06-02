@@ -398,8 +398,12 @@ def select_best_per_phase(
                 # by --num-steps, prefer the pair whose ORIGINAL blocks were
                 # longest (more representative source). Fall back to current
                 # num_steps when original is unset.
-                a_orig = a.original_num_steps if a.original_num_steps > 0 else a.num_steps
-                b_orig = b.original_num_steps if b.original_num_steps > 0 else b.num_steps
+                a_orig = (
+                    a.original_num_steps if a.original_num_steps > 0 else a.num_steps
+                )
+                b_orig = (
+                    b.original_num_steps if b.original_num_steps > 0 else b.num_steps
+                )
                 tie_key = -min(a_orig, b_orig)
                 sort_key = (dist, tie_key, -a.num_steps)
                 payload = {
@@ -502,9 +506,7 @@ def compute_output_path(
             f"bs{phase_details['avg_bs']}_"
             f"conc{phase_details['avg_conc']}"
         )
-    return os.path.join(
-        output_dir, phase, f"{label}_{name_append}_{base_name}.json.gz"
-    )
+    return os.path.join(output_dir, phase, f"{label}_{name_append}_{base_name}.json.gz")
 
 
 def write_reports(
@@ -555,9 +557,7 @@ def write_reports(
             row[f"{col}_start"] = blk.start_idx
             row[f"{col}_end"] = blk.end_idx
             row[f"{col}_original_num_steps"] = (
-                blk.original_num_steps
-                if blk.original_num_steps > 0
-                else blk.num_steps
+                blk.original_num_steps if blk.original_num_steps > 0 else blk.num_steps
             )
             row[f"{col}_truncated"] = blk.truncated
             row[f"{col}_avg_c_req"] = round(blk.avg("context_requests"), 3)
@@ -594,12 +594,15 @@ def load_trace(path: str):
     events = trace_json.get("traceEvents", [])
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events from {path}")
-    iteration_roots = _find_events_by_pattern_quiet(
-        events,
-        ANNOTATION_PATTERN,
-        f"execution steps (iteration) [{os.path.basename(path)}]",
-        cat="user_annotation",
-    ) or []
+    iteration_roots = (
+        _find_events_by_pattern_quiet(
+            events,
+            ANNOTATION_PATTERN,
+            f"execution steps (iteration) [{os.path.basename(path)}]",
+            cat="user_annotation",
+        )
+        or []
+    )
     return {
         "trace_json": trace_json,
         "events": events,
@@ -812,7 +815,11 @@ def main():
     print(f"    {os.path.join(args.output_dir, 'match_notes.json')}")
     print(f"    {os.path.join(args.output_dir, 'timings.json')}")
     if matches:
-        label = "extracted traces" if not args.no_extract else "extracted traces (paths only; --no-extract was set)"
+        label = (
+            "extracted traces"
+            if not args.no_extract
+            else "extracted traces (paths only; --no-extract was set)"
+        )
         print(f"  {label}:")
         for m in matches:
             print(f"    [{m['phase']}] TraceA: {m.get('a_output_path', '<unknown>')}")
@@ -832,12 +839,18 @@ def main():
     print(f"  find blocks:         {find_total:7.2f}s  ({_pct(find_total)})")
     print(f"    - trace A:         {timings['find_blocks_a_s']:7.2f}s")
     print(f"    - trace B:         {timings['find_blocks_b_s']:7.2f}s")
-    print(f"  match blocks:        {timings['match_blocks_s']:7.2f}s  ({_pct(timings['match_blocks_s'])})")
-    print(f"  extract traces:      {timings['extract_traces_s']:7.2f}s  ({_pct(timings['extract_traces_s'])})")
+    print(
+        f"  match blocks:        {timings['match_blocks_s']:7.2f}s  ({_pct(timings['match_blocks_s'])})"
+    )
+    print(
+        f"  extract traces:      {timings['extract_traces_s']:7.2f}s  ({_pct(timings['extract_traces_s'])})"
+    )
     if timings["extract_traces_s"] > 0:
         print(f"    - trace A writes:  {timings['extract_a_s']:7.2f}s")
         print(f"    - trace B writes:  {timings['extract_b_s']:7.2f}s")
-    print(f"  write reports:       {timings['write_reports_s']:7.2f}s  ({_pct(timings['write_reports_s'])})")
+    print(
+        f"  write reports:       {timings['write_reports_s']:7.2f}s  ({_pct(timings['write_reports_s'])})"
+    )
     print(f"  total:               {total:7.2f}s")
 
     timings_path = os.path.join(args.output_dir, "timings.json")
