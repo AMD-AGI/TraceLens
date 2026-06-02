@@ -141,26 +141,41 @@ class BaseTraceToTree(ABC):
             stack = dict_pidtid2stack[stack_key]
             nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
-            while (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+            # Pop stack entries that have already ended before this event starts.
+            while stack and (
+                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
-                # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
 
-            if (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+            # Handle "event bleed": the event starts inside the stack top
+            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
+            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
+            # starting a few hundred ns before a sibling cpu_op finishes).
+            # Pop the sibling and attach the event under the same parent.
+            # Larger bleeds (>= 1 us) are discarded — these are typically
+            # python_function instrumentation artifacts (e.g. PyCapsule
+            # built-ins whose duration includes GPU sync time).
+            if stack and (
+                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                 > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
-                # TODO add following to logging when logging level is debug
-                # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
-                continue
+                overlap_us = (
+                    stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                    - event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+                )
+                if overlap_us < 1.0 and len(stack) >= 2:
+                    popped_event = stack.pop()
+                    if self.event_to_category(popped_event) == "cpu_op":
+                        dict_pidtid2num_cpu_ops[stack_key] -= 1
+                    if self._is_nn_module_event(popped_event):
+                        nn_module_stack.pop()
+                else:
+                    continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
             if nn_module_stack:
