@@ -24,7 +24,11 @@ import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.Reporting.reporting_utils import (
+    add_gpu_arch_cli_args,
+    request_install,
+    resolve_gpu_arch,
+)
 from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -544,19 +548,21 @@ def generate_perf_report_pytorch(
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
+    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
     enable_origami: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
-    else:
-        gpu_arch_json = None
+    gpu_arch_json = resolve_gpu_arch(
+        gpu_arch_json_path=gpu_arch_json_path,
+        gpu_arch_platform=gpu_arch_platform,
+        gpu_arch=gpu_arch,
+    )
     add_python_func = (
         True if (group_by_parent_module or include_call_stack is True) else False
     )
@@ -1287,12 +1293,7 @@ def main():
         default=None,
         help="Path to the python executable for gemm simulator",
     )
-    parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
+    add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--enable-origami",
         action="store_true",
@@ -1362,6 +1363,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        gpu_arch_platform=args.gpu_arch_platform,
         enable_origami=args.enable_origami,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
