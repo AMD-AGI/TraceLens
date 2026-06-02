@@ -397,6 +397,15 @@ DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"cross_device_reduce", "allreduce"),
 ]
 
+DEFAULT_COMMUNICATION_REGEXES: List[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS
+]
+
+DEFAULT_CUSTOM_COLLECTIVE_REGEXES: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+]
+
 
 class TraceEventUtils:
     class JaxOpKeys:
@@ -655,20 +664,16 @@ class TraceEventUtils:
     ) -> List[re.Pattern]:
         """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
 
-        When *custom_collective_patterns* is ``None``, built-in defaults from
-        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
-        are included. Pass an explicit list (possibly empty) to override that
-        set while keeping NCCL/RCCL markers.
+        When *custom_collective_patterns* is ``None``, returns the built-in defaults from
+        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``.
+        Pass an explicit list (possibly empty) to override the set while keeping NCCL/RCCL markers.
         """
-        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
-        custom = (
-            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-            if custom_collective_patterns is None
-            else custom_collective_patterns
-        )
-        for pattern, _ in custom:
-            regexes.append(re.compile(pattern, re.IGNORECASE))
-        return regexes
+        if custom_collective_patterns is None:
+            return DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES
+        return DEFAULT_COMMUNICATION_REGEXES + [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern, _ in custom_collective_patterns
+        ]
 
     @staticmethod
     def build_collective_filter_and_inference_rules(
