@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import operator
 from collections import defaultdict
 from typing import Dict, Any, Callable, Optional
 import TraceLens.util
@@ -615,12 +614,12 @@ class TraceToTree(BaseTraceToTree):
             TraceToTree.default_categorizer,
         )
         if event_to_category in _default_cats:
-            # Stamp "cat" onto every event once so all hot-path callers can use
-            # event["cat"] via the C-level itemgetter instead of a Python function call.
+            # Stamp "cat" onto every event once so all hot-path callers get a
+            # guaranteed key and self.event_to_category uses direct subscript.
             for event in self.events:
                 if "cat" not in event:
                     event["cat"] = None
-            self.event_to_category = operator.itemgetter("cat")
+            self.event_to_category = lambda e: e["cat"]
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
 

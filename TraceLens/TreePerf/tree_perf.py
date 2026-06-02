@@ -9,7 +9,6 @@ import gzip
 import inspect
 import json
 import logging
-import operator
 import os, re, sys
 import pprint
 
@@ -277,7 +276,7 @@ class TreePerfAnalyzer:
             TraceEventUtils.default_categorizer,
             TraceToTree.default_categorizer,
         ):
-            self.event_to_category = operator.itemgetter("cat")
+            self.event_to_category = lambda e: e["cat"]
         else:
             self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
