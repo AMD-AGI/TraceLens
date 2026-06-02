@@ -10,6 +10,7 @@ from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
 
+
 def _wheel_version():
     """Produce TraceLens-<date>+<commithash> wheel names (PEP 440)."""
     try:
