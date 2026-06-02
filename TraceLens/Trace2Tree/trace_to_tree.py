@@ -610,7 +610,11 @@ class TraceToTree(BaseTraceToTree):
             trace_metadata=trace_metadata,
         )
         self.metadata = TraceEventUtils.get_metadata(self.events)
-        if event_to_category is TraceLens.util.TraceEventUtils.default_categorizer:
+        _default_cats = (
+            TraceLens.util.TraceEventUtils.default_categorizer,
+            TraceToTree.default_categorizer,
+        )
+        if event_to_category in _default_cats:
             # Stamp "cat" onto every event once so all hot-path callers can use
             # event["cat"] via the C-level itemgetter instead of a Python function call.
             for event in self.events:
