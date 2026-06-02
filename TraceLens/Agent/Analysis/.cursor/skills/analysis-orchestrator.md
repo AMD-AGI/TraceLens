@@ -109,6 +109,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
 
+7. **Extension File** (Optional) → `<extension_file>`
+   - Ask: "Do you have a TraceLens extension file to apply? Press Enter to skip."
+   - If provided, resolve to an absolute path and assign to `<extension_file>`.
+   - If skipped, set `<extension_file>` to empty (no `--extension_file` flag is added to any command).
+
 ### Build and Cache Command Prefix
 
 After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
@@ -181,6 +186,13 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | `comparative` trace1 | `--comparison_json_path <trace2_path>` |
 | `comparative` trace2 | none |
 
+**`<suffix_ext>`** — user extension file:
+
+| condition | value |
+|-----------|-------|
+| `<extension_file>` provided | `--extension_file <extension_file>` |
+| not provided | none |
+
 ---
 
 **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`):
@@ -193,7 +205,8 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 **Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
@@ -207,7 +220,8 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 **Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
@@ -222,7 +236,8 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 ---
@@ -236,7 +251,7 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   TraceLens/Agent/Analysis/utils/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
   --comparison-scope <comparison_scope>
 ```
 
