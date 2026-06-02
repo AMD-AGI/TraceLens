@@ -4,11 +4,32 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import subprocess
+from datetime import datetime
 from setuptools import setup, find_packages
+
+_BASE_VERSION = "0.1.0"
+
+def _wheel_version():
+    """Produce TraceLens-<date>+<commithash> wheel names (PEP 440)."""
+    try:
+        short_sha = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+        date_stamp = datetime.now().strftime("%Y%m%d")
+        return f"{_BASE_VERSION}.dev{date_stamp}+g{short_sha}"
+    except (OSError, subprocess.CalledProcessError):
+        return _BASE_VERSION
+
 
 setup(
     name="TraceLens",
-    version="0.1.0",
+    version=_wheel_version(),
     packages=find_packages(where="."),  # Will pick up 'TraceLens' automatically
     package_dir={"": "."},
     include_package_data=True,
@@ -43,7 +64,7 @@ setup(
             "slodels[openai,anthropic,google-genai]",
         ],
     },
-    description="A library for Automating analysis from PyTorch trace files",
+    description="A library for automating the analysis of ML model performance traces",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/AMD-AGI/TraceLens",
